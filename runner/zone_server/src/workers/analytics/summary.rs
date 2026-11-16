@@ -202,6 +202,17 @@ impl AgentAnalytics {
         self.outcomes.total == 0
     }
 
+    /// These analytics when the runs were loaded only back to `oldest`, short
+    /// of the window's start. The buckets that end by then saw none of their
+    /// runs loaded, so they are dropped rather than drawn as quiet, and the
+    /// halves the trend compares are no longer like for like, so it claims
+    /// no change.
+    pub fn measured_from(mut self, oldest: NaiveDateTime) -> Self {
+        self.series.retain(|point| point.window.end > oldest);
+        self.trend = Trend::steady();
+        self
+    }
+
     /// The failure kinds that showed up, heaviest first.
     pub fn failures(&self) -> impl Iterator<Item = (ErrorCategory, usize)> + '_ {
         self.outcomes
@@ -664,6 +675,54 @@ mod tests {
         assert_eq!(
             AgentRun::from_row(&backwards).and_then(|run| run.duration_seconds),
             None
+        );
+    }
+
+    #[test]
+    fn a_partial_load_drops_the_buckets_it_never_reached() {
+        let runs = vec![
+            run(1, AttemptOutcome::Failed, 5, 9),
+            run(2, AttemptOutcome::Succeeded, 6, 9),
+        ];
+        let analytics =
+            summarize(&runs, TimePeriod::Week, week(), moment(8, 0)).measured_from(moment(5, 9));
+
+        let starts: Vec<NaiveDateTime> = analytics
+            .series
+            .iter()
+            .map(|point| point.window.start)
+            .collect();
+        assert_eq!(
+            starts,
+            vec![moment(5, 0), moment(6, 0), moment(7, 0)],
+            "the bucket holding the oldest loaded run stays; the ones before it go"
+        );
+        assert_eq!(
+            analytics
+                .series
+                .iter()
+                .map(|point| point.total)
+                .sum::<usize>(),
+            analytics.outcomes.total
+        );
+    }
+
+    #[test]
+    fn a_partial_load_claims_no_trend() {
+        let mut runs: Vec<AgentRun> = (0..6)
+            .map(|index| run(index, AttemptOutcome::Succeeded, 2, 9))
+            .collect();
+        runs.extend((0..6).map(|index| run(100 + index, AttemptOutcome::Failed, 6, 9)));
+
+        let analytics =
+            summarize(&runs, TimePeriod::Week, week(), moment(8, 0)).measured_from(moment(2, 9));
+
+        assert_eq!(analytics.trend, Trend::steady());
+        assert_eq!(analytics.trend.earlier_success_rate, None);
+        assert_eq!(analytics.trend.later_success_rate, None);
+        assert_eq!(
+            analytics.outcomes.total, 12,
+            "the outcomes still count every loaded run"
         );
     }
 

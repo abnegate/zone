@@ -30,6 +30,7 @@ pub use tally::Tally;
 pub use task_summary::TaskSummary;
 
 pub const MAXIMUM_RUNS: i64 = 10_000;
+pub const MAXIMUM_PULL_REQUESTS: i64 = 10_000;
 
 /// The workspace's analytics over the `period` ending at `now`.
 pub async fn overview(
@@ -44,7 +45,14 @@ pub async fn overview(
     let mut snapshot = analytics::snapshot(pool).await?;
     let rows =
         analytics::attributed_runs(&mut *snapshot, workspace_id, start, end, MAXIMUM_RUNS).await?;
-    let pull_requests = analytics::pull_requests(&mut *snapshot, workspace_id, start, end).await?;
+    let pull_requests = analytics::pull_requests(
+        &mut *snapshot,
+        workspace_id,
+        start,
+        end,
+        MAXIMUM_PULL_REQUESTS,
+    )
+    .await?;
     let statuses = analytics::task_statuses(&mut *snapshot, workspace_id).await?;
     let origins = analytics::task_origins(&mut *snapshot, workspace_id, start, end).await?;
     let activity = analytics::task_activity(&mut *snapshot, workspace_id, start, end).await?;
@@ -59,25 +67,30 @@ pub async fn overview(
     .await?;
     snapshot.commit().await?;
 
-    let truncated = rows.len() as i64 >= MAXIMUM_RUNS;
     let (runs, attributions): (Vec<AgentRun>, Vec<&AttributedRunRow>) = rows
+        .rows
         .iter()
         .filter_map(|row| AgentRun::from_row(&row.run).map(|run| (run, row)))
         .unzip();
+    let summary = summarize(&runs, period, window, now);
+    let oldest = rows.rows.iter().map(|row| row.run.finished_at).min();
 
     Ok(Overview {
         period,
         window,
-        truncated,
-        runs: summarize(&runs, period, window, now),
+        truncated: rows.truncated || pull_requests.truncated,
+        runs: match oldest.filter(|_| rows.truncated) {
+            Some(oldest) => summary.measured_from(oldest),
+            None => summary,
+        },
         sources: SourceBreakdown::group(
             runs.iter().zip(attributions.iter().copied()),
-            &pull_requests,
+            &pull_requests.rows,
             now,
         ),
         models: ModelBreakdown::group(runs.iter().zip(attributions.iter().copied()), now),
         tasks: TaskSummary::new(&statuses, &origins, activity),
-        pull_requests: PullRequestSummary::new(&pull_requests),
+        pull_requests: PullRequestSummary::new(&pull_requests.rows),
         evaluations: EvaluationSummary::new(&verdicts),
     })
 }

@@ -60,13 +60,15 @@ async fn the_run_cap_drops_the_oldest_runs_not_the_newest() {
 
     let capped = analytics::attributed_runs(&pool, workspace_id, start, now, limit)
         .await
-        .expect("runs are readable");
+        .expect("runs are readable")
+        .rows;
 
     assert_eq!(capped.len(), limit as usize, "the cap is applied");
 
     let all = analytics::attributed_runs(&pool, workspace_id, start, now, 100)
         .await
-        .expect("runs are readable");
+        .expect("runs are readable")
+        .rows;
     assert_eq!(all.len(), 10, "the workspace really does have more runs");
 
     let newest = all
@@ -110,7 +112,8 @@ async fn an_uncapped_window_returns_every_run_in_it() {
 
     let inside = analytics::attributed_runs(&pool, workspace_id, now - Duration::days(1), now, 100)
         .await
-        .expect("runs are readable");
+        .expect("runs are readable")
+        .rows;
     assert_eq!(inside.len(), 5);
 
     // `[start, end)`: a window that ends before the newest run excludes it.
@@ -122,6 +125,31 @@ async fn an_uncapped_window_returns_every_run_in_it() {
         100,
     )
     .await
-    .expect("runs are readable");
+    .expect("runs are readable")
+    .rows;
     assert_eq!(earlier.len(), 4);
+}
+
+#[tokio::test]
+async fn reaching_the_run_cap_exactly_is_not_passing_it() {
+    let pool = common::create_test_pool().await;
+    let workspace_id = workspace_with_runs(&pool, 4).await;
+
+    let now = Utc::now().naive_utc();
+    let start = now - Duration::days(1);
+
+    let exact = analytics::attributed_runs(&pool, workspace_id, start, now, 4)
+        .await
+        .expect("runs are readable");
+    assert_eq!(exact.rows.len(), 4);
+    assert!(
+        !exact.truncated,
+        "every run in the window was read, so nothing is missing"
+    );
+
+    let short = analytics::attributed_runs(&pool, workspace_id, start, now, 3)
+        .await
+        .expect("runs are readable");
+    assert_eq!(short.rows.len(), 3, "the cap still holds");
+    assert!(short.truncated, "one run past the cap was left out");
 }

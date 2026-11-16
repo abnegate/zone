@@ -65,7 +65,7 @@ pub async fn load_runs(
 
     // Truncation is invisible in the gauges it produces -- they stay plausible,
     // just computed from part of the window -- so it has to be said out loud.
-    if rows.len() as i64 >= limit {
+    if rows.truncated {
         tracing::warn!(
             %workspace_id,
             limit,
@@ -75,6 +75,7 @@ pub async fn load_runs(
     }
 
     Ok(rows
+        .rows
         .iter()
         .filter_map(|row| AgentRun::from_row(&row.run))
         .collect())

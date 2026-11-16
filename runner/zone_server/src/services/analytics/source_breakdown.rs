@@ -9,8 +9,9 @@ use crate::db::analytics::{AttributedRunRow, PullRequestRow};
 use crate::workers::analytics::{AgentRun, outcomes};
 use crate::workers::learning::attempt::OutcomeStatistics;
 
-/// How the runs on one source's tasks went. Runs on a task with no source,
-/// or whose source was deleted, share the one breakdown without a source.
+/// How the runs on one source's tasks went, and how many of its pull requests
+/// merged. Runs and pull requests on a task with no source, or whose source
+/// was deleted or belongs elsewhere, share the one breakdown without a source.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceBreakdown {
     pub source_id: Option<Uuid>,
@@ -21,35 +22,52 @@ pub struct SourceBreakdown {
 }
 
 impl SourceBreakdown {
-    /// One breakdown per source, busiest first, so every run lands in exactly one.
+    /// One breakdown per source, busiest first, so every run and every merged
+    /// pull request lands in exactly one. A source whose pull requests merged
+    /// with none of its runs in the window still gets a breakdown, with no
+    /// outcomes.
     pub fn group<'a>(
         runs: impl IntoIterator<Item = (&'a AgentRun, &'a AttributedRunRow)>,
         pull_requests: &[PullRequestRow],
         now: NaiveDateTime,
     ) -> Vec<Self> {
-        let mut groups: HashMap<Option<Uuid>, (&AttributedRunRow, Vec<&AgentRun>)> = HashMap::new();
+        let mut labels: HashMap<Option<Uuid>, (Option<&str>, Option<&str>)> = HashMap::new();
+        let mut grouped: HashMap<Option<Uuid>, Vec<&AgentRun>> = HashMap::new();
         for (run, row) in runs {
-            groups
+            labels
                 .entry(row.source_id)
-                .or_insert_with(|| (row, Vec::new()))
-                .1
-                .push(run);
+                .or_insert((row.source_name.as_deref(), row.source_type.as_deref()));
+            grouped.entry(row.source_id).or_default().push(run);
         }
 
-        let mut breakdowns: Vec<Self> = groups
+        let mut merged: HashMap<Option<Uuid>, usize> = HashMap::new();
+        for pull_request in pull_requests
+            .iter()
+            .filter(|pull_request| PullRequestSummary::is_merged(pull_request))
+        {
+            labels.entry(pull_request.source_id).or_insert((
+                pull_request.source_name.as_deref(),
+                pull_request.source_type.as_deref(),
+            ));
+            *merged.entry(pull_request.source_id).or_default() += 1;
+        }
+
+        let mut breakdowns: Vec<Self> = labels
             .into_iter()
-            .map(|(source_id, (row, group))| {
+            .map(|(source_id, (name, source_type))| {
                 let attributed = source_id.is_some();
                 Self {
                     source_id,
-                    name: row.source_name.clone().filter(|_| attributed),
-                    source_type: row.source_type.clone().filter(|_| attributed),
-                    outcomes: outcomes(&group, now),
-                    merged_pull_requests: pull_requests
-                        .iter()
-                        .filter(|pull_request| pull_request.source_id == source_id)
-                        .filter(|pull_request| PullRequestSummary::is_merged(pull_request))
-                        .count(),
+                    name: name.filter(|_| attributed).map(str::to_string),
+                    source_type: source_type.filter(|_| attributed).map(str::to_string),
+                    outcomes: outcomes(
+                        grouped
+                            .get(&source_id)
+                            .map(Vec::as_slice)
+                            .unwrap_or_default(),
+                        now,
+                    ),
+                    merged_pull_requests: merged.get(&source_id).copied().unwrap_or_default(),
                 }
             })
             .collect();
@@ -100,14 +118,15 @@ mod tests {
         }
     }
 
-    fn pull_request(source_id: Option<Uuid>, status: Status) -> PullRequestRow {
+    fn pull_request(source: Option<(Uuid, &str)>, status: Status) -> PullRequestRow {
         PullRequestRow {
             task_id: Uuid::new_v4(),
-            source_id,
-            pr_status: Some(status.as_str().to_string()),
-            minutes_to_merge: None,
-            review_cycles: None,
-            approvals: None,
+            source_id: source.map(|(id, _)| id),
+            source_name: source.map(|(_, name)| name.to_string()),
+            source_type: source.map(|_| "github".to_string()),
+            status: Some(status.as_str().to_string()),
+            opened_at: None,
+            artifacts: None,
             quality_band: None,
         }
     }
@@ -202,11 +221,11 @@ mod tests {
         let api = (Uuid::new_v4(), "api");
         let rows = vec![row(Some(api), "completed"), row(None, "completed")];
         let pull_requests = vec![
-            pull_request(Some(api.0), Status::Merged),
-            pull_request(Some(api.0), Status::Merged),
-            pull_request(Some(api.0), Status::Closed),
+            pull_request(Some(api), Status::Merged),
+            pull_request(Some(api), Status::Merged),
+            pull_request(Some(api), Status::Closed),
             pull_request(None, Status::Merged),
-            pull_request(Some(Uuid::new_v4()), Status::Merged),
+            pull_request(Some((Uuid::new_v4(), "web")), Status::Merged),
         ];
 
         let breakdowns = breakdowns(&rows, &pull_requests);
@@ -219,5 +238,51 @@ mod tests {
         };
         assert_eq!(merged(Some(api.0)), Some(2));
         assert_eq!(merged(None), Some(1));
+    }
+
+    #[test]
+    fn a_source_whose_pull_requests_merged_without_runs_still_counts_them() {
+        let api = (Uuid::new_v4(), "api");
+        let docs = (Uuid::new_v4(), "docs");
+        let rows = vec![row(Some(api), "completed"), row(Some(api), "failed")];
+        let pull_requests = vec![
+            pull_request(Some(api), Status::Merged),
+            pull_request(Some(docs), Status::Merged),
+            pull_request(Some(docs), Status::Merged),
+            pull_request(Some(docs), Status::Open),
+            pull_request(None, Status::Merged),
+        ];
+
+        let breakdowns = breakdowns(&rows, &pull_requests);
+
+        assert_eq!(
+            breakdowns
+                .iter()
+                .map(|breakdown| breakdown.merged_pull_requests)
+                .sum::<usize>(),
+            PullRequestSummary::new(&pull_requests).merged,
+            "every merged pull request lands in exactly one source"
+        );
+        assert_eq!(
+            breakdowns
+                .iter()
+                .map(|breakdown| breakdown.outcomes.total)
+                .sum::<usize>(),
+            rows.len(),
+            "a source with no runs adds none"
+        );
+        let documentation = breakdowns
+            .iter()
+            .find(|breakdown| breakdown.source_id == Some(docs.0))
+            .expect("the source with only pull requests has a breakdown");
+        assert_eq!(documentation.name.as_deref(), Some("docs"));
+        assert_eq!(documentation.source_type.as_deref(), Some("github"));
+        assert_eq!(documentation.merged_pull_requests, 2);
+        assert_eq!(documentation.outcomes, OutcomeStatistics::empty());
+        assert_eq!(
+            breakdowns.first().and_then(|breakdown| breakdown.source_id),
+            Some(api.0),
+            "the busiest source still comes first"
+        );
     }
 }

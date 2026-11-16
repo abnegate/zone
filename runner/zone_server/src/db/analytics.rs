@@ -19,6 +19,7 @@ use uuid::Uuid;
 use super::DbResult;
 
 mod attributed_run_row;
+mod capped;
 mod count_row;
 mod pull_request_row;
 mod reportable_workspace;
@@ -27,6 +28,7 @@ mod shipped_task_row;
 mod task_activity_row;
 
 pub use attributed_run_row::AttributedRunRow;
+pub use capped::Capped;
 pub use count_row::CountRow;
 pub use pull_request_row::PullRequestRow;
 pub use reportable_workspace::ReportableWorkspace;
@@ -36,6 +38,29 @@ pub use task_activity_row::TaskActivityRow;
 
 /// The run statuses that have not reached an outcome yet.
 const UNFINISHED: [&str; 2] = ["running", "waiting"];
+
+/// The source a task answers to: its own, or else the source of the first of
+/// its projects that has one, as `get_task_sources` resolves it. A source that
+/// belongs to another workspace attributes nothing here.
+macro_rules! task_source {
+    () => {
+        r#"
+        LEFT JOIN LATERAL (
+            SELECT project.source_id
+            FROM task_projects membership
+            JOIN projects project ON project.id = membership.project_id
+            WHERE task.source_id IS NULL
+              AND membership.task_id = task.id
+              AND project.source_id IS NOT NULL
+            ORDER BY project.id
+            LIMIT 1
+        ) project ON TRUE
+        LEFT JOIN sources source
+            ON source.id = COALESCE(task.source_id, project.source_id)
+           AND source.workspace_id = task.workspace_id
+        "#
+    };
+}
 
 /// A read-only transaction whose every query sees the same snapshot, so the
 /// numbers an overview assembles from several reads cannot disagree with one
@@ -116,28 +141,28 @@ where
 }
 
 /// The workspace's runs that stopped inside `[start, end)`, newest first, with
-/// the source each run's task belongs to and the model the run used. A task
-/// without a source, or whose source was deleted, reads back with every source
-/// column null.
+/// the source each run's task answers to and the model the run used. A task
+/// without a source, or whose source was deleted or belongs elsewhere, reads
+/// back with every source column null.
 ///
-/// Newest first because `limit` is a cap, not a promise: over it, the rows past
-/// the cap are dropped silently. Every period summarised from these rows ends
-/// at `now`, so dropping the oldest costs the longest period some of its early
-/// history, while dropping the newest -- what ascending order did -- empties
-/// the day and week windows entirely on exactly the busiest workspaces.
-/// Nothing downstream reads these in order; each consumer filters or weights
-/// by `finished_at`.
+/// Newest first because `limit` is a cap: over it, the oldest rows are the
+/// ones dropped. Every period summarised from these rows ends at `now`, so
+/// dropping the oldest costs the longest period some of its early history,
+/// while dropping the newest -- what ascending order did -- empties the day
+/// and week windows entirely on exactly the busiest workspaces. Nothing
+/// downstream reads these in order; each consumer filters or weights by
+/// `finished_at`.
 pub async fn attributed_runs<'e, E>(
     executor: E,
     workspace_id: Uuid,
     start: NaiveDateTime,
     end: NaiveDateTime,
     limit: i64,
-) -> DbResult<Vec<AttributedRunRow>>
+) -> DbResult<Capped<AttributedRunRow>>
 where
     E: Executor<'e, Database = Postgres>,
 {
-    sqlx::query_as(
+    let rows = sqlx::query_as(concat!(
         r#"
         SELECT
             run.id AS run_id,
@@ -153,26 +178,30 @@ where
             run.model AS model
         FROM task_runs run
         JOIN tasks task ON task.id = run.task_id
-        LEFT JOIN sources source ON source.id = task.source_id
+        "#,
+        task_source!(),
+        r#"
         WHERE task.workspace_id = $1
           AND run.status <> ALL($2)
           AND COALESCE(run.completed_at, run.started_at) >= $3
           AND COALESCE(run.completed_at, run.started_at) < $4
         ORDER BY COALESCE(run.completed_at, run.started_at) DESC, run.id DESC
         LIMIT $5
-        "#,
-    )
+        "#
+    ))
     .bind(workspace_id)
     .bind(UNFINISHED.as_slice())
     .bind(start)
     .bind(end)
-    .bind(limit)
+    .bind(Capped::<AttributedRunRow>::reading(limit))
     .fetch_all(executor)
-    .await
+    .await?;
+    Ok(Capped::new(rows, limit))
 }
 
-/// Every task whose pull request was opened inside `[start, end)`, with how it
-/// was received as recorded on the newest run that opened the same pull request.
+/// Every task whose pull request was opened inside `[start, end)`, newest
+/// first and at most `limit` of them, with the source the task answers to and
+/// the reception recorded on the newest run that opened the same pull request.
 ///
 /// A run that recorded the pull request as a bare URL predates reception
 /// tracking, so it contributes no timing, review or quality.
@@ -181,33 +210,31 @@ pub async fn pull_requests<'e, E>(
     workspace_id: Uuid,
     start: NaiveDateTime,
     end: NaiveDateTime,
-) -> DbResult<Vec<PullRequestRow>>
+    limit: i64,
+) -> DbResult<Capped<PullRequestRow>>
 where
     E: Executor<'e, Database = Postgres>,
 {
-    sqlx::query_as(
+    let rows = sqlx::query_as(concat!(
         r#"
         SELECT
             task.id AS task_id,
             source.id AS source_id,
-            task.pr_status AS pr_status,
-            reception.minutes_to_merge AS minutes_to_merge,
-            reception.review_cycles AS review_cycles,
-            reception.approvals AS approvals,
+            source.name AS source_name,
+            source.source_type AS source_type,
+            task.pr_status AS status,
+            task.pr_created_at AS opened_at,
+            reception.artifacts AS artifacts,
             reception.quality_band AS quality_band
         FROM tasks task
-        LEFT JOIN sources source ON source.id = task.source_id
+        "#,
+        task_source!(),
+        r#"
         LEFT JOIN LATERAL (
             SELECT
-                CASE WHEN jsonb_typeof(run.artifacts -> 'pr' -> 'minutes_to_merge') = 'number'
-                    THEN (run.artifacts -> 'pr' ->> 'minutes_to_merge')::numeric::float8
-                END AS minutes_to_merge,
-                CASE WHEN jsonb_typeof(run.artifacts -> 'pr' -> 'review_cycles') = 'number'
-                    THEN (run.artifacts -> 'pr' ->> 'review_cycles')::numeric::int8
-                END AS review_cycles,
-                CASE WHEN jsonb_typeof(run.artifacts -> 'pr' -> 'approvals') = 'number'
-                    THEN (run.artifacts -> 'pr' ->> 'approvals')::numeric::int8
-                END AS approvals,
+                CASE WHEN jsonb_typeof(run.artifacts -> 'pr') = 'object'
+                    THEN jsonb_build_object('pr', run.artifacts -> 'pr')::text
+                END AS artifacts,
                 CASE WHEN jsonb_typeof(run.artifacts -> 'pr') = 'object'
                     THEN run.artifacts -> 'quality' ->> 'band'
                 END AS quality_band
@@ -225,13 +252,16 @@ where
           AND task.pr_created_at >= $2
           AND task.pr_created_at < $3
         ORDER BY task.pr_created_at DESC, task.id
-        "#,
-    )
+        LIMIT $4
+        "#
+    ))
     .bind(workspace_id)
     .bind(start)
     .bind(end)
+    .bind(Capped::<PullRequestRow>::reading(limit))
     .fetch_all(executor)
-    .await
+    .await?;
+    Ok(Capped::new(rows, limit))
 }
 
 /// How many of the workspace's tasks stand in each status right now.
@@ -321,7 +351,8 @@ where
 
 /// How many runs that finished inside `[start, end)` reached each evaluation
 /// verdict, reading each run's newest log from `phase` and `agent` that
-/// carries one.
+/// carries one. A log whose verdict is null or not text carries none, so it
+/// cannot hide an older log that does.
 pub async fn evaluation_verdicts<'e, E>(
     executor: E,
     workspace_id: Uuid,
@@ -347,12 +378,11 @@ where
             WHERE task.workspace_id = $1
               AND log.phase = $4
               AND log.agent_type = $5
-              AND log.metadata ? 'verdict'
+              AND jsonb_typeof(log.metadata -> 'verdict') = 'string'
               AND COALESCE(run.completed_at, run.started_at) >= $2
               AND COALESCE(run.completed_at, run.started_at) < $3
             ORDER BY log.task_run_id, log.created_at DESC NULLS LAST, log.id DESC
         ) newest
-        WHERE newest.verdict IS NOT NULL
         GROUP BY newest.verdict
         "#,
     )

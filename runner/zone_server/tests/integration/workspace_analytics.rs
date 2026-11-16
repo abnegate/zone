@@ -66,11 +66,15 @@ const MERGED_PULL_REQUEST: &str = "https://github.com/acme/widgets/pull/1";
 const CLOSED_PULL_REQUEST: &str = "https://github.com/acme/widgets/pull/2";
 const OPEN_PULL_REQUEST: &str = "https://github.com/acme/widgets/pull/3";
 const STALE_PULL_REQUEST: &str = "https://github.com/acme/widgets/pull/4";
+const TIMED_PULL_REQUEST: &str = "https://github.com/acme/widgets/pull/5";
+const WILD_PULL_REQUEST: &str = "https://github.com/acme/widgets/pull/6";
+const SKEWED_PULL_REQUEST: &str = "https://github.com/acme/widgets/pull/7";
 
 const EVALUATING: &str = "evaluating";
 const EVALUATION: &str = "evaluation";
 const IMPROVED: &str = "improved";
 const REGRESSED: &str = "regressed";
+const STEADY: &str = "steady";
 
 const TIMEOUT: &str = "timeout";
 const TEXT_SOURCE: &str = "text";
@@ -295,6 +299,40 @@ impl Seeder<'_> {
         .execute(self.pool)
         .await
         .expect("evaluation is logged");
+    }
+
+    async fn project(&self, source: Option<Uuid>) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO projects (workspace_id, source_id, name) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(self.workspace)
+        .bind(source)
+        .bind(format!("project {}", Uuid::new_v4()))
+        .fetch_one(self.pool)
+        .await
+        .expect("project is created")
+    }
+
+    async fn join(&self, task: Uuid, project: Uuid) {
+        sqlx::query("INSERT INTO task_projects (task_id, project_id) VALUES ($1, $2)")
+            .bind(task)
+            .bind(project)
+            .execute(self.pool)
+            .await
+            .expect("task joins the project");
+    }
+
+    async fn completed(&self, task: Uuid, elapsed: Duration) -> Uuid {
+        self.run(
+            task,
+            Run {
+                status: COMPLETED,
+                model: None,
+                finished: Some(self.ago(elapsed)),
+                artifacts: json!({}),
+            },
+        )
+        .await
     }
 
     async fn runs_in_bulk(&self, task: Uuid, count: i32) {
@@ -534,6 +572,19 @@ async fn seed(board: &Board) -> Seeded {
         .await;
 
     Seeded { alpha, beta }
+}
+
+fn timestamp(moment: NaiveDateTime) -> String {
+    moment.and_utc().to_rfc3339()
+}
+
+fn series_total(analytics: &Value) -> i64 {
+    analytics["series"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a series: {analytics}"))
+        .iter()
+        .map(|point| count(&point["total"]))
+        .sum()
 }
 
 fn moment(value: &Value) -> NaiveDateTime {
@@ -874,11 +925,359 @@ async fn a_workspace_past_the_run_cap_is_marked_truncated() {
         json!(true),
         "the numbers describe only part of the window and must say so"
     );
+    let runs = &body["runs"];
     assert_eq!(
-        count(&body["runs"]["outcomes"]["total"]),
+        count(&runs["outcomes"]["total"]),
         i64::from(RUN_CAP),
         "{}",
+        runs["outcomes"]
+    );
+    assert_eq!(
+        runs["trend"],
+        json!({
+            "direction": STEADY,
+            "earlier_success_rate": null,
+            "later_success_rate": null,
+            "change": 0.0,
+        }),
+        "a partial load cannot compare the halves of the window"
+    );
+    let buckets = runs["series"].as_array().map(Vec::len).unwrap_or_default();
+    assert!(
+        (1..=2).contains(&buckets),
+        "the series starts at the oldest loaded run, three hours back, instead of \
+         drawing the days before it as quiet: {buckets} buckets"
+    );
+    assert_eq!(series_total(runs), i64::from(RUN_CAP));
+}
+
+#[tokio::test]
+async fn a_workspace_at_exactly_the_run_cap_is_not_truncated() {
+    let board = Board::new().await;
+    let seeder = board.seeder();
+    let task = seeder.task(None, IN_PROGRESS, MEMBER).await;
+    seeder.runs_in_bulk(task, RUN_CAP).await;
+
+    let body = board.overview("").await;
+    assert_eq!(
+        body["truncated"],
+        json!(false),
+        "every run in the window was read: {}",
         body["runs"]["outcomes"]
+    );
+    assert_eq!(
+        count(&body["runs"]["outcomes"]["total"]),
+        i64::from(RUN_CAP)
+    );
+    assert!(
+        body["runs"]["series"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or_default()
+            >= 7,
+        "a complete load draws the whole week"
+    );
+    assert_eq!(series_total(&body["runs"]), i64::from(RUN_CAP));
+}
+
+#[tokio::test]
+async fn the_pull_request_cap_keeps_the_newest_and_says_when_it_cut() {
+    let board = Board::new().await;
+    let seeder = board.seeder();
+    let mut tasks = Vec::new();
+    for (url, hours) in [
+        (TIMED_PULL_REQUEST, 1),
+        (WILD_PULL_REQUEST, 2),
+        (SKEWED_PULL_REQUEST, 3),
+    ] {
+        let task = seeder.task(None, REVIEW, MEMBER).await;
+        seeder
+            .pull_request(task, url, OPEN, seeder.ago(Duration::hours(hours)))
+            .await;
+        tasks.push(task);
+    }
+    let start = seeder.ago(Duration::days(1));
+
+    let exact = analytics::pull_requests(board.pool(), board.workspace, start, seeder.now, 3)
+        .await
+        .expect("pull requests are readable");
+    assert_eq!(exact.rows.len(), 3);
+    assert!(!exact.truncated);
+
+    let capped = analytics::pull_requests(board.pool(), board.workspace, start, seeder.now, 2)
+        .await
+        .expect("pull requests are readable");
+    assert!(capped.truncated);
+    assert_eq!(
+        capped
+            .rows
+            .iter()
+            .map(|row| row.task_id)
+            .collect::<Vec<_>>(),
+        tasks[..2].to_vec(),
+        "the newest pull requests survive the cap"
+    );
+}
+
+#[tokio::test]
+async fn a_task_answers_to_its_projects_source_and_never_to_another_workspaces() {
+    let board = Board::new().await;
+    let seeder = board.seeder();
+    let alpha = seeder.source("Alpha").await;
+    let beta = seeder.source("Beta").await;
+    let (_, sibling) = owned_workspace(&board.client).await;
+    let elsewhere = Seeder {
+        pool: board.pool(),
+        workspace: sibling,
+        now: seeder.now,
+    };
+    let foreign = elsewhere.source("Foreign").await;
+
+    let first = seeder.project(Some(alpha.id)).await;
+    let second = seeder.project(Some(beta.id)).await;
+    let sourceless = seeder.project(None).await;
+    let expected = if first < second { &alpha } else { &beta };
+    let projected = seeder.task(None, IN_PROGRESS, MEMBER).await;
+    for project in [second, sourceless, first] {
+        seeder.join(projected, project).await;
+    }
+    seeder.completed(projected, Duration::hours(1)).await;
+    seeder
+        .pull_request(
+            projected,
+            MERGED_PULL_REQUEST,
+            MERGED,
+            seeder.ago(Duration::days(1)),
+        )
+        .await;
+
+    let misattributed = seeder.task(Some(foreign.id), IN_PROGRESS, MEMBER).await;
+    seeder.completed(misattributed, Duration::hours(2)).await;
+
+    let theirs = elsewhere.task(Some(foreign.id), COMPLETE, MEMBER).await;
+    let their_run = elsewhere.completed(theirs, Duration::hours(1)).await;
+    elsewhere
+        .pull_request(
+            theirs,
+            CLOSED_PULL_REQUEST,
+            MERGED,
+            seeder.ago(Duration::days(1)),
+        )
+        .await;
+    elsewhere
+        .evaluation(
+            their_run,
+            json!({"verdict": IMPROVED}),
+            seeder.ago(Duration::minutes(30)),
+        )
+        .await;
+
+    let body = board.overview("").await;
+    assert_eq!(count(&body["runs"]["outcomes"]["total"]), 2, "{body}");
+    let sources = &body["sources"];
+    let expected_id = expected.id.to_string();
+    let projected_source = bucket(sources, "source_id", Some(expected_id.as_str()));
+    assert_eq!(
+        projected_source["name"],
+        json!(expected.name),
+        "a task without its own source answers to its first project's: {body}"
+    );
+    assert_eq!(count(&projected_source["outcomes"]["total"]), 1, "{body}");
+    assert_eq!(
+        count(&projected_source["merged_pull_requests"]),
+        1,
+        "{body}"
+    );
+
+    let unsourced = bucket(sources, "source_id", None);
+    assert_eq!(
+        count(&unsourced["outcomes"]["total"]),
+        1,
+        "a source from another workspace attributes nothing here: {body}"
+    );
+    let foreign_id = foreign.id.to_string();
+    assert!(
+        sources.as_array().is_some_and(|list| list
+            .iter()
+            .all(|entry| entry["source_id"].as_str() != Some(foreign_id.as_str()))),
+        "{body}"
+    );
+    assert_eq!(count(&body["pull_requests"]["opened"]), 1, "{body}");
+    assert_eq!(count(&body["pull_requests"]["merged"]), 1, "{body}");
+    assert_eq!(
+        body["evaluations"],
+        json!({"improved": 0, "unchanged": 0, "regressed": 0, "not_measured": 0}),
+        "another workspace's verdicts never count here"
+    );
+}
+
+#[tokio::test]
+async fn every_merged_pull_request_lands_in_a_source_even_one_without_runs() {
+    let board = Board::new().await;
+    let seeder = board.seeder();
+    let alpha = seeder.source("Alpha").await;
+    let quiet = seeder.source("Quiet").await;
+
+    let busy = seeder.task(Some(alpha.id), COMPLETE, MEMBER).await;
+    seeder.completed(busy, Duration::hours(1)).await;
+    let idle = seeder.task(Some(quiet.id), COMPLETE, MEMBER).await;
+    seeder.completed(idle, Duration::days(10)).await;
+    seeder
+        .pull_request(
+            idle,
+            MERGED_PULL_REQUEST,
+            MERGED,
+            seeder.ago(Duration::days(1)),
+        )
+        .await;
+
+    let body = board.overview("").await;
+    let sources = &body["sources"];
+    let merged: i64 = sources
+        .as_array()
+        .unwrap_or_else(|| panic!("a list of sources: {body}"))
+        .iter()
+        .map(|entry| count(&entry["merged_pull_requests"]))
+        .sum();
+    assert_eq!(merged, count(&body["pull_requests"]["merged"]), "{body}");
+    assert_eq!(
+        totals(sources),
+        count(&body["runs"]["outcomes"]["total"]),
+        "{body}"
+    );
+
+    let quiet_id = quiet.id.to_string();
+    let quiet_source = bucket(sources, "source_id", Some(quiet_id.as_str()));
+    assert_eq!(quiet_source["name"], json!(quiet.name), "{body}");
+    assert_eq!(count(&quiet_source["outcomes"]["total"]), 0, "{body}");
+    assert_eq!(count(&quiet_source["merged_pull_requests"]), 1, "{body}");
+}
+
+#[tokio::test]
+async fn reception_is_read_the_way_the_learning_loop_reads_it() {
+    let board = Board::new().await;
+    let seeder = board.seeder();
+    let opened = seeder.ago(Duration::days(1));
+
+    let timed = seeder.task(None, COMPLETE, MEMBER).await;
+    seeder
+        .run(
+            timed,
+            Run {
+                status: COMPLETED,
+                model: None,
+                finished: Some(seeder.ago(Duration::hours(4))),
+                artifacts: json!({
+                    "pr": {
+                        "pr_url": TIMED_PULL_REQUEST,
+                        "opened_at": timestamp(seeder.ago(Duration::hours(3))),
+                        "merged_at": timestamp(seeder.ago(Duration::minutes(90))),
+                        "review_cycles": 2,
+                        "approvals": 1
+                    }
+                }),
+            },
+        )
+        .await;
+    seeder
+        .pull_request(timed, TIMED_PULL_REQUEST, MERGED, opened)
+        .await;
+
+    let wild = seeder.task(None, COMPLETE, MEMBER).await;
+    seeder
+        .run(
+            wild,
+            Run {
+                status: COMPLETED,
+                model: None,
+                finished: Some(seeder.ago(Duration::hours(4))),
+                artifacts: json!({
+                    "pr": {
+                        "pr_url": WILD_PULL_REQUEST,
+                        "minutes_to_merge": 1e30,
+                        "review_cycles": 1e20,
+                        "approvals": 1e20
+                    }
+                }),
+            },
+        )
+        .await;
+    seeder
+        .pull_request(wild, WILD_PULL_REQUEST, MERGED, opened)
+        .await;
+
+    let skewed = seeder.task(None, COMPLETE, MEMBER).await;
+    seeder
+        .run(
+            skewed,
+            Run {
+                status: COMPLETED,
+                model: None,
+                finished: Some(seeder.ago(Duration::hours(4))),
+                artifacts: json!({
+                    "pr": {
+                        "pr_url": SKEWED_PULL_REQUEST,
+                        "opened_at": timestamp(seeder.ago(Duration::hours(1))),
+                        "merged_at": timestamp(seeder.ago(Duration::hours(2)))
+                    }
+                }),
+            },
+        )
+        .await;
+    seeder
+        .pull_request(skewed, SKEWED_PULL_REQUEST, MERGED, opened)
+        .await;
+
+    let body = board.overview("").await;
+    let pull_requests = &body["pull_requests"];
+    assert_eq!(count(&pull_requests["merged"]), 3, "{body}");
+    assert_eq!(
+        rate(&pull_requests["median_minutes_to_merge"]),
+        90.0,
+        "a merge with no recorded minutes is timed from its timestamps, and one \
+         that reads as finishing before it began is left out: {body}"
+    );
+    assert_eq!(
+        rate(&pull_requests["mean_review_cycles"]),
+        2.0,
+        "a count too large to be one is ignored rather than failing the request: {body}"
+    );
+    assert_eq!(rate(&pull_requests["mean_approvals"]), 1.0, "{body}");
+}
+
+#[tokio::test]
+async fn a_newer_log_without_a_verdict_does_not_hide_an_older_one() {
+    let board = Board::new().await;
+    let seeder = board.seeder();
+    let task = seeder.task(None, COMPLETE, MEMBER).await;
+    let run = seeder.completed(task, Duration::hours(2)).await;
+    seeder
+        .evaluation(
+            run,
+            json!({"verdict": IMPROVED}),
+            seeder.ago(Duration::minutes(90)),
+        )
+        .await;
+    seeder
+        .evaluation(
+            run,
+            json!({"verdict": null}),
+            seeder.ago(Duration::minutes(60)),
+        )
+        .await;
+    seeder
+        .evaluation(
+            run,
+            json!({"verdict": 3}),
+            seeder.ago(Duration::minutes(30)),
+        )
+        .await;
+
+    let body = board.overview("").await;
+    assert_eq!(
+        body["evaluations"],
+        json!({"improved": 1, "unchanged": 0, "regressed": 0, "not_measured": 0}),
+        "{body}"
     );
 }
 
@@ -902,28 +1301,30 @@ async fn the_overview_reads_one_read_only_snapshot() {
         .expect("the access mode is readable");
     assert_eq!(read_only, "on");
 
-    seeder
-        .run(
-            task,
-            Run {
-                status: COMPLETED,
-                model: None,
-                finished: Some(seeder.ago(Duration::hours(1))),
-                artifacts: json!({}),
-            },
-        )
-        .await;
-    let runs = analytics::attributed_runs(
+    let start = seeder.ago(Duration::days(1));
+    let before = analytics::attributed_runs(
         &mut *snapshot,
         board.workspace,
-        seeder.ago(Duration::days(1)),
+        start,
+        seeder.now,
+        i64::from(RUN_CAP),
+    )
+    .await
+    .expect("runs are readable inside the snapshot");
+    assert!(before.rows.is_empty());
+
+    seeder.completed(task, Duration::hours(1)).await;
+    let after = analytics::attributed_runs(
+        &mut *snapshot,
+        board.workspace,
+        start,
         seeder.now,
         i64::from(RUN_CAP),
     )
     .await
     .expect("runs are readable inside the snapshot");
     assert!(
-        runs.is_empty(),
+        after.rows.is_empty(),
         "a run written after the snapshot began must not appear partway through it"
     );
     snapshot.commit().await.expect("the snapshot ends");

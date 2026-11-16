@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::Tally;
 use crate::db::analytics::PullRequestRow;
 use crate::services::github::pull_requests::Status;
+use crate::workers::learning::artifacts;
 use crate::workers::learning::quality::QualityBand;
 
 /// What became of the pull requests opened inside the window.
@@ -20,6 +21,12 @@ pub struct PullRequestSummary {
 }
 
 impl PullRequestSummary {
+    /// Count what became of `rows`, timing and reviewing each through the
+    /// learning loop's own readers so this summary and the quality score it
+    /// draws agree on every pull request.
+    ///
+    /// A merge that reads as finishing before it began is clock skew, not a
+    /// fast merge, so it is left out of the median rather than pulling it down.
     pub fn new(rows: &[PullRequestRow]) -> Self {
         let merged = rows.iter().filter(|row| Self::is_merged(row)).count();
         let closed = rows
@@ -32,18 +39,21 @@ impl PullRequestSummary {
         let minutes_to_merge: Vec<f64> = rows
             .iter()
             .filter(|row| Self::is_merged(row))
-            .filter_map(|row| row.minutes_to_merge)
-            .filter(|minutes| minutes.is_finite())
+            .filter_map(|row| {
+                artifacts::reception(row.artifacts.as_ref(), row.opened_at).minutes_to_merge
+            })
+            .filter(|minutes| *minutes >= 0)
+            .map(|minutes| minutes as f64)
             .collect();
         let review_cycles: Vec<f64> = rows
             .iter()
-            .filter_map(|row| row.review_cycles)
-            .map(|cycles| cycles as f64)
+            .filter_map(|row| artifacts::review_cycles(row.artifacts.as_ref()))
+            .map(f64::from)
             .collect();
         let approvals: Vec<f64> = rows
             .iter()
-            .filter_map(|row| row.approvals)
-            .map(|approvals| approvals as f64)
+            .filter_map(|row| artifacts::approvals(row.artifacts.as_ref()))
+            .map(f64::from)
             .collect();
 
         Self {
@@ -73,7 +83,7 @@ impl PullRequestSummary {
     }
 
     fn status(row: &PullRequestRow) -> Option<Status> {
-        row.pr_status.as_deref().and_then(Status::parse)
+        row.status.as_deref().and_then(Status::parse)
     }
 }
 
@@ -98,25 +108,38 @@ fn mean(values: &[f64]) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{NaiveDate, NaiveDateTime};
+    use serde_json::{Value, json};
     use uuid::Uuid;
 
-    fn pull_request(status: Option<&str>) -> PullRequestRow {
+    fn opened() -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 11, 16)
+            .and_then(|date| date.and_hms_opt(9, 0, 0))
+            .expect("valid moment")
+    }
+
+    fn pull_request(status: Option<Status>) -> PullRequestRow {
         PullRequestRow {
             task_id: Uuid::new_v4(),
             source_id: None,
-            pr_status: status.map(str::to_string),
-            minutes_to_merge: None,
-            review_cycles: None,
-            approvals: None,
+            source_name: None,
+            source_type: None,
+            status: status.map(|status| status.as_str().to_string()),
+            opened_at: Some(opened()),
+            artifacts: None,
             quality_band: None,
         }
     }
 
-    fn merged_after(minutes: f64) -> PullRequestRow {
+    fn received(status: Option<Status>, reception: Value) -> PullRequestRow {
         PullRequestRow {
-            minutes_to_merge: Some(minutes),
-            ..pull_request(Some(Status::Merged.as_str()))
+            artifacts: Some(json!({ "pr": reception })),
+            ..pull_request(status)
         }
+    }
+
+    fn merged_after(minutes: i64) -> PullRequestRow {
+        received(Some(Status::Merged), json!({ "minutes_to_merge": minutes }))
     }
 
     #[test]
@@ -131,10 +154,8 @@ mod tests {
 
     #[test]
     fn the_merge_rate_is_unknown_while_nothing_is_decided() {
-        let summary = PullRequestSummary::new(&[
-            pull_request(Some(Status::Open.as_str())),
-            pull_request(None),
-        ]);
+        let summary =
+            PullRequestSummary::new(&[pull_request(Some(Status::Open)), pull_request(None)]);
         assert_eq!(summary.open, 2);
         assert_eq!(summary.opened, 2);
         assert_eq!(summary.merge_rate, None);
@@ -143,9 +164,9 @@ mod tests {
     #[test]
     fn the_merge_rate_counts_only_decided_pull_requests() {
         let summary = PullRequestSummary::new(&[
-            pull_request(Some(Status::Merged.as_str())),
-            pull_request(Some(Status::Closed.as_str())),
-            pull_request(Some(Status::Open.as_str())),
+            pull_request(Some(Status::Merged)),
+            pull_request(Some(Status::Closed)),
+            pull_request(Some(Status::Open)),
         ]);
         assert_eq!(
             (summary.merged, summary.closed, summary.open, summary.opened),
@@ -156,19 +177,20 @@ mod tests {
 
     #[test]
     fn an_unknown_status_counts_as_open() {
-        let summary = PullRequestSummary::new(&[pull_request(Some("draft"))]);
+        let mut draft = pull_request(None);
+        draft.status = Some("draft".to_string());
+        let summary = PullRequestSummary::new(&[draft]);
         assert_eq!((summary.open, summary.opened), (1, 1));
     }
 
     #[test]
     fn the_median_merge_time_reads_only_merged_pull_requests_with_a_time() {
-        let mut closed = pull_request(Some(Status::Closed.as_str()));
-        closed.minutes_to_merge = Some(1_000.0);
+        let closed = received(Some(Status::Closed), json!({ "minutes_to_merge": 1_000 }));
         let summary = PullRequestSummary::new(&[
-            merged_after(30.0),
-            merged_after(10.0),
-            merged_after(20.0),
-            pull_request(Some(Status::Merged.as_str())),
+            merged_after(30),
+            merged_after(10),
+            merged_after(20),
+            pull_request(Some(Status::Merged)),
             closed,
         ]);
         assert_eq!(summary.median_minutes_to_merge, Some(20.0));
@@ -176,17 +198,77 @@ mod tests {
 
     #[test]
     fn an_even_median_is_the_midpoint() {
-        let summary = PullRequestSummary::new(&[merged_after(10.0), merged_after(40.0)]);
+        let summary = PullRequestSummary::new(&[merged_after(10), merged_after(40)]);
         assert_eq!(summary.median_minutes_to_merge, Some(25.0));
     }
 
     #[test]
+    fn a_merge_time_is_derived_from_its_timestamps_when_none_was_recorded() {
+        let stamped = received(
+            Some(Status::Merged),
+            json!({
+                "opened_at": "2026-11-16T09:00:00Z",
+                "merged_at": "2026-11-16T10:30:00Z",
+            }),
+        );
+        let opened_with_the_task = received(
+            Some(Status::Merged),
+            json!({ "merged_at": "2026-11-16T09:45:00Z" }),
+        );
+
+        let summary = PullRequestSummary::new(&[stamped, opened_with_the_task]);
+
+        assert_eq!(
+            summary.median_minutes_to_merge,
+            Some(67.5),
+            "ninety minutes from the artifacts' own opening, forty-five from the task's"
+        );
+    }
+
+    #[test]
+    fn a_merge_that_reads_as_finishing_before_it_began_is_left_out() {
+        let skewed = received(
+            Some(Status::Merged),
+            json!({
+                "opened_at": "2026-11-16T10:00:00Z",
+                "merged_at": "2026-11-16T09:00:00Z",
+            }),
+        );
+        let recorded_backwards = merged_after(-15);
+
+        let summary =
+            PullRequestSummary::new(&[skewed, recorded_backwards.clone(), merged_after(40)]);
+        assert_eq!(summary.median_minutes_to_merge, Some(40.0));
+
+        let only_skew = PullRequestSummary::new(&[recorded_backwards]);
+        assert_eq!(only_skew.median_minutes_to_merge, None);
+    }
+
+    #[test]
+    fn numbers_too_large_to_be_counts_are_ignored_rather_than_failing() {
+        let wild = received(
+            Some(Status::Merged),
+            json!({
+                "minutes_to_merge": 1e300,
+                "review_cycles": 1e20,
+                "approvals": 18_446_744_073_709_551_615_u64,
+            }),
+        );
+
+        let summary = PullRequestSummary::new(&[wild, merged_after(12)]);
+
+        assert_eq!(summary.median_minutes_to_merge, Some(12.0));
+        assert_eq!(summary.mean_review_cycles, None);
+        assert_eq!(summary.mean_approvals, None);
+    }
+
+    #[test]
     fn review_means_read_only_pull_requests_with_a_value() {
-        let mut first = pull_request(Some(Status::Open.as_str()));
-        first.review_cycles = Some(1);
-        first.approvals = Some(2);
-        let mut second = pull_request(Some(Status::Merged.as_str()));
-        second.review_cycles = Some(3);
+        let first = received(
+            Some(Status::Open),
+            json!({ "review_cycles": 1, "approvals": 2 }),
+        );
+        let second = received(Some(Status::Merged), json!({ "review_cycles": 3 }));
         let summary = PullRequestSummary::new(&[first, second, pull_request(None)]);
         assert_eq!(summary.mean_review_cycles, Some(2.0));
         assert_eq!(summary.mean_approvals, Some(2.0));
@@ -194,12 +276,12 @@ mod tests {
 
     #[test]
     fn every_quality_band_is_listed_in_order_including_zeros() {
-        let mut solid = pull_request(Some(Status::Merged.as_str()));
+        let mut solid = pull_request(Some(Status::Merged));
         solid.quality_band = Some(QualityBand::Solid.as_str().to_string());
-        let mut unknown = pull_request(Some(Status::Merged.as_str()));
+        let mut unknown = pull_request(Some(Status::Merged));
         unknown.quality_band = Some("stellar".to_string());
         let summary =
-            PullRequestSummary::new(&[solid, unknown, pull_request(Some(Status::Merged.as_str()))]);
+            PullRequestSummary::new(&[solid, unknown, pull_request(Some(Status::Merged))]);
         assert_eq!(
             summary.quality,
             vec![
