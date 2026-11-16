@@ -35,7 +35,7 @@ export const sourceRegistry: SourceDefinition[] = [
   slackSource,
 ];
 
-export const getSourceById = (id: SourceType): SourceDefinition | undefined =>
+export const getSourceById = (id: string): SourceDefinition | undefined =>
   sourceRegistry.find((s) => s.id === id);
 
 export const getSourcesByCategory = (category: SourceCategory): SourceDefinition[] =>
@@ -46,7 +46,7 @@ export const getEnabledSources = (): SourceDefinition[] => sourceRegistry.filter
 export const getSourceBadgeColor = (type: SourceType): string =>
   getSourceById(type)?.badgeColor ?? 'badge-gray';
 
-export const getSourceLabel = (type: SourceType): string => getSourceById(type)?.name ?? type;
+export const getSourceLabel = (type: string): string => getSourceById(type)?.name ?? type;
 
 export const initializeFormState = (sourceId: SourceType): Record<string, unknown> => {
   const source = getSourceById(sourceId);
