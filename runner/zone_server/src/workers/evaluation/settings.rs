@@ -10,6 +10,8 @@ pub const CATEGORIES_VARIABLE: &str = "ZONE_TASK_EVALUATION_CATEGORIES";
 pub const TOOL_TIMEOUT_VARIABLE: &str = "ZONE_TASK_EVALUATION_TOOL_TIMEOUT_SECONDS";
 pub const BUDGET_VARIABLE: &str = "ZONE_TASK_EVALUATION_BUDGET_SECONDS";
 
+const ALL_CATEGORIES: &str = "all";
+
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_TOTAL_BUDGET: Duration = Duration::from_secs(900);
 const MAXIMUM_TOOL_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -67,18 +69,42 @@ impl CategorySelection {
         }
     }
 
-    pub fn parse(list: &str) -> Self {
+    pub fn parse(list: &str) -> Option<Self> {
         let mut selection = Self::NONE;
+        let mut recognised = false;
+        let mut unrecognised: Vec<String> = Vec::new();
         for token in list.split(',') {
             let token = token.trim().to_ascii_lowercase();
-            if token == "all" {
-                return Self::ALL;
+            if token.is_empty() {
+                continue;
             }
-            if let Some(category) = EvalCategory::ALL.iter().find(|c| c.as_str() == token) {
+            if token == ALL_CATEGORIES {
+                selection = Self::ALL;
+                recognised = true;
+            } else if let Some(category) = EvalCategory::ALL
+                .iter()
+                .find(|category| category.as_str() == token)
+            {
                 selection.enable(*category);
+                recognised = true;
+            } else if !unrecognised.contains(&token) {
+                unrecognised.push(token);
             }
         }
-        selection
+
+        for token in &unrecognised {
+            tracing::warn!(
+                variable = CATEGORIES_VARIABLE,
+                "{CATEGORIES_VARIABLE} names an unknown category {token:?}; ignoring it"
+            );
+        }
+        if !recognised {
+            tracing::warn!(
+                variable = CATEGORIES_VARIABLE,
+                "{CATEGORIES_VARIABLE} names no known category; using the default selection"
+            );
+        }
+        recognised.then_some(selection)
     }
 }
 
@@ -152,7 +178,7 @@ impl EvaluationSettings {
             categories: environment
                 .categories
                 .as_deref()
-                .map(CategorySelection::parse)
+                .and_then(CategorySelection::parse)
                 .unwrap_or(defaults.categories),
             tool_timeout: parse_duration(
                 environment.tool_timeout_seconds.as_deref(),
@@ -188,6 +214,10 @@ fn parse_duration(raw: Option<&str>, fallback: Duration, ceiling: Duration) -> D
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
     use super::*;
 
     #[test]
@@ -227,7 +257,7 @@ mod tests {
 
     #[test]
     fn parses_a_category_list() {
-        let categories = CategorySelection::parse("test, coverage");
+        let categories = CategorySelection::parse("test, coverage").expect("a selection");
         assert!(categories.includes(EvalCategory::Test));
         assert!(categories.includes(EvalCategory::Coverage));
         assert!(!categories.includes(EvalCategory::Lint));
@@ -235,19 +265,78 @@ mod tests {
 
     #[test]
     fn parses_the_all_shorthand() {
-        assert_eq!(CategorySelection::parse("all"), CategorySelection::ALL);
-        assert_eq!(CategorySelection::parse("test,all"), CategorySelection::ALL);
+        assert_eq!(
+            CategorySelection::parse("all"),
+            Some(CategorySelection::ALL)
+        );
+        assert_eq!(
+            CategorySelection::parse("test,all"),
+            Some(CategorySelection::ALL)
+        );
     }
 
     #[test]
-    fn ignores_unknown_category_names() {
-        assert_eq!(
-            CategorySelection::parse("nonsense"),
-            CategorySelection::NONE
-        );
-        let categories = CategorySelection::parse("nonsense,lint");
+    fn an_unknown_name_is_ignored_with_one_warning_each() {
+        let (categories, log) = logged(|| CategorySelection::parse("nonsense,lint,Nonsense,tset"));
+        let categories = categories.expect("lint was recognised");
         assert!(categories.includes(EvalCategory::Lint));
         assert!(!categories.includes(EvalCategory::Test));
+        assert_eq!(
+            log.matches("\"nonsense\"").count(),
+            1,
+            "a repeated unknown name is reported once: {log}"
+        );
+        assert_eq!(log.matches("\"tset\"").count(), 1, "{log}");
+        assert!(!log.contains("default selection"), "{log}");
+    }
+
+    #[test]
+    fn a_list_with_no_known_name_keeps_the_default_selection() {
+        let (settings, log) = logged(|| {
+            EvaluationSettings::resolve(&EvaluationEnvironment::from_lookup(lookup(&[(
+                CATEGORIES_VARIABLE,
+                "nonsense, tset",
+            )])))
+        });
+        assert_eq!(
+            settings.categories,
+            CategorySelection::default(),
+            "a list of typos must not switch every category off"
+        );
+        assert!(log.contains(CATEGORIES_VARIABLE), "{log}");
+        assert!(log.contains("default selection"), "{log}");
+        assert_eq!(log.matches("\"nonsense\"").count(), 1, "{log}");
+        assert_eq!(log.matches("\"tset\"").count(), 1, "{log}");
+    }
+
+    fn logged<T>(read: impl FnOnce() -> T) -> (T, String) {
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for Captured {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("the captured log")
+                    .extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, read);
+        let log =
+            String::from_utf8_lossy(&captured.0.lock().expect("the captured log")).into_owned();
+        (value, log)
     }
 
     #[test]
