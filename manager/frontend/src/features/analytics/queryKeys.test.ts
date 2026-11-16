@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { ANALYTICS_KEY, analyticsKeys } from './queryKeys';
+import { analyticsKeys } from './queryKeys';
 
 describe('analytics query keys', () => {
   it('keys an overview on its workspace and period', () => {
@@ -12,7 +12,7 @@ describe('analytics query keys', () => {
 
   it('keeps every overview under its workspace', () => {
     const workspace = analyticsKeys.workspace('workspace-1');
-    expect(workspace).toEqual([ANALYTICS_KEY, 'workspace-1']);
+    expect(workspace).toEqual(['analytics', 'workspace-1']);
     expect(analyticsKeys.overview('workspace-1', 'quarter').slice(0, 2)).toEqual([...workspace]);
   });
 

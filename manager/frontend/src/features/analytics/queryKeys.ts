@@ -1,6 +1,6 @@
 import type { TimePeriod } from './types';
 
-export const ANALYTICS_KEY = 'analytics';
+const ANALYTICS_KEY = 'analytics';
 
 type Workspace = string | undefined;
 

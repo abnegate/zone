@@ -16,7 +16,7 @@ const DIRECTIONS: Record<TrendDirection, string> = {
   declining: 'Down',
 };
 
-export function trendText(trend: Trend): string {
+function trendText(trend: Trend): string {
   if (trend.direction === TrendDirectionSchema.enum.steady) return DIRECTIONS.steady;
   return `${DIRECTIONS[trend.direction]} ${AnalyticsFormat.points(trend.change)}`;
 }

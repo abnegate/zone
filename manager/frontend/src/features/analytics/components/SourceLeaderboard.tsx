@@ -7,14 +7,6 @@ export const SOURCES_LABEL = 'Runs by source';
 
 export const NO_SOURCES = 'No source has finished a run in this period.';
 
-function busiestFirst(sources: readonly SourceBreakdown[]): SourceBreakdown[] {
-  return [...sources].sort(
-    (left, right) =>
-      right.outcomes.total - left.outcomes.total ||
-      right.merged_pull_requests - left.merged_pull_requests
-  );
-}
-
 export interface SourceLeaderboardProps {
   sources: readonly SourceBreakdown[];
 }
@@ -40,7 +32,7 @@ export function SourceLeaderboard({ sources }: SourceLeaderboardProps) {
         </TableRow>
       </TableHeader>
       <TableBody>
-        {busiestFirst(sources).map((source) => (
+        {sources.map((source) => (
           <TableRow key={source.source_id ?? NO_SOURCE}>
             <TableCell className="analytics-name">
               <span className="analytics-name-primary">{source.name ?? NO_SOURCE}</span>
