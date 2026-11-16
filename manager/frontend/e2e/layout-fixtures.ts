@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import type { LicenseResponse } from '../src/features/enterprise/types';
 import type { SourceStatus } from '../src/features/github/sourceStatus';
 import {
   wireCommits,
@@ -34,6 +35,13 @@ const mockOrganization = {
   is_active: true,
   created_at: '2024-01-01T00:00:00Z',
   updated_at: '2024-01-01T00:00:00Z',
+};
+
+const communityLicense: LicenseResponse = {
+  edition: 'community',
+  status: 'community',
+  license: null,
+  seats: { used: 1, licensed: null, over: false },
 };
 
 const mockWorkspace = {
@@ -1019,6 +1027,7 @@ export async function setupCommonRoutes(
     else if (path === '/api/auth/sessions')
       body = { sessions: populated ? mockSessions : [] };
     else if (path === '/api/context/search') body = { results: [], total: 0 };
+    else if (path === '/api/license') body = communityLicense;
     else {
       await route.fallback();
       return;

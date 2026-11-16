@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { SessionsSection } from '../../auth/components';
+import { LicenseSection } from '../../enterprise';
 import { SourcesSection } from '../../sources/components';
 import { McpServersSection, WorkspaceMcpServersSection } from '../mcp';
 import {
@@ -135,6 +136,8 @@ function serverContent(section: SettingsSection): ReactNode {
       return <FeaturesSection />;
     case SettingsSection.Connect:
       return <ConnectDevicesSection />;
+    case SettingsSection.License:
+      return <LicenseSection />;
     default:
       return null;
   }

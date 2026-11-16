@@ -33,6 +33,8 @@ const workspaceRole: WorkspaceRoleState = { role: undefined, resolving: false };
 
 let permissions: string[] = [];
 
+let user: { is_admin: boolean } | null = null;
+
 const contentMounts: string[] = [];
 const contentAccess: SettingsAccess[] = [];
 
@@ -41,7 +43,10 @@ mock.module('../../../shared/context/WorkspaceContext', () => ({
 }));
 
 mock.module('../../auth/context', () => ({
-  useAuth: () => ({ hasPermission: (permission: string) => permissions.includes(permission) }),
+  useAuth: () => ({
+    user,
+    hasPermission: (permission: string) => permissions.includes(permission),
+  }),
 }));
 
 mock.module('../navigation/useWorkspaceRole', () => ({
@@ -185,6 +190,7 @@ describe('SettingsPage', () => {
     contentAccess.length = 0;
     workspaceContext.loading = false;
     workspaceContext.resolvingRole = false;
+    user = null;
     signInAs('member', 'viewer');
   });
 
@@ -204,6 +210,14 @@ describe('SettingsPage', () => {
       expect(linkLabels('Organization')).toEqual(['Members', 'GitHub', 'MCP servers']);
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
       expect(linkLabels('You')).toEqual(['Sessions']);
+    });
+
+    it('adds License under This server for a server admin', () => {
+      user = { is_admin: true };
+
+      renderAt('/settings/workspace/general');
+
+      expect(linkLabels('This server')).toEqual(['Features', 'Connect a device', 'License']);
     });
 
     it('shows an organization admin with no workspace every organization section and no workspace group', () => {
@@ -342,7 +356,27 @@ describe('SettingsPage', () => {
         workspaceRole: 'admin',
         installsModels: true,
         readsSources: false,
+        administersServer: false,
       });
+    });
+
+    it('passes server administration to the content for a server admin', () => {
+      user = { is_admin: true };
+
+      renderAt('/settings/server/license');
+
+      expect(contentAccess.at(-1)?.administersServer).toBe(true);
+      const region = screen.getByRole('region', { name: 'License' });
+      expect(within(region).getByTestId('settings-content').textContent).toBe('server/license');
+    });
+
+    it('sends someone who does not administer the server from License to the first visible section', () => {
+      user = { is_admin: false };
+
+      renderAt('/settings/server/license');
+
+      expect(location()).toBe('/settings/workspace/general');
+      expect(screen.queryByRole('link', { name: 'License' })).not.toBeInTheDocument();
     });
 
     it('passes whether the user can read sources to the content', () => {

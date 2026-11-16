@@ -68,6 +68,7 @@ const ownerAccess: SettingsAccess = {
   workspaceRole: 'admin',
   installsModels: true,
   readsSources: true,
+  administersServer: true,
 };
 
 function renderNav(access: SettingsAccess, entry = '/settings/workspace/general') {
@@ -124,8 +125,19 @@ describe('SettingsNav', () => {
       ['MCP servers', '/settings/organization/mcp'],
       ['Features', '/settings/server/features'],
       ['Connect a device', '/settings/server/connect'],
+      ['License', '/settings/server/license'],
       ['Sessions', '/settings/you/sessions'],
     ]);
+  });
+
+  it('lists License under This server only for a server admin', () => {
+    renderNav(ownerAccess);
+    expect(linkLabels('This server')).toEqual(['Features', 'Connect a device', 'License']);
+  });
+
+  it('leaves License out of This server for anyone who does not administer the server', () => {
+    renderNav({ ...ownerAccess, administersServer: false });
+    expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
   });
 
   it('marks the current section as the current page', () => {
@@ -150,6 +162,7 @@ describe('SettingsNav', () => {
       workspaceRole: undefined,
       installsModels: true,
       readsSources: true,
+      administersServer: false,
     });
 
     expect(screen.queryByRole('group', { name: 'Workspace' })).not.toBeInTheDocument();

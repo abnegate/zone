@@ -13,7 +13,7 @@ export interface SettingsAccessState {
 export function useSettingsAccess(): SettingsAccessState {
   const { currentOrganization, currentWorkspace, loading, resolvingRole } = useWorkspace();
   const { role: workspaceRole, resolving: resolvingWorkspaceRole } = useWorkspaceRole();
-  const { hasPermission } = useAuth();
+  const { hasPermission, user } = useAuth();
 
   return {
     access: {
@@ -23,6 +23,7 @@ export function useSettingsAccess(): SettingsAccessState {
       workspaceRole,
       installsModels: hasPermission(PERMISSIONS.MODELS.READ),
       readsSources: hasPermission(PERMISSIONS.SOURCES.READ),
+      administersServer: user?.is_admin === true,
     },
     loading: loading || resolvingRole,
     resolvingWorkspaceRole,

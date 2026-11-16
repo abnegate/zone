@@ -1,0 +1,21 @@
+import type { z } from 'zod';
+import type {
+  EditionSchema,
+  LicenseDetailsSchema,
+  LicenseRefusalSchema,
+  LicenseResponseSchema,
+  LicenseStatusSchema,
+  SeatsSchema,
+  SetLicenseRequestSchema,
+  TierSchema,
+} from './schemas';
+
+export type Edition = z.infer<typeof EditionSchema>;
+export type LicenseStatus = z.infer<typeof LicenseStatusSchema>;
+export type Tier = z.infer<typeof TierSchema>;
+export type LicenseDetails = z.infer<typeof LicenseDetailsSchema>;
+export type Seats = z.infer<typeof SeatsSchema>;
+export type LicenseResponse = z.infer<typeof LicenseResponseSchema>;
+export type SetLicenseRequest = z.infer<typeof SetLicenseRequestSchema>;
+export type LicenseRefusalBody = z.infer<typeof LicenseRefusalSchema>;
+export type LicenseRefusalCode = LicenseRefusalBody['code'];
