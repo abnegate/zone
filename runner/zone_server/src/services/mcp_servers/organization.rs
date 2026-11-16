@@ -124,7 +124,7 @@ impl OrganizationHub {
     pub fn register(
         &self,
         registry: &mut ToolRegistry,
-        include: &dyn Fn(Uuid) -> bool,
+        include: &dyn Fn(&Definition) -> bool,
     ) -> Registered {
         let mut used: HashSet<String> = registry.names().into_iter().map(str::to_string).collect();
         let inner = self.read();
@@ -132,7 +132,7 @@ impl OrganizationHub {
             .slots
             .iter()
             .map(|(server, slot)| (*server, slot))
-            .filter(|(server, _)| include(*server))
+            .filter(|(_, slot)| include(&slot.definition))
             .collect();
         slots.sort_by(|(_, left), (_, right)| left.definition.name.cmp(&right.definition.name));
         let mut registered = Registered::default();
@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(hub.connected(), 2, "both stub servers have to connect");
         let mut registry = ToolRegistry::new();
 
-        let registered = hub.register(&mut registry, &|server| server != excluded.id);
+        let registered = hub.register(&mut registry, &|definition| definition.id != excluded.id);
 
         assert_eq!(registered, one());
         assert_eq!(registry.names(), ["kept__delegate"]);
