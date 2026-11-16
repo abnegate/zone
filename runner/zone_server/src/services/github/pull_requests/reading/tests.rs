@@ -456,7 +456,6 @@ async fn a_batch_sent_once_the_listing_stopped_asks_github_for_nothing() {
             &Semaphore::new(1),
             &RepositoryId::new(REPOSITORY_ID),
             &[&row],
-            Duration::from_secs(1),
             &stop,
         )
         .await

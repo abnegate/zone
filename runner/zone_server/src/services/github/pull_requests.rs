@@ -60,6 +60,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use super::authentication::credentialed;
+use super::cache::REFRESH_DEADLINE;
 use super::client::Github;
 use super::client::MEBIBYTE;
 use super::client::listed;
@@ -88,7 +89,9 @@ pub const KEPT_LIMIT: Duration = Duration::from_secs(5 * 60);
 pub const UNRANKED: u32 = 0;
 pub const BATCH: usize = PullRequestService::EVIDENCE_BATCH;
 pub const EVIDENCE_CONCURRENCY: usize = 4;
-pub const EVIDENCE_LIMIT: Duration = Duration::from_secs(20);
+pub const GRAPHQL_LIMIT: Duration = Duration::from_secs(20);
+pub const DEADLINE_MARGIN: Duration = Duration::from_secs(20);
+pub const SURVEY_DEADLINE: Duration = REFRESH_DEADLINE.saturating_sub(DEADLINE_MARGIN);
 pub const FOREIGN_COMMIT: &str = "That commit is not on this pull request.";
 pub const UNRENDERED_COMMIT: &str = "GitHub would not render this commit's diff.";
 pub const INVALID_SOURCE: &str = "has a GitHub configuration Zone cannot read.";
@@ -433,9 +436,17 @@ async fn fetch(
         &source.source,
         source.configuration.clone(),
         |github| async move {
-            Survey::new(&github, permits, repository, previous, now)
-                .listing(limit)
-                .await
+            Survey::new(
+                github,
+                permits,
+                repository,
+                previous,
+                now,
+                GRAPHQL_LIMIT,
+                SURVEY_DEADLINE,
+            )
+            .listing(limit)
+            .await
         },
     )
     .await

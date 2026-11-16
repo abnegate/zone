@@ -4,7 +4,6 @@ use std::num::NonZeroU32;
 use std::num::NonZeroU64;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use abnegate_vcs::ChangedFile;
 use abnegate_vcs::Collected;
@@ -91,14 +90,13 @@ impl Github {
         loop {
             let page = {
                 let _permit = admitted(permits).await?;
-                self.service()
-                    .list_open_pull_requests(
-                        self.repository(),
-                        self.token(),
-                        page_size(limit.saturating_sub(pulls.len())),
-                        after.as_deref(),
-                    )
-                    .await?
+                self.bounded(self.service().list_open_pull_requests(
+                    self.repository(),
+                    self.token(),
+                    page_size(limit.saturating_sub(pulls.len())),
+                    after.as_deref(),
+                ))
+                .await??
             };
             let identified = repository.get_or_insert_with(|| page.repository_id.clone());
             if *identified != page.repository_id {
@@ -122,7 +120,8 @@ impl Github {
 
     /// The evidence on each pull request `rows` lists, read in one GraphQL
     /// request under one of `permits` that is let go once GitHub answers or
-    /// `limit` passes, whichever is first. A pull request read for another,
+    /// the client's guard runs out, whichever is first. A pull request read
+    /// for another,
     /// or that GitHub could not answer for, is `None`, and so is every one of
     /// them when GitHub refused the request for any reason short of a halt or
     /// took too long, to be read through REST instead.
@@ -135,7 +134,6 @@ impl Github {
         permits: &Semaphore,
         repository: &RepositoryId,
         rows: &[&ListedPullRequest],
-        limit: Duration,
         stop: &AtomicBool,
     ) -> Result<Vec<Option<PullRequestEvidence>>, Fault> {
         let unread = || rows.iter().map(|_| None).collect();
@@ -145,15 +143,12 @@ impl Github {
             if stop.load(Ordering::Acquire) {
                 return Ok(unread());
             }
-            tokio::time::timeout(
-                limit,
-                self.service().fetch_pull_request_evidence(
-                    self.repository(),
-                    self.token(),
-                    repository,
-                    &ids,
-                ),
-            )
+            self.bounded(self.service().fetch_pull_request_evidence(
+                self.repository(),
+                self.token(),
+                repository,
+                &ids,
+            ))
             .await
         };
         let slots = match read {
@@ -177,11 +172,11 @@ impl Github {
                 );
                 return Ok(unread());
             }
-            Err(_) => {
+            Err(fault) => {
                 stop.store(true, Ordering::Release);
                 tracing::warn!(
                     repository = %self.repository(),
-                    seconds = limit.as_secs_f64(),
+                    %fault,
                     "Reading pull requests through REST after GitHub took too long over their batch"
                 );
                 return Ok(unread());

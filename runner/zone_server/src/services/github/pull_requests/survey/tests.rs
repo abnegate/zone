@@ -18,7 +18,9 @@ use wiremock::matchers::path;
 use wiremock::matchers::query_param;
 
 use super::*;
+use crate::services::github::pull_requests::GRAPHQL_LIMIT;
 use crate::services::github::pull_requests::Readiness;
+use crate::services::github::pull_requests::SURVEY_DEADLINE;
 use crate::services::github::readiness::BlockerCode;
 use crate::services::github::readiness::Mergeability;
 use crate::services::github::testing::mocked;
@@ -314,7 +316,7 @@ async fn surveyed(
     previous: Option<&Listing>,
     limit: u32,
 ) -> Result<Listing, Fault> {
-    surveyed_within(server, permits, previous, limit, EVIDENCE_LIMIT).await
+    surveyed_within(server, permits, previous, limit, GRAPHQL_LIMIT).await
 }
 
 /// A listing whose evidence batches GitHub has `patience` to answer.
@@ -325,12 +327,29 @@ async fn surveyed_within(
     limit: u32,
     patience: Duration,
 ) -> Result<Listing, Fault> {
-    let github = mocked(server);
+    surveyed_by(server, permits, previous, limit, patience, SURVEY_DEADLINE).await
+}
+
+/// A listing that has `patience` for each GraphQL read and `deadline` for
+/// every assessment.
+async fn surveyed_by(
+    server: &MockServer,
+    permits: &Semaphore,
+    previous: Option<&Listing>,
+    limit: u32,
+    patience: Duration,
+    deadline: Duration,
+) -> Result<Listing, Fault> {
     let repository = repository();
-    let survey = Survey {
-        limit: patience,
-        ..Survey::new(&github, permits, &repository, previous, now())
-    };
+    let survey = Survey::new(
+        mocked(server),
+        permits,
+        &repository,
+        previous,
+        now(),
+        patience,
+        deadline,
+    );
     tokio::time::timeout(BUDGET, survey.listing(limit))
         .await
         .expect("a listing finishes")
@@ -903,8 +922,12 @@ async fn a_batch_github_takes_too_long_over_is_read_through_rest_and_stops_the_r
         .unwrap();
 
     assert!(started.elapsed() < SLOW, "{:?}", started.elapsed());
-    assert_eq!(numbers(&listing), (1..=12).collect::<Vec<u64>>());
-    assert!(listing.complete, "{:?}", listing.warnings);
+    assert!(
+        listing.pull_requests.is_empty(),
+        "a listing read before would keep its verdicts"
+    );
+    assert!(!listing.complete);
+    assert_eq!(listing.warnings.len(), 12, "{:?}", listing.warnings);
     assert_eq!(
         batches(&server).await.len(),
         1,
@@ -917,6 +940,11 @@ async fn a_batch_github_takes_too_long_over_is_read_through_rest_and_stops_the_r
             "#{number}"
         );
     }
+    assert_eq!(
+        thread_counts(&server).await,
+        0,
+        "no GraphQL thread count is asked for once GraphQL took too long"
+    );
     server.verify().await;
 }
 
@@ -1030,5 +1058,167 @@ async fn a_listing_under_a_closed_credential_reads_no_evidence_and_assesses_noth
     assert_eq!(listing.warnings.len(), 2, "{:?}", listing.warnings);
     assert_eq!(opens(&server).await, 0);
     assert!(batches(&server).await.is_empty());
+    server.verify().await;
+}
+
+const HURRIED: Duration = Duration::from_millis(500);
+
+async fn thread_counts(server: &MockServer) -> usize {
+    received(server)
+        .await
+        .iter()
+        .filter(|request| String::from_utf8_lossy(&request.body).contains("\"number\""))
+        .count()
+}
+
+/// The listing of `numbers` a GitHub that answers at once reads.
+async fn settled(numbers: std::ops::RangeInclusive<u64>) -> Listing {
+    let fast = silent().await;
+    opened(&fast, numbers.clone()).await;
+    evidenced(&fast).await;
+    let listing = surveyed(&fast, &Semaphore::new(CREDENTIAL_PERMITS), None, LIMIT)
+        .await
+        .unwrap();
+    assert!(listing.complete, "{:?}", listing.warnings);
+    assert_eq!(listing.pull_requests.len(), numbers.count());
+    listing
+}
+
+#[tokio::test]
+async fn a_listing_page_github_is_slow_over_is_read_through_rest_in_time() {
+    let first = settled(1..=2).await;
+    let server = silent().await;
+    let rows: Vec<Value> = (1..=2).map(|number| open_row(number, UPDATED_AT)).collect();
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains(LISTING))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": {"repository": {
+                    "id": REPOSITORY_ID,
+                    "pullRequests": {
+                        "pageInfo": {"hasNextPage": false, "endCursor": null},
+                        "nodes": rows,
+                    },
+                }}}))
+                .set_delay(SLOW),
+        )
+        .mount(&server)
+        .await;
+    rest_listed(&server, 1..=2).await;
+    let permits = Semaphore::new(CREDENTIAL_PERMITS);
+    let started = Instant::now();
+
+    let again = surveyed_within(&server, &permits, Some(&first), LIMIT, PATIENCE)
+        .await
+        .unwrap();
+
+    assert!(started.elapsed() < SLOW, "{:?}", started.elapsed());
+    assert_eq!(again, first);
+    assert_eq!(opens(&server).await, 1);
+    assert_eq!(reads_of(&server, "pulls").await, 1);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn thread_counts_github_is_slow_over_keep_the_last_verdicts_and_are_not_asked_again() {
+    let first = settled(1..=2).await;
+    let server = silent().await;
+    open(
+        &server,
+        u64::from(LIMIT),
+        vec![open_row(1, CHANGED_AT), open_row(2, CHANGED_AT)],
+        None,
+    )
+    .await;
+    evidence(&server, |id| match number_of(id) {
+        1 => overflowing(1),
+        _ => Value::Null,
+    })
+    .await;
+    rested(&server, 2).await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("\"number\""))
+        .respond_with(|request: &Request| {
+            counted(asked_number(request).unwrap_or_default()).set_delay(SLOW)
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let permits = Semaphore::new(1);
+    let started = Instant::now();
+
+    let again = surveyed_within(&server, &permits, Some(&first), LIMIT, PATIENCE)
+        .await
+        .unwrap();
+
+    assert!(started.elapsed() < SLOW, "{:?}", started.elapsed());
+    assert!(!again.complete);
+    assert_eq!(again.warnings.len(), 2, "{:?}", again.warnings);
+    assert_eq!(again.pull_requests, first.pull_requests);
+    assert_eq!(
+        thread_counts(&server).await,
+        1,
+        "a thread count is not asked for once one took too long"
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_listing_past_its_deadline_keeps_the_last_verdicts_of_what_it_had_not_assessed() {
+    let first = settled(1..=3).await;
+    let server = silent().await;
+    open(
+        &server,
+        u64::from(LIMIT),
+        (1..=3).map(|number| open_row(number, CHANGED_AT)).collect(),
+        None,
+    )
+    .await;
+    evidence(&server, |id| match number_of(id) {
+        1 => node(1),
+        number => overflowing(number),
+    })
+    .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("\"number\""))
+        .respond_with(|request: &Request| {
+            counted(asked_number(request).unwrap_or_default()).set_delay(SLOW)
+        })
+        .mount(&server)
+        .await;
+    let permits = Semaphore::new(CREDENTIAL_PERMITS);
+    let started = Instant::now();
+
+    let again = surveyed_by(
+        &server,
+        &permits,
+        Some(&first),
+        LIMIT,
+        GRAPHQL_LIMIT,
+        HURRIED,
+    )
+    .await
+    .unwrap();
+    let cold = surveyed_by(&server, &permits, None, LIMIT, GRAPHQL_LIMIT, HURRIED)
+        .await
+        .unwrap();
+
+    assert!(started.elapsed() < SLOW * 2, "{:?}", started.elapsed());
+    assert!(!again.complete);
+    assert_eq!(numbers(&again), [1, 2, 3]);
+    assert_eq!(again.pull_requests[0].updated_at, CHANGED_AT);
+    assert_eq!(again.pull_requests[1..], first.pull_requests[1..]);
+    assert_eq!(again.warnings.len(), 1, "{:?}", again.warnings);
+    assert!(
+        again.warnings[0].contains("2 pull requests"),
+        "{:?}",
+        again.warnings
+    );
+    assert!(!cold.complete);
+    assert_eq!(numbers(&cold), [1]);
+    assert_eq!(permits.available_permits(), CREDENTIAL_PERMITS);
     server.verify().await;
 }

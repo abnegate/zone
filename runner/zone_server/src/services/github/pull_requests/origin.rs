@@ -10,4 +10,6 @@ pub(super) enum Origin {
     FollowUp,
     /// REST alone, after GitHub refused or could not answer for the batch.
     Rest,
+    /// Nothing: the listing ran out of time before it was assessed again.
+    Late,
 }

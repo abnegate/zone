@@ -7,7 +7,6 @@ use tokio::sync::Semaphore;
 use super::Github;
 use super::comment_evidence;
 use super::mergeability;
-use super::thread_described;
 use super::thread_evidence;
 use super::vetted;
 use crate::services::github::evidence::Assessed;
@@ -90,10 +89,8 @@ impl Github {
         if threads.complete {
             return Ok(threads);
         }
-        self.service
-            .fetch_review_thread_counts(&self.reference(row.reference.number().get())?, &self.token)
+        self.thread_counts(&self.reference(row.reference.number().get())?)
             .await
-            .map_err(thread_described)
     }
 
     async fn inspected(

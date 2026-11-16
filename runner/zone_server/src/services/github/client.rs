@@ -1,3 +1,4 @@
+mod guard;
 mod review;
 mod rows;
 mod survey;
@@ -59,6 +60,7 @@ use crate::services::prioritisation::Configuration as Prioritisation;
 use crate::services::prioritisation::Prioritiser;
 use crate::services::prioritisation::pull_request;
 use crate::utils::text::truncate;
+pub(crate) use guard::Guard;
 use review::Review;
 pub(crate) use rows::Rows;
 pub(crate) use survey::sufficient;
@@ -143,6 +145,7 @@ pub(crate) struct Github {
     signals: ReviewSignals,
     configuration: Configuration,
     origin: String,
+    guard: Option<Guard>,
 }
 
 impl Github {
@@ -220,7 +223,36 @@ impl Github {
             signals,
             configuration,
             origin: origin.trim_end_matches(SEPARATOR).to_string(),
+            guard: None,
         })
+    }
+
+    /// This client with every GraphQL read of a listing held to `guard`.
+    pub(crate) fn guarded(self, guard: Guard) -> Self {
+        Self {
+            guard: Some(guard),
+            ..self
+        }
+    }
+
+    /// What `read` answers, held to this client's guard when it has one.
+    pub(crate) async fn bounded<T>(&self, read: impl Future<Output = T>) -> Result<T, Fault> {
+        match &self.guard {
+            Some(guard) => guard.bounded(read).await,
+            None => Ok(read.await),
+        }
+    }
+
+    pub(crate) async fn thread_counts(
+        &self,
+        reference: &PullRequestReference,
+    ) -> Result<ReviewThreadCount, Fault> {
+        self.bounded(
+            self.service
+                .fetch_review_thread_counts(reference, &self.token),
+        )
+        .await?
+        .map_err(thread_described)
     }
 
     pub(crate) fn reference(&self, number: u64) -> Result<PullRequestReference, String> {
@@ -502,12 +534,7 @@ impl Github {
         let reference = self.reference(detail.number.get())?;
         let threads = match threads {
             Some(collected) => recorded_evidence(collected),
-            None => thread_evidence(
-                self.service
-                    .fetch_review_thread_counts(&reference, &self.token)
-                    .await
-                    .map_err(thread_described)?,
-            ),
+            None => thread_evidence(self.thread_counts(&reference).await?),
         };
         Ok(Review {
             draft: detail.draft,

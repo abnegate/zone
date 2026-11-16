@@ -9,10 +9,11 @@ use chrono::Utc;
 use futures::StreamExt;
 use futures::stream;
 use tokio::sync::Semaphore;
+use tokio::time::Instant;
+use tokio::time::timeout_at;
 
 use super::BATCH;
 use super::EVIDENCE_CONCURRENCY;
-use super::EVIDENCE_LIMIT;
 use super::Listing;
 use super::PullRequest;
 use super::Repository;
@@ -20,39 +21,46 @@ use super::origin::Origin;
 use super::reassess;
 use super::refresh_plan;
 use crate::services::github::client::Github;
+use crate::services::github::client::Guard;
 use crate::services::github::client::sufficient;
 use crate::services::github::fault::Fault;
 use crate::services::github::throttle::CREDENTIAL_PERMITS;
 
 type Verdict = (Origin, Result<PullRequest, Fault>);
 
+const LATE: &str = "GitHub was not read in time to assess this pull request again.";
+
 /// One read of a source's open pull requests, against the listing read
 /// before it.
 pub(super) struct Survey<'a> {
-    pub(super) github: &'a Github,
-    pub(super) permits: &'a Semaphore,
-    pub(super) repository: &'a Repository,
-    pub(super) previous: Option<&'a Listing>,
-    pub(super) now: DateTime<Utc>,
-    pub(super) limit: Duration,
-    pub(super) stop: AtomicBool,
+    github: Github,
+    permits: &'a Semaphore,
+    repository: &'a Repository,
+    previous: Option<&'a Listing>,
+    now: DateTime<Utc>,
+    deadline: Instant,
+    stop: AtomicBool,
 }
 
 impl<'a> Survey<'a> {
+    /// A listing that waits `patience` on each GraphQL read and starts no
+    /// assessment `deadline` from now, nor finishes one begun before.
     pub(super) fn new(
-        github: &'a Github,
+        github: Github,
         permits: &'a Semaphore,
         repository: &'a Repository,
         previous: Option<&'a Listing>,
         now: DateTime<Utc>,
+        patience: Duration,
+        deadline: Duration,
     ) -> Self {
         Self {
-            github,
+            github: github.guarded(Guard::new(patience)),
             permits,
             repository,
             previous,
             now,
-            limit: EVIDENCE_LIMIT,
+            deadline: Instant::now() + deadline,
             stop: AtomicBool::new(false),
         }
     }
@@ -61,7 +69,13 @@ impl<'a> Survey<'a> {
     /// evidence on each one not current read in batches, or through REST
     /// when GitHub refuses the GraphQL listing short of a halt.
     pub(super) async fn listing(&self, limit: u32) -> Result<Listing, Fault> {
-        match self.github.open_pull_requests(self.permits, limit).await {
+        let opened = timeout_at(
+            self.deadline,
+            self.github.open_pull_requests(self.permits, limit),
+        )
+        .await
+        .map_err(|_| Fault::upstream(LATE))?;
+        match opened {
             Ok((repository, rows, complete)) => self.batched(&repository, rows, complete).await,
             Err(fault) if fault.halts() => Err(fault),
             Err(fault) => {
@@ -70,7 +84,9 @@ impl<'a> Survey<'a> {
                     %fault,
                     "Listing open pull requests through REST after GitHub refused the GraphQL listing"
                 );
-                let (rows, complete) = self.github.open_pulls(limit).await?;
+                let (rows, complete) = timeout_at(self.deadline, self.github.open_pulls(limit))
+                    .await
+                    .map_err(|_| Fault::upstream(LATE))??;
                 self.through_rest(rows, complete).await
             }
         }
@@ -119,18 +135,23 @@ impl<'a> Survey<'a> {
         batch: &[(usize, &ListedPullRequest)],
     ) -> Result<Vec<(usize, Verdict)>, Fault> {
         let rows: Vec<&ListedPullRequest> = batch.iter().map(|(_, row)| *row).collect();
-        let read = self
-            .github
-            .evidence(self.permits, repository, &rows, self.limit, &self.stop)
-            .await?;
-        let verdicts: Vec<_> =
-            batch
-                .iter()
-                .zip(read)
-                .map(|(&(index, row), evidence)| async move {
-                    (index, self.verdict(row, evidence).await)
-                })
-                .collect();
+        let read = timeout_at(
+            self.deadline,
+            self.github
+                .evidence(self.permits, repository, &rows, &self.stop),
+        )
+        .await;
+        let read = match read {
+            Ok(read) => read?,
+            Err(_) => return Ok(batch.iter().map(|(index, _)| (*index, late())).collect()),
+        };
+        let verdicts: Vec<_> = batch
+            .iter()
+            .zip(read)
+            .map(|(&(index, row), evidence)| async move {
+                (index, self.timely(self.verdict(row, evidence)).await)
+            })
+            .collect();
         let mut verdicts = stream::iter(verdicts).buffer_unordered(BATCH);
         let mut judged = Vec::with_capacity(batch.len());
         while let Some((index, verdict)) = verdicts.next().await {
@@ -151,7 +172,7 @@ impl<'a> Survey<'a> {
             .map(|(row, kept)| async move {
                 match kept {
                     Some(kept) => (Origin::Kept, Ok(kept.clone())),
-                    None => self.verdict(row, None).await,
+                    None => self.timely(self.verdict(row, None)).await,
                 }
             })
             .collect();
@@ -161,6 +182,12 @@ impl<'a> Survey<'a> {
             judged.push(halted(verdict)?);
         }
         Ok(self.listed(rows.iter().zip(judged), complete))
+    }
+
+    async fn timely(&self, verdict: impl Future<Output = Verdict>) -> Verdict {
+        timeout_at(self.deadline, verdict)
+            .await
+            .unwrap_or_else(|_| late())
     }
 
     async fn verdict(
@@ -186,7 +213,7 @@ impl<'a> Survey<'a> {
             None => (
                 Origin::Rest,
                 reassess(
-                    self.github,
+                    &self.github,
                     self.permits,
                     self.repository,
                     row,
@@ -210,22 +237,25 @@ impl<'a> Survey<'a> {
             complete,
             warnings: Vec::new(),
         };
-        let (mut kept, mut batched, mut followed, mut rested) = (0, 0, 0, 0);
+        let (mut kept, mut batched, mut followed, mut rested, mut late) = (0, 0, 0, 0, 0);
         for (row, (origin, verdict)) in verdicts {
             match origin {
                 Origin::Kept => kept += 1,
                 Origin::Batch => batched += 1,
                 Origin::FollowUp => followed += 1,
                 Origin::Rest => rested += 1,
+                Origin::Late => late += 1,
             }
             match verdict {
                 Ok(pull_request) => listing.pull_requests.push(pull_request),
                 Err(fault) => {
                     let number = row.reference.number().get();
                     listing.complete = false;
-                    listing
-                        .warnings
-                        .push(format!("{}#{number}: {fault}", self.repository.name));
+                    if origin != Origin::Late {
+                        listing
+                            .warnings
+                            .push(format!("{}#{number}: {fault}", self.repository.name));
+                    }
                     listing.pull_requests.extend(
                         self.previous
                             .into_iter()
@@ -236,16 +266,27 @@ impl<'a> Survey<'a> {
                 }
             }
         }
+        if late > 0 {
+            listing.warnings.push(format!(
+                "{}: {late} pull requests were not assessed again in time; their last verdicts stand.",
+                self.repository.name
+            ));
+        }
         tracing::info!(
             repository = %self.repository.name,
             kept,
             batched,
             followed,
             rested,
+            late,
             "Assessed open pull requests"
         );
         listing
     }
+}
+
+fn late() -> Verdict {
+    (Origin::Late, Err(Fault::upstream(LATE)))
 }
 
 fn halted(verdict: Verdict) -> Result<Verdict, Fault> {
