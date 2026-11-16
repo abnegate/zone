@@ -113,11 +113,13 @@ describe('SettingsNav', () => {
     expect(links).toEqual([
       ['General', '/settings/workspace/general'],
       ['AI', '/settings/workspace/ai'],
+      ['Agent policy', '/settings/workspace/agent-policy'],
       ['Folders', '/settings/workspace/folders'],
       ['Sources', '/settings/workspace/sources'],
       ['Members', '/settings/workspace/members'],
       ['MCP servers', '/settings/workspace/mcp'],
       ['AI defaults', '/settings/organization/ai'],
+      ['Agent policy', '/settings/organization/agent-policy'],
       ['Members', '/settings/organization/members'],
       ['Devices', '/settings/organization/devices'],
       ['Audit log', '/settings/organization/audit'],
@@ -174,6 +176,7 @@ describe('SettingsNav', () => {
     expect(screen.queryByRole('group', { name: 'Workspace' })).not.toBeInTheDocument();
     expect(linkLabels('Organization')).toEqual([
       'AI defaults',
+      'Agent policy',
       'Members',
       'Devices',
       'Audit log',

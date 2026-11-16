@@ -19,6 +19,7 @@ export type SettingsGroup = (typeof SettingsGroup)[keyof typeof SettingsGroup];
 export const SettingsSection = {
   General: 'general',
   Ai: 'ai',
+  AgentPolicy: 'agent-policy',
   Folders: 'folders',
   Sources: 'sources',
   Members: 'members',
@@ -60,6 +61,8 @@ export const GROUP_LABELS: Record<SettingsGroup, string> = {
 };
 
 const SOURCES_LABEL = 'Sources';
+
+const AGENT_POLICY_LABEL = 'Agent policy';
 
 const LOCATION_SEPARATOR = ' → ';
 
@@ -104,6 +107,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
   },
   {
     group: SettingsGroup.Workspace,
+    section: SettingsSection.AgentPolicy,
+    label: AGENT_POLICY_LABEL,
+    visible: inWorkspace,
+  },
+  {
+    group: SettingsGroup.Workspace,
     section: SettingsSection.Folders,
     label: 'Folders',
     visible: inWorkspace,
@@ -131,6 +140,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     section: SettingsSection.Ai,
     label: 'AI defaults',
     visible: administersOrganization,
+  },
+  {
+    group: SettingsGroup.Organization,
+    section: SettingsSection.AgentPolicy,
+    label: AGENT_POLICY_LABEL,
+    visible: inOrganization,
   },
   {
     group: SettingsGroup.Organization,
