@@ -39,6 +39,7 @@ Zone is one platform: a shared core, and two editions built on it. The editions 
 - **Knowledge Base**: A wiki per workspace with semantic search, which promotes answers the workspace keeps giving into standing instructions
 - **Sources**: Index GitHub, GitLab, local folders, web pages and text for chats and tasks
 - **Reminders**: One-off and recurring reminders (hourly at most)
+- **Workspace digests**: A daily, weekly or monthly summary per workspace of its runs, success rate and trend, failures and regressions, sent through the configured Slack, Discord or email notifier; off unless `ZONE_REPORT_ENABLED` is set (see [Workspace digests](docs/CONFIGURATION.md#-workspace-digests))
 - **Apps**: Desktop (macOS, Linux), Android and iOS clients and the `zone` CLI, with an admin list to allow or block each device
 - **Private Web Search** (optional): VPN-protected metasearch engine; when the VPN is on, all stack internet traffic uses the same tunnel
 - **Multi-Tenant Architecture**: Organizations and workspaces for team collaboration, with email invitations
@@ -54,6 +55,8 @@ Zone is one platform: a shared core, and two editions built on it. The editions 
 - **Checked work**: Every change an agent makes to a task, document, message or reminder gets a receipt built from the tool call, not from the model's account of it, and a check the model proposes is run and judged by the server
 - **Learning from runs**: What worked, what failed and what reviewers said becomes conventions and lessons in later prompts once a second run confirms them
 - **Pull request upkeep**: Fixes a pull request until its checks pass, repairs merge conflicts and refuses a repair that drops either side, scores each change's blast radius, merges from the chat, and flags tasks that regress after they finish
+- **Task run evaluation**: Tests, lint and typecheck are measured before and after each task run and the run judged improved, unchanged or regressed; build and coverage are opt-in through `ZONE_TASK_EVALUATION_CATEGORIES`, and it is off unless `ZONE_TASK_EVALUATION` is set (see [Task evaluation](docs/CONFIGURATION.md#-task-evaluation))
+- **Analytics**: A page per workspace over 24 hours, 7, 30 or 90 days: success rate and trend, runs by outcome, failure kinds, per-source and per-model breakdowns, pull request merge rate and time to merge, task status and origins, and evaluation verdicts
 - **GitHub App & Releases**: Connect repositories through an organization's GitHub App, and cut releases from the workspace
 - **MCP tools**: Attach stdio and streamable HTTP MCP servers (magents by default) so tasks can spawn or message other coding agents, or import the ones a connected provider already has configured
 
@@ -278,7 +281,7 @@ make list-models       # List downloaded models
 # Development
 make dev               # Hot reload
 make rebuild           # Rebuild and restart
-make test              # Smoke tests (health checks)
+make test              # Smoke test the running stack
 make dev-check         # Format check, lint and test every project
 
 # Maintenance
@@ -312,6 +315,10 @@ curl -X POST https://manager.yourdomain.com/api/auth/login \
 
 # List workspaces (with JWT token)
 curl https://manager.yourdomain.com/api/workspaces \
+  -H "Authorization: Bearer ${JWT_TOKEN}"
+
+# Workspace analytics (period: day, week, month or quarter)
+curl "https://manager.yourdomain.com/api/workspaces/${WORKSPACE_ID}/analytics?period=week" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
@@ -455,7 +462,7 @@ zone/
 │   └── zone_runner/         # Daemon binary (command execution via abnegate-exec)
 ├── manager/                 # Manager frontend
 │   └── frontend/            # React frontend
-│       ├── src/features/    # Chats, tasks, projects, knowledge, models, pull requests, releases
+│       ├── src/features/    # Analytics, chats, tasks, projects, knowledge, models, pull requests, releases
 │       └── src/components/  # UI components
 ├── packages/ui/             # Shared @zone/ui components
 ├── comfyui/                 # ComfyUI image, workflows and trainers
