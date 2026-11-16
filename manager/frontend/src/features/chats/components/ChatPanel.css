@@ -491,6 +491,31 @@
   text-decoration: underline;
 }
 
+.chat-merge-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-2);
+}
+
+.chat-merge-subject {
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+}
+
+.chat-merge-warning {
+  margin: 0;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-sm);
+}
+
+.chat-merge-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--ui-space-2);
+  margin-top: var(--ui-space-1);
+}
+
 .chat-gallery-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(4.5rem, 1fr));

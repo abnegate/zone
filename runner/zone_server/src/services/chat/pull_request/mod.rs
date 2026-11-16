@@ -11,6 +11,7 @@ mod connection;
 mod credential;
 mod detection;
 mod error;
+mod merge;
 mod mergeable;
 mod observation;
 mod open;
@@ -40,6 +41,7 @@ pub use cache::StatusCache;
 pub use checks::Checks;
 pub use connection::Connection;
 pub use error::Error;
+pub use merge::Merge;
 pub use mergeable::Mergeable;
 pub use opened::Opened;
 pub use push::push;
@@ -157,6 +159,18 @@ pub async fn set_auto_merge(
     Ok(())
 }
 
+/// Merges the pull request on GitHub, at the head it was last read at.
+pub async fn merge(
+    state: &AppState,
+    workspace_id: Uuid,
+    row: &PullRequestRow,
+) -> Result<(), Error> {
+    let open = open(state, workspace_id, row).await?;
+    let merged = changes::merge(&open).await;
+    state.pull_request_statuses().forget(row.id);
+    merged
+}
+
 /// Turns auto-fix on, acting as `user`, or off. Unlike draft and auto-merge
 /// this is zone's own preference rather than something GitHub holds, so it
 /// only touches the row; what acts on it is the next status read that finds
@@ -227,6 +241,7 @@ async fn open(state: &AppState, workspace_id: Uuid, row: &PullRequestRow) -> Res
     }
     Ok(Open {
         service,
+        reference,
         token,
         status,
         node_id,
@@ -338,6 +353,7 @@ async fn observe(
         State::Open => None,
         State::Closed | State::Merged => Some(AutoMerge::SETTLED.to_string()),
     };
+    let merge_unavailable = Merge::unavailable(lifecycle, detail.draft, mergeable, &methods);
     Ok(Observation {
         status: Status {
             title: detail.title,
@@ -350,6 +366,7 @@ async fn observe(
             mergeable,
             auto_merge,
             draft_unavailable,
+            merge_unavailable,
             threads,
             observed_at: chrono::Utc::now(),
         },

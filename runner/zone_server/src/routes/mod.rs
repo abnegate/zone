@@ -7,7 +7,6 @@ pub mod ai_settings;
 pub mod artifacts;
 pub mod audit;
 pub mod auth;
-pub mod billing;
 pub mod chats;
 pub mod common;
 pub mod connect;
@@ -101,9 +100,6 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/auth/forgot-password", post(auth::forgot_password))
         .route("/api/auth/reset-password", post(auth::reset_password))
-        // Public billing routes
-        .route("/api/plans", get(billing::list_plans))
-        .route("/api/plans/{plan_id}", get(billing::get_plan))
         // Public invitation route (to view invitation details)
         .route("/api/invitations/{token}", get(invitations::get_invitation))
         // Artifact reads (public - a bearer header or an HMAC-signed URL, checked
@@ -361,6 +357,10 @@ pub fn create_router(state: AppState) -> Router {
             patch(chats::pull_requests::update),
         )
         .route(
+            "/api/chats/{id}/pull-requests/{pull_request_id}/merge",
+            post(chats::pull_requests::merge),
+        )
+        .route(
             "/api/chats/{id}/pull-requests/{pull_request_id}/diff",
             get(chats::pull_requests::diff),
         )
@@ -572,19 +572,6 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/organizations/{org_id}/agents/{agent}/logins/{login_id}",
             delete(agents::sign_out_login),
-        )
-        // Billing routes
-        .route(
-            "/api/organizations/{org_id}/subscription",
-            get(billing::get_org_subscription_handler),
-        )
-        .route(
-            "/api/organizations/{org_id}/usage",
-            get(billing::get_org_usage),
-        )
-        .route(
-            "/api/organizations/{org_id}/limits",
-            get(billing::get_org_limits_handler),
         )
         // Audit logs
         .route(

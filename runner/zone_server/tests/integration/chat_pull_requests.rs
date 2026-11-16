@@ -30,7 +30,7 @@ use zone_server::config::{Config, ModelBackend};
 use zone_server::db::chat_pull_requests::{self, NewPullRequest};
 use zone_server::db::workspace_members::{self, WorkspaceRole};
 use zone_server::db::{github_installations, sources, workspaces};
-use zone_server::services::chat::pull_request::{AutoMerge, Error};
+use zone_server::services::chat::pull_request::{AutoMerge, Error, Merge};
 use zone_server::state::AppState;
 
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -255,6 +255,18 @@ impl Workspace {
         let response = self
             .client
             .patch_json_auth(&self.pull_request(id), &body, &self.token)
+            .await;
+        (response.status, response.json_value())
+    }
+
+    async fn merge(&self, id: Uuid, token: &str) -> (StatusCode, Value) {
+        let response = self
+            .client
+            .post_json_auth(
+                &format!("{}/merge", self.pull_request(id)),
+                &json!({}),
+                token,
+            )
             .await;
         (response.status, response.json_value())
     }
@@ -1034,6 +1046,8 @@ async fn a_viewer_can_read_and_diff_a_chats_pull_requests_but_not_change_them() 
         )
         .await;
     assert_eq!(changed.status, StatusCode::FORBIDDEN, "{}", changed.text());
+    let (merged, refused) = workspace.merge(id, &viewer).await;
+    assert_eq!(merged, StatusCode::FORBIDDEN, "{refused}");
 }
 
 #[tokio::test]
@@ -1119,6 +1133,129 @@ async fn merge_when_ready_sets_auto_merge_on_github_and_lists_it_as_enabled() {
         json!({"open": 0, "resolved": 1}),
         "{listed}"
     );
+}
+
+/// GitHub answering the merge of pull request 12 with `response`, once.
+async fn merge_request(github: &MockServer, response: ResponseTemplate) {
+    Mock::given(method("PUT"))
+        .and(path(format!("/repos/acme/widgets/pulls/{NUMBER}/merge")))
+        .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
+        .and(body_partial_json(
+            json!({"sha": HEAD, "merge_method": "squash"}),
+        ))
+        .respond_with(response)
+        .expect(1)
+        .mount(github)
+        .await;
+}
+
+/// How many times GitHub was asked to merge pull request 12.
+async fn merges_asked_for(github: &MockServer) -> usize {
+    github
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|request| {
+            request
+                .url
+                .path()
+                .ends_with(&format!("/pulls/{NUMBER}/merge"))
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn merging_asks_github_to_merge_at_the_head_the_status_was_read_at() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    automate(&github, Automation::default()).await;
+    threads_read()
+        .respond_with(threads_answer(&[true]))
+        .mount(&github)
+        .await;
+    merge_request(
+        &github,
+        ResponseTemplate::new(200).set_body_json(json!({
+            "sha": HEAD,
+            "merged": true,
+            "message": "Pull Request successfully merged",
+        })),
+    )
+    .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    let id = workspace.record(&link(&github, NUMBER)).await;
+
+    let (status, merged) = workspace.merge(id, &workspace.token).await;
+
+    assert_eq!(status, StatusCode::OK, "{merged}");
+    assert_eq!(merged["id"], id.to_string(), "{merged}");
+    assert_eq!(merges_asked_for(&github).await, 1);
+}
+
+#[tokio::test]
+async fn a_merge_branch_protection_refuses_reaches_the_reader_in_githubs_words() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    automate(&github, Automation::default()).await;
+    merge_request(
+        &github,
+        ResponseTemplate::new(405).set_body_json(json!({
+            "message": "Required status check \"build\" is expected.",
+        })),
+    )
+    .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    let id = workspace.record(&link(&github, NUMBER)).await;
+
+    let (status, refused) = workspace.merge(id, &workspace.token).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(
+        refused.to_string().contains("Required status check"),
+        "{refused}"
+    );
+}
+
+#[tokio::test]
+async fn a_draft_is_refused_a_merge_before_github_is_asked_for_one() {
+    let github = MockServer::start().await;
+    describe(&github, true).await;
+    automate(
+        &github,
+        Automation {
+            draft: true,
+            ..Automation::default()
+        },
+    )
+    .await;
+    threads_read()
+        .respond_with(threads_answer(&[]))
+        .mount(&github)
+        .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    let id = workspace.record(&link(&github, NUMBER)).await;
+
+    let listed = workspace.listed(&workspace.token).await;
+    assert_eq!(
+        listed[0]["status"]["merge_unavailable"],
+        Merge::DRAFT,
+        "{listed}"
+    );
+    let (status, refused) = workspace.merge(id, &workspace.token).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(refused.to_string().contains(Merge::DRAFT), "{refused}");
+    assert_eq!(merges_asked_for(&github).await, 0);
 }
 
 #[tokio::test]

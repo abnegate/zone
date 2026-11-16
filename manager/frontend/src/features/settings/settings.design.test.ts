@@ -117,17 +117,13 @@ describe('settings surfaces', () => {
 
   it('tints role, status and action badges from the semantic palette at 20px', () => {
     const members = read(join(settings, 'organization', 'components', 'OrgMembersSection.css'));
-    const billing = read(join(settings, 'organization', 'components', 'BillingSection.css'));
     const audit = read(join(settings, 'organization', 'components', 'AuditLogsSection.css'));
-    for (const css of [members, billing, audit]) {
+    for (const css of [members, audit]) {
       expect(css).not.toMatch(/#[0-9a-f]{3,6}\b/i);
       expect(css).not.toContain('rgba(');
       expect(css).not.toContain('text-transform: uppercase;\n  letter-spacing: 0.5px');
     }
     expect(rule(members, '.role-badge')).toContain('height: var(--ui-badge-height)');
-    expect(rule(billing, '.billing-section .status-badge')).toContain(
-      'height: var(--ui-badge-height)'
-    );
     expect(rule(audit, '.action-badge')).toContain('height: var(--ui-badge-height)');
     expect(rule(members, '.member-avatar')).toContain('width: var(--ui-space-6)');
     expect(rule(members, '.role-select')).toContain('height: var(--ui-control-height-sm)');
@@ -139,13 +135,6 @@ describe('settings surfaces', () => {
     expect(css).not.toContain('rgba(');
     expect(rule(css, '.connect-url')).toContain('font-family: var(--ui-font-mono)');
     expect(rule(css, '.connect-url-row')).toContain('min-height: var(--ui-control-height)');
-  });
-
-  it('keeps metric values at 18 or below', () => {
-    const billing = read(join(settings, 'organization', 'components', 'BillingSection.css'));
-    expect(rule(billing, '.metric-value')).toContain('font-size: var(--ui-text-lg)');
-    expect(billing).not.toContain('--ui-text-3xl');
-    expect(billing).not.toContain('--ui-text-2xl');
   });
 });
 

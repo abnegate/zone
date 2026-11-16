@@ -357,6 +357,7 @@ mod tests {
             mergeable,
             auto_merge: AutoMerge::unavailable(AutoMerge::UNREAD),
             draft_unavailable: None,
+            merge_unavailable: None,
             threads: open_threads.map(|open| Threads { open, resolved: 0 }),
             observed_at: Utc::now(),
         }

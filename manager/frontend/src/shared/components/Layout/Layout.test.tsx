@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 import { render, screen } from '@testing-library/react';
 
-// Mock Sidebar to avoid its dependencies
 mock.module('../Sidebar/Sidebar', () => ({
   default: function MockSidebar() {
     return <aside data-testid="sidebar">Sidebar</aside>;
@@ -13,7 +12,10 @@ mock.module('../../../features/models', () => ({
   TrainDock: () => null,
 }));
 
-// Mock react-router-dom
+mock.module('./usePreloadPages', () => ({
+  usePreloadPages: () => {},
+}));
+
 mock.module('react-router-dom', () => ({
   Outlet: () => <div data-testid="outlet">Outlet content</div>,
   useLocation: () => ({ pathname: '/', search: '', hash: '', state: null, key: 'default' }),
@@ -28,7 +30,6 @@ mock.module('react-router-dom', () => ({
   ),
 }));
 
-// Mock auth context
 mock.module('../../../features/auth/context', () => ({
   useAuth: () => ({
     isAuthenticated: true,

@@ -88,8 +88,6 @@ pub async fn create_organization(
     .fetch_one(pool)
     .await?;
 
-    super::subscriptions::ensure_default_subscription(pool, row.id).await?;
-
     Ok(OrganizationRow {
         id: row.id,
         name: row.name,
@@ -120,8 +118,6 @@ pub async fn create_organization_tx(
     )
     .fetch_one(&mut **tx)
     .await?;
-
-    super::subscriptions::ensure_default_subscription(&mut **tx, row.id).await?;
 
     Ok(OrganizationRow {
         id: row.id,

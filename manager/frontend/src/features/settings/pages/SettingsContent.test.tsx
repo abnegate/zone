@@ -32,7 +32,6 @@ mock.module('../workspace/components', () => ({
 
 mock.module('../organization/components', () => ({
   AuditLogsSection: marker('audit-logs-section'),
-  BillingSection: marker('billing-section'),
   DevicesSection: marker('devices-section'),
   GitHubSection: marker('github-section'),
   OrganizationAiSection: marker('organization-ai-section'),
@@ -343,12 +342,6 @@ describe('SettingsContent', () => {
       },
       {
         group: SettingsGroup.Organization,
-        section: SettingsSection.Billing,
-        testId: 'billing-section',
-        props: { orgId: organizationId },
-      },
-      {
-        group: SettingsGroup.Organization,
         section: SettingsSection.Audit,
         testId: 'audit-logs-section',
         props: { orgId: organizationId },
@@ -384,7 +377,7 @@ describe('SettingsContent', () => {
       const { container } = render(
         <SettingsContent
           group={SettingsGroup.You}
-          section={SettingsSection.Billing}
+          section={SettingsSection.Audit}
           access={access('admin', 'admin')}
         />
       );

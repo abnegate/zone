@@ -655,6 +655,14 @@ describe('a chat pull request reads as the server describes it', () => {
     const source = readFileSync(join(PULL_REQUEST_RS, 'status.rs'), 'utf8');
     expect(Object.keys(rustStructFields(source, 'Status'))).toContain('threads');
   });
+
+  /// What stops the merge action being offered. A field the server stopped
+  /// sending reads as no reason at all, which would offer every reader a merge
+  /// GitHub is going to refuse, so the name is pinned here.
+  test('the status carries why a merge cannot be asked for', () => {
+    const source = readFileSync(join(PULL_REQUEST_RS, 'status.rs'), 'utf8');
+    expect(Object.keys(rustStructFields(source, 'Status'))).toContain('merge_unavailable');
+  });
 });
 
 const CHATS_DB_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/db/chats/sort.rs');

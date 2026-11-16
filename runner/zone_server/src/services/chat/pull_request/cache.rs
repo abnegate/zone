@@ -67,6 +67,7 @@ mod tests {
             mergeable: Mergeable::Clean,
             auto_merge: AutoMerge::unavailable(AutoMerge::UNREAD),
             draft_unavailable: None,
+            merge_unavailable: None,
             threads: Some(Threads::default()),
             observed_at: Utc::now(),
         }

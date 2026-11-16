@@ -95,6 +95,27 @@ pub async fn update(
     Ok(Json(PullRequestResponse::new(tracked, true)))
 }
 
+/// POST /api/chats/{id}/pull-requests/{pull_request_id}/merge
+///
+/// Merges it on GitHub now. A merge cannot be taken back, so only a reader who
+/// can write to the workspace may ask for one, and GitHub's own refusal — a
+/// branch protection rule, a conflict, a head that moved — is returned as it
+/// was given rather than retried.
+pub async fn merge(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, pull_request_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<PullRequestResponse>, ServerError> {
+    let (chat, workspace) = chat(&state, &auth, id).await?;
+    check_workspace_write_access(&state, &auth, workspace).await?;
+    let row = owned(&state, chat.id, pull_request_id).await?;
+    pull_request::merge(&state, workspace, &row)
+        .await
+        .map_err(refused)?;
+    let tracked = pull_request::track(&state, workspace, row).await?;
+    Ok(Json(PullRequestResponse::new(tracked, true)))
+}
+
 /// GET /api/chats/{id}/pull-requests/{pull_request_id}/diff
 pub async fn diff(
     State(state): State<AppState>,

@@ -6139,6 +6139,7 @@ describe('ChatsPage', () => {
         auto_merge: { enabled: false, unavailable: null },
         threads: { open: 0, resolved: 0 },
         draft_unavailable: null,
+        merge_unavailable: null,
         observed_at: '2026-11-13T10:00:00Z',
         ...(overrides.status as Record<string, unknown> | undefined),
       },
