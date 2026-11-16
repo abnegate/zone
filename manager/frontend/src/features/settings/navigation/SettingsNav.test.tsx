@@ -126,16 +126,22 @@ describe('SettingsNav', () => {
       ['Features', '/settings/server/features'],
       ['Connect a device', '/settings/server/connect'],
       ['License', '/settings/server/license'],
+      ['Single sign-on', '/settings/server/sso'],
       ['Sessions', '/settings/you/sessions'],
     ]);
   });
 
-  it('lists License under This server only for a server admin', () => {
+  it('lists License and Single sign-on under This server only for a server admin', () => {
     renderNav(ownerAccess);
-    expect(linkLabels('This server')).toEqual(['Features', 'Connect a device', 'License']);
+    expect(linkLabels('This server')).toEqual([
+      'Features',
+      'Connect a device',
+      'License',
+      'Single sign-on',
+    ]);
   });
 
-  it('leaves License out of This server for anyone who does not administer the server', () => {
+  it('leaves License and Single sign-on out of This server for anyone who does not administer the server', () => {
     renderNav({ ...ownerAccess, administersServer: false });
     expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
   });

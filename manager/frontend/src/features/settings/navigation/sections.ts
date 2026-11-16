@@ -29,6 +29,7 @@ export const SettingsSection = {
   Features: 'features',
   Connect: 'connect',
   License: 'license',
+  Sso: 'sso',
   Sessions: 'sessions',
 } as const;
 
@@ -177,6 +178,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     group: SettingsGroup.Server,
     section: SettingsSection.License,
     label: 'License',
+    visible: administersServer,
+  },
+  {
+    group: SettingsGroup.Server,
+    section: SettingsSection.Sso,
+    label: 'Single sign-on',
     visible: administersServer,
   },
   {

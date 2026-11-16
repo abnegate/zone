@@ -50,6 +50,7 @@ mock.module('../server/components', () => ({
 
 mock.module('../../enterprise', () => ({
   LicenseSection: marker('license-section'),
+  SsoSection: marker('sso-section'),
 }));
 
 mock.module('../../auth/components', () => ({
@@ -321,6 +322,25 @@ describe('SettingsContent', () => {
         <SettingsContent
           group={SettingsGroup.Server}
           section={SettingsSection.License}
+          access={access('admin', 'owner')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('shows single sign-on to a server admin', () => {
+      renderSection(SettingsGroup.Server, SettingsSection.Sso, {
+        ...access('viewer', 'member'),
+        administersServer: true,
+      });
+      expect(propsOf('sso-section')).toEqual({});
+    });
+
+    it('renders no single sign-on for anyone who does not administer the server', () => {
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Server}
+          section={SettingsSection.Sso}
           access={access('admin', 'owner')}
         />
       );
