@@ -1006,17 +1006,35 @@ async fn driver_tasks_still_waiting_move_to_the_front_of_the_most_urgent_first_o
     );
 }
 
+const RUN_FINISH_INDEX: &str = "task run finish index";
+
+async fn migrator() -> Migrator {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    Migrator::new(directory.as_path()).await.unwrap()
+}
+
+fn version_before(migrator: &Migrator, description: &str) -> i64 {
+    let version = migrator
+        .iter()
+        .find(|migration| migration.description == description)
+        .unwrap_or_else(|| panic!("no migration is named {description}"))
+        .version;
+    migrator
+        .iter()
+        .map(|migration| migration.version)
+        .filter(|&earlier| earlier < version)
+        .max()
+        .unwrap_or_default()
+}
+
 #[tokio::test]
 async fn the_run_finish_index_builds_while_runs_keep_beating() {
-    const BEFORE_RUN_FINISH_INDEX: i64 = 13;
     const INDEX: &str = "idx_task_runs_finished";
     const BEAT: &str = "UPDATE task_runs SET heartbeat_at = NOW() WHERE id = $1";
     let database = Database::new(PREFIX).await;
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-    Migrator::new(directory.as_path())
-        .await
-        .unwrap()
-        .run_to(BEFORE_RUN_FINISH_INDEX, &database.pool)
+    let migrator = migrator().await;
+    migrator
+        .run_to(version_before(&migrator, RUN_FINISH_INDEX), &database.pool)
         .await
         .unwrap();
     let mut runs = Vec::new();
@@ -1093,15 +1111,16 @@ async fn the_run_finish_index_builds_while_runs_keep_beating() {
 
 #[tokio::test]
 async fn an_upgrade_stops_gathering_from_notion_sources() {
-    const BEFORE_NOTION_DEACTIVATION: i64 = 15;
+    const NOTION_DEACTIVATION: &str = "deactivate notion sources";
     const NOTION: &str = "notion";
     const GITHUB: &str = "github";
     let database = Database::new(PREFIX).await;
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-    Migrator::new(directory.as_path())
-        .await
-        .unwrap()
-        .run_to(BEFORE_NOTION_DEACTIVATION, &database.pool)
+    let migrator = migrator().await;
+    migrator
+        .run_to(
+            version_before(&migrator, NOTION_DEACTIVATION),
+            &database.pool,
+        )
         .await
         .unwrap();
     let (workspace, _) = database.workspace().await;
@@ -1145,19 +1164,18 @@ async fn an_upgrade_stops_gathering_from_notion_sources() {
 
 #[tokio::test]
 async fn an_index_build_interrupted_on_an_earlier_boot_is_built_again() {
-    const BEFORE_CONCURRENT_INDEXES: i64 = 13;
     const UNRELATED: &str = "idx_migration_unrelated";
     const CANCELED: &str = "57014";
     let database = Database::new(PREFIX).await;
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-    let migrator = Migrator::new(directory.as_path()).await.unwrap();
+    let migrator = migrator().await;
+    let before_concurrent_indexes = version_before(&migrator, RUN_FINISH_INDEX);
     migrator
-        .run_to(BEFORE_CONCURRENT_INDEXES, &database.pool)
+        .run_to(before_concurrent_indexes, &database.pool)
         .await
         .unwrap();
     let mut builds: Vec<(String, String)> = migrator
         .iter()
-        .filter(|migration| migration.version > BEFORE_CONCURRENT_INDEXES && migration.no_tx)
+        .filter(|migration| migration.version > before_concurrent_indexes && migration.no_tx)
         .map(|migration| {
             let index = interrupted::indexes_built(migration.sql.as_str())
                 .into_iter()
