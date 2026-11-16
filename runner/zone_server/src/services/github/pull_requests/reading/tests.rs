@@ -3,6 +3,7 @@ use serde_json::json;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::any;
 use wiremock::matchers::body_partial_json;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
@@ -465,11 +466,24 @@ async fn a_batch_sent_once_the_listing_stopped_asks_github_for_nothing() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
+/// A GitHub that fails the test on any page it was not told to answer, so a
+/// listing that keeps paging is caught rather than answered with a 404.
+async fn paged() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(u8::MAX)
+        .expect(0)
+        .mount(&server)
+        .await;
+    server
+}
+
 #[tokio::test]
 async fn a_page_that_lists_nothing_new_but_says_more_follow_stops_the_listing() {
     let empty = std::ops::RangeInclusive::new(1, 0);
     for (name, rows) in [("an empty page", empty), ("a page listed before", 1..=100)] {
-        let server = MockServer::start().await;
+        let server = paged().await;
         open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
         open_page(&server, REPOSITORY_ID, 50, Some(CURSOR), rows, Some(LATER)).await;
         let github = mocked(&server);
@@ -487,7 +501,7 @@ async fn a_page_that_lists_nothing_new_but_says_more_follow_stops_the_listing() 
 
 #[tokio::test]
 async fn a_page_that_names_the_cursor_it_was_read_after_stops_the_listing() {
-    let server = MockServer::start().await;
+    let server = paged().await;
     open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
     open_page(
         &server,
