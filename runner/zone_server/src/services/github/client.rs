@@ -1,4 +1,5 @@
 mod review;
+mod survey;
 
 use abnegate_secret::SecretValue;
 use abnegate_vcs::BranchName;
