@@ -70,6 +70,7 @@ use crate::workers::embeddings::spawn_message_embedding_task;
 use abnegate_search::{SearchContext, SearchHit, SearxngClient, sanitize_query};
 
 mod confinement;
+mod denial;
 mod ending;
 pub mod job;
 mod queue;
@@ -266,7 +267,8 @@ impl LiveTurn {
             }
             ServerMessage::MessageEnd { .. }
             | ServerMessage::Cancelled { .. }
-            | ServerMessage::Error { .. } => {
+            | ServerMessage::Error { .. }
+            | ServerMessage::Denied { .. } => {
                 self.status = None;
                 self.frames.clear();
             }
@@ -572,7 +574,7 @@ impl Drop for Generation {
 type ChatPreparation = session::Preparation;
 
 enum Routing {
-    Image(crate::config::ComfyUiConfig, LlmBackend, Endpoint),
+    Image(crate::config::ComfyUiConfig, Option<LlmBackend>, Endpoint),
     Video(crate::config::ComfyUiConfig),
     Audio(crate::config::ComfyUiConfig),
     Upscale(crate::config::ComfyUiConfig),
@@ -799,6 +801,9 @@ pub enum ServerMessage {
     },
     /// Error message
     Error { message: String },
+    /// The organization's or workspace's agent policy refused the turn. `code` is the refusal's
+    /// `policy_*` code, which the console words and links to the policy by.
+    Denied { message: String, code: String },
     /// Non-fatal progress (e.g. web search in progress)
     Status { message: String },
     /// The turn moved to another login and carries on in the same answer.
@@ -2178,7 +2183,7 @@ async fn handle_image_generation(
     prompt: &str,
     metadata: Option<&serde_json::Value>,
     mut image_config: crate::config::ComfyUiConfig,
-    backend: LlmBackend,
+    backend: Option<LlmBackend>,
     endpoint: Endpoint,
     generation: &mut Generation,
     session: &mut Session,
@@ -2235,13 +2240,18 @@ async fn handle_image_generation(
     let generation_prompt = if source.is_some()
         && client.prompt_mode() != abnegate_comfy::recipe::PromptMode::EditInstruction
     {
-        crate::services::image_intent::ImageIntentClassifier::new(
-            image_config.clone(),
-            endpoint,
-            backend,
-        )
-        .edit_prompt(prompt)
-        .await
+        match backend {
+            Some(backend) => {
+                crate::services::image_intent::ImageIntentClassifier::new(
+                    image_config.clone(),
+                    endpoint,
+                    backend,
+                )
+                .edit_prompt(prompt)
+                .await
+            }
+            None => crate::services::image_intent::heuristic_edit_prompt(prompt),
+        }
     } else {
         prompt.to_string()
     };
@@ -2816,7 +2826,7 @@ async fn handle_send_message(
                         request.cancelled(stream).await;
             return false;
         }
-        result = prepare_message(state, chat_id, workspace_id, content, metadata.as_ref()) => result,
+        result = prepare_message(state, chat_id, workspace_id, user_id, content, metadata.as_ref()) => result,
     };
     let mut saved = false;
     let result = async {
@@ -2947,13 +2957,12 @@ async fn handle_send_message(
     }
     if let Err(error) = result {
         tracing::error!("Error handling send message: {error}");
-        publish(
-            stream,
-            ServerMessage::Error {
-                message: error.to_string(),
-            },
-        )
-        .await;
+        let turn = denial::Turn {
+            chat: chat_id,
+            workspace: workspace_id,
+            actor: user_id,
+        };
+        publish(stream, turn.ended(state, error.as_ref()).await).await;
     }
     saved
 }
@@ -3060,6 +3069,7 @@ async fn prepare_message(
     state: &AppState,
     chat_id: Uuid,
     workspace_id: Uuid,
+    user_id: Uuid,
     content: &str,
     metadata: Option<&serde_json::Value>,
 ) -> Result<Routing, Box<dyn std::error::Error + Send + Sync>> {
@@ -3080,26 +3090,29 @@ async fn prepare_message(
     if let Some(settings) = route.settings() {
         settings.apply_to_comfyui(&mut image_config);
     }
+    let turn = denial::Turn {
+        chat: chat_id,
+        workspace: workspace_id,
+        actor: user_id,
+    };
     let mut backend = None;
     let intent = match crate::services::image_intent::reading(&image_config, content, metadata) {
         crate::services::image_intent::Reading::Settled(intent) => intent,
         crate::services::image_intent::Reading::Unsettled(lanes) => {
-            let resolved = classifying(
-                state,
-                workspace_id,
-                &chat,
-                &route,
-                &endpoint,
-                &mut image_config,
-            )
-            .await?;
-            let intent = crate::services::image_intent::ImageIntentClassifier::new(
-                image_config.clone(),
-                endpoint.clone(),
-                resolved.clone(),
-            )
-            .settle(content, lanes)
-            .await;
+            let resolved =
+                classifying(state, turn, &chat, &route, &endpoint, &mut image_config).await?;
+            let intent = match &resolved {
+                Some(classifier) => {
+                    crate::services::image_intent::ImageIntentClassifier::new(
+                        image_config.clone(),
+                        endpoint.clone(),
+                        classifier.clone(),
+                    )
+                    .settle(content, lanes)
+                    .await
+                }
+                None => crate::services::image_intent::GenerationIntent::Chat,
+            };
             backend = Some(resolved);
             intent
         }
@@ -3121,15 +3134,7 @@ async fn prepare_message(
             let backend = match backend {
                 Some(backend) => backend,
                 None => {
-                    classifying(
-                        state,
-                        workspace_id,
-                        &chat,
-                        &route,
-                        &endpoint,
-                        &mut image_config,
-                    )
-                    .await?
+                    classifying(state, turn, &chat, &route, &endpoint, &mut image_config).await?
                 }
             };
             Routing::Image(image_config, backend, endpoint)
@@ -3145,15 +3150,22 @@ async fn prepare_message(
 /// The backend a workspace's classifier runs on, with `config` naming the
 /// model it classifies with there: the login the chat runs on, while it can.
 /// A workspace's backend that can't be resolved leaves it the instance's; a
-/// chat's chosen provider is the one it runs on, or it fails.
+/// chat's chosen provider is the one it runs on, or it fails, and so does a
+/// backend the agent policy refuses.
+///
+/// The classifier runs only on a model the policy admits on that backend, the
+/// chat's own when the one chosen for it is refused. With neither admitted
+/// there is none, and the refusal is audited: an unclassified message is a
+/// chat message, and an image edit's prompt is worded without a model.
 async fn classifying(
     state: &AppState,
-    workspace_id: Uuid,
+    turn: denial::Turn,
     chat: &chats::ChatRow,
     route: &Route,
     endpoint: &Endpoint,
     config: &mut crate::config::ComfyUiConfig,
-) -> Result<LlmBackend, crate::services::backend::Error> {
+) -> Result<Option<LlmBackend>, crate::services::backend::Error> {
+    let workspace_id = turn.workspace;
     let sticky = match chats::session(state.db(), chat.id).await {
         Ok(session) => session.and_then(|session| session.login),
         Err(error) => {
@@ -3163,7 +3175,7 @@ async fn classifying(
     };
     let backend = match route.backend_for(state, sticky).await {
         Ok(backend) => backend,
-        Err(error) if route.chosen().is_some() => return Err(error),
+        Err(error) if route.chosen().is_some() || error.denial().is_some() => return Err(error),
         Err(error) => {
             tracing::warn!(
                 %workspace_id,
@@ -3177,9 +3189,30 @@ async fn classifying(
         .catalog(&state.config().ollama_host, &backend)
         .await;
     let preferences = route.preferences(&config.classifier_model);
-    config.classifier_model =
+    let chosen =
         crate::services::stages::classifier_model(&preferences, &catalog, &chat.model_name);
-    Ok(backend)
+    let own = Some(chat.model_name.as_str()).filter(|model| {
+        *model != chosen
+            && !crate::services::stages::is_auto(model)
+            && preferences.admits(model)
+            && catalog.accepts(model)
+    });
+    let refused = match route.admit(state, &backend, &chosen).await {
+        Ok(()) => {
+            config.classifier_model = chosen;
+            return Ok(Some(backend));
+        }
+        Err(denial) => denial,
+    };
+    if let Some(own) = own
+        && route.admit(state, &backend, own).await.is_ok()
+    {
+        config.classifier_model = own.to_string();
+        return Ok(Some(backend));
+    }
+    tracing::info!(chat_id = %chat.id, model = %chosen, %refused, "The agent policy admits no model to classify the message on; it is read as a chat message");
+    turn.record(state, refused, Some(&chosen)).await;
+    Ok(None)
 }
 
 async fn load_web_search(
@@ -3382,8 +3415,8 @@ async fn prepare_chat(
     }
     let current = resolved.login.clone();
     let chosen = route.chosen().is_some();
-    let endpoint = route.into_endpoint()?;
-    let catalog = endpoint
+    let catalog = route
+        .endpoint()?
         .catalog(&state.config().ollama_host, &resolved.backend)
         .await;
     chat.model_name = crate::services::stages::chat_model(
@@ -3394,6 +3427,18 @@ async fn prepare_chat(
         model.image,
         model.agentic,
     );
+    if let Err(denial) = route
+        .admit(state, &resolved.backend, &chat.model_name)
+        .await
+    {
+        return Err(denial::Refused {
+            denial,
+            model: chat.model_name,
+        }
+        .into());
+    }
+    let policy = route.policy().cloned();
+    let endpoint = route.into_endpoint()?;
     if web_search_requested && !sanitize_query(content).is_empty() {
         publish(
             stream,
@@ -3426,7 +3471,8 @@ async fn prepare_chat(
     preparation.handover = match (organization, current, &preparation.session) {
         (Some(organization), Some(current), Some(_)) => {
             let handover = Handover::new(organization, current, model, previous.as_ref(), opening)
-                .in_directory(directory);
+                .in_directory(directory)
+                .with_policy(policy);
             Some(match chosen {
                 true => handover.strict(),
                 false => handover,
@@ -3814,6 +3860,7 @@ async fn handle_chat_generation(
     let mut chunk_index = 0;
     let mut cancelled = false;
     let mut failure = None;
+    let mut denied = None;
     let mut blocked = None;
     let mut response_truncated = false;
     let mut asked = false;
@@ -4234,6 +4281,18 @@ async fn handle_chat_generation(
             let switch = match moved {
                 Ok(switch) => switch,
                 Err(ended) => {
+                    if let Some(denial) = ended
+                        .as_ref()
+                        .and_then(crate::services::backend::Error::denial)
+                    {
+                        let turn = denial::Turn {
+                            chat: chat_id,
+                            workspace: workspace_id,
+                            actor: user_id,
+                        };
+                        turn.record(state, denial, None).await;
+                        denied = Some(denial);
+                    }
                     failure = Some(match ended {
                         Some(error) => error.to_string(),
                         None => self::failure(&endpoint, llm_client.backend(), cause.message),
@@ -4506,9 +4565,10 @@ async fn handle_chat_generation(
             },
         )
         .await;
-        let terminal = match failure {
-            Some(message) => ServerMessage::Error { message },
-            None => ServerMessage::Cancelled {
+        let terminal = match (denied, failure) {
+            (Some(denial), _) => denial::frame(denial),
+            (None, Some(message)) => ServerMessage::Error { message },
+            (None, None) => ServerMessage::Cancelled {
                 message_id: Some(assistant_message_id),
             },
         };
@@ -4631,6 +4691,9 @@ async fn handle_chat_generation(
                 }
             };
             publish(stream, end_msg).await;
+            if let Some(denial) = denied {
+                publish(stream, denial::frame(denial)).await;
+            }
 
             tracing::debug!(
                 "Assistant message completed: chat_id={}, message_id={}, db_id={}, length={}",
@@ -5340,6 +5403,7 @@ mod tests {
                 &state,
                 organization.chat,
                 organization.workspace,
+                Uuid::nil(),
                 QUESTION,
                 None,
             )
@@ -5369,6 +5433,7 @@ mod tests {
                 state,
                 organization.chat,
                 organization.workspace,
+                Uuid::nil(),
                 QUESTION,
                 None,
             )
@@ -5610,6 +5675,7 @@ mod tests {
                 &state,
                 organization.chat,
                 organization.workspace,
+                Uuid::nil(),
                 QUESTION,
                 None,
             )
@@ -5671,6 +5737,7 @@ mod tests {
                 &state,
                 organization.chat,
                 organization.workspace,
+                Uuid::nil(),
                 "generate an image of a lighthouse at dusk",
                 None,
             )
@@ -5679,9 +5746,9 @@ mod tests {
 
             let Ok(Routing::Image(
                 config,
-                LlmBackend::Cli {
+                Some(LlmBackend::Cli {
                     agent, settings, ..
-                },
+                }),
                 _,
             )) = routing
             else {
@@ -5752,11 +5819,12 @@ mod tests {
                 state,
                 organization.chat,
                 organization.workspace,
+                Uuid::nil(),
                 "generate an image of a lighthouse at dusk",
                 None,
             )
             .await;
-            let Ok(Routing::Image(_, LlmBackend::Cli { settings, .. }, _)) = routing else {
+            let Ok(Routing::Image(_, Some(LlmBackend::Cli { settings, .. }), _)) = routing else {
                 panic!("expected an image route carrying the organization's agent");
             };
             settings.credential.expose().map(str::to_string)
@@ -5837,6 +5905,7 @@ mod tests {
                 &state,
                 organization.chat,
                 organization.workspace,
+                Uuid::nil(),
                 "generate an image of a lighthouse at dusk",
                 None,
             )
@@ -6981,13 +7050,14 @@ cat 'DIR/reply.jsonl'
                 &state,
                 organization.chat,
                 organization.workspace,
+                Uuid::nil(),
                 "generate ambient rain sounds",
                 None,
             )
             .await;
             organization.remove().await;
 
-            let Ok(Routing::Image(_, LlmBackend::Cli { settings, .. }, _)) = routing else {
+            let Ok(Routing::Image(_, Some(LlmBackend::Cli { settings, .. }), _)) = routing else {
                 panic!("expected the agent's IMAGE to route the turn to an image");
             };
             assert_eq!(settings.executable.as_ref(), Some(&claude.executable));
