@@ -184,11 +184,11 @@ describe('HEIC attachments', () => {
     expect(isSendable(attachment)).toBe(true);
   });
 
-  it('says what to do when the engine has no HEIC decoder', async () => {
+  it('says so when no decoder, native or bundled, can read the file', async () => {
     const attachment = await readAttachment(heic('IMG_0001.heic', ''), {
       transcode: async () => null,
     });
-    expect(attachment.rejected).toBe('HEIC needs converting to JPEG');
+    expect(attachment.rejected).toBe('this HEIC could not be read');
     expect(attachment.url).toBeUndefined();
   });
 

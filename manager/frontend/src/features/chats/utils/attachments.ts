@@ -1,5 +1,8 @@
 import { cancelled, isCancelled } from '../../../api/upload';
 
+import { decodeHeic } from './heicDecode';
+import type { Pixels } from './heic';
+
 export interface Attachment {
   id: string;
   name: string;
@@ -138,6 +141,41 @@ export const toJpegDataUrl: Transcoder = async (file) => {
   } catch {
     return null;
   }
+  return jpegFromBitmap(bitmap);
+};
+
+/**
+ * What Safari cannot do for us. Chrome, Firefox and Edge decode no HEIC at
+ * all, so the file is handed to libheif and the pixels it returns are encoded
+ * here as the JPEG everything downstream reads.
+ */
+export const heicToJpegDataUrl: Transcoder = async (file) => {
+  if (typeof createImageBitmap !== 'function') return null;
+  let pixels: Pixels | null;
+  try {
+    pixels = await decodeHeic(await file.arrayBuffer());
+  } catch {
+    return null;
+  }
+  if (!pixels) return null;
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await createImageBitmap(new ImageData(pixels.data, pixels.width, pixels.height));
+  } catch {
+    return null;
+  }
+  return jpegFromBitmap(bitmap);
+};
+
+/**
+ * The engine's own decoder first, since it costs nothing where it works, and
+ * the WASM one only for the file it turned down.
+ */
+export const transcodeToJpeg: Transcoder = async (file) =>
+  (await toJpegDataUrl(file)) ?? (await heicToJpegDataUrl(file));
+
+/** Sample down to what a vision model reads and encode, closing the bitmap. */
+async function jpegFromBitmap(bitmap: ImageBitmap): Promise<string | null> {
   try {
     const longest = Math.max(bitmap.width, bitmap.height, 1);
     const scale = Math.min(1, MAX_IMAGE_EDGE / longest);
@@ -155,7 +193,7 @@ export const toJpegDataUrl: Transcoder = async (file) => {
   } finally {
     bitmap.close();
   }
-};
+}
 
 type ReadOptions = {
   signal?: AbortSignal;
@@ -255,7 +293,7 @@ async function readTranscoded(
   base: { id: string; name: string; size: number; type: string },
   options: ReadOptions
 ): Promise<Attachment> {
-  const { signal, onProgress, transcode = toJpegDataUrl } = options;
+  const { signal, onProgress, transcode = transcodeToJpeg } = options;
   if (signal?.aborted) throw cancelled();
   if (file.size > MAX_SOURCE_IMAGE_BYTES) {
     return { ...base, rejected: `over ${formatBytes(MAX_SOURCE_IMAGE_BYTES)}` };
@@ -264,7 +302,7 @@ async function readTranscoded(
   const url = await transcode(file);
   if (signal?.aborted) throw cancelled();
   if (!url) {
-    return { ...base, rejected: 'HEIC needs converting to JPEG' };
+    return { ...base, rejected: 'this HEIC could not be read' };
   }
 
   const size = dataUrlBytes(url);
