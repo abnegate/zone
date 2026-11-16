@@ -4,7 +4,7 @@ use uuid::Uuid;
 use zone_core::llm::LlmBackend;
 
 use super::unprepared::Unprepared;
-use super::{Failure, Fault, Prepared, resolve_model, routed};
+use super::{Failure, Fault, Prepared, admitted, resolve_model, routed};
 use crate::db::tasks;
 use crate::services::backend::{self, Resolved};
 use crate::services::login::identity::LoginIdentity;
@@ -58,7 +58,8 @@ impl Seat {
     /// What the next attempt of `run` runs on: the login a limit handed it
     /// over to, else the run's own as it stands now, else the one the router
     /// picks in its place. An attempt on another agent than the last runs on
-    /// a model that agent chose, which is recorded as the run's.
+    /// a model that agent chose, which is recorded as the run's once the
+    /// route's agent policy admits it there.
     pub(super) async fn take(
         &mut self,
         state: &AppState,
@@ -82,6 +83,7 @@ impl Seat {
         };
         if agent(&resolved.backend) != agent(&self.backend) {
             self.model = self.model(state, task, &resolved.backend).await?;
+            admitted(state, &self.route, &resolved.backend, self.model.clone()).await?;
             if !matches!(
                 tasks::record_run_model(state.db(), run, owner, &self.model).await,
                 Ok(true)
@@ -204,6 +206,11 @@ impl Seat {
         resolve_model(state, task, backend, endpoint, &preferences)
             .await
             .map_err(|message| Fault::from(Unprepared::Model(message)))
+    }
+
+    /// The model the run's latest attempt ran on, or was refused.
+    pub(super) fn current(&self) -> &str {
+        &self.model
     }
 
     fn tried(&self) -> Vec<Uuid> {

@@ -7,6 +7,7 @@ use crate::services::stages::{self, Catalog, Preferences};
 use crate::state::AppState;
 use uuid::Uuid;
 use zone_core::llm::LlmBackend;
+use zone_enterprise::policy::Denial;
 
 const UNRECORDED_AUTHOR: &str = "the model that wrote the change was not recorded, so no review \
      can be shown to be independent, and no review bot answered";
@@ -187,30 +188,60 @@ pub fn objection(author: &Author, reviewer: &Reviewer) -> Option<&'static str> {
 }
 
 /// Where a workspace's reviews and merge summaries run, and what they may run
-/// there, read from its settings once.
+/// there, read from its settings once, under the agent policy of the route
+/// they run on.
 pub struct Venue {
     pub backend: LlmBackend,
     pub endpoint: Endpoint,
     pub preferences: Preferences,
     pub catalog: Catalog,
+    pub route: Route,
 }
 
 impl Venue {
     /// The venue the workspace's settings name, the instance's when it saves
-    /// none, or why its saved endpoint cannot be used.
+    /// none, or why its saved endpoint cannot be used or its policy refuses it.
     pub async fn for_workspace(state: &AppState, workspace: Uuid) -> Result<Self, backend::Error> {
         let config = state.config();
         let route = Route::for_workspace(state, workspace).await;
         let backend = route.backend(state).await?;
         let preferences = route.preferences(&config.comfyui.classifier_model);
-        let endpoint = route.into_endpoint()?;
+        let endpoint = route.endpoint()?.clone();
         let catalog = endpoint.catalog(&config.ollama_host, &backend).await;
         Ok(Self {
             backend,
             preferences,
             endpoint,
             catalog,
+            route,
         })
+    }
+
+    /// The reviewers of `lineup` the venue's policy lets run, in its order, or the denial of
+    /// the first when it lets none of them run.
+    pub async fn admitted(
+        &self,
+        state: &AppState,
+        lineup: Vec<Reviewer>,
+    ) -> Result<Vec<Reviewer>, Denial> {
+        let mut admitted = Vec::with_capacity(lineup.len());
+        let mut refusal = None;
+        for reviewer in lineup {
+            match self
+                .route
+                .admit(state, &self.backend, &reviewer.model)
+                .await
+            {
+                Ok(()) => admitted.push(reviewer),
+                Err(denial) => {
+                    refusal.get_or_insert(denial);
+                }
+            }
+        }
+        match refusal {
+            Some(denial) if admitted.is_empty() => Err(denial),
+            _ => Ok(admitted),
+        }
     }
 
     /// The [`lineup`] for `round`. `configured` names models on the instance's
@@ -708,15 +739,69 @@ mod tests {
                 zone_context::embeddings::providers::PROVIDER_SELF_HOSTED,
             )
         };
-        let endpoint = Endpoint::resolve(&crate::state::test_config(), &settings);
+        let config = crate::state::test_config();
+        let endpoint = Endpoint::resolve(&config, &settings);
         assert_eq!(endpoint.origin(), Origin::Settings);
         let venue = Venue {
             backend: LlmBackend::Http,
             preferences: Preferences::for_endpoint(&settings, "instance-classifier", &endpoint),
             endpoint,
             catalog: Catalog::default(),
+            route: Route::new(&config, Uuid::new_v4(), Uuid::new_v4(), settings),
         };
         venue.lineup(&Author::Unrecorded, configured, 1)
+    }
+
+    /// A venue on the instance's endpoint whose organization's policy lists `models`.
+    fn governed(models: &[&str]) -> Venue {
+        use zone_enterprise::policy::{Effective, Rules};
+
+        let config = crate::state::test_config();
+        let settings = crate::services::endpoint::testing::settings(
+            zone_context::embeddings::providers::PROVIDER_SELF_HOSTED,
+        );
+        let rules = Rules {
+            models: Some(models.iter().map(ToString::to_string).collect()),
+            ..Rules::default()
+        };
+        Venue {
+            backend: LlmBackend::Http,
+            preferences: Preferences::default(),
+            endpoint: Endpoint::resolve(&config, &settings),
+            catalog: Catalog::default(),
+            route: Route::new(&config, Uuid::new_v4(), Uuid::new_v4(), settings)
+                .with_policy(Some(Effective::new(rules, Rules::default()))),
+        }
+    }
+
+    fn reviewer(model: &str) -> Reviewer {
+        Reviewer {
+            model: model.to_string(),
+            same_model: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_change_is_reviewed_only_on_models_the_policy_admits() {
+        let state = AppState::new(
+            crate::state::test_config(),
+            crate::state::unreachable_pool(),
+            None,
+        );
+        let lineup = vec![
+            reviewer("gpt-4o"),
+            reviewer("qwen3:32b"),
+            reviewer("qwen2.5:7b"),
+        ];
+
+        let admitted = governed(&["qwen*"]).admitted(&state, lineup.clone()).await;
+        let refused = governed(&["mistral*"]).admitted(&state, lineup).await;
+
+        assert_eq!(
+            admitted,
+            Ok(vec![reviewer("qwen3:32b"), reviewer("qwen2.5:7b")])
+        );
+        assert_eq!(refused, Err(Denial::Model));
     }
 
     #[test]

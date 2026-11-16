@@ -24,6 +24,7 @@ use crate::services::backend;
 use crate::services::checkout::{self, Baseline, Repository};
 use crate::services::endpoint::{Endpoint, Error as EndpointError};
 use crate::services::github_app::{Credential, Error as GitHubError, Failure, Unauthenticated};
+use crate::services::policy::{self, Background, background};
 use crate::services::route::Route;
 use crate::services::stages;
 use crate::state::AppState;
@@ -733,6 +734,12 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
 
     let route = Route::for_workspace(state, task.workspace_id).await;
     let resolved = route.backend(state).await;
+    let background = Background {
+        workspace: Some(task.workspace_id),
+        subject: policy::Subject::Task(task.id),
+        actor: None,
+    };
+    let refusal = resolved.as_ref().err().and_then(backend::Error::denial);
     let (backend, route) = match repair_route(
         route,
         resolved,
@@ -740,17 +747,28 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         state.config(),
     ) {
         Ok(chosen) => chosen,
-        Err(reason) => return RepairOutcome::Failed(reason),
+        Err(reason) => {
+            if let Some(denial) = refusal {
+                background
+                    .refused(state, denial, task.model_name.as_deref())
+                    .await;
+            }
+            return RepairOutcome::Failed(reason);
+        }
     };
     let preferences = route.preferences(&state.config().comfyui.classifier_model);
-    let endpoint = match route.into_endpoint() {
-        Ok(endpoint) => endpoint,
+    let endpoint = match route.endpoint() {
+        Ok(endpoint) => endpoint.clone(),
         Err(unusable) => return RepairOutcome::Failed(unusable.to_string()),
     };
     let model = match repair_model(state, &task, &backend, &endpoint, &preferences).await {
         Ok(model) => model,
         Err(error) => return RepairOutcome::Failed(error.to_string()),
     };
+    if let Err(denial) = route.admit(state, &backend, &model).await {
+        background.refused(state, denial, Some(&model)).await;
+        return RepairOutcome::Failed(denial.to_string());
+    }
     let repairer = ModelRepairAgent::new(
         endpoint.llm(model.clone(), REPAIR_TEMPERATURE, REPAIR_TOKENS, backend),
         model,
@@ -885,21 +903,38 @@ async fn subject(state: &AppState, task: &tasks::TaskRow, report: &str) -> Subje
 
 async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Option<Subject> {
     let route = Route::for_workspace(state, task.workspace_id).await;
+    let requested = task.model_name.as_deref().unwrap_or(stages::AUTO);
+    let background = Background {
+        workspace: Some(task.workspace_id),
+        subject: policy::Subject::Task(task.id),
+        actor: None,
+    };
     if let Err(unusable) = route.endpoint() {
         tracing::warn!(task_id = %task.id, %unusable, "Naming the change without a model");
+        if let Some(denial) = unusable.denial() {
+            background.refused(state, denial, Some(requested)).await;
+        }
         return None;
     }
     let preferences = route.preferences(&state.config().comfyui.classifier_model);
-    let backend = route.backend(state).await.ok()?;
-    let endpoint = route.into_endpoint().ok()?;
+    let backend = match route.backend(state).await {
+        Ok(backend) => backend,
+        Err(error) => {
+            if let Some(denial) = error.denial() {
+                background.refused(state, denial, Some(requested)).await;
+            }
+            return None;
+        }
+    };
+    let endpoint = route.endpoint().ok()?;
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)
         .await;
-    let model = stages::summary_model(
-        &preferences,
-        &catalog,
-        task.model_name.as_deref().unwrap_or(stages::AUTO),
-    )?;
+    let configured = stages::summary_model(&preferences, &catalog, requested)?;
+    let candidates = background::candidates(&configured, &preferences, &catalog, requested);
+    let model = background
+        .model(state, &route, &backend, &candidates)
+        .await?;
 
     let client = endpoint.llm(model, SUBJECT_TEMPERATURE, SUBJECT_TOKENS, backend);
     let messages = [
@@ -916,7 +951,8 @@ async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Opti
 /// Where a repair's turns go: the workspace's endpoint when it runs over HTTP,
 /// else the instance's own endpoint, when the instance runs over HTTP. The
 /// instance's key only ever goes to the instance's host, and a workspace whose
-/// saved endpoint cannot be used is never repaired on the instance instead.
+/// saved endpoint cannot be used, or whose agent policy refuses what it would
+/// run on, is never repaired on the instance instead.
 fn repair_route(
     route: Route,
     resolved: Result<LlmBackend, backend::Error>,
@@ -926,6 +962,7 @@ fn repair_route(
     match resolved {
         Ok(LlmBackend::Http) => Ok((LlmBackend::Http, route)),
         Err(backend::Error::Unusable(unusable)) => Err(unusable.to_string()),
+        Err(error) if error.denial().is_some() => Err(error.to_string()),
         Ok(LlmBackend::Cli { .. }) | Err(_) => match instance {
             LlmBackend::Http => Ok((instance, route.on_instance(config))),
             LlmBackend::Cli { .. } => Err(NO_REPAIR_BACKEND.to_string()),
@@ -1206,6 +1243,45 @@ mod tests {
         assert!(
             saved(&config).on_instance(&config).endpoint().is_err(),
             "an unusable route was moved onto the instance"
+        );
+    }
+
+    #[test]
+    fn a_repair_the_policy_refuses_fails_with_the_denial_rather_than_run_on_the_instance() {
+        use zone_enterprise::policy::{Agent, Denial, Effective, Provider, Rules};
+
+        let config = instance_config("http://litellm:4000");
+        let denied = saved(&config).with_policy(Some(Effective::new(
+            Rules {
+                providers: Some(vec![Provider::Anthropic]),
+                ..Rules::default()
+            },
+            Rules::default(),
+        )));
+        let unusable = denied.endpoint().expect_err("the policy denies OpenAI");
+        let agent = Denial::Agent(Agent::Claude);
+
+        let unusable_route = repair_route(
+            denied,
+            Err(backend::Error::Unusable(unusable)),
+            LlmBackend::Http,
+            &config,
+        );
+        let denied_agent = repair_route(
+            saved(&config),
+            Err(backend::Error::Denied(agent)),
+            LlmBackend::Http,
+            &config,
+        );
+
+        assert_eq!(
+            unusable_route.err(),
+            Some(Denial::Provider(Provider::OpenAI).to_string())
+        );
+        assert_eq!(
+            denied_agent.err(),
+            Some(agent.to_string()),
+            "a repair whose agent the policy denies fell back to the instance"
         );
     }
 

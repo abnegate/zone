@@ -55,6 +55,7 @@ use crate::agent::wait;
 use crate::agent::wait::Waited;
 use crate::agent::wait::Waiting;
 use crate::config::ModelBackend;
+use crate::db::audit::actions;
 use crate::db::task_tool_calls;
 use crate::db::tasks;
 use crate::services::backend;
@@ -65,6 +66,9 @@ use crate::services::endpoint::Endpoint;
 use crate::services::failure::unreachable;
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router;
+use crate::services::policy;
+use crate::services::policy::Denied;
+use crate::services::policy::Subject;
 use crate::services::route::Reason;
 use crate::services::route::Route;
 use crate::services::route::Unusable;
@@ -249,6 +253,8 @@ struct Fault {
     login: Option<Box<LoginIdentity>>,
     /// The login the run was handed over to, when it was.
     rerouted: Option<Box<LoginIdentity>>,
+    /// The agent policy's denial the attempt failed on, when it did.
+    denial: Option<Denial>,
 }
 
 impl Fault {
@@ -260,6 +266,7 @@ impl Fault {
             limit: None,
             login: None,
             rerouted: None,
+            denial: None,
         }
     }
 
@@ -331,7 +338,10 @@ impl Fault {
             | backend::Error::Denied(_)
             | backend::Error::Unusable(_) => Failure::Terminal,
         };
-        Self::new(failure, RUN_FAILED, error.to_string())
+        Self {
+            denial: error.denial(),
+            ..Self::new(failure, RUN_FAILED, error.to_string())
+        }
     }
 
     /// This fault, of an attempt that ran under `login`.
@@ -417,6 +427,7 @@ impl From<Unprepared> for Fault {
     fn from(unprepared: Unprepared) -> Self {
         match unprepared {
             Unprepared::Backend(error) => Self::backend(error),
+            Unprepared::Denied { denial, .. } => Self::backend(backend::Error::Denied(denial)),
             unprepared => Self::new(Failure::Terminal, RUN_FAILED, unprepared.to_string()),
         }
     }
@@ -1296,6 +1307,10 @@ async fn execute_in_checkout<'a>(
         Err(unprepared) => {
             obs.set_status(RUN_FAILED);
             tracing::error!("Task {} cannot start: {}", task_id, unprepared);
+            if let Some((denial, model)) = unprepared.denial() {
+                let model = model.or(task.model_name.as_deref());
+                refused(state, &task, execution.actor, denial, model).await;
+            }
             if let Err(error) = tasks::complete_owned_task_run(
                 state.db(),
                 run_id,
@@ -1523,6 +1538,10 @@ async fn execute_in_checkout<'a>(
             );
         }
         Err(stopped) => {
+            if let Some(denial) = stopped.fault.denial {
+                let model = seat.lock().await.current().to_string();
+                refused(state, task, actor, denial, Some(&model)).await;
+            }
             obs.set_status(if stopped.exhausted {
                 "exhausted"
             } else {
@@ -1573,7 +1592,8 @@ struct Prepared {
 /// run at that endpoint.
 ///
 /// A plan waits for approval on a card only zone's own loop raises, so a run
-/// that needs one cannot start on a coding agent at all.
+/// that needs one cannot start on a coding agent at all, and a run on a model
+/// the route's agent policy refuses does not start.
 async fn prepare(
     state: &AppState,
     task: &tasks::TaskRow,
@@ -1582,7 +1602,7 @@ async fn prepare(
     plan_approval: bool,
 ) -> Result<Prepared, Unprepared> {
     let preferences = route.preferences(&state.config().comfyui.classifier_model);
-    let endpoint = route.into_endpoint().map_err(backend::Error::from)?;
+    let endpoint = route.endpoint().map_err(backend::Error::from)?.clone();
     let Resolved { backend, login } = resolved?;
     if plan_approval && matches!(backend, LlmBackend::Cli { .. }) {
         return Err(Unprepared::Refused(match state.config().model_backend() {
@@ -1593,6 +1613,7 @@ async fn prepare(
     let model = resolve_model(state, task, &backend, &endpoint, &preferences)
         .await
         .map_err(Unprepared::Model)?;
+    let model = admitted(state, &route, &backend, model).await?;
     Ok(Prepared {
         backend,
         endpoint,
@@ -1631,6 +1652,44 @@ async fn routed(
         .resolve(state, tried, Some(login.id), running)
         .await
         .map_err(Fault::backend)
+}
+
+/// `model`, when the agent policy `route` runs under lets it run on `backend`.
+async fn admitted(
+    state: &AppState,
+    route: &Route,
+    backend: &LlmBackend,
+    model: String,
+) -> Result<String, Unprepared> {
+    match route.admit(state, backend, &model).await {
+        Ok(()) => Ok(model),
+        Err(denial) => Err(Unprepared::Denied { denial, model }),
+    }
+}
+
+/// Audits that the agent policy refused a run of `task`, started by `actor`,
+/// with `denial`, on `model` when one was judged.
+async fn refused(
+    state: &AppState,
+    task: &tasks::TaskRow,
+    actor: Option<Uuid>,
+    denial: Denial,
+    model: Option<&str>,
+) {
+    tracing::warn!(task_id = %task.id, code = denial.code(), model, "The agent policy refused the run");
+    policy::record(
+        state,
+        actions::AGENT_POLICY_TURN_DENIED,
+        &Denied {
+            workspace: task.workspace_id,
+            organization: None,
+            actor,
+            subject: Subject::Task(task.id),
+            denial,
+            detail: model,
+        },
+    )
+    .await;
 }
 
 /// Brings what the organization knows of `login`'s usage up to date once an
@@ -8110,6 +8169,7 @@ mod cli_tests {
     use wiremock::MockServer;
     use zone_core::llm::SignIn;
     use zone_core::llm::Toolset;
+    use zone_enterprise::policy::{Effective, Rules};
 
     const ANSWER: &str = "Wrote it.";
     const EXECUTABLE: &str = "claude";
@@ -9017,6 +9077,95 @@ mod cli_tests {
             CliSettings::default().with_credential(Credential::key(CLAUDE_CODE_OAUTH_TOKEN, token)),
         )
         .with_sign_in(SignIn::Organization)
+    }
+
+    /// A route under `rules`, the organization's policy, on `provider`.
+    fn governed(state: &AppState, provider: &str, rules: Rules) -> Route {
+        Route::new(
+            state.config(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            crate::services::endpoint::testing::settings(provider),
+        )
+        .with_policy(Some(Effective::new(rules, Rules::default())))
+    }
+
+    /// A run re-routed onto an agent its policy denies never runs an attempt
+    /// on it, and only a policy change could let it, so it is not retried.
+    #[tokio::test]
+    async fn an_attempt_routed_onto_an_agent_the_policy_denies_fails_for_good() {
+        let state = AppState::new(
+            crate::state::test_config(),
+            crate::state::unreachable_pool(),
+            None,
+        );
+        let route = governed(
+            &state,
+            PROVIDER_CLAUDE_CODE,
+            Rules {
+                agents: Some(Vec::new()),
+                ..Rules::default()
+            },
+        );
+        let login = LoginIdentity {
+            id: Uuid::new_v4(),
+            agent: AgentKind::Claude,
+            label: "jake@example.com".to_string(),
+        };
+
+        let fault = routed(
+            &state,
+            &route,
+            &signed_in("first-access"),
+            Some(&login),
+            &[],
+            None,
+        )
+        .await
+        .expect_err("a denied agent runs no attempt");
+
+        let denial = Denial::Agent(zone_enterprise::policy::Agent::Claude);
+        assert_eq!(fault.failure, Failure::Terminal);
+        assert_eq!(fault.message, denial.to_string());
+        assert_eq!(fault.denial, Some(denial));
+    }
+
+    /// A model the policy does not list never runs, and fails the run with the
+    /// denial; a policy that could not be read fails only this attempt.
+    #[tokio::test]
+    async fn a_run_on_a_model_the_policy_denies_is_not_prepared() {
+        let state = AppState::new(
+            crate::state::test_config(),
+            crate::state::unreachable_pool(),
+            None,
+        );
+        let route = governed(
+            &state,
+            PROVIDER_CLAUDE_CODE,
+            Rules {
+                models: Some(vec!["claude-opus-*".to_string()]),
+                ..Rules::default()
+            },
+        );
+        let backend = signed_in("first-access");
+
+        let allowed = admitted(&state, &route, &backend, "claude-opus-4-1".to_string()).await;
+        let refused = admitted(&state, &route, &backend, "sonnet".to_string())
+            .await
+            .expect_err("a model the policy does not list");
+
+        assert_eq!(allowed.ok().as_deref(), Some("claude-opus-4-1"));
+        assert_eq!(refused.denial(), Some((Denial::Model, Some("sonnet"))));
+        assert_eq!(refused.to_string(), Denial::Model.to_string());
+        let fault = Fault::from(refused);
+        assert_eq!(fault.failure, Failure::Terminal);
+        assert_eq!(fault.denial, Some(Denial::Model));
+        let unreadable = Fault::from(Unprepared::Denied {
+            denial: Denial::Unreadable,
+            model: "sonnet".to_string(),
+        });
+        assert_eq!(unreadable.failure, Failure::Transient);
+        assert_eq!(unreadable.denial, Some(Denial::Unreadable));
     }
 
     /// A login that cannot be read may since have been renewed or signed out,
