@@ -513,6 +513,15 @@ impl Route {
         chat
     }
 
+    /// Who chose the endpoint completions go to, whatever the policy says of them, or why there
+    /// is none.
+    pub fn origin(&self) -> Result<Origin, Unusable> {
+        self.endpoint
+            .as_ref()
+            .map(Endpoint::origin)
+            .map_err(|unusable| *unusable)
+    }
+
     /// The endpoint completions go to, or why there is none.
     pub fn endpoint(&self) -> Result<&Endpoint, Unusable> {
         match self.denied() {
@@ -663,7 +672,7 @@ impl Route {
     /// The models these settings prefer for completions sent to this route's
     /// endpoint, choosing only models its policy lets run.
     pub fn preferences(&self, classifier: &str) -> Preferences {
-        match (self.settings(), self.endpoint()) {
+        match (self.settings(), &self.endpoint) {
             (Some(settings), Ok(endpoint)) => {
                 Preferences::for_endpoint(settings, classifier, endpoint)
             }

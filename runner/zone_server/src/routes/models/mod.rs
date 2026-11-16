@@ -43,7 +43,6 @@ use crate::auth::{AuthUser, ModelInstaller, ModelRemover};
 use crate::db::ai_settings;
 use crate::error::ServerError;
 use crate::pull::{ComfyPull, ManifestFile, Pull, PullStart};
-use crate::routes::policy::refusal;
 use crate::services::comfy::{language, overlay, policy};
 use crate::services::endpoint::Origin;
 use crate::services::model::Model;
@@ -218,17 +217,14 @@ async fn list_workspace_models(
         return error.into_response();
     }
     let route = Route::for_workspace(&state, workspace).await;
-    if let Err(denial) = route.precheck(None).await {
-        return refusal::denied(denial);
-    }
-    let origin = match route.endpoint() {
-        Ok(endpoint) => endpoint.origin(),
+    let origin = match route.origin() {
+        Ok(origin) => origin,
         Err(unusable) => return ServerError::Conflict(unusable.to_string()).into_response(),
     };
     match origin {
         Origin::Instance => {
             let mut inventory = inventory(&state).await;
-            govern(&state, &route, inventory.models_mut()).await;
+            govern(&route, inventory.models_mut()).await;
             inventory.into_response()
         }
         Origin::Settings => {
@@ -238,16 +234,16 @@ async fn list_workspace_models(
                 .into_iter()
                 .map(saved_model)
                 .collect();
-            govern(&state, &route, &mut saved).await;
+            govern(&route, &mut saved).await;
             Json(saved).into_response()
         }
     }
 }
 
 /// Marks each model in `models` a chat may run that the agent policy `route` runs under
-/// refuses, with the code of its denial.
-async fn govern(state: &AppState, route: &Route, models: &mut [ModelResponse]) {
-    if route.policy().is_none() {
+/// refuses, with the code of its denial: every one of them when it refuses the route itself.
+async fn govern(route: &Route, models: &mut [ModelResponse]) {
+    if route.policy().is_none() && route.precheck(None).await.is_ok() {
         return;
     }
     futures::future::join_all(

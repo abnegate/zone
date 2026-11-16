@@ -433,7 +433,7 @@ right, as it always has.
 | Where | What happens |
 |---|---|
 | Chat | The turn doesn't start, and the chat shows the policy's message. Over the WebSocket this is `{"type": "denied", "message": "…", "code": "policy_…"}`. |
-| Provider, model and agent pickers | Denied options are disabled, with the reason. API responses carry it as `denial`. |
+| Provider, model and agent pickers | Denied options are disabled, with the reason. API responses carry it as `denial`. Listing a workspace's models never refuses: when the policy denies the workspace's provider or agent, or can't be read, every model carries that denial. |
 | REST requests | 403 with `{"error": "…", "code": "policy_…"}`. |
 | Task runs | The run fails with the policy's message. `policy_unreadable` is retried; every other denial is final. |
 | Tool calls | The tool trace shows the call as refused by policy. |

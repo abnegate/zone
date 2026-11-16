@@ -736,11 +736,16 @@ async fn the_workspace_models_mark_what_the_policy_denies_on_either_endpoint() {
     fixture
         .restrict(json!({ "providers": ["anthropic"] }))
         .await;
-    refused(
-        &fixture.models().await,
-        PROVIDER_DENIED,
-        "listing a denied provider's models",
-    );
+    let denied = fixture.models().await;
+    accepted(&denied, StatusCode::OK, "a denied provider's models");
+    let denied = denied.json_value();
+    for model in [FAST, REASONING] {
+        assert_eq!(
+            listed(&denied, model)["denial"],
+            json!(PROVIDER_DENIED),
+            "{denied}"
+        );
+    }
     fixture.cleanup().await;
 }
 
@@ -1019,5 +1024,17 @@ async fn a_policy_that_cannot_be_read_refuses_everything_it_governs() {
     }
     let default = &fixture.workspace_offers().await["default"];
     assert_eq!(default["denial"], json!(UNREADABLE), "{default}");
+    let models = fixture.models().await;
+    accepted(
+        &models,
+        StatusCode::OK,
+        "the models under an unreadable policy",
+    );
+    let models = models.json_value();
+    assert_eq!(
+        listed(&models, FAST)["denial"],
+        json!(UNREADABLE),
+        "{models}"
+    );
     fixture.cleanup().await;
 }
