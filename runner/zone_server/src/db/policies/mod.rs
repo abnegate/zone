@@ -51,10 +51,25 @@ pub async fn layers(
     .await
 }
 
+/// Locks the organization's policy row until `transaction` ends, inserting an empty one first so
+/// that concurrent first writers queue on it too. Answers `None` when there was no policy; a
+/// caller that then saves nothing must roll back so the empty row is not kept.
 pub async fn lock_organization(
     transaction: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
 ) -> DbResult<Option<Stored>> {
+    let created = sqlx::query(
+        "INSERT INTO organization_policies (organization_id) VALUES ($1) \
+         ON CONFLICT (organization_id) DO NOTHING",
+    )
+    .bind(organization_id)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected()
+        > 0;
+    if created {
+        return Ok(None);
+    }
     sqlx::query_as(
         "SELECT rules, updated_by, updated_at FROM organization_policies \
          WHERE organization_id = $1 FOR UPDATE",
@@ -64,10 +79,23 @@ pub async fn lock_organization(
     .await
 }
 
+/// Locks the workspace's policy row the way [`lock_organization`] locks the organization's.
 pub async fn lock_workspace(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
 ) -> DbResult<Option<Stored>> {
+    let created = sqlx::query(
+        "INSERT INTO workspace_policies (workspace_id) VALUES ($1) \
+         ON CONFLICT (workspace_id) DO NOTHING",
+    )
+    .bind(workspace_id)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected()
+        > 0;
+    if created {
+        return Ok(None);
+    }
     sqlx::query_as(
         "SELECT rules, updated_by, updated_at FROM workspace_policies \
          WHERE workspace_id = $1 FOR UPDATE",

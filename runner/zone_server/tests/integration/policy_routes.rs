@@ -1,8 +1,11 @@
 //! The agent policy routes: who may read and change each layer, how the license gates changes,
 //! how a patch is applied and validated, and what every change audits.
 
+use std::time::{Duration, Instant};
+
 use axum::http::StatusCode;
 use serde_json::{Value, json};
+use sqlx::{Postgres, Transaction};
 use zone_enterprise::Tier;
 use zone_enterprise::policy::{
     BODY_INVALID, CEILING_INVALID, DOMAIN_INVALID, MODEL_INVALID, Rules, SERVER_INVALID, WIDER,
@@ -17,6 +20,65 @@ use crate::common::sso::{grace, lapsed};
 
 const PREFIX: &str = "policy_routes";
 const LICENSE_REQUIRED: &str = "license_required";
+const WAITING: &str = "SELECT count(*) FROM pg_locks \
+     WHERE NOT granted AND relation = $1::regclass \
+     AND database = (SELECT oid FROM pg_database WHERE datname = current_database())";
+const QUEUE_WITHIN: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy)]
+enum Layer {
+    Organization,
+    Workspace,
+}
+
+impl Layer {
+    fn table(self) -> &'static str {
+        match self {
+            Self::Organization => "organization_policies",
+            Self::Workspace => "workspace_policies",
+        }
+    }
+
+    fn freeze(self) -> &'static str {
+        match self {
+            Self::Organization => "LOCK TABLE organization_policies IN SHARE ROW EXCLUSIVE MODE",
+            Self::Workspace => "LOCK TABLE workspace_policies IN SHARE ROW EXCLUSIVE MODE",
+        }
+    }
+
+    fn resource(self) -> &'static str {
+        match self {
+            Self::Organization => resources::ORGANIZATION_AGENT_POLICY,
+            Self::Workspace => resources::WORKSPACE_AGENT_POLICY,
+        }
+    }
+
+    fn rules(self, response: &TestResponse) -> Value {
+        response.assert_status(StatusCode::OK);
+        let field = match self {
+            Self::Organization => "policy",
+            Self::Workspace => "workspace",
+        };
+        response.json_value()[field].clone()
+    }
+
+    async fn update(self, fixture: &Fixture, body: &Value) -> TestResponse {
+        let token = &fixture.owner.token;
+        match self {
+            Self::Organization => fixture.update_organization(token, body).await,
+            Self::Workspace => fixture.update_workspace(token, body).await,
+        }
+    }
+
+    async fn read(self, fixture: &Fixture) -> Value {
+        let token = &fixture.owner.token;
+        let response = match self {
+            Self::Organization => fixture.organization_policy(token).await,
+            Self::Workspace => fixture.workspace_policy(token).await,
+        };
+        self.rules(&response)
+    }
+}
 
 fn unrestricted() -> Value {
     serde_json::to_value(Rules::default()).unwrap()
@@ -782,5 +844,82 @@ async fn an_unchanged_policy_is_not_audited() {
 
     let audits = fixture.audits(actions::AGENT_POLICY_UPDATED).await;
     assert_eq!(audits.len(), 2, "only the two real changes are audited");
+    fixture.cleanup().await;
+}
+
+/// Commits `freeze` once both writers queue on `layer`'s table, so neither has written the layer
+/// before the other starts.
+async fn release(fixture: &Fixture, layer: Layer, freeze: Transaction<'_, Postgres>) {
+    let deadline = Instant::now() + QUEUE_WITHIN;
+    loop {
+        let waiting: i64 = sqlx::query_scalar(WAITING)
+            .bind(layer.table())
+            .fetch_one(fixture.pool())
+            .await
+            .unwrap();
+        if waiting == 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "both {layer:?} changes wait on the frozen table, {waiting} do"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    freeze.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_first_changes_to_a_layer_both_land_and_audit_what_they_replaced() {
+    let fixture = licensed().await;
+
+    for (layer, first, second) in [
+        (
+            Layer::Organization,
+            json!({ "agents": ["claude"] }),
+            json!({ "models": ["sonnet"] }),
+        ),
+        (
+            Layer::Workspace,
+            json!({ "ceiling": "write" }),
+            json!({ "agents": [] }),
+        ),
+    ] {
+        let mut freeze = fixture.pool().begin().await.unwrap();
+        sqlx::query(layer.freeze())
+            .execute(&mut *freeze)
+            .await
+            .unwrap();
+        let (one, two, ()) = tokio::join!(
+            layer.update(&fixture, &first),
+            layer.update(&fixture, &second),
+            release(&fixture, layer, freeze),
+        );
+        one.assert_status(StatusCode::OK);
+        two.assert_status(StatusCode::OK);
+
+        let stored = layer.read(&fixture).await;
+        for patch in [&first, &second] {
+            for (field, value) in patch.as_object().unwrap() {
+                assert_eq!(&stored[field], value, "{layer:?} kept {field}: {stored}");
+            }
+        }
+        let audits: Vec<_> = fixture
+            .audits(actions::AGENT_POLICY_UPDATED)
+            .await
+            .into_iter()
+            .filter(|audit| audit.resource_type == layer.resource())
+            .collect();
+        assert_eq!(audits.len(), 2, "{layer:?}: {audits:?}");
+        let earlier = audits
+            .iter()
+            .find(|audit| audit.old_values == Some(unrestricted()))
+            .unwrap_or_else(|| panic!("one {layer:?} change replaced nothing: {audits:?}"));
+        let later = audits
+            .iter()
+            .find(|audit| audit.old_values == earlier.new_values)
+            .unwrap_or_else(|| panic!("the other {layer:?} change replaced it: {audits:?}"));
+        assert_eq!(later.new_values, Some(stored));
+    }
     fixture.cleanup().await;
 }

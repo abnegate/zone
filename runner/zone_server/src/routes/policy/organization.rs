@@ -116,7 +116,7 @@ async fn write(
     let previous = rules(current.as_ref())?;
     let next = previous.patched(&patch).normalized()?;
     if next == previous {
-        transaction.commit().await?;
+        transaction.rollback().await?;
         return Ok(OrganizationResponse::new(
             standing,
             access,

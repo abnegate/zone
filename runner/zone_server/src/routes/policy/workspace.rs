@@ -131,7 +131,7 @@ async fn write(
     let next = previous.patched(&patch).normalized()?;
     next.within(&outer, &patch.fields())?;
     if next == previous {
-        transaction.commit().await?;
+        transaction.rollback().await?;
         return Ok(WorkspaceResponse::new(
             standing,
             access,
