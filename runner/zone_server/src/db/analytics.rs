@@ -15,37 +15,13 @@ use uuid::Uuid;
 
 use super::DbResult;
 
-/// A workspace with finished runs worth reporting on.
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
-pub struct ReportableWorkspace {
-    pub workspace_id: Uuid,
-    pub name: String,
-}
+mod reportable_workspace;
+mod run_row;
+mod shipped_task_row;
 
-/// One finished run, as analytics reads it.
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
-pub struct RunRow {
-    pub run_id: Uuid,
-    pub task_id: Uuid,
-    pub status: String,
-    pub error_message: Option<String>,
-    /// The category the learning loop assigned, if it has been past this run.
-    pub error_category: Option<String>,
-    pub started_at: Option<NaiveDateTime>,
-    pub finished_at: NaiveDateTime,
-}
-
-/// One task whose fix has shipped, and where that task stands now.
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
-pub struct ShippedTaskRow {
-    pub task_id: Uuid,
-    pub title: String,
-    pub status: String,
-    pub shipped_at: NaiveDateTime,
-    /// When the task left `complete` after shipping, if it has.
-    pub reopened_at: Option<NaiveDateTime>,
-    pub pull_request_url: Option<String>,
-}
+pub use reportable_workspace::ReportableWorkspace;
+pub use run_row::RunRow;
+pub use shipped_task_row::ShippedTaskRow;
 
 /// Active workspaces with a run that finished inside the window.
 pub async fn reportable_workspaces(
