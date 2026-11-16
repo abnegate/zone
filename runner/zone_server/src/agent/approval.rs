@@ -59,20 +59,20 @@ impl Decision {
 
 static LIVE: Lazy<DashMap<Uuid, ApprovalPolicy>> = Lazy::new(DashMap::new);
 
-/// Told the name of every call a policy withholds, to keep a record of it.
-pub type Recorder = Arc<dyn Fn(&str) + Send + Sync>;
+/// Told the name of each call a policy withholds.
+pub type Withholding = dyn Fn(&str) + Send + Sync;
 
 /// How a loop should treat mutating file and shell tools.
 ///
 /// Auto is a live flag so turning auto-approve on mid-turn can release waiters
 /// and skip later confirmations in the same generation. The ceiling and the
-/// recorder are shared the same way, so every clone answers to the one set
-/// last.
+/// withholding hook are shared the same way, so every clone answers to the one
+/// set last.
 #[derive(Clone)]
 pub struct ApprovalPolicy {
     auto: Arc<AtomicBool>,
     ceiling: Arc<RwLock<Option<Tier>>>,
-    recorder: Arc<RwLock<Option<Recorder>>>,
+    withholding: Arc<RwLock<Option<Arc<Withholding>>>>,
     unattended: bool,
     gate: ApprovalGate,
 }
@@ -82,7 +82,7 @@ impl ApprovalPolicy {
         Self {
             auto: Arc::new(AtomicBool::new(auto)),
             ceiling: Arc::new(RwLock::new(None)),
-            recorder: Arc::new(RwLock::new(None)),
+            withholding: Arc::new(RwLock::new(None)),
             unattended,
             gate,
         }
@@ -106,7 +106,6 @@ impl ApprovalPolicy {
         self.auto.load(Ordering::Acquire)
     }
 
-    /// The highest tier auto-approve may release, when a policy caps it.
     pub fn ceiling(&self) -> Option<Tier> {
         *self.ceiling.read().unwrap_or_else(PoisonError::into_inner)
     }
@@ -123,14 +122,13 @@ impl ApprovalPolicy {
         self
     }
 
-    pub fn set_recorder(&self, recorder: Recorder) {
+    pub fn set_recorder(&self, withholding: Arc<Withholding>) {
         *self
-            .recorder
+            .withholding
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = Some(recorder);
+            .unwrap_or_else(PoisonError::into_inner) = Some(withholding);
     }
 
-    /// Whether auto-approve lets a call at this tier through unasked.
     fn releases(&self, tier: Tier) -> bool {
         self.is_auto() && within(tier, self.ceiling())
     }
@@ -144,18 +142,17 @@ impl ApprovalPolicy {
     }
 
     /// Whether the call is refused without being asked, because it needs an
-    /// approval nobody attending this run can give. A withheld call is told
-    /// to the recorder.
+    /// approval nobody attending this run can give.
     pub fn withheld(&self, name: &str, tier: Tier) -> bool {
         let withheld = self.withholds(tier);
         if withheld {
-            let recorder = self
-                .recorder
+            let withholding = self
+                .withholding
                 .read()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
-            if let Some(recorder) = recorder {
-                recorder(name);
+            if let Some(withholding) = withholding {
+                withholding(name);
             }
         }
         withheld
@@ -280,12 +277,10 @@ impl ApprovalPolicy {
     }
 }
 
-/// Whether a call at this tier is no higher than the ceiling, where there is one.
 fn within(tier: Tier, ceiling: Option<Tier>) -> bool {
     ceiling.is_none_or(|ceiling| tier <= ceiling)
 }
 
-/// A call parked on a decision, and the tier it was asked at.
 struct Waiter {
     sender: oneshot::Sender<Decision>,
     tier: Tier,
@@ -371,8 +366,6 @@ impl ApprovalGate {
         self.resolve_where(Decision::Cancelled, |_| true);
     }
 
-    /// Approve every waiter at or below the ceiling, or every waiter when
-    /// there is none.
     pub fn approve_within(&self, ceiling: Option<Tier>) {
         self.resolve_where(Decision::Approved, |tier| within(tier, ceiling));
     }
@@ -787,7 +780,6 @@ mod tests {
         assert!(names.lock().expect("the record").is_empty());
     }
 
-    /// With no ceiling an unattended run is today's auto-approved task.
     #[tokio::test]
     async fn an_unattended_run_without_a_ceiling_approves_everything() {
         let policy = ApprovalPolicy::unattended();
@@ -803,8 +795,6 @@ mod tests {
         }
     }
 
-    /// Only a run nobody attends withholds: an attended chat above the ceiling
-    /// asks instead.
     #[test]
     fn an_attended_chat_above_the_ceiling_asks_rather_than_withholds() {
         let policy = policy(true, Some(Tier::Write));

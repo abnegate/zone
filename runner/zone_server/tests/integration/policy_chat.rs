@@ -183,7 +183,6 @@ impl Fixture {
         .unwrap();
     }
 
-    /// Sends `content` and reads frames until the turn ends.
     async fn turn(&self, content: &str) -> Vec<Value> {
         let mut socket = connect_async(format!("ws://{}/ws/chats/{}", self.address, self.chat))
             .await

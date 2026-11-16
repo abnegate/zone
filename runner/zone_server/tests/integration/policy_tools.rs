@@ -22,12 +22,15 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_enterprise::Tier;
 use zone_enterprise::policy::Denial;
 use zone_server::agent::approval::refusal::POLICY;
+use zone_server::agent::wait::{KIND_TASK_RUN, WAIT_FOR};
 use zone_server::config::{AgentConfig, ModelBackend};
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::{licenses, migrations, tasks};
+use zone_server::services::mcp_servers::stub::Stub;
 use zone_server::state::AppState;
 
 use crate::common::context::{MODEL, Script, Socket, answer, calls, next, send, tool};
+use crate::common::mcp::isolated;
 use crate::common::sso::{Audit, active, keyring, lapsed};
 use crate::common::{
     Database, TestClient, create_test_router, create_test_state, test_config, test_email,
@@ -59,12 +62,24 @@ const CREATE_PULL_REQUEST: &str = "create_pull_request";
 const ADMITTED: &str = "127.0.0.1";
 const FOREIGN: &str = "example.com";
 
+const LISTED_SERVER: &str = "listed";
+const UNLISTED_SERVER: &str = "unlisted";
+const STUB_TOOL: &str = "delegate";
+const STUB_PATH: &str = "/mcp";
+const CONNECTED: &str = "connected";
+const FAILED: &str = "failed";
+const WAIT_SETTLED: &str = "wait_settled";
+const INSTRUCTION: &str = "ping";
+const UNKNOWN_TOOL: &str = "Unknown tool";
+
 /// Claude withholds its own tools with an empty `--tools`.
 const CLAUDE_WITHHELD: &str = "--tools ";
 /// Codex withholds its own tools by disabling the features that bring them.
 const CODEX_WITHHELD: &str = "shell_tool";
 
 const AGENT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a hub waits on one server's handshake, and a margin.
+const SETTLE: Duration = Duration::from_secs(45);
 const AUDIT_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(25);
 
@@ -262,7 +277,66 @@ impl Server {
         }
     }
 
-    /// Every completion request the model was sent, in order.
+    /// Returns once the organization's hub has connected the server.
+    async fn serve(&self, name: &str, stub: &Stub) {
+        let servers = format!("/api/organizations/{}/mcp-servers", self.organization);
+        let stored = self
+            .client
+            .post_json_auth(
+                &servers,
+                &json!({
+                    "name": name,
+                    "transport": "http",
+                    "url": format!("http://{ADMITTED}:{}{STUB_PATH}", stub.port()),
+                }),
+                &self.token,
+            )
+            .await
+            .json_value();
+        let id = stored["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a stored server has an id: {stored}"));
+        let deadline = Instant::now() + SETTLE;
+        loop {
+            let server = self
+                .client
+                .get_auth(&format!("{servers}/{id}"), &self.token)
+                .await
+                .json_value();
+            if server["status"] == CONNECTED {
+                return;
+            }
+            assert_ne!(server["status"], FAILED, "{server}");
+            assert!(Instant::now() < deadline, "never connected: {server}");
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    async fn finished_run(&self) -> Uuid {
+        let task = tasks::create_task_as(
+            self.pool(),
+            self.workspace,
+            &[],
+            "Waited on",
+            "Finish",
+            None,
+            None,
+            true,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run_as(self.pool(), task.id, None)
+            .await
+            .unwrap();
+        tasks::complete_task_run(self.pool(), run.id, "completed", None, None)
+            .await
+            .unwrap()
+            .expect("the run to finish");
+        run.id
+    }
+
     async fn completions(&self) -> Vec<Value> {
         self.received(COMPLETIONS_PATH)
             .await
@@ -285,7 +359,6 @@ impl Server {
             .collect()
     }
 
-    /// The arguments the stand-in agent was last started with.
     async fn arguments(&self) -> String {
         let recorded = self.directory.path().join(ARGUMENTS);
         let deadline = Instant::now() + AGENT_TIMEOUT;
@@ -466,6 +539,22 @@ async fn denials(pool: &PgPool) -> Vec<Audit> {
 
 fn command(id: &str) -> Value {
     tool(id, RUN_COMMAND, json!({"command": "echo held"}))
+}
+
+fn waiting(run: Uuid) -> Value {
+    tool(
+        "wait",
+        WAIT_FOR,
+        json!({"kind": KIND_TASK_RUN, "id": run, "timeout_secs": 60}),
+    )
+}
+
+fn served(server: &str) -> String {
+    format!("{server}__{STUB_TOOL}")
+}
+
+fn settled(frames: &[Value]) -> bool {
+    frames.iter().any(|frame| frame["type"] == WAIT_SETTLED)
 }
 
 #[tokio::test]
@@ -752,6 +841,115 @@ async fn a_chat_offline_on_its_own_is_never_readmitted() {
         !names(&advertised(&request), FETCH_URL),
         "a chat that opted out of the public web is readmitted nothing"
     );
+
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_turn_resumed_after_a_wait_still_reaches_only_the_listed_mcp_servers() {
+    let _environment = isolated();
+    let stub = Stub::start(&[]).await;
+    let server = Server::start(Backend::Http).await;
+    server
+        .restrict(json!({"mcp_servers": [LISTED_SERVER]}))
+        .await;
+    server.license(&active(Tier::Team)).await;
+    server.serve(LISTED_SERVER, &stub).await;
+    server.serve(UNLISTED_SERVER, &stub).await;
+    let run = server.finished_run().await;
+
+    let chat = server.chat(MODEL, json!({})).await;
+    server.script.push(calls("", vec![waiting(run)]));
+    server.script.push(calls(
+        "",
+        [LISTED_SERVER, UNLISTED_SERVER]
+            .into_iter()
+            .map(|name| tool(name, &served(name), json!({"instruction": INSTRUCTION})))
+            .collect(),
+    ));
+    server.script.push(answer(ANSWER));
+    let frames = server
+        .turn(chat, "Wait for the run, then delegate.", None)
+        .await;
+    assert!(settled(&frames), "the wait settles: {frames:?}");
+
+    let completions = server.completions().await;
+    let [first, _, last] = completions.as_slice() else {
+        panic!("the wait, the delegations and the answer: {completions:?}");
+    };
+    let offered = advertised(first);
+    assert!(names(&offered, &served(LISTED_SERVER)), "{offered}");
+    assert!(!names(&offered, &served(UNLISTED_SERVER)), "{offered}");
+    let listed = result(last, LISTED_SERVER);
+    assert!(
+        listed.contains(INSTRUCTION),
+        "the resumed round still reaches the listed server: {listed}"
+    );
+    let unlisted = result(last, UNLISTED_SERVER);
+    assert!(
+        unlisted.contains(UNKNOWN_TOOL),
+        "the resumed round reached a server the policy leaves out: {unlisted}"
+    );
+
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_turn_resumed_after_a_wait_keeps_what_a_domain_list_readmits_and_audits_its_refusals() {
+    let _environment = isolated();
+    let stub = Stub::start(&[]).await;
+    let server = Server::start(Backend::Http).await;
+    server
+        .restrict(json!({"mcp_servers": [LISTED_SERVER], "domains": [ADMITTED]}))
+        .await;
+    server.license(&active(Tier::Team)).await;
+    server.serve(LISTED_SERVER, &stub).await;
+    server.serve(UNLISTED_SERVER, &stub).await;
+    let run = server.finished_run().await;
+
+    let chat = server.chat(MODEL, json!({})).await;
+    server.script.push(calls("", vec![waiting(run)]));
+    server.script.push(calls(
+        "",
+        vec![tool(
+            "foreign",
+            FETCH_URL,
+            json!({"url": format!("https://{FOREIGN}/")}),
+        )],
+    ));
+    server.script.push(answer(ANSWER));
+    let frames = server
+        .turn(chat, "Wait for the run, then fetch it.", None)
+        .await;
+    assert!(settled(&frames), "the wait settles: {frames:?}");
+
+    let completions = server.completions().await;
+    let [_, resumed, last] = completions.as_slice() else {
+        panic!("the wait, the fetch and the answer: {completions:?}");
+    };
+    let offered = advertised(resumed);
+    assert!(
+        names(&offered, FETCH_URL),
+        "fetch_url holds itself to the domains, so the resumed round keeps it: {offered}"
+    );
+    assert!(
+        names(&offered, &served(LISTED_SERVER)),
+        "a listed server at an admitted host stays readmitted: {offered}"
+    );
+    assert!(!names(&offered, &served(UNLISTED_SERVER)), "{offered}");
+    let refused = result(last, "foreign");
+    assert!(
+        refused.contains(&Denial::Domain.to_string()),
+        "{FOREIGN} is not on the list: {refused}"
+    );
+    let audits = denials(server.pool()).await;
+    let [audit] = audits.as_slice() else {
+        panic!("one refusal, one audit: {audits:?}");
+    };
+    assert_eq!(audit.resource_id, Some(chat));
+    let values = audit.new_values.as_ref().expect("the denial's values");
+    assert_eq!(values["code"], Denial::Domain.code());
+    assert_eq!(values["detail"], FOREIGN);
 
     server.cleanup().await;
 }

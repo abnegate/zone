@@ -63,7 +63,6 @@ pub struct Handover {
     strict: bool,
     /// The directory the chat's project starts it in, on whichever login it runs.
     directory: Option<PathBuf>,
-    /// The agent policy the turn runs under.
     policy: Option<Effective>,
 }
 

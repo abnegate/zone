@@ -112,7 +112,6 @@ impl Preferences {
         }
     }
 
-    /// These preferences choosing only models `policy` lets run whenever the choice is theirs.
     pub fn under(self, policy: Option<&Effective>) -> Self {
         Self {
             policy: policy.cloned(),
@@ -120,7 +119,6 @@ impl Preferences {
         }
     }
 
-    /// Whether the policy lets these preferences choose `name`.
     fn permits(&self, name: &str) -> bool {
         self.policy
             .as_ref()
@@ -442,7 +440,6 @@ pub fn summary_model(
     (catalog.chooses() || !is_auto(&model)).then_some(model)
 }
 
-/// The first of `names` the agent knows.
 fn known<'a>(kind: AgentKind, names: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {
     names
         .into_iter()
