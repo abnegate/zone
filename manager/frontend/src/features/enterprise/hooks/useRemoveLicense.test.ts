@@ -52,6 +52,25 @@ describe('useRemoveLicense', () => {
     expect(get).not.toHaveBeenCalled();
   });
 
+  it('keeps the Community response when a license read in flight settles after the removal', async () => {
+    let settleRead: (value: LicenseResponse) => void = () => {};
+    get.mockImplementation(() => new Promise((settle) => (settleRead = settle)));
+    remove.mockResolvedValue(COMMUNITY);
+    const removed = mock();
+    const { queryClient, result } = setup();
+    const read = queryClient
+      .fetchQuery({ queryKey: licenseQueryKeys.current, queryFn: get })
+      .catch(() => undefined);
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(1));
+
+    act(() => result.current.remove(removed));
+    await waitFor(() => expect(removed).toHaveBeenCalled());
+    settleRead(ACTIVE);
+    await read;
+
+    expect(queryClient.getQueryData<LicenseResponse>(licenseQueryKeys.current)).toEqual(COMMUNITY);
+  });
+
   it('exposes a failure and keeps the license in the cache', async () => {
     remove.mockRejectedValue(new Error('Failed to remove the license: 500'));
     const removed = mock();

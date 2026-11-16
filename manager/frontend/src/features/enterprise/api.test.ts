@@ -56,7 +56,7 @@ describe('licenseApi.get', () => {
   it('rejects a response outside the contract', async () => {
     respond({ ...ACTIVE, status: 'expired' });
 
-    expect(await failure(licenseApi.get())).toBeInstanceOf(Error);
+    await expect(licenseApi.get()).rejects.toThrow('Validation failed');
   });
 
   it('throws an ApiError carrying the status when the user is not a server admin', async () => {
@@ -138,7 +138,7 @@ describe('licenseApi.set', () => {
   it('sends nothing for a key that is only whitespace', async () => {
     const request = respond(ACTIVE);
 
-    expect(await failure(licenseApi.set('  \n'))).toBeInstanceOf(Error);
+    await expect(licenseApi.set('  \n')).rejects.toThrow('Validation failed');
     expect(request).not.toHaveBeenCalled();
   });
 });

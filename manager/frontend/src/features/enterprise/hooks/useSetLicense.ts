@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { licenseApi } from '../api';
 import { LicenseRefusal } from '../LicenseRefusal';
-import { licenseQueryKeys } from '../queryKeys';
+import { licenseMutationKeys, licenseQueryKeys } from '../queryKeys';
 import type { LicenseResponse } from '../types';
 
 export interface SetLicenseState {
@@ -16,8 +16,10 @@ export function useSetLicense(): SetLicenseState {
   const queryClient = useQueryClient();
 
   const { mutate, isPending, error, reset } = useMutation({
+    mutationKey: licenseMutationKeys.change,
     mutationFn: (key: string) => licenseApi.set(key),
-    onSuccess: (response) => {
+    onSuccess: async (response) => {
+      await queryClient.cancelQueries({ queryKey: licenseQueryKeys.current });
       queryClient.setQueryData(licenseQueryKeys.current, response);
     },
   });

@@ -56,3 +56,5 @@ export const UNCOUNTED_COMMUNITY: LicenseResponse = {
   ...COMMUNITY,
   seats: { used: null, licensed: null, over: false },
 };
+
+export const ENFORCEMENT_CLAIM = /configur|stop|sign-in|polic|disable/i;

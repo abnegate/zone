@@ -21,10 +21,11 @@ const BADGE_VARIANTS: Readonly<Record<Tone, BadgeProps['variant']>> = {
 
 interface LicenseSummaryProps {
   response: LicenseResponse;
+  changing: boolean;
   onRemove: () => void;
 }
 
-export function LicenseSummary({ response, onRemove }: LicenseSummaryProps) {
+export function LicenseSummary({ response, changing, onRemove }: LicenseSummaryProps) {
   const { edition, status, license, seats, unverified } = response;
 
   return (
@@ -39,7 +40,7 @@ export function LicenseSummary({ response, onRemove }: LicenseSummaryProps) {
         )}
         {storesLicense(response) && (
           <div className="license-summary-actions">
-            <Button type="button" variant="ghost" size="sm" onClick={onRemove}>
+            <Button type="button" variant="ghost" size="sm" disabled={changing} onClick={onRemove}>
               Remove license
             </Button>
           </div>

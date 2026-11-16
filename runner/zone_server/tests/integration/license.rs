@@ -37,6 +37,13 @@ const WITHHOLD_SESSIONS_ON_CHANGE: &str = "
     CREATE TRIGGER withhold_sessions AFTER INSERT OR UPDATE OR DELETE ON licenses
     FOR EACH STATEMENT EXECUTE FUNCTION withhold_sessions();
 ";
+/// Seats are also counted from `organization_members`, which neither the
+/// token check nor the admin guard reads; renaming it fails only the count,
+/// so the admin's request still authenticates. Only this test's own database
+/// is touched.
+const WITHHOLD_MEMBERSHIPS: &str =
+    "ALTER TABLE organization_members RENAME TO withheld_organization_members";
+const WITHHOLD_LICENSES: &str = "ALTER TABLE licenses RENAME TO withheld_licenses";
 
 struct Account {
     id: Uuid,
@@ -182,11 +189,8 @@ impl Fixture {
             .unwrap();
     }
 
-    async fn withhold_sessions_on_change(&self) {
-        sqlx::raw_sql(WITHHOLD_SESSIONS_ON_CHANGE)
-            .execute(self.pool())
-            .await
-            .unwrap();
+    async fn withhold(&self, statement: &'static str) {
+        sqlx::raw_sql(statement).execute(self.pool()).await.unwrap();
     }
 
     async fn stored(&self) -> Option<String> {
@@ -814,7 +818,7 @@ async fn setting_a_key_whose_seats_cannot_be_counted_reports_usage_as_unknown() 
     };
     let key = issue(&payload);
     fixture.register().await;
-    fixture.withhold_sessions_on_change().await;
+    fixture.withhold(WITHHOLD_SESSIONS_ON_CHANGE).await;
 
     let response = fixture.put(&admin.token, &key).await;
 
@@ -836,7 +840,7 @@ async fn removing_a_key_whose_seats_cannot_be_counted_reports_usage_as_unknown()
         .put(&admin.token, &active(Tier::Team))
         .await
         .assert_status(StatusCode::OK);
-    fixture.withhold_sessions_on_change().await;
+    fixture.withhold(WITHHOLD_SESSIONS_ON_CHANGE).await;
 
     let response = fixture.delete(&admin.token).await;
 
@@ -846,6 +850,45 @@ async fn removing_a_key_whose_seats_cannot_be_counted_reports_usage_as_unknown()
     assert_uncounted(&body, Value::Null);
     assert_eq!(fixture.rows().await, 0);
     assert_eq!(fixture.audits(actions::LICENSE_REMOVED).await.len(), 1);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn reading_a_license_whose_seats_cannot_be_counted_reports_usage_as_unknown() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    let payload = current(Tier::Team);
+    fixture
+        .put(&admin.token, &issue(&payload))
+        .await
+        .assert_status(StatusCode::OK);
+    fixture.withhold(WITHHOLD_MEMBERSHIPS).await;
+
+    let response = fixture.get(&admin.token).await;
+
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    assert_eq!(body["edition"], "team", "{body}");
+    assert_eq!(body["status"], "active", "{body}");
+    assert_eq!(body["license"], details(&payload));
+    assert_uncounted(&body, json!(SEATS));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_license_that_cannot_be_loaded_is_a_server_error() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    fixture
+        .put(&admin.token, &active(Tier::Team))
+        .await
+        .assert_status(StatusCode::OK);
+    fixture.withhold(WITHHOLD_LICENSES).await;
+
+    let response = fixture.get(&admin.token).await;
+
+    response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(response.json_value().get("license").is_none());
     fixture.cleanup().await;
 }
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   ACTIVE,
   COMMUNITY,
+  ENFORCEMENT_CLAIM,
   GRACE,
   LAPSED,
   OVER_SEATS,
@@ -70,16 +71,22 @@ describe('statusNotice', () => {
     expect(statusNotice(ACTIVE)).toBeNull();
   });
 
-  it('says when the grace period ends', () => {
-    expect(statusNotice(GRACE)).toContain('grace period ends Dec 1, 2027');
-    expect(statusNotice(GRACE)).toContain('expired on Nov 1, 2027');
+  it('says when the license expired and asks for renewal before the grace period ends', () => {
+    expect(statusNotice(GRACE)).toBe(
+      'This license expired on Nov 1, 2027. Its grace period ends Dec 1, 2027; renew before then.'
+    );
   });
 
-  it('says configuring Enterprise features has stopped while sign-in and policies continue', () => {
-    const notice = statusNotice(LAPSED);
-    expect(notice).toContain('lapsed on Dec 1, 2027');
-    expect(notice).toContain('Configuring Enterprise features has stopped');
-    expect(notice).toContain('Sign-in and existing policies keep working');
+  it('says when the license lapsed and asks for a renewed key', () => {
+    expect(statusNotice(LAPSED)).toBe(
+      'This license lapsed on Dec 1, 2027. Paste a renewed license key to replace it.'
+    );
+  });
+
+  it('claims no feature stops working, since nothing is gated on the license yet', () => {
+    for (const response of [GRACE, LAPSED]) {
+      expect(statusNotice(response)).not.toMatch(ENFORCEMENT_CLAIM);
+    }
   });
 });
 
