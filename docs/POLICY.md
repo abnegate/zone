@@ -281,8 +281,8 @@ the reason.
 Where Zone picks the model itself, it picks only among allowed ones. Chat
 titles, pull request subjects, auto-project summaries and image-intent checks
 try their usual candidates in order and use the first one the policy allows.
-If none is allowed, Zone skips that completion, falls back as it does when the
-model doesn't answer in time, and records the denial in the audit log.
+If none is allowed, Zone skips that completion and records the denial in the
+audit log.
 Auto-project reviews and pull request repairs fail with the denial instead.
 
 ### What a policy can't govern
