@@ -26,7 +26,9 @@ const fixtures = process.env.ZONE_COMFY_FIXTURES;
 
 function digestOf(name: string): string {
   if (!fixtures) throw new Error('ZONE_COMFY_FIXTURES must point at the stand-in fixtures');
-  return createHash('sha256').update(readFileSync(join(fixtures, name))).digest('hex');
+  return createHash('sha256')
+    .update(readFileSync(join(fixtures, name)))
+    .digest('hex');
 }
 
 async function openChat(page: import('@playwright/test').Page, title: string) {
@@ -83,9 +85,7 @@ test('a drawing request renders in the thread', async ({ page, consoleErrors }) 
   await sendAndSettle(page, 'draw a picture of a red bicycle in the rain');
 
   await expect(page.locator('[data-testid="message-image"]')).toHaveCount(1);
-  expect(await attachmentDigest(page, '[data-testid="message-image"]')).toBe(
-    digestOf('image.png')
-  );
+  expect(await attachmentDigest(page, '[data-testid="message-image"]')).toBe(digestOf('image.png'));
   expect(consoleErrors).toEqual([]);
 });
 

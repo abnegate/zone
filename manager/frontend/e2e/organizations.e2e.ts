@@ -1,4 +1,4 @@
-import { test, expect } from './fixtures';
+import { expect, test } from './fixtures';
 import { setupAuth } from './helpers/auth';
 import { blockServiceWorker, routeApi } from './test-utils';
 
@@ -43,12 +43,12 @@ const mockOrgs = [
 
 const mockWorkspaces: Record<string, ReturnType<typeof generateMockWorkspace>[]> = {
   'org-1': [
-    generateMockWorkspace('ws-1', 'org-1', 'Engineering', 'engineering', { description: 'Dev team' }),
+    generateMockWorkspace('ws-1', 'org-1', 'Engineering', 'engineering', {
+      description: 'Dev team',
+    }),
     generateMockWorkspace('ws-2', 'org-1', 'Marketing', 'marketing'),
   ],
-  'org-2': [
-    generateMockWorkspace('ws-3', 'org-2', 'Default', 'default'),
-  ],
+  'org-2': [generateMockWorkspace('ws-3', 'org-2', 'Default', 'default')],
 };
 
 test.describe('Organizations & Context Switcher', () => {
@@ -363,9 +363,7 @@ test.describe('Organizations & Context Switcher', () => {
       await page.waitForTimeout(300);
 
       // Check localStorage
-      const orgId = await page.evaluate(() =>
-        localStorage.getItem('manager_current_org')
-      );
+      const orgId = await page.evaluate(() => localStorage.getItem('manager_current_org'));
       expect(orgId).toBe('org-1');
     });
 

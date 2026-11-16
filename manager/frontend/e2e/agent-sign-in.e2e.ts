@@ -880,9 +880,7 @@ test.describe('Coding agent sign-in', () => {
     await capture(page, 'codex-refused');
   });
 
-  test('the old organization settings address opens organization AI settings', async ({
-    page,
-  }) => {
+  test('the old organization settings address opens organization AI settings', async ({ page }) => {
     await mockApi(page, {
       role: 'owner',
       provider: 'claude_code',

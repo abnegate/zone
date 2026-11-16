@@ -1,15 +1,15 @@
-import { test, expect } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { RESPONDING } from '../src/features/chats/components/Generation';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import {
-  GENERATED_ARTIFACT_URL,
-  MOCK_PNG_BYTES,
-  MOCK_PNG_DATA_URL,
-  generatedAttachment,
-  installChatSocketMock,
   type ChatSendPayload,
   type ChatSocketController,
+  GENERATED_ARTIFACT_URL,
+  generatedAttachment,
+  installChatSocketMock,
+  MOCK_PNG_BYTES,
+  MOCK_PNG_DATA_URL,
 } from './helpers/chatSocket';
-import { RESPONDING } from '../src/features/chats/components/Generation';
 import { blockServiceWorker, CHAT_PROVIDERS, routeApi } from './test-utils';
 
 const mockChat = {
@@ -165,16 +165,17 @@ test.describe('Chat images', () => {
     const started = (await timer.textContent()) ?? '';
     await expect(timer).not.toHaveText(started);
     await expect(page.locator('.generation-spinner')).toBeVisible();
-    await expect(page.locator('.generation-spinner')).toHaveCSS('animation-name', 'generation-spin');
+    await expect(page.locator('.generation-spinner')).toHaveCSS(
+      'animation-name',
+      'generation-spin'
+    );
     await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Send', exact: true })).toHaveCount(0);
     await expect(page.locator('.chat-header')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Attach files' })).toBeVisible();
     await page.fill('.message-form textarea', 'Next prompt');
     await page.locator('.message-form textarea').press('Enter');
-    await expect
-      .poll(() => sent)
-      .toEqual(['Make a pretty picture of a blue fox', 'Next prompt']);
+    await expect.poll(() => sent).toEqual(['Make a pretty picture of a blue fox', 'Next prompt']);
     await expect(page.getByRole('status')).toHaveText('Generating image…');
     await expect(page.getByRole('alert')).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('generation-pending.png'), fullPage: true });

@@ -67,10 +67,7 @@ function width(
   }));
 }
 
-async function expectNoSidewaysScroll(
-  page: Page,
-  screen: (typeof screens)[number]
-): Promise<void> {
+async function expectNoSidewaysScroll(page: Page, screen: (typeof screens)[number]): Promise<void> {
   const main = await width(page);
   expect(main.scroll).toBeLessThanOrEqual(main.client);
   if (!screen.body) return;
@@ -309,9 +306,7 @@ test.describe('Page bar on a 1440px desktop', () => {
 test.describe('Settings on a 1280x720 laptop', () => {
   test.use({ viewport: { width: 1280, height: 720 } });
 
-  test('controls below the fold never grow the document past the viewport', async ({
-    page,
-  }) => {
+  test('controls below the fold never grow the document past the viewport', async ({ page }) => {
     await open(page, screens[0]);
     const body = page.locator('.page-body');
     expect(await body.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(

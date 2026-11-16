@@ -1,4 +1,4 @@
-import { api, expect, signIn, SOURCES_PATH, state, test, tokenFor } from './harness';
+import { api, expect, SOURCES_PATH, signIn, state, test, tokenFor } from './harness';
 
 /**
  * The layout contract every page is held to, measured live at the smallest
@@ -100,7 +100,10 @@ test('no conversation stretches the document past the viewport', async ({ page }
   const overflowing: Record<string, number> = {};
   for (const chat of chats) {
     await page.goto(`/chats?id=${chat.id}`);
-    await page.locator('.messages-container').waitFor({ timeout: 15_000 }).catch(() => undefined);
+    await page
+      .locator('.messages-container')
+      .waitFor({ timeout: 15_000 })
+      .catch(() => undefined);
     await page.waitForLoadState('networkidle').catch(() => undefined);
     const overflow = await documentOverflow(page);
     if (overflow !== 0) overflowing[chat.id] = overflow;
@@ -155,9 +158,7 @@ test('chat titles keep the row width and the conversation header stays one row',
   const covered = await item.evaluate((element) => {
     const overlay = element.querySelector('.chat-item-actions')?.getBoundingClientRect();
     const title = element.querySelector('.chat-title')?.getBoundingClientRect();
-    return Boolean(
-      overlay && title && overlay.top <= title.top && overlay.bottom >= title.bottom
-    );
+    return Boolean(overlay && title && overlay.top <= title.top && overlay.bottom >= title.bottom);
   });
   expect(covered, 'the hover actions leave the title showing above them').toBe(true);
 
@@ -213,14 +214,18 @@ test('the add source tiles are one 56px row each', async ({ page }) => {
   const heights = await tiles.evaluateAll((elements) =>
     elements.map((element) => Math.round(element.getBoundingClientRect().height))
   );
-  expect(heights.every((height) => height === 56), heights.join(',')).toBe(true);
+  expect(
+    heights.every((height) => height === 56),
+    heights.join(',')
+  ).toBe(true);
 
-  const wrapped = await tiles.evaluateAll((elements) =>
-    elements.filter((element) =>
-      [...element.querySelectorAll('.source-type-name, .source-type-desc')].some(
-        (line) => line.getBoundingClientRect().height > 24
-      )
-    ).length
+  const wrapped = await tiles.evaluateAll(
+    (elements) =>
+      elements.filter((element) =>
+        [...element.querySelectorAll('.source-type-name, .source-type-desc')].some(
+          (line) => line.getBoundingClientRect().height > 24
+        )
+      ).length
   );
   expect(wrapped, 'a tile line wrapped').toBe(0);
 });
@@ -231,9 +236,9 @@ test('sibling cards in a grid share one height', async ({ page }) => {
   for (const [route, selector] of [['/wiki', '.knowledge-card']] as const) {
     await page.goto(route);
     await page.waitForLoadState('networkidle').catch(() => undefined);
-    const heights = await page.locator(selector).evaluateAll((cards) =>
-      cards.map((card) => Math.round(card.getBoundingClientRect().height))
-    );
+    const heights = await page
+      .locator(selector)
+      .evaluateAll((cards) => cards.map((card) => Math.round(card.getBoundingClientRect().height)));
     if (heights.length < 2) continue;
     expect(new Set(heights).size, `${selector} heights ${heights.join(',')}`).toBe(1);
   }
@@ -261,9 +266,10 @@ test('the settings save footer stays on the pane edge at both ends of the scroll
       const atEnd = bottom();
       return { pane: body.getBoundingClientRect().bottom, atTop, atEnd };
     });
-    expect(Math.abs((edges.atTop ?? 0) - edges.pane), `${route} while scrolling`).toBeLessThanOrEqual(
-      1
-    );
+    expect(
+      Math.abs((edges.atTop ?? 0) - edges.pane),
+      `${route} while scrolling`
+    ).toBeLessThanOrEqual(1);
     expect(
       Math.abs((edges.atEnd ?? 0) - edges.pane),
       `${route} at the end of the scroll`

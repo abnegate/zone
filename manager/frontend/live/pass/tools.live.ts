@@ -26,8 +26,7 @@ import {
  * transcript (chat_entries), never from what the model says it did.
  */
 
-const REPO =
-  process.env.ZONE_LIVE_REPO_URL ?? 'https://github.com/abnegate/zone-tests';
+const REPO = process.env.ZONE_LIVE_REPO_URL ?? 'https://github.com/abnegate/zone-tests';
 const [OWNER, NAME] = REPO.replace(/^https:\/\/github\.com\//, '').split('/');
 const work = process.env.ZONE_LIVE_WORK ?? '/tmp/zone-live-verify';
 const gh = {
@@ -37,24 +36,24 @@ const gh = {
 
 function toolNames(chatId: string): string[] {
   return sql(
-    `select c->'function'->>'name' from chat_entries, jsonb_array_elements(coalesce(nullif(message->'tool_calls', 'null'::jsonb), '[]'::jsonb)) c where chat_id = '${chatId}' order by position`,
+    `select c->'function'->>'name' from chat_entries, jsonb_array_elements(coalesce(nullif(message->'tool_calls', 'null'::jsonb), '[]'::jsonb)) c where chat_id = '${chatId}' order by position`
   );
 }
 
 function toolResults(chatId: string, tool: string): string[] {
   return sql(
-    `select left(r.message->>'content', 400) from chat_entries a join chat_entries r on r.chat_id = a.chat_id and r.message->>'role' = 'tool' and r.message->>'tool_call_id' = a.message->'tool_calls'->0->>'id' where a.chat_id = '${chatId}' and a.message->'tool_calls'->0->'function'->>'name' = '${tool}' order by r.position`,
+    `select left(r.message->>'content', 400) from chat_entries a join chat_entries r on r.chat_id = a.chat_id and r.message->>'role' = 'tool' and r.message->>'tool_call_id' = a.message->'tool_calls'->0->>'id' where a.chat_id = '${chatId}' and a.message->'tool_calls'->0->'function'->>'name' = '${tool}' order by r.position`
   );
 }
 
-async function messagesOf(
-  chatId: string,
-): Promise<{ role: string; content: string }[]> {
+async function messagesOf(chatId: string): Promise<{ role: string; content: string }[]> {
   const { body } = await api('GET', `/api/chats/${chatId}/messages`, {
     token: await ownerToken(),
   });
-  return ((body as { messages?: { role: string; content: string }[] })
-    .messages ?? []) as { role: string; content: string }[];
+  return ((body as { messages?: { role: string; content: string }[] }).messages ?? []) as {
+    role: string;
+    content: string;
+  }[];
 }
 
 function findFile(name: string): string[] {
@@ -68,11 +67,10 @@ function findFile(name: string): string[] {
   const found: string[] = [];
   for (const root of roots) {
     try {
-      const out = execFileSync(
-        'find',
-        [root, '-name', name, '-not', '-path', '*/node_modules/*'],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
-      );
+      const out = execFileSync('find', [root, '-name', name, '-not', '-path', '*/node_modules/*'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
       found.push(...out.split('\n').filter(Boolean));
     } catch {
       // a root that does not exist or cannot be searched says nothing
@@ -97,7 +95,7 @@ test.describe('agent tools from chat', () => {
     const chatId = await agentChat(page, false);
     await send(
       page,
-      `Create a file called notes-${s}.txt in your working directory containing exactly one line: first line ${s}`,
+      `Create a file called notes-${s}.txt in your working directory containing exactly one line: first line ${s}`
     );
     const approve = page.locator('[data-testid="tool-approve"]').first();
     await expect(approve).toBeVisible({ timeout: 600_000 });
@@ -110,9 +108,7 @@ test.describe('agent tools from chat', () => {
     ).replace(/\s+/g, ' ');
     await shot(page, '40-approval-card');
     await approve.click();
-    await ask(page, '', { replies: 1, approve: true, timeout: 600_000 }).catch(
-      () => undefined,
-    );
+    await ask(page, '', { replies: 1, approve: true, timeout: 600_000 }).catch(() => undefined);
     await expect(page.locator('.message-assistant')).toHaveCount(1, {
       timeout: 600_000,
     });
@@ -120,31 +116,23 @@ test.describe('agent tools from chat', () => {
       timeout: 600_000,
     });
     const written = findFile(`notes-${s}.txt`);
-    const receipt = await page
-      .locator('[data-testid="action-receipt"], .tool-call--ok')
-      .count();
+    const receipt = await page.locator('[data-testid="action-receipt"], .tool-call--ok').count();
     await shot(page, '40-write-approved');
 
-    const readReply = await ask(
-      page,
-      `Read notes-${s}.txt back to me word for word.`,
-      { replies: 2, timeout: 600_000 },
-    );
+    const readReply = await ask(page, `Read notes-${s}.txt back to me word for word.`, {
+      replies: 2,
+      timeout: 600_000,
+    });
     await shot(page, '40-read-file');
     await ask(
       page,
       `Apply a patch to notes-${s}.txt that changes "first line" to "second line", then show me the file.`,
-      { replies: 3, timeout: 900_000 },
+      { replies: 3, timeout: 900_000 }
     );
     await shot(page, '40-apply-patch');
-    const patched = written.length
-      ? execFileSync('cat', [written[0]], { encoding: 'utf8' })
-      : '';
+    const patched = written.length ? execFileSync('cat', [written[0]], { encoding: 'utf8' }) : '';
 
-    await send(
-      page,
-      `Create another file called denied-${s}.txt containing the word never.`,
-    );
+    await send(page, `Create another file called denied-${s}.txt containing the word never.`);
     const deny = page.locator('[data-testid="tool-deny"]').first();
     await expect(deny).toBeVisible({ timeout: 600_000 });
     await shot(page, '40-deny-card');
@@ -159,7 +147,7 @@ test.describe('agent tools from chat', () => {
     await shot(page, '40-write-denied');
     const tools = toolNames(chatId);
     const deniedResult = toolResults(chatId, 'write_file').filter((r) =>
-      /den|declin|refus|not approved/i.test(r),
+      /den|declin|refus|not approved/i.test(r)
     );
     record(40, {
       result:
@@ -203,19 +191,17 @@ test.describe('agent tools from chat', () => {
     const fg = await ask(
       page,
       'Run the shell command uname -sm and tell me exactly what it printed.',
-      { replies: 1, timeout: 600_000 },
+      { replies: 1, timeout: 600_000 }
     );
     await shot(page, '41-run-shell-foreground');
     await ask(
       page,
       `Start a background shell job that sleeps 20 seconds and then prints BG-DONE-${s}. Do not wait in the foreground: wait for the background job to finish, then read its log and tell me the exact line it printed.`,
-      { replies: 2, timeout: 900_000 },
+      { replies: 2, timeout: 900_000 }
     );
     const jobCard = await page.locator('[data-testid="job-card"]').count();
     const waitCard = await page.locator('[data-testid="wait-card"]').count();
-    const waitOutcome = await page
-      .locator('[data-testid="wait-outcome"]')
-      .count();
+    const waitOutcome = await page.locator('[data-testid="wait-outcome"]').count();
     await shot(page, '41-background-job');
     const tools = toolNames(chatId);
     const bg = toolResults(chatId, 'run_shell');
@@ -247,14 +233,12 @@ test.describe('agent tools from chat', () => {
     expect(tools).toContain('tail_job');
   });
 
-  test('42: ask_user renders a question card and the answer is the next turn', async ({
-    page,
-  }) => {
+  test('42: ask_user renders a question card and the answer is the next turn', async ({ page }) => {
     await signIn(page);
     const chatId = await agentChat(page);
     await send(
       page,
-      'Before answering, ask me which of these three cities I mean, offering them as choices: Auckland, Wellington, Christchurch. Once I choose, tell me one fact about that city.',
+      'Before answering, ask me which of these three cities I mean, offering them as choices: Auckland, Wellington, Christchurch. Once I choose, tell me one fact about that city.'
     );
     const card = page.locator('[data-testid="question-card"]').first();
     await expect(card).toBeVisible({ timeout: 600_000 });
@@ -274,13 +258,10 @@ test.describe('agent tools from chat', () => {
     await shot(page, '42-answered');
     const tools = toolNames(chatId);
     const userTurns = sql(
-      `select left(message->>'content', 120) from chat_entries where chat_id = '${chatId}' and message->>'role' = 'user' order by position`,
+      `select left(message->>'content', 120) from chat_entries where chat_id = '${chatId}' and message->>'role' = 'user' order by position`
     );
     record(42, {
-      result:
-        tools.includes('ask_user') && /wellington/i.test(answer)
-          ? 'WORKS'
-          : 'FAILS',
+      result: tools.includes('ask_user') && /wellington/i.test(answer) ? 'WORKS' : 'FAILS',
       chat_id: chatId,
       question: question.slice(0, 300),
       answer: answer.slice(0, 200),
@@ -300,7 +281,7 @@ test.describe('agent tools from chat', () => {
     await ask(
       page,
       `Please remember this about me for future conversations: my favourite text editor is Helix, and my project codename is falcon-${s}.`,
-      { replies: 1, timeout: 600_000 },
+      { replies: 1, timeout: 600_000 }
     );
     await shot(page, '43-memory-written');
     const writeTools = toolNames(first);
@@ -309,7 +290,7 @@ test.describe('agent tools from chat', () => {
     const readBack = await ask(
       page,
       'Which text editor do I prefer, and what is my project codename? Check what you remember about me.',
-      { replies: 1, timeout: 600_000 },
+      { replies: 1, timeout: 600_000 }
     );
     const badge = await page.locator('[data-testid="memory-badge"]').count();
     await shot(page, '43-memory-read-with-badge');
@@ -320,18 +301,17 @@ test.describe('agent tools from chat', () => {
     await ask(
       page,
       `Add to the stored note about my editor that I use the Catppuccin theme with it.`,
-      { replies: 3, timeout: 600_000 },
+      { replies: 3, timeout: 600_000 }
     );
     await shot(page, '43-memory-appended');
-    await ask(
-      page,
-      `Forget the stored note about my project codename falcon-${s}.`,
-      { replies: 4, timeout: 600_000 },
-    );
+    await ask(page, `Forget the stored note about my project codename falcon-${s}.`, {
+      replies: 4,
+      timeout: 600_000,
+    });
     await shot(page, '43-memory-deleted');
     const readTools = toolNames(second);
     const rows = sql(
-      `select left(title, 80) || ' | ' || left(replace(content, E'\\n', ' '), 120) from knowledge_entries where category = 'memory' order by updated_at desc limit 6`,
+      `select left(title, 80) || ' | ' || left(replace(content, E'\\n', ' '), 120) from knowledge_entries where category = 'memory' order by updated_at desc limit 6`
     );
     record(43, {
       result:
@@ -380,7 +360,7 @@ test.describe('agent tools from chat', () => {
       // than two minutes to reach the tool call, and the server rightly
       // refuses a due time that has already passed by then.
       `Set a reminder for me ten minutes from now that says: stretch ${s}`,
-      { replies: 1, timeout: 600_000 },
+      { replies: 1, timeout: 600_000 }
     );
     let tools = toolNames(chatId);
     const reminderResults = toolResults(chatId, 'create_reminder');
@@ -389,9 +369,9 @@ test.describe('agent tools from chat', () => {
       .poll(
         () =>
           sql(
-            `select count(*) from reminders where content like '%stretch ${s}%' and status = 'delivered'`,
+            `select count(*) from reminders where content like '%stretch ${s}%' and status = 'delivered'`
           ).join(','),
-        { timeout: 1_500_000, intervals: [5_000] },
+        { timeout: 1_500_000, intervals: [5_000] }
       )
       .toBe('1')
       .then(() => Date.now() - setAt)
@@ -403,7 +383,7 @@ test.describe('agent tools from chat', () => {
     await ask(
       page,
       `Every hour, starting ten minutes from now, run this instruction for me (put the instruction in the reminder's prompt so each firing carries it out): report the current date and time and the word tick-${s}.`,
-      { replies: 2, timeout: 600_000 },
+      { replies: 2, timeout: 600_000 }
     );
     await shot(page, '45-prompt-reminder-set');
     // reminder_turns is the worker's queue and is emptied once a firing has
@@ -413,15 +393,15 @@ test.describe('agent tools from chat', () => {
       .poll(
         () =>
           sql(
-            `select coalesce(max(fired_count), 0) from reminders where content like '%tick-${s}%'`,
+            `select coalesce(max(fired_count), 0) from reminders where content like '%tick-${s}%'`
           ).join(','),
-        { timeout: 480_000, intervals: [5_000] },
+        { timeout: 480_000, intervals: [5_000] }
       )
       .not.toBe('0')
       .then(() => true)
       .catch(() => false);
     const recurringShape = sql(
-      `select case when prompt is null then 'delivers its content' else 'runs its prompt as a turn' end from reminders where content like '%tick-${s}%'`,
+      `select case when prompt is null then 'delivers its content' else 'runs its prompt as a turn' end from reminders where content like '%tick-${s}%'`
     ).join(',');
     await page.reload();
     await page.waitForTimeout(2_000);
@@ -436,35 +416,34 @@ test.describe('agent tools from chat', () => {
     });
     await shot(page, '45-reminder-cancelled');
     const status = sql(
-      `select left(content, 60) || ' | ' || timing_mode || ' | ' || status || ' | ' || coalesce(rrule, '') from reminders where content like '%${s}%' order by created_at`,
+      `select left(content, 60) || ' | ' || timing_mode || ' | ' || status || ' | ' || coalesce(rrule, '') from reminders where content like '%${s}%' order by created_at`
     );
 
     // A watch: fires on its rule and reports only when the thing it reads changed.
     await ask(
       page,
       `Create a file watch-${s}.txt in your working directory containing the word v1. Then set up a watch that runs every minute, reads that file, and tells me only when its content has changed since the last check.`,
-      { replies: 5, timeout: 900_000 },
+      { replies: 5, timeout: 900_000 }
     );
     await shot(page, '45-watch-set');
     const watchRow = sql(
-      `select id || ' | ' || timing_mode || ' | ' || coalesce(rrule,'') || ' | ' || status from reminders where timing_mode = 'condition_watch' and created_at > now() - interval '20 minutes' order by created_at desc limit 1`,
+      `select id || ' | ' || timing_mode || ' | ' || coalesce(rrule,'') || ' | ' || status from reminders where timing_mode = 'condition_watch' and created_at > now() - interval '20 minutes' order by created_at desc limit 1`
     );
     const baselineWait = 150_000;
     await page.waitForTimeout(baselineWait);
     const beforeChange = (await messagesOf(chatId)).length;
-    await ask(
-      page,
-      `Change watch-${s}.txt so that it contains the word v2 instead.`,
-      { replies: 6, timeout: 600_000 },
-    );
+    await ask(page, `Change watch-${s}.txt so that it contains the word v2 instead.`, {
+      replies: 6,
+      timeout: 600_000,
+    });
     const changedAt = Date.now();
     const watchReported = await expect
       .poll(
         () =>
           sql(
-            `select count(*) from reminder_turns t join reminders r on r.id = t.reminder_id where r.timing_mode = 'condition_watch' and t.created_at > now() - interval '10 minutes'`,
+            `select count(*) from reminder_turns t join reminders r on r.id = t.reminder_id where r.timing_mode = 'condition_watch' and t.created_at > now() - interval '10 minutes'`
           ).join(','),
-        { timeout: 300_000, intervals: [5_000] },
+        { timeout: 300_000, intervals: [5_000] }
       )
       .not.toBe('0')
       .then(() => Date.now() - changedAt)
@@ -473,19 +452,16 @@ test.describe('agent tools from chat', () => {
     await page.waitForTimeout(2_000);
     await shot(page, '45-watch-fired-on-change');
     const observations = sql(
-      `select left(coalesce(last_observation,''), 120) || ' | ' || status from reminders where timing_mode = 'condition_watch' and created_at > now() - interval '30 minutes' order by created_at desc limit 1`,
+      `select left(coalesce(last_observation,''), 120) || ' | ' || status from reminders where timing_mode = 'condition_watch' and created_at > now() - interval '30 minutes' order by created_at desc limit 1`
     );
     tools = toolNames(chatId);
     for (const id of sql(
-      `select id from reminders where timing_mode = 'condition_watch' and status = 'pending' and created_at > now() - interval '30 minutes'`,
+      `select id from reminders where timing_mode = 'condition_watch' and status = 'pending' and created_at > now() - interval '30 minutes'`
     )) {
       sql(`update reminders set status = 'cancelled' where id = '${id}'`);
     }
     record(44, {
-      result:
-        tools.includes('load_tools') && tools.includes('create_reminder')
-          ? 'WORKS'
-          : 'FAILS',
+      result: tools.includes('load_tools') && tools.includes('create_reminder') ? 'WORKS' : 'FAILS',
       searched_first: tools.includes('search_tools'),
       note: 'The prompt catalog names every deferred tool, so a model that already knows the name loads it without search_tools; the row asks that the deferred tool is found and loaded, which load_tools alone satisfies',
       cause: tools.includes('create_reminder')
@@ -505,7 +481,8 @@ test.describe('agent tools from chat', () => {
         tools.includes('cancel_reminder')
           ? 'WORKS'
           : 'FAILS',
-      watch: 'the condition watch is judged by row 45c (watch.live.ts), whose hourly cadence is the smallest the tool accepts',
+      watch:
+        'the condition watch is judged by row 45c (watch.live.ts), whose hourly cadence is the smallest the tool accepts',
       chat_id: chatId,
       exact_reminder_fired_after_ms: fired,
       recurring_reminder_fired: promptFired,
@@ -552,31 +529,27 @@ test.describe('agent tools from chat', () => {
     const searched = await ask(
       page,
       `Search the knowledge base for the deployment checklist ${s} and tell me what it says.`,
-      { replies: 1, timeout: 600_000 },
+      { replies: 1, timeout: 600_000 }
     );
     const citations = page.locator('[data-testid="citation"]');
-    const citationText = (await citations.allInnerTexts()).map((c) =>
-      c.replace(/\s+/g, ' '),
-    );
-    const evidenceLabels = await page
-      .locator('.citation-evidence')
-      .allInnerTexts();
+    const citationText = (await citations.allInnerTexts()).map((c) => c.replace(/\s+/g, ' '));
+    const evidenceLabels = await page.locator('.citation-evidence').allInnerTexts();
     await shot(page, '46-search-knowledge-citation');
     await ask(
       page,
       `List the documents in the wiki, then read the one titled "${title}" and quote its first sentence.`,
-      { replies: 2, timeout: 600_000 },
+      { replies: 2, timeout: 600_000 }
     );
     await shot(page, '46-list-and-read');
     await ask(
       page,
       `Create a wiki document titled "Runbook ${s}" whose content is: Step one, check the dashboards. Step two, page the on-call engineer.`,
-      { replies: 3, timeout: 600_000 },
+      { replies: 3, timeout: 600_000 }
     );
     await ask(
       page,
       `Update the "Runbook ${s}" document by appending the line: Reviewed by the live pass ${s}.`,
-      { replies: 4, timeout: 600_000 },
+      { replies: 4, timeout: 600_000 }
     );
     await shot(page, '46-create-and-update');
     const tools = toolNames(chatId);
@@ -585,13 +558,10 @@ test.describe('agent tools from chat', () => {
     const card = page.locator('.knowledge-card', { hasText: `Runbook ${s}` });
     await expect(card).toBeVisible({ timeout: 30_000 });
     await card.click();
-    const dialogText = (await page.locator('.wiki-dialog').innerText()).replace(
-      /\s+/g,
-      ' ',
-    );
+    const dialogText = (await page.locator('.wiki-dialog').innerText()).replace(/\s+/g, ' ');
     await shot(page, '46-wiki-shows-document');
     const stored = sql(
-      `select left(replace(content, E'\\n', ' '), 300) from knowledge_entries where title = 'Runbook ${s}'`,
+      `select left(replace(content, E'\\n', ' '), 300) from knowledge_entries where title = 'Runbook ${s}'`
     );
     record(46, {
       result:
@@ -623,28 +593,25 @@ test.describe('agent tools from chat', () => {
     expect(tools).toContain('update_document');
   });
 
-  test('47: list_chats and search_chat_history reach across chats', async ({
-    page,
-  }) => {
+  test('47: list_chats and search_chat_history reach across chats', async ({ page }) => {
     await signIn(page);
     const s = stamp();
     const other = await newChat(page, { model: 'llama3.2:3b' });
     await ask(
       page,
       `The password for the ${s} vault is quokka-${s}. Please acknowledge in one sentence.`,
-      { replies: 1, timeout: 600_000 },
+      { replies: 1, timeout: 600_000 }
     );
     const chatId = await agentChat(page);
-    const listed = await ask(
-      page,
-      'List my recent chats in this workspace with their titles.',
-      { replies: 1, timeout: 600_000 },
-    );
+    const listed = await ask(page, 'List my recent chats in this workspace with their titles.', {
+      replies: 1,
+      timeout: 600_000,
+    });
     await shot(page, '47-list-chats');
     const found = await ask(
       page,
       `Search my chat history for the word quokka-${s} and tell me which chat mentions it and what it says.`,
-      { replies: 2, timeout: 600_000 },
+      { replies: 2, timeout: 600_000 }
     );
     await shot(page, '47-search-chat-history');
     const tools = toolNames(chatId);
@@ -666,21 +633,19 @@ test.describe('agent tools from chat', () => {
     expect(tools).toContain('search_chat_history');
   });
 
-  test('48: fetch_url reads a page; web_search needs the search backend', async ({
-    page,
-  }) => {
+  test('48: fetch_url reads a page; web_search needs the search backend', async ({ page }) => {
     await signIn(page);
     const chatId = await agentChat(page);
     const fetched = await ask(
       page,
       'Fetch the web page at https://example.com/ and tell me its main heading, word for word.',
-      { replies: 1, timeout: 600_000 },
+      { replies: 1, timeout: 600_000 }
     );
     await shot(page, '48-fetch-url');
     const searched = await ask(
       page,
       'Search the web for the current stable version of the Rust programming language and tell me the version number and where you found it.',
-      { replies: 2, timeout: 600_000 },
+      { replies: 2, timeout: 600_000 }
     );
     await shot(page, '48-web-search');
     const tools = toolNames(chatId);
@@ -720,20 +685,19 @@ test.describe('agent tools from chat', () => {
     const searched = await ask(
       page,
       'Search the web for the current stable version of the Rust programming language and tell me the version and the page you found it on.',
-      { replies: 1, timeout: 600_000 },
+      { replies: 1, timeout: 600_000 }
     );
     await shot(page, '61-web-search');
     const prometheus = await ask(
       page,
       'Ask Prometheus how many scrape targets are up right now, and tell me the number.',
-      { replies: 2, timeout: 600_000 },
+      { replies: 2, timeout: 600_000 }
     );
     await shot(page, '53-query-prometheus');
-    const grafana = await ask(
-      page,
-      'List the Grafana dashboards that exist in this deployment.',
-      { replies: 3, timeout: 600_000 },
-    );
+    const grafana = await ask(page, 'List the Grafana dashboards that exist in this deployment.', {
+      replies: 3,
+      timeout: 600_000,
+    });
     await shot(page, '53-list-grafana-dashboards');
     const tools = toolNames(chatId);
     const searches = execFileSync('docker', ['logs', '--since', since, searxng], {
@@ -772,20 +736,13 @@ test.describe('agent tools from chat', () => {
     expect(monitoringWorks, `${tools.join(',')} || ${grafana.slice(0, 300)}`).toBe(true);
   });
 
-  test('50: the GitHub tools against the scratch repository', async ({
-    page,
-  }) => {
+  test('50: the GitHub tools against the scratch repository', async ({ page }) => {
     test.setTimeout(3_600_000);
     await signIn(page);
     const s = stamp();
     const branch = `chat-pr-${s}`;
     const clone = execFileSync('mktemp', ['-d'], { encoding: 'utf8' }).trim();
-    execFileSync('git', [
-      'clone',
-      '-q',
-      `git@github.com:${OWNER}/${NAME}.git`,
-      clone,
-    ]);
+    execFileSync('git', ['clone', '-q', `git@github.com:${OWNER}/${NAME}.git`, clone]);
     execFileSync('git', ['-C', clone, 'checkout', '-qb', branch]);
     execFileSync('sh', [
       '-c',
@@ -860,9 +817,7 @@ test.describe('agent tools from chat', () => {
     let count = 0;
     for (const [tool, prompt] of steps) {
       count += 1;
-      replies[tool] = (
-        await ask(page, prompt, { replies: count, timeout: 900_000 })
-      ).slice(0, 200);
+      replies[tool] = (await ask(page, prompt, { replies: count, timeout: 900_000 })).slice(0, 200);
       await shot(page, `50-${String(count).padStart(2, '0')}-${tool}`);
     }
     const tools = toolNames(chatId);
@@ -878,7 +833,7 @@ test.describe('agent tools from chat', () => {
         '--json',
         'number,title,headRefName',
       ],
-      { encoding: 'utf8', env: gh },
+      { encoding: 'utf8', env: gh }
     );
     const chatPr = (
       JSON.parse(prs) as {
@@ -888,13 +843,10 @@ test.describe('agent tools from chat', () => {
       }[]
     ).find((p) => p.headRefName === branch);
     const missing = steps
-      .filter(
-        ([label, , accepts]) =>
-          !(accepts ?? [label]).some((tool) => tools.includes(tool)),
-      )
+      .filter(([label, , accepts]) => !(accepts ?? [label]).some((tool) => tools.includes(tool)))
       .map(([label]) => label);
     record(50, {
-      result: missing.length === 0 && Boolean(chatPr) ? 'WORKS' : 'FAILS',
+      result: missing.length === 0 && chatPr ? 'WORKS' : 'FAILS',
       cause:
         missing.length === 0
           ? undefined
@@ -904,22 +856,13 @@ test.describe('agent tools from chat', () => {
       pull_request_opened_by_chat: chatPr ?? null,
       replies,
       tools,
-      screenshots: steps.map(
-        ([tool], i) => `50-${String(i + 1).padStart(2, '0')}-${tool}.png`,
-      ),
+      screenshots: steps.map(([tool], i) => `50-${String(i + 1).padStart(2, '0')}-${tool}.png`),
     });
     if (chatPr) {
       execFileSync(
         'gh',
-        [
-          'pr',
-          'close',
-          String(chatPr.number),
-          '-R',
-          `${OWNER}/${NAME}`,
-          '--delete-branch',
-        ],
-        { env: gh },
+        ['pr', 'close', String(chatPr.number), '-R', `${OWNER}/${NAME}`, '--delete-branch'],
+        { env: gh }
       );
     }
     expect(missing, `tools never called: ${missing.join(', ')}`).toEqual([]);
@@ -943,39 +886,39 @@ test.describe('agent tools from chat', () => {
     await ask(
       page,
       `Create a task in the project "Real pass scratch" titled "Chat-made task ${s}" with the description: list the files in the working directory and report how many there are. (a manual task is fine).`,
-      { replies: 3, timeout: 600_000 },
+      { replies: 3, timeout: 600_000 }
     );
     await ask(
       page,
       `Update the task "Chat-made task ${s}": set its priority to 5 and add "Created from chat" to its description.`,
-      { replies: 4, timeout: 600_000 },
+      { replies: 4, timeout: 600_000 }
     );
     const started = await ask(
       page,
       `Now start a background coding task in the project "Real pass scratch" titled "Chat-run ${s}" whose job is to list the files in its working directory and report how many there are, and tell me the task id and run id it gave you.`,
-      { replies: 5, timeout: 900_000 },
+      { replies: 5, timeout: 900_000 }
     );
     await shot(page, '51-task-created-and-started');
     const manualRow = sql(
-      `select id || ' | ' || status || ' | ' || coalesce(priority::text, '-') || ' | ' || is_agentic from tasks where title = 'Chat-made task ${s}'`,
+      `select id || ' | ' || status || ' | ' || coalesce(priority::text, '-') || ' | ' || is_agentic from tasks where title = 'Chat-made task ${s}'`
     );
     const taskRow = sql(
-      `select id || ' | ' || status || ' | ' || coalesce(priority::text, '-') || ' | ' || is_agentic from tasks where title = 'Chat-run ${s}' order by created_at desc limit 1`,
+      `select id || ' | ' || status || ' | ' || coalesce(priority::text, '-') || ' | ' || is_agentic from tasks where title = 'Chat-run ${s}' order by created_at desc limit 1`
     );
     const taskId = taskRow[0]?.split(' | ')[0] ?? '';
     await expect
       .poll(
         async () =>
           sql(
-            `select status from task_runs where task_id = '${taskId}' order by started_at desc limit 1`,
+            `select status from task_runs where task_id = '${taskId}' order by started_at desc limit 1`
           ).join(','),
-        { timeout: 1_500_000, intervals: [5_000] },
+        { timeout: 1_500_000, intervals: [5_000] }
       )
       .toMatch(/completed|failed/);
     const status = await ask(
       page,
       `Use get_task_run to read the latest run of the task "Chat-run ${s}" and tell me its status in one sentence.`,
-      { replies: 6, timeout: 600_000 },
+      { replies: 6, timeout: 600_000 }
     );
     await shot(page, '51-get-task-run');
     const tools = toolNames(chatId);
@@ -985,7 +928,7 @@ test.describe('agent tools from chat', () => {
     const cardText = (await card.innerText()).replace(/\s+/g, ' ');
     await shot(page, '51-task-on-tasks-page');
     const run = sql(
-      `select status || ' | ' || coalesce(result_summary, '') from task_runs where task_id = '${taskId}' order by started_at desc limit 1`,
+      `select status || ' | ' || coalesce(result_summary, '') from task_runs where task_id = '${taskId}' order by started_at desc limit 1`
     );
     const wanted = [
       'list_projects',
@@ -997,10 +940,7 @@ test.describe('agent tools from chat', () => {
     ];
     const missing = wanted.filter((t) => !tools.includes(t));
     record(51, {
-      result:
-        missing.length === 0 && run.join(',').startsWith('completed')
-          ? 'WORKS'
-          : 'FAILS',
+      result: missing.length === 0 && run.join(',').startsWith('completed') ? 'WORKS' : 'FAILS',
       cause:
         missing.length === 0
           ? undefined
@@ -1022,9 +962,7 @@ test.describe('agent tools from chat', () => {
     expect(missing, `tools never called: ${missing.join(', ')}`).toEqual([]);
   });
 
-  test('52: list_members, and send_message posts into another chat', async ({
-    page,
-  }) => {
+  test('52: list_members, and send_message posts into another chat', async ({ page }) => {
     await signIn(page);
     const s = stamp();
     const target = await newChat(page, { model: 'llama3.2:3b' });
@@ -1033,26 +971,25 @@ test.describe('agent tools from chat', () => {
     await page.getByRole('menuitem', { name: 'Rename' }).click();
     await page.locator('#chat-name').fill(`Inbox ${s}`);
     await page.getByRole('button', { name: 'Save name' }).click();
-    await expect(
-      page.locator('.chat-item', { hasText: `Inbox ${s}` }),
-    ).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('.chat-item', { hasText: `Inbox ${s}` })).toBeVisible({
+      timeout: 30_000,
+    });
 
     const chatId = await agentChat(page);
-    const members = await ask(
-      page,
-      'Who are the members of this workspace? List their names.',
-      { replies: 1, timeout: 600_000 },
-    );
+    const members = await ask(page, 'Who are the members of this workspace? List their names.', {
+      replies: 1,
+      timeout: 600_000,
+    });
     await shot(page, '52-list-members');
     await ask(
       page,
       `Post the message "Hello from the agent ${s}" into the chat called "Inbox ${s}", mentioning the workspace owner.`,
-      { replies: 2, timeout: 600_000 },
+      { replies: 2, timeout: 600_000 }
     );
     await shot(page, '52-send-message');
     const tools = toolNames(chatId);
     const delivered = sql(
-      `select role || ' | ' || left(content, 120) from messages where chat_id = '${target}' and content like '%Hello from the agent ${s}%'`,
+      `select role || ' | ' || left(content, 120) from messages where chat_id = '${target}' and content like '%Hello from the agent ${s}%'`
     );
     await page.goto(`/chats?id=${target}`);
     await page.waitForTimeout(2_000);
@@ -1078,11 +1015,7 @@ test.describe('agent tools from chat', () => {
       delivered_rows: delivered,
       whom: 'send_message posts into a workspace chat by id; mentions record member ids and send no notification',
       tools,
-      screenshots: [
-        '52-list-members.png',
-        '52-send-message.png',
-        '52-message-in-target-chat.png',
-      ],
+      screenshots: ['52-list-members.png', '52-send-message.png', '52-message-in-target-chat.png'],
     });
     expect(tools).toContain('list_members');
     expect(tools).toContain('send_message');

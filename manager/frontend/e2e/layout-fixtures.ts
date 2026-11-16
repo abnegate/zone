@@ -1,13 +1,6 @@
 import type { Page } from '@playwright/test';
 import type { Overview } from '../src/features/analytics/types';
 import type { SourceStatus } from '../src/features/github/sourceStatus';
-import {
-  wireCommits,
-  wireDetail,
-  wireDiff,
-  wireLog,
-  wirePullRequest,
-} from '../src/test/pullRequests';
 import type { PullRequest } from '../src/features/pull-requests/types';
 import type {
   OptionsResponse,
@@ -16,16 +9,15 @@ import type {
   ReleasesResponse,
   SourceOptions,
 } from '../src/features/releases/types';
-import type {
-  AiSettings,
-  WorkspaceAiSettings,
-} from '../src/features/settings/workspace/types';
+import type { AiSettings, WorkspaceAiSettings } from '../src/features/settings/workspace/types';
 import {
-  adminPermissions,
-  createMockJwt,
-  mockAdminUser,
-  routeApi,
-} from './test-utils';
+  wireCommits,
+  wireDetail,
+  wireDiff,
+  wireLog,
+  wirePullRequest,
+} from '../src/test/pullRequests';
+import { adminPermissions, createMockJwt, mockAdminUser, routeApi } from './test-utils';
 
 const mockOrganization = {
   id: 'org-1',
@@ -72,7 +64,7 @@ const mockAiSettings: AiSettings = {
 const workspaceAiSettingsPath = /\/workspaces\/[^/]+\/settings\/ai$/;
 
 export function workspaceAiSettingsResponse(
-  settings: AiSettings = mockAiSettings,
+  settings: AiSettings = mockAiSettings
 ): WorkspaceAiSettings {
   return {
     ...settings,
@@ -85,11 +77,9 @@ export function workspaceAiSettingsResponse(
 
 export function aiSettingsResponse(
   path: string,
-  settings: AiSettings = mockAiSettings,
+  settings: AiSettings = mockAiSettings
 ): AiSettings | WorkspaceAiSettings {
-  return workspaceAiSettingsPath.test(path)
-    ? workspaceAiSettingsResponse(settings)
-    : settings;
+  return workspaceAiSettingsPath.test(path) ? workspaceAiSettingsResponse(settings) : settings;
 }
 
 const mockMembers = [
@@ -380,15 +370,33 @@ export const mockSources = [
 ];
 
 const sourceTypes = [
-  { id: 'github', name: 'GitHub', category: 'file', description: 'GitHub repository', enabled: true },
+  {
+    id: 'github',
+    name: 'GitHub',
+    category: 'file',
+    description: 'GitHub repository',
+    enabled: true,
+  },
   { id: 'gitlab', name: 'GitLab', category: 'file', description: 'GitLab project', enabled: true },
-  { id: 'filesystem', name: 'Filesystem', category: 'file', description: 'Local directory', enabled: true },
+  {
+    id: 'filesystem',
+    name: 'Filesystem',
+    category: 'file',
+    description: 'Local directory',
+    enabled: true,
+  },
   { id: 'web', name: 'Web URL', category: 'web', description: 'Web page', enabled: true },
   { id: 'text', name: 'Text', category: 'text', description: 'Raw text', enabled: true },
   { id: 'ical', name: 'Calendar', category: 'calendar', description: 'iCal feed', enabled: false },
   { id: 'imap', name: 'Mail', category: 'mail', description: 'IMAP mailbox', enabled: false },
   { id: 'slack', name: 'Slack', category: 'chat', description: 'Slack workspace', enabled: false },
-  { id: 'discord', name: 'Discord', category: 'chat', description: 'Discord server', enabled: false },
+  {
+    id: 'discord',
+    name: 'Discord',
+    category: 'chat',
+    description: 'Discord server',
+    enabled: false,
+  },
 ];
 
 const mockSessions = [
@@ -424,8 +432,7 @@ export const mockKnowledge = [
     workspace_id: 'ws-1',
     title: 'Getting Started Guide',
     content: 'Welcome to Zone! This guide will help you get started...',
-    fetched_content:
-      'Welcome to Zone! This guide will help you get started with the platform.',
+    fetched_content: 'Welcome to Zone! This guide will help you get started with the platform.',
     type: 'text',
     url: null,
     tags: ['guide', 'getting-started'],
@@ -438,8 +445,7 @@ export const mockKnowledge = [
     workspace_id: 'ws-1',
     title: 'API Reference',
     content: 'Complete API documentation for Zone...',
-    fetched_content:
-      'Complete API documentation for Zone platform including all endpoints.',
+    fetched_content: 'Complete API documentation for Zone platform including all endpoints.',
     type: 'text',
     url: null,
     tags: ['api', 'documentation'],
@@ -1117,8 +1123,7 @@ function pullRequestBody(sourceId: string, number: number, artifact: string | un
 }
 
 function githubBody(path: string, populated: boolean): unknown {
-  if (pullRequestsPath.test(path))
-    return populated ? populatedPullRequests : emptyPullRequests;
+  if (pullRequestsPath.test(path)) return populated ? populatedPullRequests : emptyPullRequests;
   const pullRequest = pullRequestPath.exec(path);
   if (pullRequest)
     return pullRequestBody(
@@ -1178,10 +1183,7 @@ export async function setupAdminAuth(page: Page, withheld: readonly string[] = [
   );
 }
 
-export async function setupCommonRoutes(
-  page: Page,
-  populated = false
-): Promise<void> {
+export async function setupCommonRoutes(page: Page, populated = false): Promise<void> {
   await routeApi(page, /\/api\//, async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
@@ -1219,20 +1221,15 @@ export async function setupCommonRoutes(
         return;
       }
       body = { directories: [], folders: [] };
-    } else if (path.endsWith('/members'))
-      body = { members: populated ? mockMembers : [] };
+    } else if (path.endsWith('/members')) body = { members: populated ? mockMembers : [] };
     else if (path.endsWith('/devices')) body = { devices: [] };
     else if (path.endsWith('/device-policy')) body = { mode: 'open' };
-    else if (/\/settings\/ai(?:\/effective)?$/.test(path))
-      body = aiSettingsResponse(path);
-    else if (path === '/api/organizations')
-      body = { organizations: [mockOrganization] };
+    else if (/\/settings\/ai(?:\/effective)?$/.test(path)) body = aiSettingsResponse(path);
+    else if (path === '/api/organizations') body = { organizations: [mockOrganization] };
     else if (/\/organizations\/[^/]+\/workspaces$/.test(path))
       body = { workspaces: [mockWorkspace] };
-    else if (/\/organizations\/[^/]+$/.test(path))
-      body = { organization: mockOrganization };
-    else if (/\/workspaces\/[^/]+$/.test(path))
-      body = { workspace: mockWorkspace };
+    else if (/\/organizations\/[^/]+$/.test(path)) body = { organization: mockOrganization };
+    else if (/\/workspaces\/[^/]+$/.test(path)) body = { workspace: mockWorkspace };
     else if (path === '/api/models/setup')
       body = {
         ram_bytes: 68719476736,
@@ -1272,22 +1269,15 @@ export async function setupCommonRoutes(
     else if (path === '/api/models/train') {
       await route.fulfill({ status: 204, body: '' });
       return;
-    }
-    else if (path === '/api/chats')
-      body = { chats: populated ? mockChats : [] };
-    else if (path === '/api/projects')
-      body = { projects: populated ? mockProjects : [] };
+    } else if (path === '/api/chats') body = { chats: populated ? mockChats : [] };
+    else if (path === '/api/projects') body = { projects: populated ? mockProjects : [] };
     else if (path.endsWith('/sync')) body = { configs: [] };
-    else if (path.endsWith('/tasks'))
-      body = { tasks: populated ? mockTasks : [] };
+    else if (path.endsWith('/tasks')) body = { tasks: populated ? mockTasks : [] };
     else if (path.endsWith('/runs')) body = { runs: [] };
     else if (path.endsWith('/sources/types')) body = { types: sourceTypes };
-    else if (path.endsWith('/sources'))
-      body = { sources: populated ? mockSources : [] };
-    else if (path === '/api/knowledge')
-      body = { entries: populated ? mockKnowledge : [] };
-    else if (path === '/api/auth/sessions')
-      body = { sessions: populated ? mockSessions : [] };
+    else if (path.endsWith('/sources')) body = { sources: populated ? mockSources : [] };
+    else if (path === '/api/knowledge') body = { entries: populated ? mockKnowledge : [] };
+    else if (path === '/api/auth/sessions') body = { sessions: populated ? mockSessions : [] };
     else if (path === '/api/context/search') body = { results: [], total: 0 };
     else {
       await route.fallback();

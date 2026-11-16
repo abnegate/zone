@@ -1,4 +1,4 @@
-import type { Page, BrowserContext, Route } from '@playwright/test';
+import type { BrowserContext, Page, Route } from '@playwright/test';
 
 export { SOURCES_PATH } from '../src/features/settings/navigation/sections';
 

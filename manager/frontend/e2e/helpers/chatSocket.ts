@@ -71,7 +71,9 @@ export async function installChatSocketMock(page: Page): Promise<ChatSocketContr
         w.__chatSockets.push(this);
         queueMicrotask(() => {
           this.onopen?.();
-          (this._listeners.open || []).forEach((fn) => fn());
+          for (const listener of this._listeners.open ?? []) {
+            listener();
+          }
         });
       }
       send(data: string) {
@@ -88,7 +90,9 @@ export async function installChatSocketMock(page: Page): Promise<ChatSocketContr
       receive(frame: unknown) {
         const event = { data: JSON.stringify(frame) };
         this.onmessage?.(event);
-        (this._listeners.message || []).forEach((fn) => fn(event));
+        for (const listener of this._listeners.message ?? []) {
+          listener(event);
+        }
       }
     }
     w.WebSocket = MockChatSocket;

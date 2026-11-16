@@ -15,29 +15,22 @@ const GGUF = 'hf.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M';
 
 async function installed(): Promise<string[]> {
   const response = await fetch(`${ollama}/api/tags`).catch(() => null);
-  if (!response || !response.ok) return [];
+  if (!response?.ok) return [];
   const body = (await response.json()) as { models?: { name: string }[] };
   return (body.models ?? []).map((m) => m.name);
 }
 
-async function installFromAddModel(
-  page: Page,
-  name: string,
-  screenshot: string,
-): Promise<string> {
+async function installFromAddModel(page: Page, name: string, screenshot: string): Promise<string> {
   const panel = page.locator('.models-install-panel');
   await panel.locator('input[placeholder="Model name..."]').fill(name);
   await panel.getByRole('button', { name: 'Install' }).click();
   const job = page.locator('.pull-job', { hasText: name });
   await expect(job).toBeVisible({ timeout: 30_000 });
   await expect
-    .poll(
-      async () => (await job.innerText().catch(() => '')).replace(/\s+/g, ' '),
-      {
-        timeout: 1_500_000,
-        intervals: [2_000],
-      },
-    )
+    .poll(async () => (await job.innerText().catch(() => '')).replace(/\s+/g, ' '), {
+      timeout: 1_500_000,
+      intervals: [2_000],
+    })
     .toMatch(/Installation complete|Installation failed/);
   const text = (await job.innerText()).replace(/\s+/g, ' ');
   await shot(page, screenshot);
@@ -63,16 +56,10 @@ test.describe('models page', () => {
       .locator('.model-capabilities')
       .innerText()
       .catch(() => '');
-    const disk = page.locator(
-      '[role="progressbar"][aria-label="Disk space used"]',
-    );
+    const disk = page.locator('[role="progressbar"][aria-label="Disk space used"]');
     const diskShown = await disk.isVisible().catch(() => false);
-    const diskValue = diskShown
-      ? await disk.getAttribute('aria-valuenow')
-      : null;
-    const diskTitle = diskShown
-      ? await page.locator('.models-disk').getAttribute('title')
-      : null;
+    const diskValue = diskShown ? await disk.getAttribute('aria-valuenow') : null;
+    const diskTitle = diskShown ? await page.locator('.models-disk').getAttribute('title') : null;
     await shot(page, '14-installed-models');
 
     const agentRow = rows
@@ -106,9 +93,7 @@ test.describe('models page', () => {
     await page.getByRole('button', { name: 'Search', exact: true }).click();
     const browseRows = page.locator('.browse-item');
     await expect(browseRows.first()).toBeVisible({ timeout: 60_000 });
-    const browseNames = await browseRows
-      .locator('.browse-name')
-      .allInnerTexts();
+    const browseNames = await browseRows.locator('.browse-name').allInnerTexts();
     await shot(page, '15-browse-filtered');
 
     // Install from the catalog: the qwen2.5 family opens its download options,
@@ -119,9 +104,7 @@ test.describe('models page', () => {
     let catalogInstall = '';
     if (await target.count()) {
       await target.getByRole('button', { name: 'Install' }).click();
-      const chip = page
-        .locator('.details-download-chip[title="qwen2.5:0.5b"]')
-        .first();
+      const chip = page.locator('.details-download-chip[title="qwen2.5:0.5b"]').first();
       if (await chip.isVisible().catch(() => false)) {
         await shot(page, '15-download-options');
         await chip.click();
@@ -131,22 +114,15 @@ test.describe('models page', () => {
           .isVisible()
           .catch(() => false)
       ) {
-        await page
-          .getByRole('dialog')
-          .getByRole('button', { name: 'Install Model' })
-          .click();
+        await page.getByRole('dialog').getByRole('button', { name: 'Install Model' }).click();
       }
       const job = page.locator('.pull-job', { hasText: 'qwen2.5' }).first();
       await expect(job).toBeVisible({ timeout: 60_000 });
       await expect
-        .poll(
-          async () =>
-            (await job.innerText().catch(() => '')).replace(/\s+/g, ' '),
-          {
-            timeout: 1_500_000,
-            intervals: [2_000],
-          },
-        )
+        .poll(async () => (await job.innerText().catch(() => '')).replace(/\s+/g, ' '), {
+          timeout: 1_500_000,
+          intervals: [2_000],
+        })
         .toMatch(/Installation complete|Installation failed/);
       catalogInstall = (await job.innerText()).replace(/\s+/g, ' ');
       await shot(page, '15-catalog-install-complete');
@@ -159,11 +135,7 @@ test.describe('models page', () => {
     }
     const afterSmall = await installed();
 
-    const huggingFace = await installFromAddModel(
-      page,
-      GGUF,
-      '15-huggingface-install-complete',
-    );
+    const huggingFace = await installFromAddModel(page, GGUF, '15-huggingface-install-complete');
     const afterGguf = await installed();
 
     // Delete the small catalog model from the Installed list.
@@ -175,19 +147,15 @@ test.describe('models page', () => {
     await expect(confirm).toContainText('Delete Model');
     await shot(page, '14-delete-confirm');
     await confirm.getByRole('button', { name: 'Delete', exact: true }).click();
-    await expect(page.locator('.model-item', { hasText: SMALL })).toHaveCount(
-      0,
-      { timeout: 60_000 },
-    );
+    await expect(page.locator('.model-item', { hasText: SMALL })).toHaveCount(0, {
+      timeout: 60_000,
+    });
     await shot(page, '14-after-delete');
     const afterDelete = await installed();
 
     record(14, {
       result:
-        listed >= 1 &&
-        /Size/i.test(detailText) &&
-        diskShown &&
-        !afterDelete.includes(SMALL)
+        listed >= 1 && /Size/i.test(detailText) && diskShown && !afterDelete.includes(SMALL)
           ? 'WORKS'
           : 'FAILS',
       installed_rows: listed,
@@ -209,9 +177,7 @@ test.describe('models page', () => {
     record(15, {
       result:
         afterSmall.includes(SMALL) &&
-        afterGguf.some((n) =>
-          n.startsWith('hf.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF'),
-        )
+        afterGguf.some((n) => n.startsWith('hf.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF'))
           ? 'WORKS'
           : 'FAILS',
       browse_rows_after_filters_and_search: browseNames.slice(0, 10),
@@ -219,9 +185,7 @@ test.describe('models page', () => {
       huggingface_install: huggingFace.slice(0, 300),
       ollama_tags_before: before.length,
       ollama_tags_after_small: afterSmall.includes(SMALL),
-      ollama_tags_after_gguf: afterGguf.filter((n) =>
-        n.startsWith('hf.co/Qwen'),
-      ),
+      ollama_tags_after_gguf: afterGguf.filter((n) => n.startsWith('hf.co/Qwen')),
       screenshots: [
         '15-browse-filtered.png',
         '15-download-options.png',
@@ -230,11 +194,7 @@ test.describe('models page', () => {
       ],
     });
     expect(afterSmall).toContain(SMALL);
-    expect(
-      afterGguf.some((n) =>
-        n.startsWith('hf.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF'),
-      ),
-    ).toBe(true);
+    expect(afterGguf.some((n) => n.startsWith('hf.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF'))).toBe(true);
     expect(afterDelete).not.toContain(SMALL);
   });
 
@@ -248,18 +208,14 @@ test.describe('models page', () => {
     });
 
     execFileSync('sh', [process.env.ZONE_PASS_OLLAMA_CTL ?? '', 'stop']);
-    await expect
-      .poll(async () => (await installed()).length, { timeout: 60_000 })
-      .toBe(0);
+    await expect.poll(async () => (await installed()).length, { timeout: 60_000 }).toBe(0);
     const stoppedResponse = page
-      .waitForResponse(
-        (r) =>
-          r.url().includes('/api/models') && r.request().method() === 'GET',
-        { timeout: 60_000 },
-      )
+      .waitForResponse((r) => r.url().includes('/api/models') && r.request().method() === 'GET', {
+        timeout: 60_000,
+      })
       .then(
         async (r) =>
-          `${r.status()} ${(await r.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 240)}`,
+          `${r.status()} ${(await r.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 240)}`
       )
       .catch(() => 'no request seen');
     await page.getByRole('button', { name: 'Refresh' }).click();
@@ -270,10 +226,7 @@ test.describe('models page', () => {
       .isVisible()
       .catch(() => false);
     const rowsWhileStopped = await page.locator('.model-item').count();
-    const mainText = (await page.locator('main').innerText()).replace(
-      /\s+/g,
-      ' ',
-    );
+    const mainText = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
     await shot(page, '16-ollama-stopped');
 
     execFileSync('sh', [process.env.ZONE_PASS_OLLAMA_CTL ?? '', 'start']);

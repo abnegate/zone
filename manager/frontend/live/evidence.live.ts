@@ -68,10 +68,7 @@ async function threadWith(metadata: unknown, title: string): Promise<string> {
   return chatId;
 }
 
-test('every citation is labelled by how good its evidence is', async ({
-  page,
-  consoleErrors,
-}) => {
+test('every citation is labelled by how good its evidence is', async ({ page, consoleErrors }) => {
   const chatId = await threadWith({ citations: CITATIONS }, 'live citations');
 
   await signIn(page);
@@ -104,14 +101,8 @@ test('every citation is labelled by how good its evidence is', async ({
   expect(consoleErrors).toEqual([]);
 });
 
-test('a workspace write is shown as a receipt, not as prose', async ({
-  page,
-  consoleErrors,
-}) => {
-  const chatId = await threadWith(
-    { action_receipts: [RECEIPT] },
-    'live receipts'
-  );
+test('a workspace write is shown as a receipt, not as prose', async ({ page, consoleErrors }) => {
+  const chatId = await threadWith({ action_receipts: [RECEIPT] }, 'live receipts');
 
   await signIn(page);
   await page.goto(`/chats?id=${chatId}`);

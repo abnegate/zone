@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
-import { expect, signIn, state, test, tokenFor } from './harness';
-import { createChat } from './harness';
+import { createChat, expect, signIn, state, test, tokenFor } from './harness';
 
 /**
  * The media lanes against real ComfyUI and real weights, driven from the

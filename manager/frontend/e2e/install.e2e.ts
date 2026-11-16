@@ -1,5 +1,5 @@
-import { test, expect } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { blockServiceWorker, routeApi } from './test-utils';
 
 test.describe('Model Installation', () => {
@@ -96,8 +96,20 @@ test.describe('Add Model Section UI', () => {
 
 test.describe('Install from Browse', () => {
   const mockBrowseModels = [
-    { id: 'llama3.2', name: 'llama3.2', description: 'Meta Llama 3.2', downloads: 1500000, tags: ['chat'] },
-    { id: 'codellama', name: 'codellama', description: 'Code Llama', downloads: 500000, tags: ['code'] },
+    {
+      id: 'llama3.2',
+      name: 'llama3.2',
+      description: 'Meta Llama 3.2',
+      downloads: 1500000,
+      tags: ['chat'],
+    },
+    {
+      id: 'codellama',
+      name: 'codellama',
+      description: 'Code Llama',
+      downloads: 500000,
+      tags: ['code'],
+    },
   ];
 
   test.beforeEach(async ({ context, page }) => {
