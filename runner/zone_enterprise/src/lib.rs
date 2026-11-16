@@ -14,6 +14,8 @@ mod production;
 mod seats;
 #[cfg(any(test, feature = "signing"))]
 mod signing;
+#[cfg(feature = "sso")]
+pub mod sso;
 mod status;
 mod tier;
 mod trusted_key;
