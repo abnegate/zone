@@ -256,7 +256,9 @@ describe('ForgotPasswordPage', () => {
 
       await userEvent.type(screen.getByLabelText(/email/i), 'test@example.com{enter}');
 
-      expect(mockForgotPassword).toHaveBeenCalled();
+      await waitFor(() => {
+        expect(mockForgotPassword).toHaveBeenCalled();
+      });
     });
   });
 
