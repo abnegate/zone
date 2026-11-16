@@ -4,9 +4,9 @@ Your AI, your data, your infrastructure—put your backlog on autopilot.
 
 Claude Code, Codex and Ollama are engines. Zone is everything around them that turns what they produce into work you can trust: it records what agents did, proves it was checked, learns from how it went, keeps its pull requests green and mergeable, and runs on hardware you own.
 
-Zone is one platform: a shared core, and two editions built on it. The editions describe what you use Zone for, not separate installs: every feature ships in the same stack, and setup's `--features` decides which local models and media runtimes it installs and switches on.
+Zone is one platform with three parts: a shared core, and Zone Code and Zone Studio built on it. The parts describe what you use Zone for, not separate installs: every feature ships in the same stack, and setup's `--features` decides which local models and media runtimes it installs and switches on.
 
-| Edition | For | Adds |
+| Part | For | Adds |
 |---------|-----|------|
 | **Zone** (core) | Anyone who wants a private AI workspace | Chat, knowledge base, sources, reminders, desktop and mobile apps, optional private search |
 | **Zone Code** | Teams that want their backlog worked | Coding agents across accounts and vendors, auto projects, checked work, pull request upkeep |
@@ -590,7 +590,7 @@ keep them private. See [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## License
 
-MIT License, as declared in [runner/Cargo.toml](runner/Cargo.toml).
+MIT License - See [LICENSE](LICENSE) file for details.
 
 ## Contributing
 
