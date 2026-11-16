@@ -3,7 +3,7 @@ set -eu
 
 unset DOMAIN_HOST_WEBUI OLLAMA_BASE_URL COMPOSE_PROFILES ZONE_COMPOSE ZONE_ENV_FILE \
     LITELLM_STATUS LITELLM_HEALTH OLLAMA_HEALTH UNREACHABLE CONTAINERS PROFILES \
-    MANAGER_CONFIG_FILES CONSOLE_CONFIG_FILES
+    MANAGER_CONFIG_FILES CONSOLE_CONFIG_FILES MANAGER_EXEC_STATUS
 
 directory=$(mktemp -d)
 trap 'rm -rf "$directory"' EXIT HUP INT TERM
@@ -45,10 +45,20 @@ cat > "$directory/bin/docker" <<'DOCKER'
 printf '%s\n' "$*" >> "$DOCKER_LOG"
 case "$1" in
     ps)
-        for container in ${CONTAINERS:-litellm}; do
-            printf '%s\n' "$container"
-        done
+        case "$*" in
+            *com.docker.compose.service=manager*)
+                case " ${CONTAINERS:-litellm} " in
+                    *' manager '*) printf '%s\n' manager-id ;;
+                esac
+                ;;
+            *)
+                for container in ${CONTAINERS:-litellm}; do
+                    printf '%s\n' "$container"
+                done
+                ;;
+        esac
         ;;
+    exec) exit "${MANAGER_EXEC_STATUS:-0}" ;;
     inspect)
         for argument do
             container=$argument
@@ -97,6 +107,10 @@ fail() {
 
 write_env() {
     printf '%s\n' "$@" > "$sandbox/.env"
+}
+
+docker_called() {
+    grep -qF -- "$1" "$directory/docker.log"
 }
 
 smoke() {
@@ -168,6 +182,7 @@ assert_output '✓ LiteLLM'
 assert_output '✓ Manager'
 assert_output '✓ Console'
 assert_output '✓ Ollama'
+assert_output 'from the host: the manager container is not running'
 
 smoke LITELLM_STATUS=200 || fail 'Expected LiteLLM answering 200 to pass'
 
@@ -287,5 +302,27 @@ if smoke CONTAINERS='litellm ollama' OLLAMA_HEALTH=starting; then
     fail 'Expected a bundled Ollama that is not healthy to fail'
 fi
 assert_output '✗ Ollama container (starting)'
+
+smoke CONTAINERS='litellm manager' || fail 'Expected Ollama reachable from the manager container to pass'
+docker_called 'exec manager-id curl -sf --max-time 10 -o /dev/null http://host.docker.internal:11434/api/tags' \
+    || fail 'Expected Ollama to be probed at its configured URL from inside the manager container'
+assert_not_requested '11434'
+assert_output '✓ Ollama (http://host.docker.internal:11434/api/tags from the manager container)'
+
+if smoke CONTAINERS='litellm manager' MANAGER_EXEC_STATUS=7; then
+    fail 'Expected Ollama the host reaches but the manager container cannot to fail'
+fi
+assert_not_requested '11434'
+assert_output '✗ Ollama (http://host.docker.internal:11434/api/tags from the manager container)'
+assert_output 'OLLAMA_HOST=0.0.0.0:11434'
+
+smoke CONTAINERS='litellm manager' MANAGER_EXEC_STATUS=127 \
+    || fail 'Expected a manager image without curl to fall back to the host probe'
+assert_requested 'http://127.0.0.1:11434/api/tags'
+assert_output 'from the host: the manager image has no curl'
+
+write_env 'OLLAMA_BASE_URL=http://models.example:11434//'
+smoke CONTAINERS='litellm manager' || fail 'Expected an external Ollama reachable from the manager container to pass'
+docker_called 'http://models.example:11434/api/tags' || fail 'Expected the .env OLLAMA_BASE_URL to be probed from the container'
 
 printf '%s\n' 'Smoke test checks passed'
