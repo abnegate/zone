@@ -122,7 +122,7 @@ impl Default for EvaluationSettings {
 /// The raw environment a set of settings is resolved from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EvaluationEnvironment {
-    pub enabled: Option<String>,
+    pub enabled: Option<bool>,
     pub categories: Option<String>,
     pub tool_timeout_seconds: Option<String>,
     pub budget_seconds: Option<String>,
@@ -136,7 +136,7 @@ impl EvaluationEnvironment {
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
         let environment = Environment::new(lookup);
         Self {
-            enabled: environment.read(ENABLED_VARIABLE),
+            enabled: environment.flag(ENABLED_VARIABLE),
             categories: environment.read(CATEGORIES_VARIABLE),
             tool_timeout_seconds: environment.read(TOOL_TIMEOUT_VARIABLE),
             budget_seconds: environment.read(BUDGET_VARIABLE),
@@ -148,11 +148,7 @@ impl EvaluationSettings {
     pub fn resolve(environment: &EvaluationEnvironment) -> Self {
         let defaults = Self::default();
         Self {
-            enabled: environment
-                .enabled
-                .as_deref()
-                .map(parse_flag)
-                .unwrap_or(defaults.enabled),
+            enabled: environment.enabled.unwrap_or(defaults.enabled),
             categories: environment
                 .categories
                 .as_deref()
@@ -182,13 +178,6 @@ impl EvaluationSettings {
     }
 }
 
-fn parse_flag(raw: &str) -> bool {
-    matches!(
-        raw.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
 fn parse_duration(raw: Option<&str>, fallback: Duration, ceiling: Duration) -> Duration {
     raw.and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|seconds| *seconds > 0)
@@ -213,17 +202,15 @@ mod tests {
     #[test]
     fn accepts_the_usual_spellings_of_true() {
         for raw in ["1", "true", "TRUE", "yes", " on "] {
-            let settings = EvaluationSettings::resolve(&EvaluationEnvironment {
-                enabled: Some(raw.to_string()),
-                ..EvaluationEnvironment::default()
-            });
+            let settings = EvaluationSettings::resolve(&EvaluationEnvironment::from_lookup(
+                lookup(&[(ENABLED_VARIABLE, raw)]),
+            ));
             assert!(settings.enabled, "{raw} should enable evaluation");
         }
         for raw in ["0", "false", "no", "", "maybe"] {
-            let settings = EvaluationSettings::resolve(&EvaluationEnvironment {
-                enabled: Some(raw.to_string()),
-                ..EvaluationEnvironment::default()
-            });
+            let settings = EvaluationSettings::resolve(&EvaluationEnvironment::from_lookup(
+                lookup(&[(ENABLED_VARIABLE, raw)]),
+            ));
             assert!(!settings.enabled, "{raw} should not enable evaluation");
         }
     }

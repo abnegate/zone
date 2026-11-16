@@ -1,3 +1,5 @@
+const ENABLED_SPELLINGS: [&str; 4] = ["1", "true", "yes", "on"];
+
 pub struct Environment<Lookup> {
     lookup: Lookup,
 }
@@ -12,6 +14,11 @@ where
 
     pub fn read(&self, variable: &str) -> Option<String> {
         (self.lookup)(variable).filter(|value| !value.trim().is_empty())
+    }
+
+    pub fn flag(&self, variable: &str) -> Option<bool> {
+        self.read(variable)
+            .map(|value| ENABLED_SPELLINGS.contains(&value.trim().to_ascii_lowercase().as_str()))
     }
 }
 
@@ -49,5 +56,29 @@ mod tests {
             Some(" 45 "),
             "padding is left for each setting's parser to handle"
         );
+    }
+
+    #[test]
+    fn a_flag_is_on_only_for_the_usual_spellings_of_true() {
+        for on in ["1", "true", "TRUE", "yes", "Yes", " on "] {
+            assert_eq!(
+                holding(on).flag(VARIABLE),
+                Some(true),
+                "{on:?} must turn on"
+            );
+        }
+        for off in ["0", "false", "no", "off", "maybe"] {
+            assert_eq!(
+                holding(off).flag(VARIABLE),
+                Some(false),
+                "{off:?} must turn off"
+            );
+        }
+    }
+
+    #[test]
+    fn a_blank_or_missing_flag_is_unset() {
+        assert_eq!(holding(" ").flag(VARIABLE), None);
+        assert_eq!(holding("true").flag("ZONE_ENVIRONMENT_OTHER"), None);
     }
 }

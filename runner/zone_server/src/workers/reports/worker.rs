@@ -43,7 +43,7 @@ const DAY_OF_MONTH_VARIABLE: &str = "ZONE_REPORT_DAY_OF_MONTH";
 /// The raw environment a schedule is resolved from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReportEnvironment {
-    pub enabled: Option<String>,
+    pub enabled: Option<bool>,
     pub cadence: Option<String>,
     pub hour: Option<String>,
     pub weekday: Option<String>,
@@ -58,7 +58,7 @@ impl ReportEnvironment {
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
         let environment = Environment::new(lookup);
         Self {
-            enabled: environment.read(ENABLED_VARIABLE),
+            enabled: environment.flag(ENABLED_VARIABLE),
             cadence: environment.read(CADENCE_VARIABLE),
             hour: environment.read(HOUR_VARIABLE),
             weekday: environment.read(WEEKDAY_VARIABLE),
@@ -117,11 +117,7 @@ impl ReportSettings {
         );
 
         Self {
-            enabled: environment
-                .enabled
-                .as_deref()
-                .map(parse_flag)
-                .unwrap_or(defaults.enabled),
+            enabled: environment.enabled.unwrap_or(defaults.enabled),
             schedule: Schedule {
                 cadence,
                 hour: or_default(
@@ -161,13 +157,6 @@ impl ReportSettings {
     pub fn from_process_environment() -> Self {
         Self::resolve(&ReportEnvironment::from_process())
     }
-}
-
-fn parse_flag(raw: &str) -> bool {
-    matches!(
-        raw.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
 }
 
 /// The last delivery per workspace, held across cycles.
@@ -352,7 +341,7 @@ mod tests {
 
     fn environment(cadence: &str, hour: &str) -> ReportEnvironment {
         ReportEnvironment {
-            enabled: Some("true".to_string()),
+            enabled: Some(true),
             cadence: Some(cadence.to_string()),
             hour: Some(hour.to_string()),
             ..ReportEnvironment::default()
