@@ -1,3 +1,4 @@
+mod clock;
 mod decision;
 mod entry;
 mod expiry;
@@ -18,12 +19,12 @@ use chrono::TimeDelta;
 use chrono::Utc;
 use dashmap::DashMap;
 use futures::FutureExt;
-use tokio::time::Instant;
 
 use super::client::REQUEST_FAILED;
 use super::fault::Fault;
 use super::freshness::Freshness;
 use super::snapshot::Snapshot;
+use clock::Clock;
 use decision::Decision;
 use expiry::Expiry;
 use slot::Slot;
@@ -71,17 +72,18 @@ impl<K: Eq + Hash + Clone, T> Cache<K, T> {
         Fetch: FnOnce(Option<Arc<T>>) -> Fetched,
         Fetched: Future<Output = Result<T, Fault>>,
     {
+        let clock = Clock::start(now);
         self.sweep(now);
         let slot = self.slot(key.clone(), now);
-        let decide = || slot.decide(refresh, now, self.ttl, self.floor, Expiry::Wait);
-        if let Some(answer) = decide().answer() {
+        let decide = |now| slot.decide(refresh, now, self.ttl, self.floor, Expiry::Wait);
+        if let Some(answer) = decide(now).answer() {
             return answer;
         }
         let _flight = slot.flight().await;
-        if let Some(answer) = decide().answer() {
+        if let Some(answer) = decide(clock.now()).answer() {
             return answer;
         }
-        self.fetched(&key, &slot, now, fetch).await
+        self.fetched(&key, &slot, clock, fetch).await
     }
 
     pub fn peek(&self, key: &K) -> Option<Snapshot<T>> {
@@ -109,7 +111,7 @@ impl<K: Eq + Hash + Clone, T> Cache<K, T> {
         &self,
         key: &K,
         slot: &Arc<Slot<T>>,
-        now: DateTime<Utc>,
+        clock: Clock,
         fetch: Fetch,
     ) -> Result<(Snapshot<T>, Freshness), Fault>
     where
@@ -117,7 +119,7 @@ impl<K: Eq + Hash + Clone, T> Cache<K, T> {
         Fetched: Future<Output = Result<T, Fault>>,
     {
         let (previous, epoch) = slot.previous();
-        settle(&self.slots, key, slot, fetch(previous), epoch, now).await
+        settle(&self.slots, key, slot, fetch(previous), epoch, clock).await
     }
 
     fn slot(&self, key: K, now: DateTime<Utc>) -> Arc<Slot<T>> {
@@ -155,10 +157,11 @@ where
         Fetch: FnOnce(Option<Arc<T>>) -> Fetched,
         Fetched: Future<Output = Result<T, Fault>> + Send + 'static,
     {
+        let clock = Clock::start(now);
         self.sweep(now);
         let slot = self.slot(key.clone(), now);
-        let decide = || slot.decide(refresh, now, self.ttl, self.floor, Expiry::Revalidate);
-        let flight = match decide() {
+        let decide = |now| slot.decide(refresh, now, self.ttl, self.floor, Expiry::Revalidate);
+        let flight = match decide(now) {
             Decision::Revalidate(snapshot, freshness) => match slot.try_flight() {
                 Some(flight) => flight,
                 None => return Ok((snapshot, freshness)),
@@ -167,18 +170,18 @@ where
             Decision::Serve(snapshot, freshness) => return Ok((snapshot, freshness)),
             Decision::Refuse(fault) => return Err(fault),
         };
-        match decide() {
+        match decide(clock.now()) {
             Decision::Revalidate(snapshot, freshness) => {
                 let (previous, epoch) = slot.previous();
                 let fetched = guarded(fetch(previous));
                 let slots = Arc::clone(&self.slots);
                 tokio::spawn(async move {
                     let _flight = flight;
-                    settle(&slots, &key, &slot, fetched, epoch, now).await
+                    settle(&slots, &key, &slot, fetched, epoch, clock).await
                 });
                 Ok((snapshot, freshness))
             }
-            Decision::Fetch => self.fetched(&key, &slot, now, fetch).await,
+            Decision::Fetch => self.fetched(&key, &slot, clock, fetch).await,
             Decision::Serve(snapshot, freshness) => Ok((snapshot, freshness)),
             Decision::Refuse(fault) => Err(fault),
         }
@@ -220,15 +223,14 @@ async fn settle<K, T, Fetched>(
     slot: &Arc<Slot<T>>,
     fetched: Fetched,
     epoch: u64,
-    now: DateTime<Utc>,
+    clock: Clock,
 ) -> Result<(Snapshot<T>, Freshness), Fault>
 where
     K: Eq + Hash,
     Fetched: Future<Output = Result<T, Fault>>,
 {
-    let started = Instant::now();
     let fetched = fetched.await;
-    let settled_at = now + delta(started.elapsed());
+    let settled_at = clock.now();
     let answer = slot.settle(fetched, settled_at, epoch);
     if slot.vacant(settled_at) {
         // Two holders are the map and this fetch; any more is a reader queued

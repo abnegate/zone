@@ -1056,3 +1056,69 @@ async fn a_snapshot_invalidated_while_it_was_read_again_is_fetched_again() {
     assert_eq!(*snapshot.value, 9);
     assert_eq!(fetches.load(Ordering::SeqCst), 2);
 }
+
+async fn a_rate_limit_queued_behind_a_slow_refresh_backs_off_from_when_it_settled(serving: bool) {
+    let cache = cache();
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    let (fetches, gate) = (Arc::new(AtomicUsize::new(0)), Arc::new(Notify::new()));
+    let asked = later(start, 46);
+    let limited = counted(&fetches, |_| {
+        Err(Fault::RateLimited {
+            retry_after: Some(Duration::from_secs(30)),
+            exhausted: true,
+        })
+    });
+
+    let mut failing = pin!(cache.read(
+        KEY,
+        true,
+        asked,
+        gated(&fetches, &gate, |_| Err(unreachable()))
+    ));
+    let mut queued = match serving {
+        true => cache.serve(KEY, true, asked, limited).boxed_local(),
+        false => cache.read(KEY, true, asked, limited).boxed_local(),
+    };
+    assert!(
+        poll!(failing.as_mut()).is_pending(),
+        "the first refresh is fetching"
+    );
+    assert!(
+        poll!(queued.as_mut()).is_pending(),
+        "the second refresh waits for the first"
+    );
+    tokio::time::advance(Duration::from_secs(89)).await;
+    gate.notify_one();
+    let (_, freshness) = failing
+        .await
+        .expect("the failed refresh serves what it had");
+    assert_eq!(freshness, Freshness::Stale);
+    let (_, freshness) = queued
+        .await
+        .expect("the rate limited refresh serves what it had");
+    assert_eq!(freshness, Freshness::Stale);
+    assert_eq!(fetches.load(Ordering::SeqCst), 2);
+
+    let (snapshot, freshness) = cache
+        .read(KEY, true, later(start, 136), counted(&fetches, following))
+        .await
+        .expect("the stale snapshot is served inside the backoff");
+    assert_eq!(freshness, Freshness::Stale);
+    assert_eq!(*snapshot.value, 7);
+    assert_eq!(
+        fetches.load(Ordering::SeqCst),
+        2,
+        "the backoff runs from when the queued refresh settled, not from when it was asked"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rate_limit_read_behind_a_slow_refresh_backs_off_from_when_it_settled() {
+    a_rate_limit_queued_behind_a_slow_refresh_backs_off_from_when_it_settled(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rate_limit_served_behind_a_slow_refresh_backs_off_from_when_it_settled() {
+    a_rate_limit_queued_behind_a_slow_refresh_backs_off_from_when_it_settled(true).await;
+}
