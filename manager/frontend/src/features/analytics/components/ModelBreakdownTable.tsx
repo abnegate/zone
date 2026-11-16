@@ -1,6 +1,6 @@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zone/ui';
-import { count, measured, share } from '../format';
-import { NO_MODEL } from '../labels';
+import { AnalyticsFormat } from '../AnalyticsFormat';
+import { NO_MODEL } from '../AnalyticsLabel';
 import type { ModelBreakdown } from '../types';
 
 export const MODELS_LABEL = 'Runs by model';
@@ -41,15 +41,17 @@ export function ModelBreakdownTable({ models }: ModelBreakdownTableProps) {
             <TableCell className="analytics-name">
               <span className="analytics-name-primary">{model ?? NO_MODEL}</span>
             </TableCell>
-            <TableCell className="analytics-number">{count(outcomes.total)}</TableCell>
             <TableCell className="analytics-number">
-              {outcomes.total === 0 ? share(null) : share(outcomes.success_rate)}
+              {AnalyticsFormat.count(outcomes.total)}
             </TableCell>
             <TableCell className="analytics-number">
-              {measured(completion.median_seconds, completion.measured)}
+              {AnalyticsFormat.share(outcomes.total === 0 ? null : outcomes.success_rate)}
             </TableCell>
             <TableCell className="analytics-number">
-              {measured(completion.ninetieth_seconds, completion.measured)}
+              {AnalyticsFormat.measured(completion.median_seconds, completion.measured)}
+            </TableCell>
+            <TableCell className="analytics-number">
+              {AnalyticsFormat.measured(completion.ninetieth_seconds, completion.measured)}
             </TableCell>
           </TableRow>
         ))}

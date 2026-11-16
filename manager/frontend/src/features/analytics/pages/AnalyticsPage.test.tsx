@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { emptyOverview, overview } from '../../../test/analytics';
+import { NO_TREND } from '../components';
 import type { Analytics } from '../hooks';
 import type { TimePeriod } from '../types';
 
@@ -35,13 +36,23 @@ afterAll(() => {
   mock.restore();
 });
 
-function renderPage() {
+function LocationProbe() {
+  const location = useLocation();
+  return <p data-testid="location">{location.search}</p>;
+}
+
+function renderPage(entry = '/analytics') {
   const AnalyticsPage = page.default;
   return render(
-    <MemoryRouter initialEntries={['/analytics']}>
+    <MemoryRouter initialEntries={[entry]}>
       <AnalyticsPage />
+      <LocationProbe />
     </MemoryRouter>
   );
+}
+
+function search(): string | null {
+  return screen.getByTestId('location').textContent;
 }
 
 function region(name: string): HTMLElement {
@@ -62,6 +73,7 @@ describe('AnalyticsPage', () => {
     expect(screen.getByRole('heading', { level: 1, name: page.TITLE })).toBeDefined();
     const tabs = within(screen.getByRole('tablist', { name: page.PERIOD_LABEL }));
     expect(tabs.getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
+      '24 hours',
       '7 days',
       '30 days',
       '90 days',
@@ -81,6 +93,62 @@ describe('AnalyticsPage', () => {
 
     expect(requested.at(-1)).toBe('month');
     expect(month.getAttribute('aria-selected')).toBe('true');
+    expect(search()).toBe('?period=month');
+  });
+
+  it('offers the last 24 hours', () => {
+    state = { ...IDLE, overview: overview() };
+    renderPage();
+
+    const day = screen.getByRole('tab', { name: '24 hours' });
+    fireEvent.mouseDown(day);
+    fireEvent.click(day);
+
+    expect(requested.at(-1)).toBe('day');
+    expect(search()).toBe('?period=day');
+  });
+
+  it('opens on the period the address names', () => {
+    state = { ...IDLE, overview: overview({ period: 'quarter' }) };
+    renderPage('/analytics?period=quarter');
+
+    expect(requested.at(-1)).toBe('quarter');
+    expect(screen.getByRole('tab', { name: '90 days' }).getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('falls back to a week when the address names no period it knows', () => {
+    state = { ...IDLE, overview: overview() };
+    renderPage('/analytics?period=year');
+
+    expect(requested.at(-1)).toBe('week');
+    expect(screen.getByRole('tab', { name: '7 days' }).getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('keeps other search params when a tab changes the period', () => {
+    state = { ...IDLE, overview: overview() };
+    renderPage('/analytics?period=month&from=sidebar');
+
+    const quarter = screen.getByRole('tab', { name: '90 days' });
+    fireEvent.mouseDown(quarter);
+    fireEvent.click(quarter);
+
+    expect(search()).toBe('?period=quarter&from=sidebar');
+  });
+
+  it('labels the numbers by the period they cover while the next period loads', () => {
+    state = { ...IDLE, overview: emptyOverview(), refreshing: true };
+    renderPage('/analytics?period=month');
+
+    expect(requested.at(-1)).toBe('month');
+    expect(within(region('Runs')).getByText(page.noRunsTitle('week'))).toBeDefined();
+    expect(screen.queryByText(page.noRunsTitle('month'))).toBeNull();
+  });
+
+  it('labels the run chart by the period it covers while the next period loads', () => {
+    state = { ...IDLE, overview: overview(), refreshing: true };
+    renderPage('/analytics?period=quarter');
+
+    expect(screen.getByRole('img', { name: /over the last 7 days$/ })).toBeDefined();
   });
 
   it('lays out tiles, the run chart and every section', () => {
@@ -116,6 +184,31 @@ describe('AnalyticsPage', () => {
     renderPage();
 
     expect(screen.getByRole('status').textContent).toBe(page.TRUNCATED);
+  });
+
+  it('draws a truncated window from the runs it read, with no trend', () => {
+    const full = overview();
+    state = {
+      ...IDLE,
+      overview: overview({
+        truncated: true,
+        runs: {
+          ...full.runs,
+          series: full.runs.series.slice(4),
+          trend: {
+            direction: 'steady',
+            earlier_success_rate: null,
+            later_success_rate: null,
+            change: 0,
+          },
+        },
+      }),
+    };
+    const { container } = renderPage();
+
+    expect(screen.getByRole('status').textContent).toBe(page.TRUNCATED);
+    expect(container.querySelectorAll('.analytics-chart-bar')).toHaveLength(3);
+    expect(screen.getByText(NO_TREND)).toBeDefined();
   });
 
   it('shows the loading skeleton before the first overview arrives', () => {

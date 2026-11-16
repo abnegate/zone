@@ -36,6 +36,14 @@ describe('MeterRow', () => {
     expect((row.querySelector('.analytics-meter-fill') as HTMLElement).style.inlineSize).toBe('0%');
   });
 
+  it('stops the fill at the end of the track', () => {
+    const row = meter(15, 10);
+
+    expect((row.querySelector('.analytics-meter-fill') as HTMLElement).style.inlineSize).toBe(
+      '100%'
+    );
+  });
+
   it('keeps the track out of the accessible text', () => {
     const row = meter(3, 12);
 

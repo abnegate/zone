@@ -388,6 +388,11 @@
   font-variant-numeric: tabular-nums;
 }
 
+.analytics-legend-note {
+  margin-inline-start: auto;
+  color: var(--ui-text-muted);
+}
+
 .analytics-section div:has(> .analytics-table) {
   overflow-x: auto;
 }

@@ -1,5 +1,5 @@
 import { Button, EmptyState, Tabs, TabsList, TabsTrigger } from '@zone/ui';
-import { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import {
   AnalyticsSkeleton,
@@ -14,7 +14,7 @@ import {
   TaskSummaryCard,
 } from '../components';
 import { useAnalytics } from '../hooks';
-import { DEFAULT_PERIOD, isPeriod, PERIODS, periodLabel } from '../period';
+import { isPeriod, PERIOD_PARAM, PERIODS, periodLabel, periodOf } from '../period';
 import type { Overview, TimePeriod } from '../types';
 import './AnalyticsPage.css';
 
@@ -34,11 +34,20 @@ export function noRunsTitle(period: TimePeriod): string {
 }
 
 export default function AnalyticsPage() {
-  const [period, setPeriod] = useState<TimePeriod>(DEFAULT_PERIOD);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const period = periodOf(searchParams.get(PERIOD_PARAM));
   const { overview, loading, refreshing, error, missingWorkspace, retry } = useAnalytics(period);
 
   const choose = (value: string) => {
-    if (isPeriod(value)) setPeriod(value);
+    if (!isPeriod(value)) return;
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.set(PERIOD_PARAM, value);
+        return next;
+      },
+      { replace: true }
+    );
   };
 
   const renderRuns = (current: Overview) => {
@@ -47,7 +56,7 @@ export default function AnalyticsPage() {
         <SectionCard title="Runs" wide>
           <EmptyState
             className="analytics-empty"
-            title={noRunsTitle(period)}
+            title={noRunsTitle(current.period)}
             description={NO_RUNS_DESCRIPTION}
           />
         </SectionCard>

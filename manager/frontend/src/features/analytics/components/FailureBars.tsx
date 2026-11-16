@@ -1,5 +1,6 @@
-import { count, moment } from '../format';
-import { categoryLabel, Tone } from '../labels';
+import { AnalyticsFormat } from '../AnalyticsFormat';
+import { AnalyticsLabel } from '../AnalyticsLabel';
+import { Tone } from '../Tone';
 import type { CategoryStatistics } from '../types';
 import { MeterRow } from './MeterRow';
 
@@ -9,7 +10,7 @@ export const FAILURES_LABEL = 'Failure kinds';
 
 function detail(statistics: CategoryStatistics): string {
   const tasks = statistics.distinct_tasks === 1 ? 'task' : 'tasks';
-  return `${count(statistics.distinct_tasks)} ${tasks} · last ${moment(statistics.last_seen)}`;
+  return `${AnalyticsFormat.count(statistics.distinct_tasks)} ${tasks} · last ${AnalyticsFormat.date(statistics.last_seen)}`;
 }
 
 export interface FailureBarsProps {
@@ -26,10 +27,10 @@ export function FailureBars({ categories }: FailureBarsProps) {
       {categories.map((statistics) => (
         <MeterRow
           key={statistics.category}
-          label={categoryLabel(statistics.category)}
+          label={AnalyticsLabel.category(statistics.category)}
           value={statistics.occurrences}
           maximum={maximum}
-          display={count(statistics.occurrences)}
+          display={AnalyticsFormat.count(statistics.occurrences)}
           tone={Tone.Destructive}
           detail={detail(statistics)}
         />

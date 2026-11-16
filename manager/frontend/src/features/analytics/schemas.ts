@@ -115,9 +115,9 @@ export const PullRequestSummarySchema = z.object({
   closed: CountSchema,
   open: CountSchema,
   merge_rate: ShareSchema.nullable(),
-  median_minutes_to_merge: QuantitySchema.nullable(),
-  mean_review_cycles: QuantitySchema.nullable(),
-  mean_approvals: QuantitySchema.nullable(),
+  median_minutes_to_merge: z.number().nullable(),
+  mean_review_cycles: z.number().nullable(),
+  mean_approvals: z.number().nullable(),
   quality: z.array(TallySchema),
 });
 

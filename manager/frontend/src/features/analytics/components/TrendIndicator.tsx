@@ -1,4 +1,4 @@
-import { points, share } from '../format';
+import { AnalyticsFormat } from '../AnalyticsFormat';
 import { TrendDirectionSchema } from '../schemas';
 import type { Trend, TrendDirection } from '../types';
 
@@ -18,11 +18,11 @@ const DIRECTIONS: Record<TrendDirection, string> = {
 
 export function trendText(trend: Trend): string {
   if (trend.direction === TrendDirectionSchema.enum.steady) return DIRECTIONS.steady;
-  return `${DIRECTIONS[trend.direction]} ${points(trend.change)}`;
+  return `${DIRECTIONS[trend.direction]} ${AnalyticsFormat.points(trend.change)}`;
 }
 
 function comparison(trend: Trend): string {
-  return `Earlier half ${share(trend.earlier_success_rate)}, later half ${share(trend.later_success_rate)}`;
+  return `Earlier half ${AnalyticsFormat.share(trend.earlier_success_rate)}, later half ${AnalyticsFormat.share(trend.later_success_rate)}`;
 }
 
 export interface TrendIndicatorProps {

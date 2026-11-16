@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { partialMatchKey, useQuery } from '@tanstack/react-query';
 import { useCallback } from 'react';
 import { analyticsApi, LOAD_FAILED } from '../../../api/analytics';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
@@ -6,8 +6,6 @@ import { analyticsKeys } from '../queryKeys';
 import type { Overview, TimePeriod } from '../types';
 
 export const STALE_MS = 60_000;
-
-const WORKSPACE_POSITION = 1;
 
 export const NO_WORKSPACE = 'No workspace selected';
 
@@ -38,7 +36,9 @@ export function useAnalytics(period: TimePeriod): Analytics {
     enabled: !!workspaceId,
     staleTime: STALE_MS,
     placeholderData: (previous, previousQuery) =>
-      previousQuery?.queryKey[WORKSPACE_POSITION] === workspaceId ? previous : undefined,
+      previousQuery && partialMatchKey(previousQuery.queryKey, analyticsKeys.workspace(workspaceId))
+        ? previous
+        : undefined,
   });
 
   const retry = useCallback(() => {

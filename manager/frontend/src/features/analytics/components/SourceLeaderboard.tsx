@@ -1,6 +1,6 @@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zone/ui';
-import { count, share } from '../format';
-import { humanize, NO_SOURCE } from '../labels';
+import { AnalyticsFormat } from '../AnalyticsFormat';
+import { AnalyticsLabel, NO_SOURCE } from '../AnalyticsLabel';
 import type { SourceBreakdown } from '../types';
 
 export const SOURCES_LABEL = 'Runs by source';
@@ -45,14 +45,22 @@ export function SourceLeaderboard({ sources }: SourceLeaderboardProps) {
             <TableCell className="analytics-name">
               <span className="analytics-name-primary">{source.name ?? NO_SOURCE}</span>
               {source.source_type && (
-                <span className="analytics-name-secondary">{humanize(source.source_type)}</span>
+                <span className="analytics-name-secondary">
+                  {AnalyticsLabel.sourceType(source.source_type)}
+                </span>
               )}
             </TableCell>
-            <TableCell className="analytics-number">{count(source.outcomes.total)}</TableCell>
             <TableCell className="analytics-number">
-              {source.outcomes.total === 0 ? share(null) : share(source.outcomes.success_rate)}
+              {AnalyticsFormat.count(source.outcomes.total)}
             </TableCell>
-            <TableCell className="analytics-number">{count(source.merged_pull_requests)}</TableCell>
+            <TableCell className="analytics-number">
+              {AnalyticsFormat.share(
+                source.outcomes.total === 0 ? null : source.outcomes.success_rate
+              )}
+            </TableCell>
+            <TableCell className="analytics-number">
+              {AnalyticsFormat.count(source.merged_pull_requests)}
+            </TableCell>
           </TableRow>
         ))}
       </TableBody>

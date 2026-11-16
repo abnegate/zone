@@ -1,14 +1,16 @@
 import { type CSSProperties, useId } from 'react';
-import { bucketLabel, count } from '../format';
+import { AnalyticsFormat } from '../AnalyticsFormat';
 import { periodLabel } from '../period';
-import { labelEvery, niceCeiling } from '../scale';
 import type { SeriesPoint, TimePeriod } from '../types';
+import { RunSeriesAxis } from './RunSeriesAxis';
 
 const HEIGHT = 100;
 const BAR_WIDTH = 0.7;
 const BAR_OFFSET = (1 - BAR_WIDTH) / 2;
 const TICK_LABELS = 7;
 const GRID_FRACTIONS = [1, 0.5, 0] as const;
+
+export const NO_SERIES = 'No run fell inside this window to chart.';
 
 export const Outcome = {
   Succeeded: 'succeeded',
@@ -42,10 +44,12 @@ function segments(point: SeriesPoint, maximum: number): Segment[] {
 }
 
 function summary(point: SeriesPoint, period: TimePeriod): string {
-  const label = bucketLabel(point.window, period);
-  const runs = `${count(point.total)} ${point.total === 1 ? 'run' : 'runs'}`;
+  const label = RunSeriesAxis.bucket(point.window, period);
+  const runs = `${AnalyticsFormat.count(point.total)} ${point.total === 1 ? 'run' : 'runs'}`;
   if (point.total === 0) return `${label}: no runs`;
-  const breakdown = STACK.map((outcome) => `${count(point[outcome])} ${outcome}`).join(', ');
+  const breakdown = STACK.map(
+    (outcome) => `${AnalyticsFormat.count(point[outcome])} ${outcome}`
+  ).join(', ');
   return `${label}: ${runs}, ${breakdown}`;
 }
 
@@ -60,8 +64,11 @@ export interface RunSeriesChartProps {
 
 export function RunSeriesChart({ series, period }: RunSeriesChartProps) {
   const titleId = useId();
-  const maximum = niceCeiling(Math.max(0, ...series.map((point) => point.total)));
-  const every = labelEvery(series.length, TICK_LABELS);
+  if (series.length === 0) {
+    return <p className="analytics-quiet">{NO_SERIES}</p>;
+  }
+  const maximum = RunSeriesAxis.ceiling(Math.max(0, ...series.map((point) => point.total)));
+  const every = RunSeriesAxis.labelEvery(series.length, TICK_LABELS);
   const caption = chartCaption(period);
   const columns = { '--analytics-chart-points': series.length } as CSSProperties;
   const totals = STACK.map((outcome) => ({
@@ -74,7 +81,7 @@ export function RunSeriesChart({ series, period }: RunSeriesChartProps) {
       <div className="analytics-chart-plot">
         <div className="analytics-chart-axis" aria-hidden="true">
           {GRID_FRACTIONS.map((fraction) => (
-            <span key={fraction}>{count(maximum * fraction)}</span>
+            <span key={fraction}>{AnalyticsFormat.count(maximum * fraction)}</span>
           ))}
         </div>
         <svg
@@ -118,7 +125,7 @@ export function RunSeriesChart({ series, period }: RunSeriesChartProps) {
       <div className="analytics-chart-ticks" aria-hidden="true">
         {series.map((point, index) => (
           <span key={point.window.start}>
-            {index % every === 0 ? bucketLabel(point.window, period) : ''}
+            {index % every === 0 ? RunSeriesAxis.tick(point.window, period) : ''}
           </span>
         ))}
       </div>
@@ -130,9 +137,10 @@ export function RunSeriesChart({ series, period }: RunSeriesChartProps) {
               aria-hidden="true"
             />
             {OUTCOME_LABELS[outcome]}
-            <span className="analytics-legend-value">{count(total)}</span>
+            <span className="analytics-legend-value">{AnalyticsFormat.count(total)}</span>
           </span>
         ))}
+        <span className="analytics-legend-note">{RunSeriesAxis.note(period)}</span>
       </figcaption>
       <div className="sr-only">
         <table>
@@ -151,10 +159,10 @@ export function RunSeriesChart({ series, period }: RunSeriesChartProps) {
           <tbody>
             {series.map((point) => (
               <tr key={point.window.start}>
-                <th scope="row">{bucketLabel(point.window, period)}</th>
-                <td>{count(point.total)}</td>
+                <th scope="row">{RunSeriesAxis.bucket(point.window, period)}</th>
+                <td>{AnalyticsFormat.count(point.total)}</td>
                 {STACK.map((outcome) => (
-                  <td key={outcome}>{count(point[outcome])}</td>
+                  <td key={outcome}>{AnalyticsFormat.count(point[outcome])}</td>
                 ))}
               </tr>
             ))}

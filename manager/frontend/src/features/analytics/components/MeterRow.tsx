@@ -1,7 +1,11 @@
-import type { Tone } from '../labels';
-import { proportion } from '../scale';
+import type { Tone } from '../Tone';
 
 const PERCENT = 100;
+
+function filled(value: number, maximum: number): number {
+  if (maximum <= 0) return 0;
+  return Math.min(1, Math.max(0, value / maximum)) * PERCENT;
+}
 
 export interface MeterRowProps {
   label: string;
@@ -13,12 +17,14 @@ export interface MeterRowProps {
 }
 
 export function MeterRow({ label, value, maximum, display, tone, detail }: MeterRowProps) {
-  const filled = proportion(value, maximum) * PERCENT;
   return (
     <li className="analytics-meter" data-tone={tone}>
       <span className="analytics-meter-label">{label}</span>
       <span className="analytics-meter-track" aria-hidden="true">
-        <span className="analytics-meter-fill" style={{ inlineSize: `${filled}%` }} />
+        <span
+          className="analytics-meter-fill"
+          style={{ inlineSize: `${filled(value, maximum)}%` }}
+        />
       </span>
       <span className="analytics-meter-value">{display}</span>
       {detail && <span className="analytics-meter-detail">{detail}</span>}
