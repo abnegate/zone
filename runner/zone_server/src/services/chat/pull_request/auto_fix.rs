@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use super::checks::Checks;
 use super::mergeable::Mergeable;
+use super::state::State;
 use super::status::Status;
 use crate::db::chat_pull_requests::{self, Claim, PullRequestRow};
 use crate::db::projects;
@@ -57,6 +58,9 @@ pub async fn consider(
     branch: &BranchName,
     head: &CommitSha,
 ) {
+    // A run that already ended is judged on what the pull request shows now,
+    // whether or not auto-fix would still start another one for it.
+    finish(state, row, status).await;
     // A run still working answers for whatever the branch shows now, and a
     // second run on the same branch would fight it.
     if !row.auto_fix || row.auto_fixing {
@@ -268,6 +272,51 @@ async fn start(
     Ok(Some(run.id))
 }
 
+/// Whether the pull request now shows that the run it had did what it was
+/// started for.
+///
+/// A merge settles it outright. Short of that, the complaint has to be gone
+/// and the checks have to have actually passed: pending, absent or unreadable
+/// checks prove nothing, and reading them as proof would finish a task on the
+/// strength of a verdict that never arrived.
+fn proven(status: &Status) -> bool {
+    if status.state == State::Merged {
+        return true;
+    }
+    status.open() && status.checks == Checks::Passing && status.mergeable != Mergeable::Conflicted
+}
+
+/// Finishes the task of a run that has already ended, once `status` proves it
+/// worked. Never fails the status read that called it: a task that could not
+/// be finished this time is judged again on the next poll.
+async fn finish(state: &AppState, row: &PullRequestRow, status: &Status) {
+    // A run still working has not proven anything yet, whatever the pull
+    // request shows while it pushes.
+    if row.auto_fixing {
+        return;
+    }
+    let Some(run_id) = row.auto_fix_run_id else {
+        return;
+    };
+    if !proven(status) {
+        return;
+    }
+    match chat_pull_requests::complete_auto_fix_task(state.db(), run_id).await {
+        Ok(true) => tracing::info!(
+            pull_request = %row.id,
+            run = %run_id,
+            "the pull request this run fixed is passing, so its task is finished"
+        ),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(
+            pull_request = %row.id,
+            run = %run_id,
+            %error,
+            "could not finish the task of the run that fixed this pull request"
+        ),
+    }
+}
+
 /// How the chat names the pull request a notice is about.
 fn name(row: &PullRequestRow) -> String {
     format!("{}/{}#{}", row.owner, row.repo, row.number)
@@ -428,6 +477,44 @@ mod tests {
     #[test]
     fn a_pending_check_is_not_yet_a_complaint() {
         assert_eq!(complaint(&status(Checks::Pending, Mergeable::Clean)), None);
+    }
+
+    #[test]
+    fn passing_checks_prove_the_run_did_its_job() {
+        assert!(proven(&status(Checks::Passing, Mergeable::Clean)));
+        assert!(proven(&status(Checks::Passing, Mergeable::Unstable)));
+    }
+
+    #[test]
+    fn a_merge_proves_it_whatever_the_checks_last_said() {
+        let mut merged = status(Checks::Pending, Mergeable::Unknown);
+        merged.state = State::Merged;
+        assert!(proven(&merged));
+    }
+
+    #[test]
+    fn a_verdict_that_never_arrived_proves_nothing() {
+        // The complaint is gone in all three, and in none of them did anything
+        // report that the checks pass.
+        for checks in [Checks::Pending, Checks::None, Checks::Unknown] {
+            assert!(
+                !proven(&status(checks, Mergeable::Clean)),
+                "{checks:?} should not finish a task"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failing_or_conflicted_pull_request_proves_nothing() {
+        assert!(!proven(&status(Checks::Failing, Mergeable::Clean)));
+        assert!(!proven(&status(Checks::Passing, Mergeable::Conflicted)));
+    }
+
+    #[test]
+    fn a_pull_request_closed_unmerged_proves_nothing() {
+        let mut closed = status(Checks::Passing, Mergeable::Clean);
+        closed.state = State::Closed;
+        assert!(!proven(&closed));
     }
 
     #[test]

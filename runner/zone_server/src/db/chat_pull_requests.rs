@@ -383,6 +383,32 @@ pub async fn start_auto_fix(
     }))
 }
 
+/// Finishes the task behind a settled auto-fix run, because the pull request
+/// it was started for no longer has the problem it was started for.
+///
+/// A completed run leaves its task in `review`, which is where the runner
+/// stops: it asks a person to look, and nothing it can see says whether the
+/// fix worked. The pull request itself is that evidence, so the caller reads
+/// it and finishes the task here.
+///
+/// Fenced so only a task still waiting on that verdict moves. A run that
+/// failed left its task `blocked`, a person may have moved it on purpose, and
+/// a task with a run in flight is being worked on again — none of those are
+/// finished by a passing check.
+pub async fn complete_auto_fix_task(pool: &PgPool, run_id: Uuid) -> DbResult<bool> {
+    Ok(sqlx::query(
+        "UPDATE tasks SET status = 'complete', completed_at = NOW(), updated_at = NOW() \
+         FROM task_runs r \
+         WHERE tasks.id = r.task_id AND r.id = $1 AND r.status = 'completed' \
+           AND tasks.active_run_id IS NULL AND tasks.status = 'review'",
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
 /// Says something in `chat_id` as the assistant, marked as auto-fix's own
 /// word rather than a turn somebody typed, and answers with the stored
 /// message for publishing.
@@ -749,6 +775,85 @@ mod tests {
             !settled.auto_fixing,
             "a settled run no longer reads as working"
         );
+    }
+
+    #[tokio::test]
+    async fn a_run_that_fixed_its_pull_request_has_its_task_finished() {
+        let pool = pool().await;
+        let watched = watched(&pool, true).await;
+
+        let run = start(&pool, &watched, None)
+            .await
+            .expect("auto-fix is on and nothing is claimed");
+        tasks::complete_task_run(&pool, run.id, "completed", None, None)
+            .await
+            .expect("the run settles");
+        assert_eq!(
+            task_status(&pool, run.task_id).await,
+            "review",
+            "a completed run leaves its task waiting to be looked at"
+        );
+
+        assert!(
+            complete_auto_fix_task(&pool, run.id)
+                .await
+                .expect("the update"),
+            "the pull request passing is what finishes it"
+        );
+        assert_eq!(task_status(&pool, run.task_id).await, "complete");
+
+        assert!(
+            !complete_auto_fix_task(&pool, run.id)
+                .await
+                .expect("the update"),
+            "a task already finished is not finished twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_that_failed_keeps_its_task_blocked() {
+        let pool = pool().await;
+        let watched = watched(&pool, true).await;
+
+        let run = start(&pool, &watched, None)
+            .await
+            .expect("auto-fix is on and nothing is claimed");
+        tasks::complete_task_run(&pool, run.id, "failed", Some("checks still fail"), None)
+            .await
+            .expect("the run settles");
+
+        assert!(
+            !complete_auto_fix_task(&pool, run.id)
+                .await
+                .expect("the update"),
+            "checks that pass for some other reason do not make a failed run a success"
+        );
+        assert_eq!(task_status(&pool, run.task_id).await, "blocked");
+    }
+
+    #[tokio::test]
+    async fn a_run_still_working_has_nothing_to_finish() {
+        let pool = pool().await;
+        let watched = watched(&pool, true).await;
+
+        let run = start(&pool, &watched, None)
+            .await
+            .expect("auto-fix is on and nothing is claimed");
+
+        assert!(
+            !complete_auto_fix_task(&pool, run.id)
+                .await
+                .expect("the update"),
+            "a run that has not settled has not finished its task"
+        );
+    }
+
+    async fn task_status(pool: &PgPool, task_id: Uuid) -> String {
+        tasks::get_task(pool, task_id)
+            .await
+            .expect("the read")
+            .expect("the task")
+            .status
     }
 
     #[tokio::test]
