@@ -19,7 +19,9 @@ use zone_enterprise::{Tier, period_start};
 use zone_server::auth::hash_password;
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::devices::{self, Mode};
+use zone_server::db::sso::identities;
 use zone_server::db::{refresh_tokens, seats, sessions, users};
+use zone_server::services::account::provision;
 use zone_server::services::sso::console::CALLBACK_PATH;
 use zone_server::utils::crypto::hash_token;
 
@@ -35,6 +37,7 @@ const DEVICE_BLOCKED: &str = "device_blocked";
 const UNREACHABLE_ISSUER: &str = "http://127.0.0.1:9";
 const TIME_ZONE: &str = "Europe/London";
 const DEVICE_PENDING: &str = "device_pending";
+const OTHER_CLIENT: &str = "zone-test-client-2";
 const LOCK_WAIT: Duration = Duration::from_secs(30);
 const LOCK_POLL: Duration = Duration::from_millis(20);
 
@@ -131,6 +134,30 @@ impl Server {
         self.identity_provider
             .grant(&code, &started.challenge, claims);
         code
+    }
+
+    /// Follows the authorization URL to the identity provider, which signs the test person in and
+    /// redirects back to the console's callback with a code, and returns that code.
+    async fn authenticate(&self, started: &Started) -> String {
+        let response = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+            .get(started.url.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = Url::parse(
+            response.headers()[reqwest::header::LOCATION]
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(location.as_str().starts_with(REDIRECT_URI), "{location}");
+        let parameters: HashMap<String, String> = location.query_pairs().into_owned().collect();
+        assert_eq!(parameters["state"], started.state);
+        parameters["code"].clone()
     }
 
     /// Waits until some statement in this server's database is queued behind a row or table
@@ -1062,31 +1089,121 @@ async fn a_blocked_device_cannot_sign_in() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_first_sign_ins_create_one_account() {
+async fn a_first_sign_in_that_loses_the_race_signs_in_to_the_account_the_winner_created() {
     let server = Server::new().await;
-    let first = server.start().await;
-    let second = server.start().await;
-    let first_code = server.grant(&first, server.claims(&first, unchanged));
-    let second_code = server.grant(&second, server.claims(&second, unchanged));
+    let started = server.start().await;
+    let code = server.grant(&started, server.claims(&started, unchanged));
+    let mut winner = server.fixture.pool().begin().await.unwrap();
+    let created = provision::insert(
+        &mut winner,
+        testing::EMAIL,
+        &hash_password("Unknown-horse-9").unwrap(),
+        Some(testing::NAME),
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    identities::link(
+        &mut *winner,
+        server.provider,
+        created.id,
+        testing::SUBJECT,
+        testing::EMAIL,
+    )
+    .await
+    .unwrap();
 
-    let (one, other) = tokio::join!(
-        server.callback(&first.state, &first_code),
-        server.callback(&second.state, &second_code),
+    let (response, ()) = tokio::join!(server.callback(&started.state, &code), async {
+        server.queued_behind_a_lock().await;
+        winner.commit().await.unwrap();
+    });
+
+    response.assert_status(StatusCode::OK);
+    assert_eq!(session(&response).user, created.id);
+    assert_eq!(server.users_with_email(testing::EMAIL).await, 1);
+    assert_eq!(
+        server.identities().await,
+        [(
+            created.id,
+            testing::SUBJECT.to_owned(),
+            testing::EMAIL.to_owned()
+        )]
+    );
+    assert!(
+        server
+            .fixture
+            .audits(actions::USER_CREATED)
+            .await
+            .is_empty()
+    );
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_new_client_id_unlinks_everyone_and_the_next_sign_in_relinks_by_verified_email() {
+    let server = Server::new().await;
+    let first = server.signed_in(unchanged).await;
+    server.identity_provider.register(OTHER_CLIENT);
+
+    server
+        .fixture
+        .update(
+            &server.admin.token,
+            server.provider,
+            &json!({ "client_id": OTHER_CLIENT }),
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    assert!(server.identities().await.is_empty());
+    let updated = server.fixture.audits(actions::SSO_PROVIDER_UPDATED).await;
+    assert_eq!(updated.len(), 1);
+    assert_eq!(
+        updated[0].new_values,
+        Some(json!({ "client_id": OTHER_CLIENT, "identities_cleared": 1 }))
     );
 
-    for response in [&one, &other] {
-        let status = response.status;
-        assert!(
-            status == StatusCode::OK
-                || (status == StatusCode::CONFLICT
-                    && response.json_value()["code"] == json!(EMAIL_CONFLICT)),
-            "{status} {}",
-            response.text()
-        );
-    }
-    assert!(one.status == StatusCode::OK || other.status == StatusCode::OK);
-    assert_eq!(server.users_with_email(testing::EMAIL).await, 1);
+    let started = server.start().await;
+    assert_eq!(started.parameters()["client_id"], OTHER_CLIENT);
+    let code = server.authenticate(&started).await;
+    let response = server.callback(&started.state, &code).await;
+
+    response.assert_status(StatusCode::OK);
+    assert_eq!(session(&response).user, first.user);
+    assert_eq!(
+        server.identities().await,
+        [(
+            first.user,
+            server.identity_provider.subject(OTHER_CLIENT),
+            testing::EMAIL.to_owned()
+        )]
+    );
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn editing_anything_but_the_issuer_or_client_id_keeps_the_links() {
+    let server = Server::new().await;
+    let first = server.signed_in(unchanged).await;
+
+    server
+        .fixture
+        .update(
+            &server.admin.token,
+            server.provider,
+            &json!({ "display_name": "Okta SSO", "client_secret": "rotated" }),
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
     assert_eq!(server.identities().await.len(), 1);
+    let updated = server.fixture.audits(actions::SSO_PROVIDER_UPDATED).await;
+    assert_eq!(
+        updated[0].new_values,
+        Some(json!({ "display_name": "Okta SSO", "client_secret_changed": true }))
+    );
+    assert_eq!(server.identities().await[0].0, first.user);
     server.cleanup().await;
 }
 
