@@ -7,6 +7,7 @@ use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::services::chat::notice;
 use crate::services::task_progress;
 
 use super::{
@@ -1718,11 +1719,16 @@ pub async fn sweep_task_runs(pool: &PgPool) -> DbResult<u64> {
     let runs: Vec<Uuid> = locked.into_iter().flatten().collect();
     let failed: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = 'failed', error_message = $2, completed_at = NOW(), current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL WHERE id = ANY($1) AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at <= NOW() - INTERVAL '60 seconds' RETURNING id, task_id")))
         .bind(&runs).bind(ORPHANED).fetch_all(&mut *transaction).await?;
+    let mut notices = Vec::new();
     for (run, task) in &failed {
         sqlx::query("UPDATE tasks SET status = 'blocked', completed_at = NOW(), updated_at = NOW(), active_run_id = NULL WHERE id = $1 AND active_run_id = $2")
             .bind(task).bind(run).execute(&mut *transaction).await?;
+        notices.extend(notice::announce_run(&mut transaction, *run, FAILED, Some(ORPHANED)).await?);
     }
     transaction.commit().await?;
+    for notice in notices {
+        notice.publish();
+    }
     for (run, _) in &failed {
         task_progress::publish_terminal(*run, FAILED, Some(ORPHANED));
     }
@@ -1771,7 +1777,11 @@ pub async fn stop_task_run_authorized(
     .await?;
     sqlx::query("UPDATE tasks SET status = $3, updated_at = NOW(), active_run_id = CASE WHEN $4 THEN active_run_id END WHERE id = $1 AND active_run_id = $2")
         .bind(run.task_id).bind(run.id).bind(PAUSED).bind(draining).execute(&mut *transaction).await?;
+    let notice = notice::announce_run(&mut transaction, run.id, CANCELLED, Some(STOPPED)).await?;
     transaction.commit().await?;
+    if let Some(notice) = notice {
+        notice.publish();
+    }
     task_progress::publish_terminal(run.id, CANCELLED, Some(STOPPED));
     Ok(Mutation::Applied(Stop::Stopped(Box::new(run))))
 }
@@ -1825,6 +1835,7 @@ pub async fn complete_owned_task_run(
     .await?;
     let row: Option<TaskRunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = $3, completed_at = NOW(), error_message = $4, artifacts = COALESCE($5, artifacts), progress_percent = 100, current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at > NOW() - INTERVAL '60 seconds' RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait, plan")))
         .bind(run_id).bind(owner).bind(status).bind(error_message).bind(artifacts).fetch_optional(&mut *transaction).await?;
+    let mut notice = None;
     if let Some(run) = &row {
         let status = if status == COMPLETED {
             "review"
@@ -1832,8 +1843,18 @@ pub async fn complete_owned_task_run(
             "blocked"
         };
         sqlx::query("UPDATE tasks SET status = $3, completed_at = NOW(), updated_at = NOW(), active_run_id = NULL WHERE id = $1 AND active_run_id = $2").bind(run.task_id).bind(run.id).bind(status).execute(&mut *transaction).await?;
+        notice = notice::announce_run(
+            &mut transaction,
+            run.id,
+            &run.status,
+            run.error_message.as_deref(),
+        )
+        .await?;
     }
     transaction.commit().await?;
+    if let Some(notice) = notice {
+        notice.publish();
+    }
     if let Some(run) = &row {
         task_progress::publish_terminal(run.id, &run.status, run.error_message.as_deref());
     }

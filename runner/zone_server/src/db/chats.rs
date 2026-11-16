@@ -10,7 +10,7 @@ mod sort;
 
 use abnegate_llm::ReasoningEffort;
 use chrono::NaiveDateTime;
-use sqlx::{Executor, PgPool, Postgres};
+use sqlx::{Executor, PgConnection, PgPool, Postgres};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -501,18 +501,14 @@ pub async fn create_message(
 }
 
 /// Say something in `chat_id` as the assistant, marked in `metadata` as the
-/// automation that wrote it rather than a turn somebody typed, and answer
-/// with the stored message for publishing.
-///
-/// The chat is touched so it sorts as recently active, since a reader who is
-/// being told something has a reason to look at it.
+/// automation that wrote it, and answer with the stored message for
+/// publishing. The chat is touched so it sorts as recently active.
 pub async fn announce(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     chat_id: Uuid,
     content: &str,
     metadata: serde_json::Value,
 ) -> DbResult<serde_json::Value> {
-    let mut transaction = pool.begin().await?;
     let stored: serde_json::Value = sqlx::query_scalar(
         "INSERT INTO messages (chat_id, role, content, metadata) VALUES ($1, 'assistant', $2, $3)
          RETURNING to_jsonb(messages.*)",
@@ -520,13 +516,12 @@ pub async fn announce(
     .bind(chat_id)
     .bind(content)
     .bind(metadata)
-    .fetch_one(&mut *transaction)
+    .fetch_one(&mut *connection)
     .await?;
     sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
         .bind(chat_id)
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await?;
-    transaction.commit().await?;
     Ok(stored)
 }
 
@@ -780,7 +775,7 @@ pub async fn links_for(pool: &PgPool, ids: &[Uuid]) -> DbResult<HashMap<Uuid, Ch
 /// sandboxed and without auto-approval all the same, so switching the agent on
 /// later starts it confined to zone's own tools, confirming every call it makes.
 pub(crate) async fn create_project_chat_in(
-    connection: &mut sqlx::PgConnection,
+    connection: &mut PgConnection,
     workspace_id: Uuid,
     title: &str,
     purpose: ChatPurpose,

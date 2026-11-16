@@ -391,18 +391,6 @@ pub async fn start_auto_fix(
     }))
 }
 
-/// Says something in `chat_id` as the assistant, marked as auto-fix's own
-/// word rather than a turn somebody typed, and answers with the stored
-/// message for publishing.
-pub async fn announce(
-    pool: &PgPool,
-    chat_id: Uuid,
-    content: &str,
-    metadata: serde_json::Value,
-) -> DbResult<serde_json::Value> {
-    crate::db::chats::announce(pool, chat_id, content, metadata).await
-}
-
 pub async fn retitle<'e, E>(executor: E, id: Uuid, title: &str) -> DbResult<()>
 where
     E: Executor<'e, Database = Postgres>,
