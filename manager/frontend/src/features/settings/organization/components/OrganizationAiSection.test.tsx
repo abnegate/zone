@@ -17,6 +17,7 @@ import { ApiError } from '../../../../api/ApiError';
 import { clientModule } from '../../../../test/client';
 import {
   chooseSelect,
+  describedText,
   openSelect,
   optionDescription,
   selectOptionValues,
@@ -241,9 +242,8 @@ describe('OrganizationAiSection', () => {
   });
 
   describe('Agent policy', () => {
-    const OPENAI_DENIED = "Your organization's policy doesn't allow OpenAI in this workspace.";
-    const CODEX_DENIED =
-      "Your organization's policy doesn't allow Codex (ChatGPT subscription) in this workspace.";
+    const OPENAI_DENIED = "Your organization's policy doesn't allow OpenAI API in this workspace.";
+    const CODEX_DENIED = "Your organization's policy doesn't allow Codex in this workspace.";
 
     function option(name: string): HTMLElement {
       return screen.getByRole('option', { name });
@@ -266,6 +266,11 @@ describe('OrganizationAiSection', () => {
       expect(option('Anthropic')).not.toHaveAttribute('data-disabled');
       expect(option('Claude Code (Claude subscription)')).not.toHaveAttribute('data-disabled');
       expect(option('Self-Hosted (Ollama via LiteLLM)')).not.toHaveAttribute('data-disabled');
+      expect(
+        describedText(screen.getByRole('combobox', { name: 'AI Provider', hidden: true }))
+      ).toBe(
+        `OpenAI is unavailable. ${OPENAI_DENIED} Codex (ChatGPT subscription) is unavailable. ${CODEX_DENIED}`
+      );
     });
 
     it('warns when the saved provider is one the policy denies', async () => {

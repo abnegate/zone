@@ -1,10 +1,8 @@
 import { Link } from 'react-router-dom';
-import { denialMessage, type PolicyDenialCode } from '../../enterprise';
+import { AGENT_POLICY_LINK, denialMessage, type PolicyDenialCode } from '../../enterprise';
 import { SettingsGroup, SettingsSection, settingsPath } from '../../settings/navigation/sections';
 
 export const AGENT_POLICY_PATH = settingsPath(SettingsGroup.Workspace, SettingsSection.AgentPolicy);
-
-export const AGENT_POLICY_LINK = 'See the agent policy';
 
 interface ChatErrorProps {
   message: string;
@@ -21,7 +19,7 @@ export function ChatError({ message, denial }: ChatErrorProps) {
   }
   return (
     <div className="chats-error chats-denial" role="alert" data-testid="chat-denial">
-      <p className="chats-denial-message">{denialMessage(denial)}</p>
+      <p className="chats-denial-message">{message.trim() || denialMessage(denial)}</p>
       <Link className="chats-denial-link" to={AGENT_POLICY_PATH}>
         {AGENT_POLICY_LINK}
       </Link>

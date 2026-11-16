@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { OPEN_RULES } from './draft';
 import { PolicyAgent, PolicyCode, PolicyProvider } from './schemas';
-import { providerDenial } from './settings';
+import { providerDenial, providerDenialMessage, providerSubject } from './settings';
 
 const NARROW = {
   ...OPEN_RULES,
@@ -40,5 +40,31 @@ describe('providerDenial', () => {
     expect(providerDenial(CLOSED, 'bedrock')).toBeNull();
     expect(providerDenial(CLOSED, 'openai')).toBe(PolicyCode.ProviderDenied);
     expect(providerDenial(CLOSED, 'claude_code')).toBe(PolicyCode.AgentDenied);
+  });
+});
+
+describe('providerSubject', () => {
+  it('names a provider the policy governs by its policy label', () => {
+    expect(providerSubject('openai')).toBe('OpenAI API');
+    expect(providerSubject('anthropic')).toBe('Anthropic API');
+    expect(providerSubject('claude_code')).toBe('Claude Code');
+    expect(providerSubject('codex')).toBe('Codex');
+  });
+
+  it('names nothing for a provider the server checks per route', () => {
+    expect(providerSubject('self_hosted')).toBeUndefined();
+    expect(providerSubject('bedrock')).toBeUndefined();
+  });
+});
+
+describe('providerDenialMessage', () => {
+  it('words a denial the way the server words it', () => {
+    expect(providerDenialMessage(NARROW, 'openai')).toBe(
+      "Your organization's policy doesn't allow OpenAI API in this workspace."
+    );
+    expect(providerDenialMessage(NARROW, 'codex')).toBe(
+      "Your organization's policy doesn't allow Codex in this workspace."
+    );
+    expect(providerDenialMessage(NARROW, 'anthropic')).toBeNull();
   });
 });

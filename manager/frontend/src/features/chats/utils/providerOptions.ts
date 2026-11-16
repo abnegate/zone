@@ -1,5 +1,5 @@
 import type { SelectOption } from '@zone/ui';
-import { denialReason } from '../../enterprise';
+import { denialReason, providerSubject } from '../../enterprise';
 import { isAgentProvider } from '../../settings/ai/options';
 import { AiProviderSchema } from '../../settings/workspace/schemas';
 import type { AiProvider } from '../../settings/workspace/types';
@@ -34,12 +34,11 @@ export const AUTO_EFFORT: ReasoningEffort = 'auto';
 
 const SELF_HOSTED: AiProvider = AiProviderSchema.enum.self_hosted;
 
-/** Why the agent policy keeps `offer` out of this chat, or null when it allows it. */
 export function offerDenial(offer: ChatProviderOffer): string | null {
-  return offer.denial ? denialReason(offer.denial, offer.label) : null;
+  if (!offer.denial) return null;
+  return offer.reason?.trim() || denialReason(offer.denial, providerSubject(offer.provider));
 }
 
-/** Why the agent policy keeps a listed model out of this workspace, or null when it allows it. */
 export function modelDenial(model: { denial?: string | null }): string | null {
   return model.denial ? denialReason(model.denial) : null;
 }
@@ -181,7 +180,6 @@ export function providerChoices(
   return options;
 }
 
-/** Automatic, then every listed model that can answer a chat, with those the policy denies disabled. */
 export function installedModelOptions<
   T extends { name: string; completion?: boolean; denial?: string | null },
 >(installed: T[]): SelectOption[] {
