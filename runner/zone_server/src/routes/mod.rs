@@ -361,6 +361,10 @@ pub fn create_router(state: AppState) -> Router {
             patch(chats::pull_requests::update),
         )
         .route(
+            "/api/chats/{id}/pull-requests/{pull_request_id}/merge",
+            post(chats::pull_requests::merge),
+        )
+        .route(
             "/api/chats/{id}/pull-requests/{pull_request_id}/diff",
             get(chats::pull_requests::diff),
         )

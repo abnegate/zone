@@ -496,6 +496,7 @@ export const PullRequestStatusSchema = z.object({
     unavailable: z.string().nullable(),
   }),
   draft_unavailable: z.string().nullable().catch(null),
+  merge_unavailable: z.string().nullable().catch(null),
   threads: z
     .object({ open: z.number().int().nonnegative(), resolved: z.number().int().nonnegative() })
     .nullable()

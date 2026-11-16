@@ -631,6 +631,8 @@ export interface PullRequestStatus {
   mergeable: PullRequestMergeability;
   auto_merge: PullRequestAutoMerge;
   draft_unavailable: string | null;
+  /** Why it cannot be merged now, if it cannot. */
+  merge_unavailable: string | null;
   threads: PullRequestThreads | null;
   observed_at: string;
 }

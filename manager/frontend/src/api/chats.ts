@@ -397,6 +397,21 @@ class ChatsApi {
     return parse(ChatPullRequestSchema, await response.json());
   }
 
+  /** Merges it on GitHub now, which nothing afterwards takes back. */
+  async mergeChatPullRequest(chatId: string, pullRequestId: string): Promise<ChatPullRequest> {
+    const response = await fetch(
+      `${API_BASE}/api/chats/${encodeURIComponent(chatId)}/pull-requests/${encodeURIComponent(pullRequestId)}/merge`,
+      {
+        method: 'POST',
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to merge the pull request');
+    }
+    return parse(ChatPullRequestSchema, await response.json());
+  }
+
   async getChatPullRequestDiff(chatId: string, pullRequestId: string): Promise<PullRequestDiff> {
     const response = await fetch(
       `${API_BASE}/api/chats/${encodeURIComponent(chatId)}/pull-requests/${encodeURIComponent(pullRequestId)}/diff`,
