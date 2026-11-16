@@ -41,7 +41,7 @@
   margin: 0;
   font-size: var(--ui-text-xs);
   line-height: var(--ui-leading-normal);
-  color: var(--ui-warning-600);
+  color: color-mix(in srgb, var(--ui-warning-600) 45%, var(--ui-text-primary));
   overflow-wrap: anywhere;
 }
 
