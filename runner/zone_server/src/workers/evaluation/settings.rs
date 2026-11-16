@@ -129,13 +129,22 @@ pub struct EvaluationEnvironment {
 
 impl EvaluationEnvironment {
     pub fn from_process() -> Self {
+        Self::from_lookup(|variable| std::env::var(variable).ok())
+    }
+
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let read = |variable: &str| present(lookup(variable));
         Self {
-            enabled: std::env::var(ENABLED_VARIABLE).ok(),
-            categories: std::env::var(CATEGORIES_VARIABLE).ok(),
-            tool_timeout_seconds: std::env::var(TOOL_TIMEOUT_VARIABLE).ok(),
-            budget_seconds: std::env::var(BUDGET_VARIABLE).ok(),
+            enabled: read(ENABLED_VARIABLE),
+            categories: read(CATEGORIES_VARIABLE),
+            tool_timeout_seconds: read(TOOL_TIMEOUT_VARIABLE),
+            budget_seconds: read(BUDGET_VARIABLE),
         }
     }
+}
+
+fn present(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 impl EvaluationSettings {
@@ -301,6 +310,69 @@ mod tests {
             settings.slice(Duration::from_secs(10_000)),
             settings.tool_timeout
         );
+    }
+
+    fn lookup(values: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let values: Vec<(String, String)> = values
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        move |variable| {
+            values
+                .iter()
+                .find(|(name, _)| name == variable)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    #[test]
+    fn blank_categories_keep_the_default_selection() {
+        for blank in ["", "   ", "\t"] {
+            let environment = EvaluationEnvironment::from_lookup(lookup(&[
+                (ENABLED_VARIABLE, "true"),
+                (CATEGORIES_VARIABLE, blank),
+            ]));
+            let settings = EvaluationSettings::resolve(&environment);
+            assert_eq!(
+                settings.categories,
+                CategorySelection::default(),
+                "{blank:?} must not switch every category off"
+            );
+            assert!(settings.categories.includes(EvalCategory::Test));
+            assert!(settings.categories.includes(EvalCategory::Lint));
+            assert!(settings.categories.includes(EvalCategory::Typecheck));
+        }
+    }
+
+    #[test]
+    fn blank_values_read_as_unset() {
+        let environment = EvaluationEnvironment::from_lookup(lookup(&[
+            (ENABLED_VARIABLE, " "),
+            (CATEGORIES_VARIABLE, ""),
+            (TOOL_TIMEOUT_VARIABLE, ""),
+            (BUDGET_VARIABLE, "  "),
+        ]));
+        assert_eq!(environment, EvaluationEnvironment::default());
+        assert_eq!(
+            EvaluationSettings::resolve(&environment),
+            EvaluationSettings::default()
+        );
+    }
+
+    #[test]
+    fn non_blank_values_still_apply() {
+        let environment = EvaluationEnvironment::from_lookup(lookup(&[
+            (ENABLED_VARIABLE, "true"),
+            (CATEGORIES_VARIABLE, "build"),
+            (TOOL_TIMEOUT_VARIABLE, "45"),
+            (BUDGET_VARIABLE, "600"),
+        ]));
+        let settings = EvaluationSettings::resolve(&environment);
+        assert!(settings.enabled);
+        assert!(settings.categories.includes(EvalCategory::Build));
+        assert!(!settings.categories.includes(EvalCategory::Test));
+        assert_eq!(settings.tool_timeout, Duration::from_secs(45));
+        assert_eq!(settings.total_budget, Duration::from_secs(600));
     }
 
     #[test]

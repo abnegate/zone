@@ -51,14 +51,23 @@ pub struct ReportEnvironment {
 
 impl ReportEnvironment {
     pub fn from_process() -> Self {
+        Self::from_lookup(|variable| std::env::var(variable).ok())
+    }
+
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let read = |variable: &str| present(lookup(variable));
         Self {
-            enabled: std::env::var(ENABLED_VARIABLE).ok(),
-            cadence: std::env::var(CADENCE_VARIABLE).ok(),
-            hour: std::env::var(HOUR_VARIABLE).ok(),
-            weekday: std::env::var(WEEKDAY_VARIABLE).ok(),
-            day_of_month: std::env::var(DAY_OF_MONTH_VARIABLE).ok(),
+            enabled: read(ENABLED_VARIABLE),
+            cadence: read(CADENCE_VARIABLE),
+            hour: read(HOUR_VARIABLE),
+            weekday: read(WEEKDAY_VARIABLE),
+            day_of_month: read(DAY_OF_MONTH_VARIABLE),
         }
     }
+}
+
+fn present(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 /// When digests go out, and how much history each one reads.
@@ -359,6 +368,45 @@ mod tests {
 
         assert!(!settings.enabled);
         assert_eq!(settings.schedule, Schedule::default());
+    }
+
+    #[test]
+    fn blank_values_read_as_unset() {
+        let variables = [
+            ENABLED_VARIABLE,
+            CADENCE_VARIABLE,
+            HOUR_VARIABLE,
+            WEEKDAY_VARIABLE,
+            DAY_OF_MONTH_VARIABLE,
+        ];
+        for blank in ["", "  ", "\t"] {
+            let environment = ReportEnvironment::from_lookup(|variable| {
+                variables.contains(&variable).then(|| blank.to_string())
+            });
+
+            assert_eq!(
+                environment,
+                ReportEnvironment::default(),
+                "{blank:?} must read as unset"
+            );
+            assert_eq!(
+                ReportSettings::resolve(&environment),
+                ReportSettings::default()
+            );
+        }
+    }
+
+    #[test]
+    fn non_blank_values_are_read_through_the_lookup() {
+        let environment = ReportEnvironment::from_lookup(|variable| {
+            (variable == CADENCE_VARIABLE).then(|| "daily".to_string())
+        });
+
+        assert_eq!(environment.cadence.as_deref(), Some("daily"));
+        assert_eq!(
+            ReportSettings::resolve(&environment).schedule.cadence,
+            Cadence::Daily
+        );
     }
 
     #[test]
