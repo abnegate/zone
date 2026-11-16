@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use tempfile::TempDir;
 use uuid::Uuid;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_core::llm::{LlmBackend, SignIn};
 use zone_enterprise::Tier;
 use zone_enterprise::policy::{self, Denial, Effective};
@@ -34,6 +36,8 @@ use crate::common::{Database, agents, create_test_state, test_config};
 const PREFIX: &str = "policy_routing";
 const CLAUDE: &str = "claude_code";
 const CODEX: &str = "codex";
+const SELF_HOSTED: &str = "self_hosted";
+const LOCAL: &str = "llama3:8b";
 const UNVERIFIABLE: &str = "not a license key";
 const LICENSE_REQUIRED: &str = "license_required";
 const CODEX_CREDENTIALS_FILE: &str = "auth.json";
@@ -464,6 +468,58 @@ async fn a_handover_never_moves_onto_a_model_the_policy_denies() {
         "the turn moved onto a model the policy denies: {:?}",
         governed.map(|switch| switch.model)
     );
+}
+
+async fn litellm_claiming_local_routes() -> MockServer {
+    let server = MockServer::builder().start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/model/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"model_name": "*", "litellm_params": {"model": "ollama_chat/*"}}],
+            "total_pages": 1
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn only_an_organizations_litellm_endpoint_is_believed_about_where_it_runs() {
+    let fixture = Fixture::new(SELF_HOSTED).await;
+    fixture.license(&active(Tier::Team)).await;
+    fixture.restrict(json!({"providers": ["local"]})).await;
+    let organization = litellm_claiming_local_routes().await;
+    let workspace = litellm_claiming_local_routes().await;
+    sqlx::query(
+        "UPDATE organization_ai_settings SET litellm_host = $2, completions_routed = true \
+         WHERE organization_id = $1",
+    )
+    .bind(fixture.organization)
+    .bind(organization.uri())
+    .execute(fixture.pool())
+    .await
+    .unwrap();
+
+    let on_organization = fixture.route().await.admit(&LlmBackend::Http, LOCAL).await;
+    sqlx::query(
+        "INSERT INTO workspace_ai_settings (workspace_id, litellm_host, completions_routed) \
+         VALUES ($1, $2, true)",
+    )
+    .bind(fixture.workspace)
+    .bind(workspace.uri())
+    .execute(fixture.pool())
+    .await
+    .unwrap();
+    let route = fixture.route().await;
+    let on_workspace = route.admit(&LlmBackend::Http, LOCAL).await;
+    let precheck = route.precheck(Some(LOCAL)).await;
+    fixture.cleanup().await;
+
+    assert_eq!(on_organization, Ok(()));
+    let denied = Err(Denial::Provider(policy::Provider::Other));
+    assert_eq!(on_workspace, denied);
+    assert_eq!(precheck, denied);
+    assert_eq!(on_workspace.unwrap_err().code(), policy::PROVIDER_DENIED);
 }
 
 #[tokio::test]

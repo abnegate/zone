@@ -12,6 +12,10 @@ use zone_context::embeddings::providers::{
 use crate::services::endpoint;
 use crate::services::hosts::Hosts;
 
+mod layer;
+
+pub use layer::Layer;
+
 use super::{
     DbResult,
     chats::provider::Choice,
@@ -553,6 +557,8 @@ pub struct WorkspaceSettings<T> {
 pub struct EffectiveAiSettings {
     pub provider: String,
     pub litellm_host: Option<String>,
+    /// The settings `litellm_host` was saved in, none when neither saved one.
+    pub litellm_layer: Option<Layer>,
     pub litellm_key: Option<SecretValue>,
     pub openai_api_key: Option<SecretValue>,
     pub openai_base_url: Option<String>,
@@ -1185,6 +1191,7 @@ fn effective(
     let mut effective = EffectiveAiSettings {
         provider: PROVIDER_SELF_HOSTED.to_string(),
         litellm_host: None,
+        litellm_layer: None,
         litellm_key: None,
         openai_api_key: None,
         openai_base_url: None,
@@ -1206,6 +1213,8 @@ fn effective(
     if let Some(org) = organization {
         effective.provider = org.provider;
         if org.completions_routed {
+            effective.litellm_layer =
+                nonempty(org.litellm_host.as_deref()).map(|_| Layer::Organization);
             effective.litellm_host = org.litellm_host;
             effective.litellm_key = org.litellm_key;
             effective.openai_api_key = org.openai_api_key;
@@ -1236,6 +1245,9 @@ fn effective(
             effective.provider = provider;
         }
         if ws.completions_routed {
+            if nonempty(ws.litellm_host.as_deref()).is_some() {
+                effective.litellm_layer = Some(Layer::Workspace);
+            }
             overlay_endpoint(
                 &mut effective.litellm_host,
                 &mut effective.litellm_key,
@@ -1425,6 +1437,7 @@ mod tests {
         EffectiveAiSettings {
             provider: PROVIDER_SELF_HOSTED.to_string(),
             litellm_host: None,
+            litellm_layer: None,
             litellm_key: None,
             openai_api_key: None,
             openai_base_url: None,

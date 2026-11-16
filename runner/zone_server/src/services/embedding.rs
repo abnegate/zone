@@ -183,6 +183,7 @@ mod tests {
         let settings = EffectiveAiSettings {
             provider: PROVIDER_SELF_HOSTED.to_string(),
             litellm_host: Some("http://localhost:11434".to_string()),
+            litellm_layer: None,
             litellm_key: Some(SecretValue::new("test-key")),
             openai_api_key: None,
             openai_base_url: None,
@@ -217,6 +218,7 @@ mod tests {
         let settings = EffectiveAiSettings {
             provider: PROVIDER_SELF_HOSTED.to_string(),
             litellm_host: None,
+            litellm_layer: None,
             litellm_key: None,
             openai_api_key: None,
             openai_base_url: None,
@@ -248,6 +250,7 @@ mod tests {
         let settings = EffectiveAiSettings {
             provider: "openai".to_string(),
             litellm_host: None,
+            litellm_layer: None,
             litellm_key: None,
             openai_api_key: Some(SecretValue::new("sk-test")),
             openai_base_url: None,
@@ -279,6 +282,7 @@ mod tests {
         let settings = EffectiveAiSettings {
             provider: PROVIDER_SELF_HOSTED.to_string(),
             litellm_host: Some("http://localhost:11434".to_string()),
+            litellm_layer: None,
             litellm_key: None,
             openai_api_key: None,
             openai_base_url: None,

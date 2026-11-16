@@ -145,7 +145,7 @@ hosts those URLs may name.
 ### How Zone tells where a LiteLLM model runs
 
 When `providers` is set at either layer and a completion goes to a LiteLLM
-endpoint, Zone asks that endpoint for its routes with
+endpoint Zone trusts, Zone asks that endpoint for its routes with
 `GET {endpoint}/v2/model/info`, using the key Zone uses for the endpoint. It
 then finds the route for the model name it's about to ask for:
 
@@ -159,12 +159,30 @@ The route's `model` prefix gives the provider. With the stock
 `ollama_chat/*`, so all of them count as `local`.
 
 Zone caches each endpoint's routes for 60 seconds, so a change to LiteLLM's
-`config.yaml` can take up to a minute to reach policy decisions.
+`config.yaml` can take up to a minute to reach policy decisions. A lookup that
+fails is remembered for 5 seconds, and lookups that arrive while one is in
+flight wait for it rather than ask again.
+
+**Zone believes only the routes of an endpoint the organization controls.**
+The routes are the endpoint's own answer, so whoever chooses the endpoint
+chooses what it claims. Zone trusts:
+
+- the instance's own `LITELLM_HOST`, and a saved URL on the same host;
+- an endpoint saved in the organization's AI settings.
+
+An endpoint saved in a workspace's AI settings counts as `other` whatever its
+routes say. Without this, a workspace admin could save a proxy that reports
+every route as `ollama_chat/…` while forwarding to a hosted API, and satisfy an
+organization's `providers: ["local"]`; a workspace may only narrow the
+organization's policy, never get round it. To run a workspace on its own
+LiteLLM endpoint under a `providers` restriction, save the endpoint at the
+organization, or allow `other`.
 
 **An upstream Zone can't identify counts as `other`.** That covers a model
 with no route, an endpoint that isn't LiteLLM, an endpoint that doesn't answer
-`/v2/model/info` within 2 seconds, and a key that may not read it. `other` is
-denied unless the policy allows it, so a restricted policy fails closed.
+`/v2/model/info` within 2 seconds, a key that may not read it, and an endpoint
+a workspace saved. `other` is denied unless the policy allows it, so a
+restricted policy fails closed.
 
 When `providers` is unset, Zone doesn't look up routes at all.
 

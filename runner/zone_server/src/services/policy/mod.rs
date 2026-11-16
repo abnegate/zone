@@ -20,9 +20,11 @@ use zone_core::llm::LlmBackend;
 use zone_enterprise::Feature;
 use zone_enterprise::policy::{self, Denial, Effective, Rules};
 
+use crate::db::ai_settings::Layer;
 use crate::db::audit::{self, AuditContext};
 use crate::db::{policies, workspaces};
-use crate::services::endpoint::Endpoint;
+use crate::services::endpoint::{Endpoint, Origin};
+use crate::services::license::Stored;
 use crate::services::provider::Provider;
 use crate::state::AppState;
 
@@ -113,7 +115,7 @@ pub async fn admit(
     }
 }
 
-/// [`admit`]'s judgement of a completion sent over HTTP to `endpoint`, `provider`'s.
+/// [`admit`] over HTTP. The upstream is looked up only while providers are restricted.
 pub(crate) async fn over_http(
     effective: &Effective,
     endpoint: &Endpoint,
@@ -123,19 +125,30 @@ pub(crate) async fn over_http(
     match provider {
         Some(Provider::OpenAI) => effective.provider(policy::Provider::OpenAI),
         Some(Provider::Anthropic) => effective.provider(policy::Provider::Anthropic),
-        _ if effective.restricts_providers() => {
-            let upstream = upstream::route(endpoint, model)
-                .await
-                .map_or(policy::Provider::Other, |routed| {
-                    policy::Provider::routed(&routed)
-                });
-            effective.provider(upstream)
-        }
+        _ if effective.restricts_providers() => effective.provider(upstream(endpoint, model).await),
         _ => Ok(()),
     }
 }
 
-/// Audits `denied` as `action`. A failure to record it is logged and never fails the caller.
+/// Where `endpoint` runs `model`, by the LiteLLM route it publishes. A workspace admin can point
+/// a workspace's endpoint at a proxy that publishes any routes it likes, so only the routes of
+/// the instance's endpoint, or of one the organization saved, are believed.
+async fn upstream(endpoint: &Endpoint, model: &str) -> policy::Provider {
+    let believed = match endpoint.origin() {
+        Origin::Instance => true,
+        Origin::Settings => endpoint.layer() == Some(Layer::Organization),
+    };
+    if !believed {
+        return policy::Provider::Other;
+    }
+    upstream::route(endpoint, model)
+        .await
+        .map_or(policy::Provider::Other, |routed| {
+            policy::Provider::routed(&routed)
+        })
+}
+
+/// A failure to record `denied` is logged and never fails the caller.
 pub async fn record(state: &AppState, action: &'static str, denied: &Denied<'_>) {
     let organization = match denied.organization {
         Some(organization) => Some(organization),
@@ -270,7 +283,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::services::endpoint::testing::endpoint;
+    use crate::services::endpoint::testing::{endpoint, saved};
     use crate::state::{test_config, unreachable_pool};
 
     const KEY: &str = "sk-policy-test";
@@ -401,6 +414,35 @@ mod tests {
             )
             .await,
             Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_instance_and_the_organization_are_believed_about_their_routes() {
+        let server = routing("ollama_chat/*").await;
+        let local = providers(&[policy::Provider::Local]);
+        let over = |endpoint: Endpoint| {
+            let local = local.clone();
+            async move {
+                admit(
+                    &local,
+                    &endpoint,
+                    &LlmBackend::Http,
+                    Some(Provider::SelfHosted),
+                    MODEL,
+                )
+                .await
+            }
+        };
+
+        assert_eq!(over(endpoint(&server.uri(), KEY)).await, Ok(()));
+        assert_eq!(
+            over(saved(&server.uri(), KEY, Layer::Organization)).await,
+            Ok(())
+        );
+        assert_eq!(
+            over(saved(&server.uri(), KEY, Layer::Workspace)).await,
+            Err(Denial::Provider(policy::Provider::Other))
         );
     }
 
