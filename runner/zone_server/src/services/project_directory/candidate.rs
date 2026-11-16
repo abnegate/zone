@@ -266,7 +266,7 @@ mod tests {
             .is_none(),
             "an owner GitHub would not allow is never given to git"
         );
-        for kind in ["web", "text", "notion"] {
+        for kind in ["web", "text"] {
             assert!(Candidate::of_source(&source(kind, json!({})), None).is_none());
         }
     }

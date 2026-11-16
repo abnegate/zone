@@ -27,7 +27,6 @@ impl AdapterRegistry {
         registry.register(super::FilesystemAdapter::new());
         registry.register(super::GitHubAdapter::new());
         registry.register(super::GitLabAdapter::new());
-        registry.register(super::NotionAdapter::new());
         registry.register(super::TextAdapter::new());
         registry.register(super::WebAdapter::new());
         registry
@@ -90,7 +89,6 @@ fn source_type_to_string(source_type: &SourceType) -> String {
         SourceType::GitLab => "gitlab".to_string(),
         SourceType::GoogleCalendar => "ical".to_string(),
         SourceType::GoogleMail => "imap".to_string(),
-        SourceType::Notion => "notion".to_string(),
         SourceType::Slack => "slack".to_string(),
         SourceType::Web => "web".to_string(),
         SourceType::Text => "text".to_string(),
@@ -160,10 +158,9 @@ mod tests {
         assert!(registry.has_adapter("filesystem"));
         assert!(registry.has_adapter("github"));
         assert!(registry.has_adapter("gitlab"));
-        assert!(registry.has_adapter("notion"));
         assert!(registry.has_adapter("text"));
         assert!(registry.has_adapter("web"));
-        assert_eq!(registry.len(), 6);
+        assert_eq!(registry.len(), 5);
     }
 
     #[test]
