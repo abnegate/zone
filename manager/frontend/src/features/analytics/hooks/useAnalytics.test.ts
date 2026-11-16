@@ -2,7 +2,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
-import { overview } from '../../../test/analytics';
+import { overview, wireOverview } from '../../../test/analytics';
+import { parse } from '../../../validation';
+import { OverviewSchema } from '../schemas';
 import type { Overview, TimePeriod } from '../types';
 
 const mockOverview = mock();
@@ -93,6 +95,16 @@ describe('useAnalytics', () => {
       expect(result.current.error).toBe('Failed to load analytics: period must be one of')
     );
     expect(result.current.overview).toBeUndefined();
+  });
+
+  it('says the analytics failed to load rather than show a reply it could not read', async () => {
+    mockOverview.mockImplementation(async () =>
+      parse(OverviewSchema, { ...wireOverview, truncated: 'no' })
+    );
+
+    const { result } = renderHook(() => useAnalytics('week'), { wrapper: provider() });
+
+    await waitFor(() => expect(result.current.error).toBe('Failed to load analytics'));
   });
 
   it('keeps the last period on screen while the next one loads', async () => {

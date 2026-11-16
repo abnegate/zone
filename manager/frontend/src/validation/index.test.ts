@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { getErrors, isValid, parse, safeParse } from './index';
+import { getErrors, isValid, parse, safeParse, ValidationError } from './index';
 
 describe('validation utilities', () => {
   const testSchema = z.object({
@@ -18,6 +18,17 @@ describe('validation utilities', () => {
     it('throws descriptive error when validation fails', () => {
       const invalidData = { name: '', age: -1, email: 'invalid' };
       expect(() => parse(testSchema, invalidData)).toThrow(/Validation failed/);
+    });
+
+    it('throws a ValidationError carrying the issues, so callers can tell it from a refusal', () => {
+      const invalidData = { name: '', age: 30, email: 'john@example.com' };
+      try {
+        parse(testSchema, invalidData);
+        throw new Error('Expected the parse to fail');
+      } catch (thrown) {
+        expect(thrown).toBeInstanceOf(ValidationError);
+        expect((thrown as ValidationError).issues.map((issue) => issue.path)).toEqual([['name']]);
+      }
     });
 
     it('includes field paths in error message', () => {
