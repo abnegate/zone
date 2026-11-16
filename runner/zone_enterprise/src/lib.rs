@@ -1,6 +1,7 @@
 mod duplicate_key;
 mod edition;
 mod encoding;
+mod entitlement;
 mod error;
 #[cfg(test)]
 mod fixtures;
@@ -20,6 +21,7 @@ mod trusted_key;
 pub use duplicate_key::DuplicateKey;
 pub use edition::Edition;
 pub use encoding::{SEPARATOR, encode};
+pub use entitlement::{Feature, LICENSE_REQUIRED};
 pub use error::{Error, MALFORMED, PAYLOAD_INVALID, SIGNATURE_INVALID, UNKNOWN_KEY};
 pub use key_error::KeyError;
 pub use keyring::Keyring;
