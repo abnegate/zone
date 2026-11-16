@@ -34,7 +34,7 @@ chrono = "=0.4.45"
 which = "=8.0.6"
 
 [dev-dependencies]
-tempfile = "^3.27.0"
+tempfile = "=3.27.0"
 
 [profile.release]
 lto = true
