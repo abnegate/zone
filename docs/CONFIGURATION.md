@@ -2152,7 +2152,7 @@ Inside Docker the manager image does not include magents. Install it on the host
 
 ### `ZONE_MCP_ENABLED`
 - **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
-- **Description**: Master switch for both layers, which read it the same way: the value is trimmed and read in any case, `0` / `false` / `no` / `off` turns it off, and anything else, an empty or unrecognised value included, leaves it on. Off skips every instance server, and starts or connects no organization server: each one then shows `failed` with "MCP servers are turned off on this instance (ZONE_MCP_ENABLED)".
+- **Description**: Master switch for both layers, which read it the same way: the value is trimmed and read in any case, `1` / `true` / `yes` / `on` turns it on, `0` / `false` / `no` / `off` turns it off, a blank value counts as unset and leaves it on, and any other value logs a warning and leaves it on. Off skips every instance server, and starts or connects no organization server: each one then shows `failed` with "MCP servers are turned off on this instance (ZONE_MCP_ENABLED)".
 
 ### `ZONE_MCP_AUTO_CONNECT`
 - **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
@@ -2440,11 +2440,11 @@ Off by default. When on, every task run runs the project's own tooling in its wo
 
 ### `ZONE_TASK_EVALUATION`
 - **Default**: `false`
-- **Description**: `true`, `1`, `yes` or `on` evaluates every task run; `false`, `0`, `no` or `off` does not, and any other value is read as off with a warning in the server log. Running a project's test suite twice per run is expensive, so it is opt-in.
+- **Description**: `true`, `1`, `yes` or `on`, in any case, evaluates every task run; `false`, `0`, `no` or `off` does not. A blank value counts as unset, and any other value logs a warning and keeps the default, off. Running a project's test suite twice per run is expensive, so it is opt-in.
 
 ### `ZONE_TASK_EVALUATION_CATEGORIES`
 - **Default**: `test,lint,typecheck`
-- **Description**: Comma-separated checks to run, from `test`, `lint`, `typecheck`, `build` and `coverage`; `all` selects every one. Build and coverage cost far more than they add to a single run, so they run only when named here. Unknown names are ignored.
+- **Description**: Comma-separated checks to run, from `test`, `lint`, `typecheck`, `build` and `coverage`; `all` selects every one. Build and coverage cost far more than they add to a single run, so they run only when named here. Unknown names are ignored with a warning in the server log; if none of the names is recognised, the default set, `test,lint,typecheck`, runs instead.
 
 ### `ZONE_TASK_EVALUATION_TOOL_TIMEOUT_SECONDS`
 - **Default**: `300` (max 1800)
@@ -2490,7 +2490,7 @@ Digests are sent through the [notification](#-notifications) channels — Slack,
 
 ### `ZONE_REPORT_ENABLED`
 - **Default**: `false`
-- **Description**: `true`, `1`, `yes` or `on` sends scheduled digests; `false`, `0`, `no` or `off` does not, and any other value is read as off with a warning in the server log.
+- **Description**: `true`, `1`, `yes` or `on`, in any case, sends scheduled digests; `false`, `0`, `no` or `off` does not. A blank value counts as unset, and any other value logs a warning and keeps the default, off.
 
 ### `ZONE_REPORT_CADENCE`
 - **Default**: `weekly`
