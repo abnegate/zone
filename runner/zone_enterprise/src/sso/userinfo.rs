@@ -52,7 +52,12 @@ mod tests {
             email: None,
             email_verified: None,
             name: None,
-            ..testing::claims("https://acme.okta.com", "zone", "nonce", Utc::now())
+            ..testing::claims(
+                "https://acme.okta.com",
+                "zone",
+                &testing::nonce(),
+                Utc::now(),
+            )
         }
     }
 

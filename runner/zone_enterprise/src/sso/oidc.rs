@@ -355,7 +355,7 @@ fn basic(client_id: &str, client_secret: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{LazyLock, Mutex};
 
     use serde_json::{Value, json};
     use url::form_urlencoded;
@@ -371,7 +371,7 @@ mod tests {
     const CLIENT_SECRET: &str = "s3cret";
     const CODE: &str = "code-1";
     const VERIFIER: &str = "verifier-1";
-    const NONCE: &str = "nonce-1";
+    static NONCE: LazyLock<String> = LazyLock::new(testing::nonce);
     const REDIRECT: &str = "https://zone.example.com/sso/callback";
     const DISCOVERY_PATH: &str = "/.well-known/openid-configuration";
 
@@ -422,7 +422,7 @@ mod tests {
         }
 
         fn claims(&self) -> Claims {
-            testing::claims(&self.issuer(), CLIENT_ID, NONCE, self.now())
+            testing::claims(&self.issuer(), CLIENT_ID, &NONCE, self.now())
         }
 
         async fn serve_discovery(&self, document: Value) {
@@ -463,7 +463,7 @@ mod tests {
                     &Grant {
                         code: CODE,
                         verifier: VERIFIER,
-                        nonce: NONCE,
+                        nonce: &NONCE,
                         redirect_uri: REDIRECT,
                     },
                 )
@@ -665,7 +665,7 @@ mod tests {
         let harness = Harness::new().await;
         harness.serve_standard_discovery().await;
         harness.serve_keys().await;
-        let claims = testing::claims(&harness.issuer(), "zone:app+1", NONCE, harness.now());
+        let claims = testing::claims(&harness.issuer(), "zone:app+1", &NONCE, harness.now());
         Mock::given(method("POST"))
             .and(path("/token"))
             .and(header(
@@ -806,7 +806,7 @@ mod tests {
         harness.serve_standard_discovery().await;
         harness.serve_keys().await;
         let claims = Claims {
-            nonce: Some("another".into()),
+            nonce: Some(testing::nonce()),
             ..harness.claims()
         };
         harness.serve_token(testing::id_token(&claims)).await;
