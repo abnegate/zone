@@ -168,6 +168,9 @@ if [ -n "${ZONE_LIVE_MODEL_STUB:-}" ]; then
   export ZONE_MODEL_STUB="http://127.0.0.1:$model_port"
 fi
 
+fast_model="${OLLAMA_MODEL_FAST:-llama3.2:3b}"
+vision_model="${OLLAMA_MODEL_VISION:-llava:7b}"
+
 echo "==> server on $api_port"
 (cd "$root/runner" && SQLX_OFFLINE=true cargo build --quiet -p zone_server)
 HOST=127.0.0.1 \
@@ -179,10 +182,10 @@ ZONE_CHAT_AGENT_CWD="$work/chat-cwd" \
 LITELLM_HOST="${LITELLM_HOST:-http://127.0.0.1:11434/v1}" \
 LITELLM_KEY="${LITELLM_KEY:-live-verify}" \
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}" \
-OLLAMA_MODEL_FAST="${OLLAMA_MODEL_FAST:-llama3.2:3b}" \
+OLLAMA_MODEL_FAST="$fast_model" \
 OLLAMA_MODEL_REASON="${OLLAMA_MODEL_REASON:-llama3.2:3b}" \
 OLLAMA_MODEL_EMBED="${OLLAMA_MODEL_EMBED:-nomic-embed-text}" \
-OLLAMA_MODEL_VISION="${OLLAMA_MODEL_VISION:-llava:7b}" \
+OLLAMA_MODEL_VISION="$vision_model" \
 COMFYUI_ENABLED=true \
 COMFYUI_BASE_URL="$comfy_url" \
 COMFYUI_WORKFLOW_PATH="$root/comfyui/workflows/flux1-schnell-fp8-api.json" \
@@ -192,8 +195,8 @@ COMFYUI_GENERATION_TIMEOUT_SECONDS="$generation_timeout" \
 COMFYUI_VIDEO_GENERATION_TIMEOUT_SECONDS="$video_timeout" \
 COMFYUI_AUDIO_GENERATION_TIMEOUT_SECONDS="$audio_timeout" \
 COMFYUI_UPSCALE_GENERATION_TIMEOUT_SECONDS="$upscale_timeout" \
-COMFYUI_CLASSIFIER_MODEL="${OLLAMA_MODEL_FAST:-llama3.2:3b}" \
-COMFYUI_CAPTION_MODEL="${OLLAMA_MODEL_VISION:-llava:7b}" \
+COMFYUI_CLASSIFIER_MODEL="$fast_model" \
+COMFYUI_CAPTION_MODEL="$vision_model" \
 COMFYUI_CLASSIFIER_TIMEOUT_SECONDS=20 \
 COMFYUI_POLL_INTERVAL_MILLISECONDS=200 \
 COMFYUI_UPSCALE_MODEL=RealESRGAN_x4plus.safetensors \
