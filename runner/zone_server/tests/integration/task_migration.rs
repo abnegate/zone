@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 use zone_server::db::auto_projects::Stage;
+use zone_server::db::migrations::interrupted;
 use zone_server::db::{ai_settings, memory, migrations, tasks};
 
 use crate::common::Database;
@@ -1007,7 +1008,7 @@ async fn driver_tasks_still_waiting_move_to_the_front_of_the_most_urgent_first_o
 
 #[tokio::test]
 async fn the_run_finish_index_builds_while_runs_keep_beating() {
-    const BEFORE_RUN_FINISH_INDEX: i64 = 10;
+    const BEFORE_RUN_FINISH_INDEX: i64 = 13;
     const INDEX: &str = "idx_task_runs_finished";
     const BEAT: &str = "UPDATE task_runs SET heartbeat_at = NOW() WHERE id = $1";
     let database = Database::new(PREFIX).await;
@@ -1088,6 +1089,106 @@ async fn the_run_finish_index_builds_while_runs_keep_beating() {
     );
     built.expect("the migrations finish once the lingering transaction ends");
     assert_eq!(valid, Some(true), "{INDEX} is built and usable");
+}
+
+#[tokio::test]
+async fn an_index_build_interrupted_on_an_earlier_boot_is_built_again() {
+    const BEFORE_CONCURRENT_INDEXES: i64 = 13;
+    const UNRELATED: &str = "idx_migration_unrelated";
+    const CANCELED: &str = "57014";
+    let database = Database::new(PREFIX).await;
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let migrator = Migrator::new(directory.as_path()).await.unwrap();
+    migrator
+        .run_to(BEFORE_CONCURRENT_INDEXES, &database.pool)
+        .await
+        .unwrap();
+    let mut builds: Vec<(String, String)> = migrator
+        .iter()
+        .filter(|migration| migration.version > BEFORE_CONCURRENT_INDEXES && migration.no_tx)
+        .map(|migration| {
+            let index = interrupted::index_built(migration.sql.as_str())
+                .expect("each concurrent migration builds a named index");
+            (index, migration.sql.as_str().to_string())
+        })
+        .collect();
+    assert!(
+        !builds.is_empty(),
+        "no concurrent index builds to interrupt"
+    );
+    let built: Vec<String> = builds.iter().map(|(index, _)| index.clone()).collect();
+    builds.push((
+        UNRELATED.to_string(),
+        format!("CREATE INDEX CONCURRENTLY {UNRELATED} ON tasks (title)"),
+    ));
+
+    let mut lingering = database.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE task_runs, tasks IN ROW EXCLUSIVE MODE")
+        .execute(&mut *lingering)
+        .await
+        .unwrap();
+    for (index, sql) in &builds {
+        let mut connection = database.pool.acquire().await.unwrap();
+        connection.close_on_drop();
+        sqlx::query("SET statement_timeout = '300ms'")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        let error = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.clone()))
+            .execute(&mut *connection)
+            .await
+            .expect_err("the build waits on the lingering transaction until it is cancelled");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some(CANCELED),
+            "{index}: {error}"
+        );
+    }
+    lingering.rollback().await.unwrap();
+
+    let validity = |index: String| {
+        let pool = database.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT index.indisvalid FROM pg_index index \
+                 JOIN pg_class class ON class.oid = index.indexrelid WHERE class.relname = $1",
+            )
+            .bind(index)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    for (index, _) in &builds {
+        assert_eq!(
+            validity(index.clone()).await,
+            Some(false),
+            "the cancelled build leaves {index} behind, invalid"
+        );
+    }
+    migrations::run(&database.pool).await.unwrap();
+    let mut rebuilt = Vec::new();
+    for index in &built {
+        rebuilt.push((index.clone(), validity(index.clone()).await));
+    }
+    let unrelated = validity(UNRELATED.to_string()).await;
+    database.cleanup().await;
+
+    for (index, valid) in rebuilt {
+        assert_eq!(
+            valid,
+            Some(true),
+            "{index} is built again rather than skipped by IF NOT EXISTS"
+        );
+    }
+    assert_eq!(
+        unrelated,
+        Some(false),
+        "an invalid index no pending migration builds is left alone"
+    );
 }
 
 /// The tables `sql` holds a lock on until its transaction ends, upper-cased,
