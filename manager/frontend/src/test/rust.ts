@@ -15,13 +15,21 @@
 const ATTRIBUTE = '#[';
 const COMMENT = '//';
 const SKIP_SERIALIZING_IF = 'skip_serializing_if';
-const FIELD = /^(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z_0-9]*)\s*:/;
+const FLATTEN = /\bflatten\b/;
+const FIELD = /^(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z_0-9]*)\s*:\s*(.*)$/;
+const OPTION = /^(?:(?:std|core)::option::)?Option\s*</;
 const RENAME = /\brename\s*=\s*"([^"]+)"/;
 const RENAME_ALL = /\brename_all\b/;
 
+/**
+ * A field as it travels: `optional` when serde may leave the key out, and
+ * `nullable` when an `Option` may travel as null — which it does unless serde
+ * skips it when empty or flattens it into the parent, where `None` adds no keys.
+ */
 export interface RustField {
   name: string;
   optional: boolean;
+  nullable: boolean;
 }
 
 /**
@@ -48,18 +56,22 @@ export function structFields(source: string, structName: string): RustField[] {
   const fields: RustField[] = [];
   let renamed: string | undefined;
   let optional = false;
+  let flattened = false;
   for (const raw of declaration[1].split('\n')) {
     const line = raw.trim();
     if (line.startsWith(ATTRIBUTE)) {
       renamed = RENAME.exec(line)?.[1] ?? renamed;
       optional ||= line.includes(SKIP_SERIALIZING_IF);
+      flattened ||= FLATTEN.test(line);
       continue;
     }
     const field = FIELD.exec(line);
     if (!field) continue;
-    fields.push({ name: renamed ?? field[1], optional });
+    const nullable = OPTION.test(field[2]) && !optional && !flattened;
+    fields.push({ name: renamed ?? field[1], optional, nullable });
     renamed = undefined;
     optional = false;
+    flattened = false;
   }
   if (fields.length === 0) throw new Error(`${structName} declares no fields`);
   return fields;
