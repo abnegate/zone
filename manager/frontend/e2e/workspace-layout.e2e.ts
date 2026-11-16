@@ -126,10 +126,10 @@ for (const viewport of [
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       });
 
-      test('populated screens share title and list typography without horizontal overflow', async ({
-        page,
-      }) => {
-        for (const screen of screens) {
+      for (const screen of screens)
+        test(`populated ${screen.path} shares title and list typography without horizontal overflow`, async ({
+          page,
+        }) => {
           await ready(page, `/${screen.path}`, theme);
           const heading = page.getByRole('heading', {
             name: screen.heading,
@@ -151,8 +151,7 @@ for (const viewport of [
           }
           await fitsViewport(page);
           await capture(page, `${profile}-${screen.path}`, theme);
-        }
-      });
+        });
 
       test('the sources section keeps its table inside the viewport', async ({ page }) => {
         await ready(page, SOURCES_PATH, theme);
