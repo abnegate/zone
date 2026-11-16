@@ -182,8 +182,10 @@ export default function InvitationAcceptPage() {
         <div className="invitation-actions">
           {!isAuthenticated ? (
             <>
-              <p className="auth-notice">You need to be signed in to accept this invitation</p>
-              <div className="auth-buttons">
+              <p className="invitation-notice">
+                You need to be signed in to accept this invitation
+              </p>
+              <div className="invitation-buttons">
                 <Button onClick={handleLoginRedirect} variant="primary" size="lg">
                   Sign In
                 </Button>
