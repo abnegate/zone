@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { ContextUsageSchema } from '../schemas';
-import type { ContextUsage as Usage, TokenTotals } from '../types';
+import type { TokenTotals, ContextUsage as Usage } from '../types';
 import { ContextUsage } from './ContextUsage';
 
 const usage: Usage = {

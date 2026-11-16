@@ -1,6 +1,6 @@
 import { useId, useRef, useState } from 'react';
 import { formatContextLength } from '../../models/utils/formatters';
-import type { ContextUsage as Usage, TokenTotals } from '../types';
+import type { TokenTotals, ContextUsage as Usage } from '../types';
 import './ContextUsage.css';
 
 interface Props {
