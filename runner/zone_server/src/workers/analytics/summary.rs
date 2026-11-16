@@ -230,19 +230,25 @@ pub fn summarize(
         return AgentAnalytics::empty(period, window);
     }
 
-    let attempts: Vec<ClassifiedAttempt> = inside.iter().map(|run| run.as_attempt()).collect();
-
     AgentAnalytics {
         period,
         window,
-        outcomes: summarize_outcomes(&attempts, now),
+        outcomes: outcomes(&inside, now),
         completion: completion_times(&inside),
         series: series(&inside, window, period),
         trend: trend(&inside, window),
     }
 }
 
-fn completion_times(runs: &[&AgentRun]) -> CompletionTimes {
+/// How the runs went, without the series and trend [`summarize`] adds, for a
+/// caller that only needs the outcomes of runs it has already windowed.
+pub fn outcomes(runs: &[&AgentRun], now: NaiveDateTime) -> OutcomeStatistics {
+    let attempts: Vec<ClassifiedAttempt> = runs.iter().map(|run| run.as_attempt()).collect();
+    summarize_outcomes(&attempts, now)
+}
+
+/// How long the successful runs among `runs` took to finish.
+pub fn completion_times(runs: &[&AgentRun]) -> CompletionTimes {
     let mut durations: Vec<f64> = runs
         .iter()
         .filter(|run| run.outcome.is_success())

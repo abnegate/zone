@@ -34,6 +34,9 @@ pub use run_row::RunRow;
 pub use shipped_task_row::ShippedTaskRow;
 pub use task_activity_row::TaskActivityRow;
 
+/// The run statuses that have not reached an outcome yet.
+const UNFINISHED: [&str; 2] = ["running", "waiting"];
+
 /// A read-only transaction whose every query sees the same snapshot, so the
 /// numbers an overview assembles from several reads cannot disagree with one
 /// another, and the reads queue on one connection instead of taking several.
@@ -61,60 +64,14 @@ where
         FROM task_runs run
         JOIN tasks task ON task.id = run.task_id
         JOIN workspaces workspace ON workspace.id = task.workspace_id
-        WHERE run.status NOT IN ('running', 'waiting')
-          AND COALESCE(run.completed_at, run.started_at) >= $1
+        WHERE run.status <> ALL($1)
+          AND COALESCE(run.completed_at, run.started_at) >= $2
           AND workspace.is_active IS NOT FALSE
         ORDER BY workspace.name, workspace.id
         "#,
     )
+    .bind(UNFINISHED.as_slice())
     .bind(since)
-    .fetch_all(executor)
-    .await
-}
-
-/// The workspace's runs that stopped inside `[start, end)`, newest first.
-///
-/// Newest first because `limit` is a cap, not a promise: over it, the rows past
-/// the cap are dropped silently. Every period summarised from these rows ends
-/// at `now`, so dropping the oldest costs the longest period some of its early
-/// history, while dropping the newest -- what ascending order did -- empties
-/// the day and week windows entirely on exactly the busiest workspaces.
-/// Nothing downstream reads these in order; each consumer filters or weights
-/// by `finished_at`.
-pub async fn finished_runs<'e, E>(
-    executor: E,
-    workspace_id: Uuid,
-    start: NaiveDateTime,
-    end: NaiveDateTime,
-    limit: i64,
-) -> DbResult<Vec<RunRow>>
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    sqlx::query_as(
-        r#"
-        SELECT
-            run.id AS run_id,
-            run.task_id AS task_id,
-            run.status AS status,
-            run.error_message AS error_message,
-            run.artifacts -> 'failure' ->> 'category' AS error_category,
-            run.started_at AS started_at,
-            COALESCE(run.completed_at, run.started_at) AS finished_at
-        FROM task_runs run
-        JOIN tasks task ON task.id = run.task_id
-        WHERE task.workspace_id = $1
-          AND run.status NOT IN ('running', 'waiting')
-          AND COALESCE(run.completed_at, run.started_at) >= $2
-          AND COALESCE(run.completed_at, run.started_at) < $3
-        ORDER BY COALESCE(run.completed_at, run.started_at) DESC, run.id DESC
-        LIMIT $4
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(start)
-    .bind(end)
-    .bind(limit)
     .fetch_all(executor)
     .await
 }
@@ -158,9 +115,18 @@ where
     .await
 }
 
-/// [`finished_runs`], with the source each run's task belongs to and the model
-/// the run used. A task without a source, or whose source was deleted, reads
-/// back with every source column null.
+/// The workspace's runs that stopped inside `[start, end)`, newest first, with
+/// the source each run's task belongs to and the model the run used. A task
+/// without a source, or whose source was deleted, reads back with every source
+/// column null.
+///
+/// Newest first because `limit` is a cap, not a promise: over it, the rows past
+/// the cap are dropped silently. Every period summarised from these rows ends
+/// at `now`, so dropping the oldest costs the longest period some of its early
+/// history, while dropping the newest -- what ascending order did -- empties
+/// the day and week windows entirely on exactly the busiest workspaces.
+/// Nothing downstream reads these in order; each consumer filters or weights
+/// by `finished_at`.
 pub async fn attributed_runs<'e, E>(
     executor: E,
     workspace_id: Uuid,
@@ -189,14 +155,15 @@ where
         JOIN tasks task ON task.id = run.task_id
         LEFT JOIN sources source ON source.id = task.source_id
         WHERE task.workspace_id = $1
-          AND run.status NOT IN ('running', 'waiting')
-          AND COALESCE(run.completed_at, run.started_at) >= $2
-          AND COALESCE(run.completed_at, run.started_at) < $3
+          AND run.status <> ALL($2)
+          AND COALESCE(run.completed_at, run.started_at) >= $3
+          AND COALESCE(run.completed_at, run.started_at) < $4
         ORDER BY COALESCE(run.completed_at, run.started_at) DESC, run.id DESC
-        LIMIT $4
+        LIMIT $5
         "#,
     )
     .bind(workspace_id)
+    .bind(UNFINISHED.as_slice())
     .bind(start)
     .bind(end)
     .bind(limit)

@@ -4,7 +4,7 @@ use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
 use crate::db::analytics::AttributedRunRow;
-use crate::workers::analytics::{AgentRun, CompletionTimes, TimePeriod, TimeWindow, summarize};
+use crate::workers::analytics::{AgentRun, CompletionTimes, completion_times, outcomes};
 use crate::workers::learning::attempt::OutcomeStatistics;
 
 /// How the runs on one model went. Runs that recorded no model share one breakdown.
@@ -17,29 +17,21 @@ pub struct ModelBreakdown {
 
 impl ModelBreakdown {
     /// One breakdown per model, busiest first, so every run lands in exactly one.
-    pub fn group(
-        runs: &[(AgentRun, &AttributedRunRow)],
-        period: TimePeriod,
-        window: TimeWindow,
+    pub fn group<'a>(
+        runs: impl IntoIterator<Item = (&'a AgentRun, &'a AttributedRunRow)>,
         now: NaiveDateTime,
     ) -> Vec<Self> {
-        let mut groups: HashMap<Option<&str>, Vec<AgentRun>> = HashMap::new();
+        let mut groups: HashMap<Option<&str>, Vec<&AgentRun>> = HashMap::new();
         for (run, row) in runs {
-            groups
-                .entry(row.model.as_deref())
-                .or_default()
-                .push(run.clone());
+            groups.entry(row.model.as_deref()).or_default().push(run);
         }
 
         let mut breakdowns: Vec<Self> = groups
             .into_iter()
-            .map(|(model, group)| {
-                let analytics = summarize(&group, period, window, now);
-                Self {
-                    model: model.map(str::to_string),
-                    outcomes: analytics.outcomes,
-                    completion: analytics.completion,
-                }
+            .map(|(model, group)| Self {
+                model: model.map(str::to_string),
+                outcomes: outcomes(&group, now),
+                completion: completion_times(&group),
             })
             .collect();
 
@@ -94,8 +86,7 @@ mod tests {
             .iter()
             .filter_map(|row| AgentRun::from_row(&row.run).map(|run| (run, row)))
             .collect();
-        let period = TimePeriod::Week;
-        ModelBreakdown::group(&runs, period, period.window_ending(now()), now())
+        ModelBreakdown::group(runs.iter().map(|(run, row)| (run, *row)), now())
     }
 
     #[test]

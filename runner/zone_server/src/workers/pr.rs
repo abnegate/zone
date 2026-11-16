@@ -23,6 +23,7 @@ use crate::db::{projects, tasks};
 use crate::services::backend;
 use crate::services::checkout::{self, Baseline, Repository};
 use crate::services::endpoint::{Endpoint, Error as EndpointError};
+use crate::services::github::pull_requests::Status;
 use crate::services::github_app::{Credential, Error as GitHubError, Failure, Unauthenticated};
 use crate::services::route::Route;
 use crate::services::stages;
@@ -256,13 +257,13 @@ impl Publication<'_> {
         }
     }
 
-    async fn record(&self, url: &str, branch: &BranchName, status: &str) -> Result<(), String> {
+    async fn record(&self, url: &str, branch: &BranchName, status: Status) -> Result<(), String> {
         match tasks::update_task_pr(
             self.state.db(),
             &self.execution,
             url,
             branch.as_str(),
-            status,
+            status.as_str(),
         )
         .await
         {
@@ -448,7 +449,7 @@ impl Publication<'_> {
         }
         self.identity(baseline).await?;
         if let Some(url) = existing {
-            self.record(&url, branch, "open").await?;
+            self.record(&url, branch, Status::Open).await?;
             report_repair(self.state, task.id).await;
             return Ok(PrCreationResult::PrAlreadyExists {
                 pr_url: url,
@@ -532,20 +533,20 @@ pub fn reception_artifacts(reception: &PullRequestReception) -> (Value, Value) {
 
 /// The `pr_status` a task carries for a reception: merged once GitHub says so,
 /// closed when the pull request was shut without merging, otherwise still open.
-pub fn pr_status_from(reception: &PullRequestReception) -> &'static str {
+pub fn pr_status_from(reception: &PullRequestReception) -> Status {
     match (&reception.merged_at, reception.state) {
-        (Some(_), _) => "merged",
+        (Some(_), _) => Status::Merged,
         (None, Some(state)) => status(state),
-        (None, None) => "open",
+        (None, None) => Status::Open,
     }
 }
 
 /// The `pr_status` a pull request in `state` reads as before it merges: closed
 /// once it was shut, otherwise open.
-fn status(state: PullRequestState) -> &'static str {
+fn status(state: PullRequestState) -> Status {
     match state {
-        PullRequestState::Closed => "closed",
-        _ => "open",
+        PullRequestState::Closed => Status::Closed,
+        _ => Status::Open,
     }
 }
 
@@ -653,8 +654,13 @@ pub async fn sync_reception(state: &AppState, run_id: Uuid, task_id: Uuid) -> Re
     match record_reception(state, run_id, &reception).await {
         Ok(true) => {
             let status = pr_status_from(&reception);
-            if let Err(error) = tasks::update_task_pr_status(state.db(), task_id, status).await {
-                tracing::warn!("Could not record pr_status {status} for task {task_id}: {error}");
+            if let Err(error) =
+                tasks::update_task_pr_status(state.db(), task_id, status.as_str()).await
+            {
+                tracing::warn!(
+                    "Could not record pr_status {} for task {task_id}: {error}",
+                    status.as_str()
+                );
             }
             ReceptionSyncResult::Recorded(Box::new(reception))
         }
@@ -1639,7 +1645,7 @@ mod tests {
                 &fixture.execution,
                 "late-url",
                 "late-branch",
-                "open"
+                Status::Open.as_str()
             )
             .await
             .unwrap()
@@ -2762,7 +2768,7 @@ mod publication_tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(resumed.pr_status.as_deref(), Some("open"));
+        assert_eq!(resumed.pr_status.as_deref(), Some(Status::Open.as_str()));
         assert_eq!(
             std::fs::read_to_string(fixture.path.join("sentinel")).unwrap(),
             "changed",
@@ -2882,7 +2888,7 @@ mod publication_tests {
             matches!(result, PrCreationResult::Created { .. }),
             "{result:?}"
         );
-        assert_eq!(task.pr_status.as_deref(), Some("open"));
+        assert_eq!(task.pr_status.as_deref(), Some(Status::Open.as_str()));
         assert_eq!(
             server
                 .received_requests()
@@ -3254,7 +3260,7 @@ mod reception_tests {
 
     #[test]
     fn a_merged_pull_request_reads_merged_on_its_task() {
-        assert_eq!(pr_status_from(&reception()), "merged");
+        assert_eq!(pr_status_from(&reception()), Status::Merged);
     }
 
     #[test]
@@ -3262,15 +3268,15 @@ mod reception_tests {
         let mut shut = reception();
         shut.merged_at = None;
         shut.minutes_to_merge = None;
-        assert_eq!(pr_status_from(&shut), "closed");
+        assert_eq!(pr_status_from(&shut), Status::Closed);
 
         let mut open = shut.clone();
         open.state = Some(PullRequestState::Open);
-        assert_eq!(pr_status_from(&open), "open");
+        assert_eq!(pr_status_from(&open), Status::Open);
 
         let mut unknown = shut;
         unknown.state = None;
-        assert_eq!(pr_status_from(&unknown), "open");
+        assert_eq!(pr_status_from(&unknown), Status::Open);
     }
 
     #[test]

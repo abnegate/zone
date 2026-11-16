@@ -58,21 +58,25 @@ async fn the_run_cap_drops_the_oldest_runs_not_the_newest() {
     let start = now - Duration::days(30);
     let limit = 4;
 
-    let capped = analytics::finished_runs(&pool, workspace_id, start, now, limit)
+    let capped = analytics::attributed_runs(&pool, workspace_id, start, now, limit)
         .await
         .expect("runs are readable");
 
     assert_eq!(capped.len(), limit as usize, "the cap is applied");
 
-    let all = analytics::finished_runs(&pool, workspace_id, start, now, 100)
+    let all = analytics::attributed_runs(&pool, workspace_id, start, now, 100)
         .await
         .expect("runs are readable");
     assert_eq!(all.len(), 10, "the workspace really does have more runs");
 
-    let newest = all.iter().map(|run| run.finished_at).max().expect("a run");
+    let newest = all
+        .iter()
+        .map(|row| row.run.finished_at)
+        .max()
+        .expect("a run");
     let kept = capped
         .iter()
-        .map(|run| run.finished_at)
+        .map(|row| row.run.finished_at)
         .max()
         .expect("a run");
     assert_eq!(
@@ -83,10 +87,14 @@ async fn the_run_cap_drops_the_oldest_runs_not_the_newest() {
 
     let oldest_kept = capped
         .iter()
-        .map(|run| run.finished_at)
+        .map(|row| row.run.finished_at)
         .min()
         .expect("a run");
-    let oldest = all.iter().map(|run| run.finished_at).min().expect("a run");
+    let oldest = all
+        .iter()
+        .map(|row| row.run.finished_at)
+        .min()
+        .expect("a run");
     assert!(
         oldest_kept > oldest,
         "the cap should have cost the oldest runs, not the newest"
@@ -100,13 +108,13 @@ async fn an_uncapped_window_returns_every_run_in_it() {
 
     let now = Utc::now().naive_utc();
 
-    let inside = analytics::finished_runs(&pool, workspace_id, now - Duration::days(1), now, 100)
+    let inside = analytics::attributed_runs(&pool, workspace_id, now - Duration::days(1), now, 100)
         .await
         .expect("runs are readable");
     assert_eq!(inside.len(), 5);
 
     // `[start, end)`: a window that ends before the newest run excludes it.
-    let earlier = analytics::finished_runs(
+    let earlier = analytics::attributed_runs(
         &pool,
         workspace_id,
         now - Duration::days(1),

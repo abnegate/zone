@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use super::PullRequestSummary;
 use crate::db::analytics::{AttributedRunRow, PullRequestRow};
-use crate::workers::analytics::{AgentRun, TimePeriod, TimeWindow, summarize};
+use crate::workers::analytics::{AgentRun, outcomes};
 use crate::workers::learning::attempt::OutcomeStatistics;
 
 /// How the runs on one source's tasks went. Runs on a task with no source,
@@ -22,20 +22,18 @@ pub struct SourceBreakdown {
 
 impl SourceBreakdown {
     /// One breakdown per source, busiest first, so every run lands in exactly one.
-    pub fn group(
-        runs: &[(AgentRun, &AttributedRunRow)],
+    pub fn group<'a>(
+        runs: impl IntoIterator<Item = (&'a AgentRun, &'a AttributedRunRow)>,
         pull_requests: &[PullRequestRow],
-        period: TimePeriod,
-        window: TimeWindow,
         now: NaiveDateTime,
     ) -> Vec<Self> {
-        let mut groups: HashMap<Option<Uuid>, (&AttributedRunRow, Vec<AgentRun>)> = HashMap::new();
+        let mut groups: HashMap<Option<Uuid>, (&AttributedRunRow, Vec<&AgentRun>)> = HashMap::new();
         for (run, row) in runs {
             groups
                 .entry(row.source_id)
-                .or_insert_with(|| (*row, Vec::new()))
+                .or_insert_with(|| (row, Vec::new()))
                 .1
-                .push(run.clone());
+                .push(run);
         }
 
         let mut breakdowns: Vec<Self> = groups
@@ -46,7 +44,7 @@ impl SourceBreakdown {
                     source_id,
                     name: row.source_name.clone().filter(|_| attributed),
                     source_type: row.source_type.clone().filter(|_| attributed),
-                    outcomes: summarize(&group, period, window, now).outcomes,
+                    outcomes: outcomes(&group, now),
                     merged_pull_requests: pull_requests
                         .iter()
                         .filter(|pull_request| pull_request.source_id == source_id)
@@ -74,7 +72,7 @@ impl SourceBreakdown {
 mod tests {
     use super::*;
     use crate::db::analytics::RunRow;
-    use crate::services::analytics::pull_request_summary::{CLOSED, MERGED};
+    use crate::services::github::pull_requests::Status;
     use chrono::{Duration, NaiveDate};
 
     fn now() -> NaiveDateTime {
@@ -102,11 +100,11 @@ mod tests {
         }
     }
 
-    fn pull_request(source_id: Option<Uuid>, status: &str) -> PullRequestRow {
+    fn pull_request(source_id: Option<Uuid>, status: Status) -> PullRequestRow {
         PullRequestRow {
             task_id: Uuid::new_v4(),
             source_id,
-            pr_status: Some(status.to_string()),
+            pr_status: Some(status.as_str().to_string()),
             minutes_to_merge: None,
             review_cycles: None,
             approvals: None,
@@ -122,12 +120,9 @@ mod tests {
             .iter()
             .filter_map(|row| AgentRun::from_row(&row.run).map(|run| (run, row)))
             .collect();
-        let period = TimePeriod::Week;
         SourceBreakdown::group(
-            &runs,
+            runs.iter().map(|(run, row)| (run, *row)),
             pull_requests,
-            period,
-            period.window_ending(now()),
             now(),
         )
     }
@@ -207,11 +202,11 @@ mod tests {
         let api = (Uuid::new_v4(), "api");
         let rows = vec![row(Some(api), "completed"), row(None, "completed")];
         let pull_requests = vec![
-            pull_request(Some(api.0), MERGED),
-            pull_request(Some(api.0), MERGED),
-            pull_request(Some(api.0), CLOSED),
-            pull_request(None, MERGED),
-            pull_request(Some(Uuid::new_v4()), MERGED),
+            pull_request(Some(api.0), Status::Merged),
+            pull_request(Some(api.0), Status::Merged),
+            pull_request(Some(api.0), Status::Closed),
+            pull_request(None, Status::Merged),
+            pull_request(Some(Uuid::new_v4()), Status::Merged),
         ];
 
         let breakdowns = breakdowns(&rows, &pull_requests);

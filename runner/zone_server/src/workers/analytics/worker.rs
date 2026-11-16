@@ -61,7 +61,7 @@ pub async fn load_runs(
     limit: i64,
 ) -> DbResult<Vec<AgentRun>> {
     let rows =
-        analytics::finished_runs(pool, workspace_id, window.start, window.end, limit).await?;
+        analytics::attributed_runs(pool, workspace_id, window.start, window.end, limit).await?;
 
     // Truncation is invisible in the gauges it produces -- they stay plausible,
     // just computed from part of the window -- so it has to be said out loud.
@@ -74,7 +74,10 @@ pub async fn load_runs(
         );
     }
 
-    Ok(rows.iter().filter_map(AgentRun::from_row).collect())
+    Ok(rows
+        .iter()
+        .filter_map(|row| AgentRun::from_row(&row.run))
+        .collect())
 }
 
 /// Every category with its count, including the ones the window never saw.

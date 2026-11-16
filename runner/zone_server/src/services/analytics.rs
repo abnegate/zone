@@ -60,19 +60,22 @@ pub async fn overview(
     snapshot.commit().await?;
 
     let truncated = rows.len() as i64 >= MAXIMUM_RUNS;
-    let attributed: Vec<(AgentRun, &AttributedRunRow)> = rows
+    let (runs, attributions): (Vec<AgentRun>, Vec<&AttributedRunRow>) = rows
         .iter()
         .filter_map(|row| AgentRun::from_row(&row.run).map(|run| (run, row)))
-        .collect();
-    let runs: Vec<AgentRun> = attributed.iter().map(|(run, _)| run.clone()).collect();
+        .unzip();
 
     Ok(Overview {
         period,
         window,
         truncated,
         runs: summarize(&runs, period, window, now),
-        sources: SourceBreakdown::group(&attributed, &pull_requests, period, window, now),
-        models: ModelBreakdown::group(&attributed, period, window, now),
+        sources: SourceBreakdown::group(
+            runs.iter().zip(attributions.iter().copied()),
+            &pull_requests,
+            now,
+        ),
+        models: ModelBreakdown::group(runs.iter().zip(attributions.iter().copied()), now),
         tasks: TaskSummary::new(&statuses, &origins, activity),
         pull_requests: PullRequestSummary::new(&pull_requests),
         evaluations: EvaluationSummary::new(&verdicts),

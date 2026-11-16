@@ -2,10 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use super::Tally;
 use crate::db::analytics::PullRequestRow;
+use crate::services::github::pull_requests::Status;
 use crate::workers::learning::quality::QualityBand;
-
-pub const MERGED: &str = "merged";
-pub const CLOSED: &str = "closed";
 
 /// What became of the pull requests opened inside the window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,7 +24,7 @@ impl PullRequestSummary {
         let merged = rows.iter().filter(|row| Self::is_merged(row)).count();
         let closed = rows
             .iter()
-            .filter(|row| row.pr_status.as_deref() == Some(CLOSED))
+            .filter(|row| Self::status(row) == Some(Status::Closed))
             .count();
         let open = rows.len() - merged - closed;
         let decided = merged + closed;
@@ -71,7 +69,11 @@ impl PullRequestSummary {
     }
 
     pub fn is_merged(row: &PullRequestRow) -> bool {
-        row.pr_status.as_deref() == Some(MERGED)
+        Self::status(row) == Some(Status::Merged)
+    }
+
+    fn status(row: &PullRequestRow) -> Option<Status> {
+        row.pr_status.as_deref().and_then(Status::parse)
     }
 }
 
@@ -113,7 +115,7 @@ mod tests {
     fn merged_after(minutes: f64) -> PullRequestRow {
         PullRequestRow {
             minutes_to_merge: Some(minutes),
-            ..pull_request(Some(MERGED))
+            ..pull_request(Some(Status::Merged.as_str()))
         }
     }
 
@@ -129,7 +131,10 @@ mod tests {
 
     #[test]
     fn the_merge_rate_is_unknown_while_nothing_is_decided() {
-        let summary = PullRequestSummary::new(&[pull_request(Some("open")), pull_request(None)]);
+        let summary = PullRequestSummary::new(&[
+            pull_request(Some(Status::Open.as_str())),
+            pull_request(None),
+        ]);
         assert_eq!(summary.open, 2);
         assert_eq!(summary.opened, 2);
         assert_eq!(summary.merge_rate, None);
@@ -138,9 +143,9 @@ mod tests {
     #[test]
     fn the_merge_rate_counts_only_decided_pull_requests() {
         let summary = PullRequestSummary::new(&[
-            pull_request(Some(MERGED)),
-            pull_request(Some(CLOSED)),
-            pull_request(Some("open")),
+            pull_request(Some(Status::Merged.as_str())),
+            pull_request(Some(Status::Closed.as_str())),
+            pull_request(Some(Status::Open.as_str())),
         ]);
         assert_eq!(
             (summary.merged, summary.closed, summary.open, summary.opened),
@@ -157,13 +162,13 @@ mod tests {
 
     #[test]
     fn the_median_merge_time_reads_only_merged_pull_requests_with_a_time() {
-        let mut closed = pull_request(Some(CLOSED));
+        let mut closed = pull_request(Some(Status::Closed.as_str()));
         closed.minutes_to_merge = Some(1_000.0);
         let summary = PullRequestSummary::new(&[
             merged_after(30.0),
             merged_after(10.0),
             merged_after(20.0),
-            pull_request(Some(MERGED)),
+            pull_request(Some(Status::Merged.as_str())),
             closed,
         ]);
         assert_eq!(summary.median_minutes_to_merge, Some(20.0));
@@ -177,10 +182,10 @@ mod tests {
 
     #[test]
     fn review_means_read_only_pull_requests_with_a_value() {
-        let mut first = pull_request(Some("open"));
+        let mut first = pull_request(Some(Status::Open.as_str()));
         first.review_cycles = Some(1);
         first.approvals = Some(2);
-        let mut second = pull_request(Some(MERGED));
+        let mut second = pull_request(Some(Status::Merged.as_str()));
         second.review_cycles = Some(3);
         let summary = PullRequestSummary::new(&[first, second, pull_request(None)]);
         assert_eq!(summary.mean_review_cycles, Some(2.0));
@@ -189,11 +194,12 @@ mod tests {
 
     #[test]
     fn every_quality_band_is_listed_in_order_including_zeros() {
-        let mut solid = pull_request(Some(MERGED));
+        let mut solid = pull_request(Some(Status::Merged.as_str()));
         solid.quality_band = Some(QualityBand::Solid.as_str().to_string());
-        let mut unknown = pull_request(Some(MERGED));
+        let mut unknown = pull_request(Some(Status::Merged.as_str()));
         unknown.quality_band = Some("stellar".to_string());
-        let summary = PullRequestSummary::new(&[solid, unknown, pull_request(Some(MERGED))]);
+        let summary =
+            PullRequestSummary::new(&[solid, unknown, pull_request(Some(Status::Merged.as_str()))]);
         assert_eq!(
             summary.quality,
             vec![
