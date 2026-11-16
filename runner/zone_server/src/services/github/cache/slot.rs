@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use chrono::DateTime;
 use chrono::Utc;
+use tokio::sync::OwnedMutexGuard;
 
 use super::super::fault::Fault;
 use super::super::freshness::Freshness;
@@ -14,22 +15,26 @@ use super::decision::Decision;
 use super::entry::Entry;
 
 pub(super) struct Slot<T> {
-    flight: tokio::sync::Mutex<()>,
+    flight: Arc<tokio::sync::Mutex<()>>,
     entry: Mutex<Entry<T>>,
 }
 
 impl<T> Default for Slot<T> {
     fn default() -> Self {
         Self {
-            flight: tokio::sync::Mutex::new(()),
+            flight: Arc::new(tokio::sync::Mutex::new(())),
             entry: Mutex::new(Entry::default()),
         }
     }
 }
 
 impl<T> Slot<T> {
-    pub(super) async fn flight(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.flight.lock().await
+    pub(super) async fn flight(&self) -> OwnedMutexGuard<()> {
+        Arc::clone(&self.flight).lock_owned().await
+    }
+
+    pub(super) fn try_flight(&self) -> Option<OwnedMutexGuard<()>> {
+        Arc::clone(&self.flight).try_lock_owned().ok()
     }
 
     pub(super) fn decide(

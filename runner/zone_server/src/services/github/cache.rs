@@ -19,6 +19,7 @@ use tokio::time::Instant;
 use super::fault::Fault;
 use super::freshness::Freshness;
 use super::snapshot::Snapshot;
+use decision::Decision;
 use slot::Slot;
 
 pub const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(5 * 60);
@@ -28,7 +29,7 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 pub struct Cache<K, T> {
     ttl: Duration,
     floor: Duration,
-    slots: DashMap<K, Arc<Slot<T>>>,
+    slots: Arc<DashMap<K, Arc<Slot<T>>>>,
     swept_at: Mutex<Option<DateTime<Utc>>>,
 }
 
@@ -37,7 +38,7 @@ impl<K: Eq + Hash + Clone, T> Cache<K, T> {
         Self {
             ttl,
             floor,
-            slots: DashMap::new(),
+            slots: Arc::new(DashMap::new()),
             swept_at: Mutex::new(None),
         }
     }
@@ -72,18 +73,7 @@ impl<K: Eq + Hash + Clone, T> Cache<K, T> {
             return answer;
         }
         let (previous, epoch) = slot.previous();
-        let started = Instant::now();
-        let fetched = fetch(previous).await;
-        let settled_at = now + delta(started.elapsed());
-        let answer = slot.settle(fetched, settled_at, epoch);
-        if slot.vacant(settled_at) {
-            // Two holders are the map and this read; any more is a reader queued
-            // on the slot that would otherwise settle into a slot the map dropped.
-            self.slots.remove_if(&key, |_, held| {
-                Arc::ptr_eq(held, &slot) && Arc::strong_count(held) == 2
-            });
-        }
-        answer
+        settle(&self.slots, &key, &slot, fetch(previous), epoch, now).await
     }
 
     pub fn peek(&self, key: &K) -> Option<Snapshot<T>> {
@@ -124,6 +114,81 @@ impl<K: Eq + Hash + Clone, T> Cache<K, T> {
         self.slots
             .retain(|_, slot| Arc::strong_count(slot) > 1 || !slot.idle(now, IDLE_EXPIRY));
     }
+}
+
+impl<K, T> Cache<K, T>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    T: Send + Sync + 'static,
+{
+    pub async fn serve<Fetch, Fetched>(
+        &self,
+        key: K,
+        refresh: bool,
+        now: DateTime<Utc>,
+        fetch: Fetch,
+    ) -> Result<(Snapshot<T>, Freshness), Fault>
+    where
+        Fetch: FnOnce(Option<Arc<T>>) -> Fetched + Send + 'static,
+        Fetched: Future<Output = Result<T, Fault>> + Send + 'static,
+    {
+        self.sweep(now);
+        let slot = self.slot(key.clone(), now);
+        let decide = || slot.decide(refresh, now, self.ttl, self.floor);
+        let flight = match decide() {
+            Decision::Revalidate(snapshot, freshness) => match slot.try_flight() {
+                Some(flight) => flight,
+                None => return Ok((snapshot, freshness)),
+            },
+            Decision::Fetch => slot.flight().await,
+            Decision::Serve(snapshot, freshness) => return Ok((snapshot, freshness)),
+            Decision::Refuse(fault) => return Err(fault),
+        };
+        match decide() {
+            Decision::Revalidate(snapshot, freshness) => {
+                let (previous, epoch) = slot.previous();
+                let fetched = fetch(previous);
+                let slots = Arc::clone(&self.slots);
+                tokio::spawn(async move {
+                    let _flight = flight;
+                    settle(&slots, &key, &slot, fetched, epoch, now).await
+                });
+                Ok((snapshot, freshness))
+            }
+            Decision::Fetch => {
+                let (previous, epoch) = slot.previous();
+                settle(&self.slots, &key, &slot, fetch(previous), epoch, now).await
+            }
+            Decision::Serve(snapshot, freshness) => Ok((snapshot, freshness)),
+            Decision::Refuse(fault) => Err(fault),
+        }
+    }
+}
+
+async fn settle<K, T, Fetched>(
+    slots: &DashMap<K, Arc<Slot<T>>>,
+    key: &K,
+    slot: &Arc<Slot<T>>,
+    fetched: Fetched,
+    epoch: u64,
+    now: DateTime<Utc>,
+) -> Result<(Snapshot<T>, Freshness), Fault>
+where
+    K: Eq + Hash,
+    Fetched: Future<Output = Result<T, Fault>>,
+{
+    let started = Instant::now();
+    let fetched = fetched.await;
+    let settled_at = now + delta(started.elapsed());
+    let answer = slot.settle(fetched, settled_at, epoch);
+    if slot.vacant(settled_at) {
+        // Two holders are the map and this fetch; any more is a reader queued
+        // on the slot that would otherwise settle into a slot the map dropped.
+        slots.remove_if(key, |_, held| {
+            Arc::ptr_eq(held, slot) && Arc::strong_count(held) == 2
+        });
+    }
+    answer
 }
 
 pub(super) fn delta(duration: Duration) -> TimeDelta {

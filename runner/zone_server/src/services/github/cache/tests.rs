@@ -2,11 +2,14 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::task::Poll;
 use std::time::Duration;
 
 use chrono::DateTime;
 use chrono::TimeDelta;
 use chrono::Utc;
+use futures::FutureExt;
+use futures::future::BoxFuture;
 use futures::poll;
 use tokio::sync::Notify;
 
@@ -25,6 +28,7 @@ const OTHER: u8 = 2;
 const TTL: Duration = Duration::from_secs(45);
 const FLOOR: Duration = Duration::from_secs(10);
 const UNREACHABLE: &str = "GitHub request failed or timed out.";
+const YIELDS: usize = 64;
 
 fn cache() -> Cache<u8, u32> {
     Cache::new(TTL, FLOOR)
@@ -47,6 +51,70 @@ fn exhausted() -> Fault {
 
 async fn never(_: Option<Arc<u32>>) -> Result<u32, Fault> {
     panic!("the cache must answer without asking GitHub")
+}
+
+fn following(previous: Option<Arc<u32>>) -> Result<u32, Fault> {
+    Ok(previous.map_or(0, |value| *value + 1))
+}
+
+fn counted<Answer>(
+    fetches: &Arc<AtomicUsize>,
+    answer: Answer,
+) -> impl FnOnce(Option<Arc<u32>>) -> BoxFuture<'static, Result<u32, Fault>> + Send + 'static
+where
+    Answer: FnOnce(Option<Arc<u32>>) -> Result<u32, Fault> + Send + 'static,
+{
+    let fetches = Arc::clone(fetches);
+    move |previous| {
+        async move {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            answer(previous)
+        }
+        .boxed()
+    }
+}
+
+fn gated<Answer>(
+    fetches: &Arc<AtomicUsize>,
+    gate: &Arc<Notify>,
+    answer: Answer,
+) -> impl FnOnce(Option<Arc<u32>>) -> BoxFuture<'static, Result<u32, Fault>> + Send + 'static
+where
+    Answer: FnOnce(Option<Arc<u32>>) -> Result<u32, Fault> + Send + 'static,
+{
+    let (fetches, gate) = (Arc::clone(fetches), Arc::clone(gate));
+    move |previous| {
+        async move {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            gate.notified().await;
+            answer(previous)
+        }
+        .boxed()
+    }
+}
+
+async fn at_once<Served: Future>(served: Served) -> Served::Output {
+    let mut served = pin!(served);
+    match poll!(served.as_mut()) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("the cache answers without waiting for GitHub"),
+    }
+}
+
+async fn eventually(settled: impl Fn() -> bool) -> bool {
+    for _ in 0..YIELDS {
+        if settled() {
+            return true;
+        }
+        tokio::task::yield_now().await;
+    }
+    settled()
+}
+
+fn holding(cache: &Cache<u8, u32>, value: u32) -> bool {
+    cache
+        .peek(&KEY)
+        .is_some_and(|snapshot| *snapshot.value == value)
 }
 
 async fn seeded(cache: &Cache<u8, u32>, key: u8, at: DateTime<Utc>, value: u32) {
@@ -581,4 +649,322 @@ async fn a_read_can_be_awaited_on_another_thread() {
     assert_eq!(freshness, Freshness::Refreshed);
     assert_eq!(*snapshot.value, 7);
     assert!(cache.peek(&KEY).is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_past_its_ttl_is_served_at_once_while_it_is_read_again() {
+    let cache = cache();
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    let (fetches, gate) = (Arc::new(AtomicUsize::new(0)), Arc::new(Notify::new()));
+
+    let served = at_once(cache.serve(
+        KEY,
+        false,
+        later(start, 45),
+        gated(&fetches, &gate, following),
+    ))
+    .await;
+
+    let (snapshot, freshness) = served.expect("the expired snapshot is served");
+    assert_eq!(freshness, Freshness::Revalidating);
+    assert_eq!(*snapshot.value, 7);
+    assert_eq!(snapshot.generated_at, start);
+    assert!(snapshot.warning.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn one_read_again_runs_however_many_readers_find_it_expired() {
+    let cache = cache();
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    let (fetches, gate) = (Arc::new(AtomicUsize::new(0)), Arc::new(Notify::new()));
+
+    for second in 45..=47 {
+        let (snapshot, freshness) = at_once(cache.serve(
+            KEY,
+            false,
+            later(start, second),
+            gated(&fetches, &gate, following),
+        ))
+        .await
+        .expect("the expired snapshot is served");
+        assert_eq!(freshness, Freshness::Revalidating, "at {second}s");
+        assert_eq!(*snapshot.value, 7, "at {second}s");
+    }
+    gate.notify_one();
+
+    assert!(
+        eventually(|| holding(&cache, 8)).await,
+        "the read again settles what it fetched from what it had"
+    );
+    let (snapshot, freshness) = cache
+        .serve(KEY, false, later(start, 48), counted(&fetches, following))
+        .await
+        .expect("the snapshot read again is served");
+    assert_eq!(freshness, Freshness::Cached);
+    assert_eq!(*snapshot.value, 8);
+    assert_eq!(fetches.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refresh_past_the_floor_waits_for_github() {
+    let cache = cache();
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    let (fetches, gate) = (Arc::new(AtomicUsize::new(0)), Arc::new(Notify::new()));
+
+    let mut refreshed = pin!(cache.serve(
+        KEY,
+        true,
+        later(start, 45),
+        gated(&fetches, &gate, following)
+    ));
+
+    assert!(
+        poll!(refreshed.as_mut()).is_pending(),
+        "a refresh waits for GitHub"
+    );
+    gate.notify_one();
+    let (snapshot, freshness) = refreshed.await.expect("the refresh fetches");
+    assert_eq!(freshness, Freshness::Refreshed);
+    assert_eq!(*snapshot.value, 8);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_key_never_read_or_invalidated_waits_for_github() {
+    let cache = cache();
+    let start = Utc::now();
+    let (fetches, gate) = (Arc::new(AtomicUsize::new(0)), Arc::new(Notify::new()));
+
+    for (at, expected) in [(start, 0), (later(start, 1), 1)] {
+        let mut first = pin!(cache.serve(KEY, false, at, gated(&fetches, &gate, following)));
+        assert!(
+            poll!(first.as_mut()).is_pending(),
+            "nothing current to serve, so the read waits for GitHub"
+        );
+        gate.notify_one();
+        let (snapshot, freshness) = first.await.expect("the read fetches");
+        assert_eq!(freshness, Freshness::Refreshed);
+        assert_eq!(*snapshot.value, expected);
+        cache.invalidate(&KEY);
+    }
+    assert_eq!(fetches.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refresh_during_a_read_again_waits_for_it() {
+    let cache = cache();
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    let (fetches, gate) = (Arc::new(AtomicUsize::new(0)), Arc::new(Notify::new()));
+    let (_, freshness) = at_once(cache.serve(
+        KEY,
+        false,
+        later(start, 45),
+        gated(&fetches, &gate, following),
+    ))
+    .await
+    .expect("the expired snapshot is served");
+    assert_eq!(freshness, Freshness::Revalidating);
+
+    let mut refreshed =
+        pin!(cache.serve(KEY, true, later(start, 46), counted(&fetches, following)));
+
+    assert!(
+        poll!(refreshed.as_mut()).is_pending(),
+        "the refresh waits for the read already under way"
+    );
+    gate.notify_one();
+    let (snapshot, freshness) = refreshed.await.expect("the refresh is answered");
+    assert_eq!(freshness, Freshness::Floored);
+    assert_eq!(*snapshot.value, 8);
+    assert_eq!(fetches.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_read_again_is_served_stale_with_why_and_tried_again() {
+    let cache = cache();
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    let fetches = Arc::new(AtomicUsize::new(0));
+
+    let (snapshot, freshness) = cache
+        .serve(
+            KEY,
+            false,
+            later(start, 45),
+            counted(&fetches, |_| Err(unreachable())),
+        )
+        .await
+        .expect("the expired snapshot is served");
+    assert_eq!(freshness, Freshness::Revalidating);
+    assert_eq!(*snapshot.value, 7);
+    assert!(
+        eventually(|| cache
+            .peek(&KEY)
+            .is_some_and(|snapshot| snapshot.warning.is_some()))
+        .await,
+        "the failed read again settles"
+    );
+
+    let (snapshot, freshness) = cache
+        .serve(KEY, false, later(start, 46), counted(&fetches, following))
+        .await
+        .expect("the previous snapshot outlives a failed read again");
+    assert_eq!(freshness, Freshness::Stale);
+    assert_eq!(*snapshot.value, 7);
+    assert_eq!(snapshot.warning.as_deref(), Some(UNREACHABLE));
+    assert_eq!(
+        cache.peek(&KEY).and_then(|snapshot| snapshot.warning),
+        Some(UNREACHABLE.to_string())
+    );
+    assert!(
+        eventually(|| holding(&cache, 8)).await,
+        "the next read again settles"
+    );
+
+    let (snapshot, freshness) = cache
+        .serve(KEY, false, later(start, 47), counted(&fetches, following))
+        .await
+        .expect("the snapshot read again is served");
+    assert_eq!(freshness, Freshness::Cached);
+    assert_eq!(*snapshot.value, 8);
+    assert!(snapshot.warning.is_none());
+    assert_eq!(fetches.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rate_limited_read_again_backs_off_like_an_inline_one() {
+    let cache = cache();
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let limited = later(start, 45);
+
+    cache
+        .serve(KEY, false, limited, counted(&fetches, |_| Err(exhausted())))
+        .await
+        .expect("the expired snapshot is served");
+    assert!(
+        eventually(|| cache
+            .peek(&KEY)
+            .is_some_and(|snapshot| snapshot.warning.is_some()))
+        .await,
+        "the rate limited read again settles"
+    );
+
+    let backoff = TimeDelta::from_std(RATE_LIMIT_BACKOFF).unwrap();
+    for refresh in [false, true] {
+        let (snapshot, freshness) = cache
+            .serve(
+                KEY,
+                refresh,
+                limited + backoff - TimeDelta::seconds(1),
+                counted(&fetches, following),
+            )
+            .await
+            .expect("the stale snapshot is served inside the backoff");
+        assert_eq!(freshness, Freshness::Stale, "refresh {refresh}");
+        assert_eq!(*snapshot.value, 7);
+        assert_eq!(snapshot.warning.as_deref(), Some(RATE_LIMIT_EXHAUSTED));
+    }
+    for _ in 0..YIELDS {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        fetches.load(Ordering::SeqCst),
+        1,
+        "GitHub is not asked again inside the backoff"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_panicking_read_again_frees_the_slot_for_the_next() {
+    let cache = cache();
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    let fetches = Arc::new(AtomicUsize::new(0));
+
+    let (_, freshness) = cache
+        .serve(
+            KEY,
+            false,
+            later(start, 45),
+            counted(&fetches, |_| panic!("the read again panics")),
+        )
+        .await
+        .expect("the expired snapshot is served");
+    assert_eq!(freshness, Freshness::Revalidating);
+    assert!(
+        eventually(|| fetches.load(Ordering::SeqCst) == 1).await,
+        "the panicking read again runs"
+    );
+
+    let (snapshot, freshness) = cache
+        .serve(KEY, false, later(start, 46), counted(&fetches, following))
+        .await
+        .expect("the expired snapshot is still served");
+    assert_eq!(freshness, Freshness::Revalidating);
+    assert_eq!(*snapshot.value, 7);
+    assert!(
+        eventually(|| holding(&cache, 8)).await,
+        "the next read again runs once the panicked one let go"
+    );
+    assert_eq!(fetches.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slot_forgotten_while_it_was_read_again_and_failing_is_dropped() {
+    let cache = Arc::new(cache());
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    let writer = Arc::clone(&cache);
+
+    let (snapshot, freshness) = cache
+        .serve(KEY, false, later(start, 45), move |_| async move {
+            writer.forget(&KEY);
+            Err(unreachable())
+        })
+        .await
+        .expect("the expired snapshot is served");
+    assert_eq!(freshness, Freshness::Revalidating);
+    assert_eq!(*snapshot.value, 7);
+
+    assert!(
+        eventually(|| !cache.holds(&KEY)).await,
+        "a slot left with nothing to serve is dropped"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_invalidated_while_it_was_read_again_is_fetched_again() {
+    let cache = cache();
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    let (fetches, gate) = (Arc::new(AtomicUsize::new(0)), Arc::new(Notify::new()));
+    let (_, freshness) = at_once(cache.serve(
+        KEY,
+        false,
+        later(start, 45),
+        gated(&fetches, &gate, following),
+    ))
+    .await
+    .expect("the expired snapshot is served");
+    assert_eq!(freshness, Freshness::Revalidating);
+
+    cache.invalidate(&KEY);
+    let mut waiting = pin!(cache.serve(KEY, false, later(start, 46), counted(&fetches, |_| Ok(9))));
+
+    assert!(
+        poll!(waiting.as_mut()).is_pending(),
+        "an invalidated snapshot waits for the read under way"
+    );
+    gate.notify_one();
+    let (snapshot, freshness) = waiting
+        .await
+        .expect("what predates the write is fetched again");
+    assert_eq!(freshness, Freshness::Refreshed);
+    assert_eq!(*snapshot.value, 9);
+    assert_eq!(fetches.load(Ordering::SeqCst), 2);
 }

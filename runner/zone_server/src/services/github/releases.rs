@@ -165,13 +165,14 @@ pub(crate) async fn options(
 ) -> Result<Offered, Failure> {
     let listed = connected_sources(state, workspace_id).await?;
     let now = Utc::now();
-    let origin = state.config().github_web_url.as_str();
     let snapshots = state.github_snapshots();
     let reads = join_all(listed.connected.iter().map(|source| {
         let permits = snapshots.throttle.credential(&source.source);
-        snapshots
-            .options
-            .read(source.source.id, refresh, now, move |_| async move {
+        let fetching = {
+            let (state, source) = (state.clone(), source.clone());
+            move |_| async move {
+                let (state, source) = (&state, &source);
+                let origin = state.config().github_web_url.as_str();
                 let _permit = admitted(&permits).await?;
                 credentialed(
                     state,
@@ -180,7 +181,11 @@ pub(crate) async fn options(
                     move |github| async move { github.source_options(source, origin).await },
                 )
                 .await
-            })
+            }
+        };
+        snapshots
+            .options
+            .serve(source.source.id, refresh, now, fetching)
     }))
     .await;
     let mut offered = Offered::new(now, unusable(&listed.invalid));
@@ -264,16 +269,16 @@ async fn listing(
 ) -> Result<(Snapshot<Listing>, Freshness), Fault> {
     let snapshots = state.github_snapshots();
     let permits = snapshots.throttle.credential(&source.source);
-    let origin = state.config().github_web_url.as_str();
-    snapshots
-        .releases
-        .read(source.source.id, refresh, now, move |previous| async move {
+    let fetching = {
+        let (state, source) = (state.clone(), source.clone());
+        move |previous: Option<Arc<Listing>>| async move {
+            let (state, source) = (&state, &source);
+            let origin = state.config().github_web_url.as_str();
             let since = now - TimeDelta::days(MAXIMUM_RELEASE_WINDOW_DAYS as i64);
             let horizon = now
                 .checked_sub_signed(delta(state.config().github.pipeline_horizon()))
                 .unwrap_or(DateTime::<Utc>::MIN_UTC);
             let checked_at = now.to_rfc3339();
-            let previous: Option<Arc<Listing>> = previous;
             let previous = previous.as_deref();
             credentialed(
                 state,
@@ -293,7 +298,11 @@ async fn listing(
                 },
             )
             .await
-        })
+        }
+    };
+    snapshots
+        .releases
+        .serve(source.source.id, refresh, now, fetching)
         .await
 }
 

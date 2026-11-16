@@ -11,6 +11,7 @@ use chrono::{Duration as Interval, SecondsFormat, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::time::Duration;
+use tokio::time::Instant;
 use uuid::Uuid;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -31,6 +32,8 @@ const NEXT: &str = "v1.4.1";
 const PUBLISHED_ID: u64 = 90;
 const DRAFT_ID: u64 = 91;
 const MARKER: &str = "<!-- zone-release:";
+const REVALIDATION_WAIT: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const BRANCH_FILTER: &str = "branch";
 const CREATED_FILTER: &str = "created";
 const FRESH: &str = "v1.5.0";
@@ -57,14 +60,18 @@ struct Releases {
 
 impl Releases {
     async fn new() -> Self {
-        Self::serving("", false).await
+        Self::serving("", false, None).await
     }
 
     async fn enterprise() -> Self {
-        Self::serving(ENTERPRISE_API, true).await
+        Self::serving(ENTERPRISE_API, true, None).await
     }
 
-    async fn serving(api: &'static str, enterprise: bool) -> Self {
+    async fn expiring() -> Self {
+        Self::serving("", false, Some(Duration::ZERO)).await
+    }
+
+    async fn serving(api: &'static str, enterprise: bool, ttl: Option<Duration>) -> Self {
         let github = MockServer::start().await;
         let database = context_database_url();
         let pool = PgPool::connect(&database).await.expect("the test database");
@@ -72,6 +79,9 @@ impl Releases {
         config.github_api_url = format!("{}{api}", github.uri());
         if enterprise {
             config.github_web_url = github.uri();
+        }
+        if let Some(ttl) = ttl {
+            config.github.release_ttl = ttl;
         }
         config.database_url = database;
         config.comfyui.enabled = false;
@@ -689,6 +699,40 @@ async fn a_release_older_than_the_lookup_horizon_makes_no_pipeline_call() {
             .await
             .len(),
         2
+    );
+}
+
+#[tokio::test]
+async fn an_expired_release_listing_is_served_at_once_and_read_again_behind_it() {
+    let releases = Releases::expiring().await;
+    releases
+        .answer_json(
+            "GET",
+            "/releases",
+            200,
+            json!([release(PUBLISHED_ID, LATEST, Some(&ago(1)), false, NOTES)]),
+        )
+        .await;
+    releases.runs(vec![run(501, LATEST, "success")]).await;
+    let listed = format!("{REPOSITORY}/releases");
+
+    let (status, first) = releases.get(&releases.releases()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let (status, again) = releases.get(&releases.releases()).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+
+    assert_eq!(first["sources"][0]["freshness"], "refreshed");
+    assert_eq!(again["sources"][0]["freshness"], "revalidating");
+    assert_eq!(again["stale"], false);
+    assert_eq!(again["releases"], first["releases"]);
+    let deadline = Instant::now() + REVALIDATION_WAIT;
+    while releases.sent("GET", &listed).await.len() < 2 && Instant::now() < deadline {
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    assert_eq!(
+        releases.sent("GET", &listed).await.len(),
+        2,
+        "the expired listing is read again behind the one served"
     );
 }
 

@@ -62,7 +62,14 @@ impl<T> Entry<T> {
         match refresh {
             true if age < delta(floor) => Decision::Serve(snapshot.clone(), Freshness::Floored),
             false if age < delta(ttl) => Decision::Serve(snapshot.clone(), Freshness::Cached),
-            _ => Decision::Fetch,
+            true => Decision::Fetch,
+            false => Decision::Revalidate(
+                snapshot.warned(self.failure.as_ref().map(ToString::to_string)),
+                match self.failure {
+                    Some(_) => Freshness::Stale,
+                    None => Freshness::Revalidating,
+                },
+            ),
         }
     }
 

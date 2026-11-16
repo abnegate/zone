@@ -67,6 +67,20 @@ const FAILURE: &str = "error: the build failed\n";
 const LONG_LOG_BYTES: usize = 17 * 1024 * 1024;
 const SLOW_RELEASES: u64 = 6;
 const RELEASE_LOOKUP_DELAY: Duration = Duration::from_millis(300);
+const ASSESSMENT_DELAY: Duration = Duration::from_secs(2);
+const ASSESSMENT_BUDGET: Duration = Duration::from_millis(3500);
+const REVALIDATION_WAIT: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+const ASSESSED_HEADS: [&str; CREDENTIAL_PERMITS] = [
+    "a000000000000000000000000000000000000001",
+    "a000000000000000000000000000000000000002",
+    "a000000000000000000000000000000000000003",
+    "a000000000000000000000000000000000000004",
+    "a000000000000000000000000000000000000005",
+    "a000000000000000000000000000000000000006",
+    "a000000000000000000000000000000000000007",
+    "a000000000000000000000000000000000000008",
+];
 const DIFF: &str = "diff --git a/src/lib.rs b/src/lib.rs\nindex 1..2 100644\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1,2 @@\n fn main() {}\n+fn added() {}\n";
 
 /// One open pull request GitHub knows about, how its checks stand, and
@@ -1825,4 +1839,77 @@ async fn a_malformed_request_is_refused_in_the_api_shape() {
     let (status, body) = board.merge(1, json!({"method": "squash"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["success"], json!(false));
+}
+
+#[tokio::test]
+async fn an_expired_listing_is_served_at_once_and_read_again_behind_it() {
+    let hub = Hub::hosted().await;
+    let mut config = hub.config();
+    config.github.pull_request_ttl = Duration::ZERO;
+    let board = Board::configured(hub, config).await;
+    board.hub.list(&[Pull::ready()]).await;
+
+    let first = board.listed("").await;
+    let again = board.listed("").await;
+
+    assert_eq!(first["sources"][0]["freshness"], json!("refreshed"));
+    assert_eq!(again["sources"][0]["freshness"], json!("revalidating"));
+    assert_eq!(again["stale"], json!(false));
+    assert_eq!(numbers(&again), numbers(&first));
+    let deadline = Instant::now() + REVALIDATION_WAIT;
+    while board.hub.requests_to("/repos/acme/widgets/pulls").await < 2 && Instant::now() < deadline
+    {
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    assert_eq!(
+        board.hub.requests_to("/repos/acme/widgets/pulls").await,
+        2,
+        "the expired listing is read again behind the one served"
+    );
+}
+
+#[tokio::test]
+async fn a_source_assesses_as_many_pull_requests_at_once_as_its_credential_allows() {
+    let board = Board::new(Hub::hosted().await).await;
+    let pulls: Vec<Pull> = (1..)
+        .zip(ASSESSED_HEADS)
+        .map(|(number, head)| Pull::of(number, head, Some("success")))
+        .collect();
+    board.hub.list(&pulls).await;
+    for pull in &pulls {
+        Mock::given(method("GET"))
+            .and(path(board.hub.endpoint(&format!("pulls/{}", pull.number))))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(board.hub.row(pull))
+                    .set_delay(ASSESSMENT_DELAY),
+            )
+            .with_priority(1)
+            .mount(&board.hub.server)
+            .await;
+    }
+
+    let started = Instant::now();
+    let listing = board.listed("").await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(numbers(&listing).len(), CREDENTIAL_PERMITS, "{listing}");
+    for pull in &pulls {
+        assert_eq!(
+            board
+                .hub
+                .requests_to(&format!("/repos/acme/widgets/pulls/{}", pull.number))
+                .await,
+            1,
+            "each assessment reads its pull request once"
+        );
+    }
+    assert!(
+        elapsed >= ASSESSMENT_DELAY,
+        "every assessment waited on GitHub: {elapsed:?}"
+    );
+    assert!(
+        elapsed < ASSESSMENT_BUDGET,
+        "every pull request is assessed at once: {elapsed:?}"
+    );
 }
