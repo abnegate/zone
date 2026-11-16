@@ -8,7 +8,7 @@ interface LicenseKeyFormProps {
 }
 
 export function LicenseKeyForm({ licensed }: LicenseKeyFormProps) {
-  const keyId = useId();
+  const fieldId = useId();
   const hintId = useId();
   const errorId = useId();
   const { set, pending, refusal, error, reset } = useSetLicense();
@@ -42,9 +42,9 @@ export function LicenseKeyForm({ licensed }: LicenseKeyFormProps) {
   return (
     <form className="settings-card license-key-form" onSubmit={submit}>
       <div className="form-group">
-        <label htmlFor={keyId}>License key</label>
+        <label htmlFor={fieldId}>License key</label>
         <textarea
-          id={keyId}
+          id={fieldId}
           className="license-key-input"
           rows={4}
           value={key}
