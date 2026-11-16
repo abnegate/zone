@@ -7,12 +7,14 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use reqwest::Client;
 use serde::Deserialize;
+use tokio::sync::Mutex;
 
 use crate::services::endpoint::Endpoint;
 
 const INFORMATION_PATH: &str = "/v2/model/info";
 const TIMEOUT: Duration = Duration::from_secs(2);
 const TTL: Duration = Duration::from_secs(60);
+const UNREAD_TTL: Duration = Duration::from_secs(5);
 const VERSION_PATH: &str = "/v1";
 const WILDCARD: char = '*';
 
@@ -24,16 +26,26 @@ static CLIENT: LazyLock<Client> = LazyLock::new(|| {
         .expect("Failed to build upstream route client")
 });
 
-static TABLES: LazyLock<DashMap<String, Table>> = LazyLock::new(DashMap::new);
+static TABLES: LazyLock<Tables> = LazyLock::new(Tables::default);
+
+#[derive(Default)]
+struct Tables {
+    read: DashMap<String, Table>,
+    reading: DashMap<String, Arc<Mutex<()>>>,
+}
 
 struct Table {
-    routes: Arc<[Route]>,
+    routes: Option<Arc<[Route]>>,
     fetched: Instant,
 }
 
 impl Table {
     fn fresh(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.fetched) < TTL
+        let ttl = match self.routes {
+            Some(_) => TTL,
+            None => UNREAD_TTL,
+        };
+        now.saturating_duration_since(self.fetched) < ttl
     }
 }
 
@@ -71,7 +83,6 @@ impl From<Deployment> for Route {
 }
 
 impl Route {
-    /// The part of `model` this route's wildcard name stands in for.
     fn capture<'a>(&self, model: &'a str) -> Option<&'a str> {
         let (prefix, suffix) = self.name.split_once(WILDCARD)?;
         model.strip_prefix(prefix)?.strip_suffix(suffix)
@@ -85,30 +96,35 @@ pub async fn route(endpoint: &Endpoint, model: &str) -> Option<String> {
     lookup(&TABLES, endpoint, model).await
 }
 
-async fn lookup(
-    tables: &DashMap<String, Table>,
-    endpoint: &Endpoint,
-    model: &str,
-) -> Option<String> {
-    let routes = match cached(tables, endpoint.url(), Instant::now()) {
-        Some(routes) => routes,
-        None => {
-            let routes: Arc<[Route]> = fetch(endpoint).await?.into();
-            store(tables, endpoint.url(), Arc::clone(&routes), Instant::now());
-            routes
-        }
-    };
-    resolve(&routes, model)
+async fn lookup(tables: &Tables, endpoint: &Endpoint, model: &str) -> Option<String> {
+    let url = endpoint.url();
+    if let Some(routes) = cached(&tables.read, url, Instant::now()) {
+        return resolve(routes.as_deref()?, model);
+    }
+    let reading = Arc::clone(tables.reading.entry(url.to_string()).or_default().value());
+    let _reading = reading.lock().await;
+    if let Some(routes) = cached(&tables.read, url, Instant::now()) {
+        return resolve(routes.as_deref()?, model);
+    }
+    let routes: Option<Arc<[Route]>> = fetch(endpoint).await.map(Into::into);
+    store(&tables.read, url, routes.clone(), Instant::now());
+    tables.reading.remove(url);
+    resolve(routes.as_deref()?, model)
 }
 
-fn cached(tables: &DashMap<String, Table>, url: &str, now: Instant) -> Option<Arc<[Route]>> {
+/// The routes read from `url` within their TTL: none read when the last read failed.
+fn cached(
+    tables: &DashMap<String, Table>,
+    url: &str,
+    now: Instant,
+) -> Option<Option<Arc<[Route]>>> {
     tables
         .get(url)
         .filter(|table| table.fresh(now))
-        .map(|table| Arc::clone(&table.routes))
+        .map(|table| table.routes.clone())
 }
 
-fn store(tables: &DashMap<String, Table>, url: &str, routes: Arc<[Route]>, now: Instant) {
+fn store(tables: &DashMap<String, Table>, url: &str, routes: Option<Arc<[Route]>>, now: Instant) {
     tables.retain(|_, table| table.fresh(now));
     tables.insert(
         url.to_string(),
@@ -212,8 +228,7 @@ mod tests {
     }
 
     async fn routed(server: &MockServer, model: &str) -> Option<String> {
-        let tables = DashMap::new();
-        lookup(&tables, &endpoint(&server.uri(), KEY), model).await
+        lookup(&Tables::default(), &endpoint(&server.uri(), KEY), model).await
     }
 
     #[tokio::test]
@@ -339,7 +354,7 @@ mod tests {
     #[tokio::test]
     async fn a_versioned_endpoint_reads_metadata_at_its_root() {
         let server = serving(deployments(&[("alias", "vertex_ai/gemini-2.5-pro")])).await;
-        let tables = DashMap::new();
+        let tables = Tables::default();
 
         let route = lookup(
             &tables,
@@ -362,7 +377,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let tables = DashMap::new();
+        let tables = Tables::default();
         let endpoint = endpoint(&server.uri(), KEY);
 
         assert_eq!(
@@ -377,48 +392,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_read_is_not_cached() {
+    async fn a_failed_read_is_remembered_briefly() {
         let server = MockServer::start().await;
         Mock::given(path(INFORMATION_PATH))
-            .respond_with(ResponseTemplate::new(503))
-            .up_to_n_times(1)
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
             .mount(&server)
             .await;
-        Mock::given(path(INFORMATION_PATH))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(deployments(&[("alias", "openai/remote")])),
-            )
-            .mount(&server)
-            .await;
-        let tables = DashMap::new();
+        let tables = Tables::default();
         let endpoint = endpoint(&server.uri(), KEY);
 
         assert_eq!(lookup(&tables, &endpoint, "alias").await, None);
-        assert_eq!(
-            lookup(&tables, &endpoint, "alias").await.as_deref(),
-            Some("openai/remote")
-        );
+        assert_eq!(lookup(&tables, &endpoint, "llama3:8b").await, None);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_lookups_share_one_read() {
+        let server = MockServer::start().await;
+        Mock::given(path(INFORMATION_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(deployments(&[("*", "ollama_chat/*")]))
+                    .set_delay(Duration::from_millis(200)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tables = Tables::default();
+        let endpoint = endpoint(&server.uri(), KEY);
+        let models: Vec<String> = (0..8).map(|index| format!("model-{index}")).collect();
+
+        let routes =
+            futures::future::join_all(models.iter().map(|model| lookup(&tables, &endpoint, model)))
+                .await;
+
+        for (model, route) in models.iter().zip(routes) {
+            assert_eq!(route, Some(format!("ollama_chat/{model}")));
+        }
+        server.verify().await;
     }
 
     #[test]
     fn a_table_expires_after_its_ttl() {
         let tables = DashMap::new();
         let now = Instant::now();
-        store(&tables, "http://first", Arc::from([]), now);
+        store(&tables, "http://first", Some(Arc::from([])), now);
 
         assert!(cached(&tables, "http://first", now + TTL - Duration::from_secs(1)).is_some());
         assert!(cached(&tables, "http://first", now + TTL).is_none());
     }
 
     #[test]
+    fn a_failed_read_expires_long_before_a_table() {
+        let tables = DashMap::new();
+        let now = Instant::now();
+        store(&tables, "http://unread", None, now);
+
+        assert_eq!(
+            cached(
+                &tables,
+                "http://unread",
+                now + UNREAD_TTL - Duration::from_secs(1)
+            ),
+            Some(None)
+        );
+        assert_eq!(cached(&tables, "http://unread", now + UNREAD_TTL), None);
+        assert!(UNREAD_TTL < TTL);
+    }
+
+    #[test]
     fn storing_a_table_evicts_expired_ones() {
         let tables = DashMap::new();
         let now = Instant::now();
-        store(&tables, "http://first", Arc::from([]), now);
-        store(&tables, "http://second", Arc::from([]), now + TTL / 2);
+        store(&tables, "http://first", Some(Arc::from([])), now);
+        store(&tables, "http://second", Some(Arc::from([])), now + TTL / 2);
 
-        store(&tables, "http://third", Arc::from([]), now + TTL);
+        store(&tables, "http://third", Some(Arc::from([])), now + TTL);
 
         assert!(!tables.contains_key("http://first"), "expired");
         assert!(tables.contains_key("http://second"), "still fresh");
