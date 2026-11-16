@@ -227,7 +227,6 @@ impl Github {
         })
     }
 
-    /// This client with every GraphQL read of a listing held to `guard`.
     pub(crate) fn guarded(self, guard: Guard) -> Self {
         Self {
             guard: Some(guard),
@@ -235,7 +234,6 @@ impl Github {
         }
     }
 
-    /// What `read` answers, held to this client's guard when it has one.
     pub(crate) async fn bounded<T>(&self, read: impl Future<Output = T>) -> Result<T, Fault> {
         match &self.guard {
             Some(guard) => guard.bounded(read).await,
@@ -243,8 +241,6 @@ impl Github {
         }
     }
 
-    /// What `read` answers unless it outlasts this client's guard, which
-    /// leaves the reads after it alone.
     pub(crate) async fn limited<T>(&self, read: impl Future<Output = T>) -> Result<T, Fault> {
         match &self.guard {
             Some(guard) => guard.limited(read).await,
