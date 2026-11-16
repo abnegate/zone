@@ -23,7 +23,12 @@ const UNCHECKED: &str = "Could not check server admin access";
 pub struct ServerAdmin(pub UserRow);
 
 fn permits(user: &UserRow) -> bool {
-    user.is_admin == Some(true) && user.is_active != Some(false)
+    administers(user.is_admin, user.is_active)
+}
+
+/// The one rule for who is a server admin: the admin flag set, and the account not deactivated.
+pub fn administers(is_admin: Option<bool>, is_active: Option<bool>) -> bool {
+    is_admin == Some(true) && is_active != Some(false)
 }
 
 fn refused() -> AuthError {

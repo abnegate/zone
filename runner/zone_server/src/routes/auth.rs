@@ -4,25 +4,31 @@ use axum::{
     Json,
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
+use uuid::Uuid;
+use zone_enterprise::sso::{self, PasswordAccess};
 
-use crate::auth::{AuthUser, account, hash_password, verify_password};
+use crate::auth::{AuthUser, account, admin_guard, hash_password, verify_password};
 use crate::db::DbResult;
+use crate::db::audit::{actions, resources};
 use crate::db::users::UserRow;
-use crate::db::{refresh_tokens, sessions, users};
+use crate::db::{password_reset, refresh_tokens, sessions, users};
 use crate::services::account::{AuthResponse, Refusal, provision, session};
 use crate::services::mail::Template;
+use crate::services::sso::enforcement;
 use crate::state::AppState;
 use crate::utils::crypto::hash_token;
 
-use super::common::ErrorResponse;
+use super::common::{AuditEvent, ErrorResponse, audit};
+use super::sso::refusal::{self, Stage};
 
 const LOGIN_OK: &str = "ok";
 const LOGIN_DISABLED: &str = "disabled";
 const LOGIN_ERROR: &str = "error";
 const LOGIN_INVALID_CREDENTIALS: &str = "invalid_credentials";
+const LOGIN_SSO_REQUIRED: &str = "sso_required";
 
 /// Register request
 #[derive(Debug, Deserialize)]
@@ -49,14 +55,19 @@ pub struct RefreshRequest {
 pub async fn register(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<RegisterRequest>,
+    Json(request): Json<RegisterRequest>,
 ) -> impl IntoResponse {
-    // RFC 5322 simplified: local@domain with basic constraints
+    match enforcement::access(state.db(), false).await {
+        Ok(PasswordAccess::Refused) => return sso_required(),
+        Ok(PasswordAccess::Allowed | PasswordAccess::BreakGlass) => {}
+        Err(error) => return unavailable(&error),
+    }
+
     let email_regex = regex::Regex::new(
         r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"
     ).unwrap();
 
-    if !email_regex.is_match(&req.email) || req.email.len() > 254 {
+    if !email_regex.is_match(&request.email) || request.email.len() > 254 {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new("Invalid email format")),
@@ -64,7 +75,7 @@ pub async fn register(
             .into_response();
     }
 
-    if req.password.len() < 8 {
+    if request.password.len() < 8 {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new("Password must be at least 8 characters")),
@@ -72,9 +83,12 @@ pub async fn register(
             .into_response();
     }
 
-    let has_uppercase = req.password.chars().any(|c| c.is_uppercase());
-    let has_lowercase = req.password.chars().any(|c| c.is_lowercase());
-    let has_digit = req.password.chars().any(|c| c.is_ascii_digit());
+    let has_uppercase = request.password.chars().any(char::is_uppercase);
+    let has_lowercase = request.password.chars().any(char::is_lowercase);
+    let has_digit = request
+        .password
+        .chars()
+        .any(|character| character.is_ascii_digit());
 
     if !has_uppercase || !has_lowercase || !has_digit {
         return (
@@ -86,7 +100,7 @@ pub async fn register(
             .into_response();
     }
 
-    match users::get_user_by_email(state.db(), &req.email).await {
+    match users::get_user_by_email(state.db(), &request.email).await {
         Ok(Some(_)) => {
             return (
                 StatusCode::CONFLICT,
@@ -94,52 +108,27 @@ pub async fn register(
             )
                 .into_response();
         }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+        Err(error) => return unavailable(&error),
         Ok(None) => {}
     }
 
-    let password_hash = match hash_password(&req.password) {
+    let password_hash = match hash_password(&request.password) {
         Ok(hash) => hash,
-        Err(e) => {
-            tracing::error!("Password hashing error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+        Err(error) => {
+            tracing::error!("Password hashing error: {}", error);
+            return internal_error();
         }
     };
 
     let is_admin = match users::count_users(state.db()).await {
         Ok(0) => true,
         Ok(_) => false,
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+        Err(error) => return unavailable(&error),
     };
 
-    let user = match insert(&state, &req, &password_hash, is_admin).await {
+    let user = match insert(&state, &request, &password_hash, is_admin).await {
         Ok(user) => user,
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+        Err(error) => return unavailable(&error),
     };
 
     provision::furnish(state.db(), &user).await;
@@ -174,47 +163,30 @@ async fn insert(
 pub async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<LoginRequest>,
+    Json(request): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    let user = match users::get_user_by_email(state.db(), &req.email).await {
+    let user = match users::get_user_by_email(state.db(), &request.email).await {
         Ok(Some(user)) => user,
         Ok(None) => {
             crate::metrics::record_login(LOGIN_INVALID_CREDENTIALS);
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid email or password")),
-            )
-                .into_response();
+            return invalid_credentials();
         }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
+        Err(error) => {
             crate::metrics::record_login(LOGIN_ERROR);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+            return unavailable(&error);
         }
     };
 
-    match verify_password(&req.password, &user.password_hash) {
+    match verify_password(&request.password, &user.password_hash) {
         Ok(true) => {}
         Ok(false) => {
             crate::metrics::record_login(LOGIN_INVALID_CREDENTIALS);
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid email or password")),
-            )
-                .into_response();
+            return invalid_credentials();
         }
-        Err(e) => {
-            tracing::error!("Password verification error: {}", e);
+        Err(error) => {
+            tracing::error!("Password verification error: {}", error);
             crate::metrics::record_login(LOGIN_ERROR);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+            return internal_error();
         }
     }
 
@@ -230,13 +202,33 @@ pub async fn login(
             .into_response();
     }
 
-    if let Err(e) = users::update_last_login(state.db(), user.id).await {
-        tracing::warn!("Failed to update last login: {}", e);
+    let access = match enforcement::access(
+        state.db(),
+        admin_guard::administers(user.is_admin, user.is_active),
+    )
+    .await
+    {
+        Ok(access) => access,
+        Err(error) => {
+            crate::metrics::record_login(LOGIN_ERROR);
+            return unavailable(&error);
+        }
+    };
+    if access == PasswordAccess::Refused {
+        crate::metrics::record_login(LOGIN_SSO_REQUIRED);
+        return sso_required();
+    }
+
+    if let Err(error) = users::update_last_login(state.db(), user.id).await {
+        tracing::warn!("Failed to update last login: {}", error);
     }
 
     match session::issue(&state, user.id, &headers).await {
         Ok(response) => {
             crate::metrics::record_login(LOGIN_OK);
+            if access == PasswordAccess::BreakGlass {
+                record_break_glass(&state, user.id, &user.email).await;
+            }
             Json(response).into_response()
         }
         Err(refusal) => {
@@ -244,6 +236,51 @@ pub async fn login(
             refusal.into_response()
         }
     }
+}
+
+/// A server admin signing in with a password while single sign-on is required is the way back in
+/// when the identity provider is down, so every such sign-in is on the record.
+async fn record_break_glass(state: &AppState, user_id: Uuid, email: &str) {
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: None,
+            workspace_id: None,
+            actor_id: user_id,
+            actor_email: email,
+            action: actions::USER_BREAK_GLASS_SIGNED_IN,
+            resource_type: resources::USER,
+            resource_id: Some(user_id),
+            old_values: None,
+            new_values: None,
+        },
+    )
+    .await;
+}
+
+fn sso_required() -> Response {
+    refusal::respond(&sso::Error::Required, Stage::SignIn)
+}
+
+fn invalid_credentials() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse::new("Invalid email or password")),
+    )
+        .into_response()
+}
+
+fn internal_error() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse::new("Internal server error")),
+    )
+        .into_response()
+}
+
+fn unavailable(error: &sqlx::Error) -> Response {
+    tracing::error!("Database error: {}", error);
+    internal_error()
 }
 
 fn login_outcome(refusal: Refusal) -> &'static str {
@@ -524,42 +561,30 @@ pub struct ResetPasswordRequest {
 /// POST /api/auth/forgot-password
 pub async fn forgot_password(
     State(state): State<AppState>,
-    Json(req): Json<ForgotPasswordRequest>,
+    Json(request): Json<ForgotPasswordRequest>,
 ) -> impl IntoResponse {
-    use crate::db::password_reset;
-
-    let user = match users::get_user_by_email(state.db(), &req.email).await {
+    let user = match users::get_user_by_email(state.db(), &request.email).await {
         Ok(Some(user)) => user,
-        Ok(None) => {
-            // Don't reveal whether email exists for security
-            return (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "success": true,
-                    "message": "If the email exists, a password reset email has been sent"
-                })),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+        Ok(None) => return reset_requested(),
+        Err(error) => return unavailable(&error),
     };
+
+    match enforcement::access(
+        state.db(),
+        admin_guard::administers(user.is_admin, user.is_active),
+    )
+    .await
+    {
+        Ok(PasswordAccess::Refused) => return reset_requested(),
+        Ok(PasswordAccess::Allowed | PasswordAccess::BreakGlass) => {}
+        Err(error) => return unavailable(&error),
+    }
 
     let (token, _expires_at) = match password_reset::create_reset_token(state.db(), user.id).await {
         Ok(result) => result,
-        Err(e) => {
-            tracing::error!("Failed to create reset token: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+        Err(error) => {
+            tracing::error!("Failed to create reset token: {}", error);
+            return internal_error();
         }
     };
 
@@ -584,11 +609,17 @@ pub async fn forgot_password(
         );
     }
 
+    reset_requested()
+}
+
+/// The same answer whether or not the email has an account, or may reset its password, so the
+/// endpoint can't be used to find out either.
+fn reset_requested() -> Response {
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "success": true,
-                    "message": "If the email exists, a password reset email has been sent"
+            "message": "If the email exists, a password reset email has been sent"
         })),
     )
         .into_response()
@@ -597,11 +628,9 @@ pub async fn forgot_password(
 /// POST /api/auth/reset-password
 pub async fn reset_password(
     State(state): State<AppState>,
-    Json(req): Json<ResetPasswordRequest>,
+    Json(request): Json<ResetPasswordRequest>,
 ) -> impl IntoResponse {
-    use crate::db::password_reset;
-
-    if req.new_password.len() < 8 {
+    if request.new_password.len() < 8 {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new("Password must be at least 8 characters")),
@@ -609,32 +638,25 @@ pub async fn reset_password(
             .into_response();
     }
 
-    // Verify and consume the reset token atomically to prevent race conditions
-    let user_id = match password_reset::verify_and_consume_reset_token(state.db(), &req.token).await
-    {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new("Invalid or expired reset token")),
-            )
-                .into_response();
-        }
-    };
+    if let Err(refusal) = reset_allowed(&state, &request.token).await {
+        return refusal.into_response();
+    }
 
-    let password_hash = match hash_password(&req.new_password) {
+    let user_id =
+        match password_reset::verify_and_consume_reset_token(state.db(), &request.token).await {
+            Ok(id) => id,
+            Err(_) => return invalid_reset_token(),
+        };
+
+    let password_hash = match hash_password(&request.new_password) {
         Ok(hash) => hash,
-        Err(e) => {
-            tracing::error!("Password hashing error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+        Err(error) => {
+            tracing::error!("Password hashing error: {}", error);
+            return internal_error();
         }
     };
 
-    if let Err(e) = sqlx::query!(
+    if let Err(error) = sqlx::query!(
         "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
         password_hash,
         user_id
@@ -642,23 +664,19 @@ pub async fn reset_password(
     .execute(state.db())
     .await
     {
-        tracing::error!("Failed to update password: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("Internal server error")),
-        )
-            .into_response();
+        tracing::error!("Failed to update password: {}", error);
+        return internal_error();
     }
 
-    if let Err(e) = refresh_tokens::revoke_all_user_tokens(state.db(), user_id).await {
+    if let Err(error) = refresh_tokens::revoke_all_user_tokens(state.db(), user_id).await {
         tracing::warn!(
             "Failed to revoke refresh tokens after password reset: {}",
-            e
+            error
         );
     }
 
-    if let Err(e) = sessions::revoke_all_user_sessions(state.db(), user_id).await {
-        tracing::warn!("Failed to revoke sessions after password reset: {}", e);
+    if let Err(error) = sessions::revoke_all_user_sessions(state.db(), user_id).await {
+        tracing::warn!("Failed to revoke sessions after password reset: {}", error);
     }
 
     (
@@ -671,9 +689,61 @@ pub async fn reset_password(
         .into_response()
 }
 
+/// Looks at the token without using it, so a refused reset leaves the token and the password as
+/// they were.
+async fn reset_allowed(state: &AppState, token: &str) -> Result<(), ResetRefusal> {
+    let user_id = password_reset::verify_reset_token(state.db(), token)
+        .await
+        .map_err(|_| ResetRefusal::InvalidToken)?;
+    let user = users::get_user_by_id(state.db(), user_id)
+        .await?
+        .ok_or(ResetRefusal::InvalidToken)?;
+    match enforcement::access(
+        state.db(),
+        admin_guard::administers(user.is_admin, user.is_active),
+    )
+    .await?
+    {
+        PasswordAccess::Refused => Err(ResetRefusal::Required),
+        PasswordAccess::Allowed | PasswordAccess::BreakGlass => Ok(()),
+    }
+}
+
+enum ResetRefusal {
+    InvalidToken,
+    Required,
+    Unavailable(sqlx::Error),
+}
+
+impl From<sqlx::Error> for ResetRefusal {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Unavailable(error)
+    }
+}
+
+impl IntoResponse for ResetRefusal {
+    fn into_response(self) -> Response {
+        match self {
+            Self::InvalidToken => invalid_reset_token(),
+            Self::Required => sso_required(),
+            Self::Unavailable(error) => unavailable(&error),
+        }
+    }
+}
+
+fn invalid_reset_token() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse::new("Invalid or expired reset token")),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LOGIN_DISABLED, LOGIN_ERROR, Refusal, login_outcome, verification_url};
+    use super::{
+        LOGIN_DISABLED, LOGIN_ERROR, LOGIN_SSO_REQUIRED, Refusal, login_outcome, verification_url,
+    };
 
     #[test]
     fn a_refused_session_keeps_the_login_metric_labels() {
@@ -683,6 +753,11 @@ mod tests {
         assert_eq!(login_outcome(Refusal::Unavailable), LOGIN_ERROR);
         assert_eq!(LOGIN_DISABLED, "disabled");
         assert_eq!(LOGIN_ERROR, "error");
+    }
+
+    #[test]
+    fn a_password_refused_for_single_sign_on_has_its_own_login_metric_label() {
+        assert_eq!(LOGIN_SSO_REQUIRED, "sso_required");
     }
 
     /// The console routes the verification page at /verify-email, so the mail
