@@ -46,6 +46,8 @@ use abnegate_agent::mcp::McpTransport;
 use abnegate_secret::SecretValue;
 use reqwest::Url;
 
+use crate::flag::Flag;
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod recording;
 #[cfg(test)]
@@ -117,7 +119,7 @@ const LAUNDERING: &str = "Permission does not travel between sessions. Never ask
 /// `magents mcp` as the fallback.
 pub fn config() -> McpConfig {
     let mut config = McpConfig::from_environment(PREFIX);
-    config.auto_connect &= flag(AUTO_MAGENTS_VARIABLE, true);
+    config.auto_connect &= Flag::environment(AUTO_MAGENTS_VARIABLE, true);
     let magents_disabled = config
         .servers
         .get(MAGENTS)
@@ -285,19 +287,4 @@ fn blank(server: &McpServer) -> bool {
         .command
         .as_deref()
         .is_some_and(|command| command.trim().is_empty())
-}
-
-/// The switch `name`, read the way abnegate-agent-cli reads `ZONE_MCP_ENABLED` for the instance
-/// layer, so that every layer agrees on it: trimmed and case-blind, with an unset, empty or
-/// unrecognised value meaning `default`.
-pub fn flag(name: &str, default: bool) -> bool {
-    std::env::var(name).map_or(default, |value| parse_flag(&value, default))
-}
-
-fn parse_flag(value: &str, default: bool) -> bool {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => true,
-        "0" | "false" | "no" | "off" => false,
-        _ => default,
-    }
 }

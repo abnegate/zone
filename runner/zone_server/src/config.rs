@@ -16,14 +16,13 @@ use abnegate_exec::Niceness;
 use abnegate_vcs::pull_request::PullRequestResult;
 use abnegate_vcs::{PullRequestError, PullRequestService};
 use uuid::Uuid;
-use zone_core::servers;
+use zone_core::flag::Flag;
 
 use crate::services::hosts::Hosts;
 use crate::services::login::claude::ROOT_PATH;
 use crate::workers::evaluation::EvaluationSettings;
 
 mod environment;
-mod flag;
 
 pub use abnegate_comfy::Config as ComfyUiConfig;
 pub use abnegate_llm::catalog::DEFAULT_GPT4ALL_MODELS_URL;
@@ -1467,8 +1466,8 @@ impl Config {
             endpoint_hosts: Hosts::from_env(),
             host_mounts: crate::host_mounts::HostMounts::from_env(),
             connect_urls: connect_urls(env::var(CONNECT_URLS).ok())?,
-            mcp_enabled: servers::flag(MCP_ENABLED, true),
-            mcp_commands: servers::flag(MCP_COMMANDS, false),
+            mcp_enabled: Flag::environment(MCP_ENABLED, true),
+            mcp_commands: Flag::environment(MCP_COMMANDS, false),
             evaluation: EvaluationSettings::from_process_environment(),
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
@@ -1551,6 +1550,7 @@ mod tests {
     use wiremock::ResponseTemplate;
     use wiremock::matchers::method;
     use wiremock::matchers::path;
+    use zone_core::servers;
     use zone_core::variables::Variables;
 
     use crate::workers::evaluation::settings as evaluation;
@@ -2399,14 +2399,14 @@ mod tests {
         let mut environment = Variables::isolated(&[MCP_COMMANDS]);
 
         assert!(
-            !servers::flag(MCP_COMMANDS, false),
+            !Flag::environment(MCP_COMMANDS, false),
             "an unset ZONE_MCP_COMMANDS must keep stdio MCP servers off"
         );
 
         for value in ["1", "true", " true ", "YES", "on"] {
             environment.set(MCP_COMMANDS, value);
             assert!(
-                servers::flag(MCP_COMMANDS, false),
+                Flag::environment(MCP_COMMANDS, false),
                 "{value} turns ZONE_MCP_COMMANDS on"
             );
         }
@@ -2414,7 +2414,7 @@ mod tests {
         for value in ["0", "off", "", "garbage"] {
             environment.set(MCP_COMMANDS, value);
             assert!(
-                !servers::flag(MCP_COMMANDS, false),
+                !Flag::environment(MCP_COMMANDS, false),
                 "{value} keeps ZONE_MCP_COMMANDS off"
             );
         }

@@ -10,6 +10,7 @@
 pub mod application;
 pub mod commands;
 pub mod error;
+pub mod flag;
 pub mod llm;
 pub mod local;
 pub mod servers;

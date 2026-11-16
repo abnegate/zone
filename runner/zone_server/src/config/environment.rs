@@ -1,4 +1,4 @@
-use super::flag::Flag;
+use zone_core::flag::Flag;
 
 pub struct Environment<Lookup> {
     lookup: Lookup,
@@ -17,11 +17,7 @@ where
     }
 
     pub fn flag(&self, variable: &str) -> Option<bool> {
-        let flag = Flag::parse(&self.read(variable)?);
-        if let Some(warning) = flag.warning(variable) {
-            tracing::warn!(variable, "{warning}");
-        }
-        Some(flag.enabled())
+        Flag::read(variable, (self.lookup)(variable).as_deref())
     }
 }
 
@@ -62,7 +58,7 @@ mod tests {
     }
 
     #[test]
-    fn a_flag_is_on_only_for_an_accepted_spelling_of_on() {
+    fn a_flag_reads_only_the_accepted_spellings() {
         for on in ["1", "true", "TRUE", "yes", "Yes", " on "] {
             assert_eq!(
                 holding(on).flag(VARIABLE),
@@ -70,11 +66,18 @@ mod tests {
                 "{on:?} must turn on"
             );
         }
-        for off in ["0", "false", "no", "off", "ture", "maybe"] {
+        for off in ["0", "false", "no", "off"] {
             assert_eq!(
                 holding(off).flag(VARIABLE),
                 Some(false),
-                "{off:?} must turn off, an unrecognised spelling included"
+                "{off:?} must turn off"
+            );
+        }
+        for typo in ["ture", "maybe"] {
+            assert_eq!(
+                holding(typo).flag(VARIABLE),
+                None,
+                "{typo:?} must leave the setting's own default in place"
             );
         }
     }
