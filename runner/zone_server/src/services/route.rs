@@ -145,7 +145,6 @@ impl fmt::Display for Unusable {
 }
 
 impl Unusable {
-    /// The policy denial that leaves the route unusable, when one does.
     pub fn denial(&self) -> Option<Denial> {
         match self.reason {
             Reason::Denied(denial) => Some(denial),
@@ -153,7 +152,6 @@ impl Unusable {
         }
     }
 
-    /// The code a client is told the denial by, when a policy denial leaves the route unusable.
     pub fn code(&self) -> Option<&'static str> {
         self.denial().map(|denial| denial.code())
     }
@@ -189,8 +187,6 @@ pub struct Route {
     windowed: bool,
     /// The agent the instance runs completions on, when it runs them on one.
     configured: Option<AgentKind>,
-    /// The policy the route runs under, none when no policy is enforced, or why it could not be
-    /// read.
     policy: Result<Option<Effective>, Denial>,
 }
 
@@ -431,7 +427,6 @@ impl Route {
         }
     }
 
-    /// Why the policy leaves this usable route unusable, when it does.
     fn denial(&self) -> Option<Denial> {
         match &self.policy {
             Err(denial) => Some(*denial),
@@ -468,7 +463,6 @@ impl Route {
         }
     }
 
-    /// The policy's denial as the reason this usable route can't be used.
     fn denied(&self) -> Option<Unusable> {
         self.endpoint
             .is_ok()

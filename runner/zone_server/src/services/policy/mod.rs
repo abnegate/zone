@@ -62,7 +62,6 @@ pub async fn for_workspace(state: &AppState, workspace: Uuid) -> Result<Option<E
     read(state, organization, Some(workspace)).await.map(Some)
 }
 
-/// The policy's name for `kind`, none for an agent it has no name for.
 pub fn agent(kind: AgentKind) -> Option<policy::Agent> {
     policy::Agent::named(kind.as_str())
 }
@@ -88,8 +87,6 @@ pub fn provider(effective: &Effective, provider: Provider) -> Result<(), Denial>
     }
 }
 
-/// The highest tier of tool call `effective` lets run without a person approving it, none when
-/// it sets no limit.
 pub fn ceiling(effective: &Effective) -> Option<tool::Tier> {
     effective.ceiling().map(|tier| match tier {
         policy::Tier::Read => tool::Tier::Read,
@@ -178,9 +175,8 @@ pub async fn record(state: &AppState, action: &'static str, denied: &Denied<'_>)
     }
 }
 
-/// Audits, as `action`, `denial` of what `actor` asked of `organization` itself, such as a
-/// sign-in or its AI settings, naming `detail`, what was refused. A failure to record it is
-/// logged and never fails the caller.
+/// [`record`] for what `actor` asked of `organization` itself, such as a sign-in or its AI
+/// settings.
 pub async fn record_organization(
     state: &AppState,
     action: &'static str,
@@ -265,7 +261,6 @@ async fn read(
     ))
 }
 
-/// The rules `stored` holds, none restricting anything when nothing is stored.
 fn rules(stored: Option<Value>) -> Result<Rules, String> {
     let Some(stored) = stored else {
         return Ok(Rules::default());
