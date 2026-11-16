@@ -32,6 +32,9 @@ const PUBLISHED_ID: u64 = 90;
 const DRAFT_ID: u64 = 91;
 const MARKER: &str = "<!-- zone-release:";
 const BRANCH_FILTER: &str = "branch";
+/// How long the tag listing of a concurrent create is held, so the other create meets the
+/// source's release taken. Long enough for a loaded machine to route the second request.
+const HELD_RELEASE: Duration = Duration::from_secs(5);
 const CREATED_FILTER: &str = "created";
 const FRESH: &str = "v1.5.0";
 const FRESH_ID: u64 = 92;
@@ -249,6 +252,19 @@ impl Releases {
             .received_requests()
             .await
             .expect("requests are recorded")
+    }
+
+    /// Waits until a create has listed the tags past the `listed` seen before it began, which
+    /// it does only while holding the source's release.
+    async fn reaches_github(&self, listed: usize) {
+        let route = format!("{REPOSITORY}/tags");
+        tokio::time::timeout(HELD_RELEASE, async {
+            while self.sent("GET", &route).await.len() <= listed {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the first create lists the tags");
     }
 
     async fn sent(&self, verb: &str, route: &str) -> Vec<Request> {
@@ -1468,12 +1484,19 @@ async fn only_one_release_is_created_for_a_source_at_a_time() {
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(json!([tag_row(LATEST)]))
-                .set_delay(Duration::from_millis(500)),
+                .set_delay(HELD_RELEASE),
         )
         .with_priority(1)
         .mount(&releases.github)
         .await;
-    let (first, second) = tokio::join!(releases.create(digest), releases.create(digest));
+    let listed = releases
+        .sent("GET", &format!("{REPOSITORY}/tags"))
+        .await
+        .len();
+    let (first, second) = tokio::join!(releases.create(digest), async {
+        releases.reaches_github(listed).await;
+        releases.create(digest).await
+    });
     let mut statuses = [first.0, second.0];
     statuses.sort();
     assert_eq!(
