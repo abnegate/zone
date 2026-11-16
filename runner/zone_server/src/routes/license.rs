@@ -152,42 +152,30 @@ fn rejection(error: SetError) -> Response {
     }
 }
 
-/// The change is already committed, so a failed count must not fail the
-/// response; it reports usage as unknown rather than inventing a figure.
+/// The license has already loaded, or a change has already committed, so a
+/// failed count must not fail the response and hide it; it reports usage as
+/// unknown rather than inventing a figure.
 fn counted(seats: DbResult<Seats>, license: Option<&License>) -> SeatsResponse {
     match seats {
         Ok(seats) => SeatsResponse::from(seats),
         Err(error) => {
-            tracing::error!(%error, "Could not count seats after changing the license; reporting usage as unknown");
+            tracing::error!(%error, "Could not count seats; reporting usage as unknown");
             SeatsResponse::uncounted(license)
         }
     }
 }
 
-async fn respond(state: &AppState, stored: Stored) -> Result<Json<LicenseResponse>, ServerError> {
-    let now = Utc::now();
-    let seats = state
-        .licenses()
-        .seats(state.db(), stored.license(), now)
-        .await?;
-    Ok(Json(LicenseResponse::new(
-        &stored,
-        SeatsResponse::from(seats),
-        now,
-    )))
+fn answer(stored: &Stored, seats: DbResult<Seats>, now: DateTime<Utc>) -> LicenseResponse {
+    LicenseResponse::new(stored, counted(seats, stored.license()), now)
 }
 
-async fn committed(state: &AppState, stored: Stored) -> Json<LicenseResponse> {
+async fn respond(state: &AppState, stored: Stored) -> Json<LicenseResponse> {
     let now = Utc::now();
     let seats = state
         .licenses()
         .seats(state.db(), stored.license(), now)
         .await;
-    Json(LicenseResponse::new(
-        &stored,
-        counted(seats, stored.license()),
-        now,
-    ))
+    Json(answer(&stored, seats, now))
 }
 
 pub async fn get(
@@ -195,7 +183,7 @@ pub async fn get(
     _admin: ServerAdmin,
 ) -> Result<Json<LicenseResponse>, ServerError> {
     let stored = state.licenses().load(state.db()).await?;
-    respond(&state, stored).await
+    Ok(respond(&state, stored).await)
 }
 
 pub async fn set(
@@ -230,7 +218,7 @@ pub async fn set(
         },
     )
     .await;
-    committed(&state, Stored::Verified(change.current))
+    respond(&state, Stored::Verified(change.current))
         .await
         .into_response()
 }
@@ -257,7 +245,7 @@ pub async fn remove(
         )
         .await;
     }
-    Ok(committed(&state, Stored::Empty).await)
+    Ok(respond(&state, Stored::Empty).await)
 }
 
 #[cfg(test)]
@@ -440,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn seats_that_could_not_be_counted_after_a_change_are_reported_as_unknown_and_never_over() {
+    fn seats_that_could_not_be_counted_are_reported_as_unknown_and_never_over() {
         let license = license(Tier::Team);
         let cases = [
             (
@@ -463,6 +451,56 @@ mod tests {
         for (seats, expected) in cases {
             assert_eq!(serde_json::to_value(&seats).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn a_loaded_license_is_answered_in_full_when_its_seats_cannot_be_counted() {
+        let license = license(Tier::Enterprise);
+        let stored = Stored::Verified(license.clone());
+
+        let response = answer(&stored, Err(sqlx::Error::PoolClosed), license.issued_at());
+
+        let body = serialized(&response);
+        assert_eq!(body["edition"], "enterprise", "{body}");
+        assert_eq!(body["status"], "active", "{body}");
+        assert_eq!(body["license"]["id"], json!(license.id()), "{body}");
+        assert_eq!(
+            body["seats"],
+            json!({ "used": null, "licensed": SEATS, "over": false })
+        );
+    }
+
+    #[test]
+    fn a_stored_key_that_no_longer_verifies_keeps_its_refusal_when_seats_cannot_be_counted() {
+        let stored = Stored::Unverified(zone_enterprise::Error::Signature);
+
+        let body = serialized(&answer(&stored, Err(sqlx::Error::PoolClosed), Utc::now()));
+
+        assert_eq!(
+            body["unverified"],
+            json!({ "code": stored.refusal().unwrap().code() })
+        );
+        assert_eq!(
+            body["seats"],
+            json!({ "used": null, "licensed": null, "over": false })
+        );
+    }
+
+    #[test]
+    fn counted_seats_are_answered_as_counted() {
+        let license = license(Tier::Team);
+        let stored = Stored::Verified(license.clone());
+
+        let body = serialized(&answer(
+            &stored,
+            Ok(seats(SEATS + 1, Some(SEATS))),
+            license.issued_at(),
+        ));
+
+        assert_eq!(
+            body["seats"],
+            json!({ "used": SEATS + 1, "licensed": SEATS, "over": true })
+        );
     }
 
     #[tokio::test]
