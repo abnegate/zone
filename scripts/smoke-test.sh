@@ -156,6 +156,14 @@ check_ollama() {
     esac
 }
 
+check_basic_auth_file() {
+    if problem=$(sh "$root/scripts/auth-file.sh" check); then
+        pass "Basic auth file ($(sh "$root/scripts/auth-file.sh" path))"
+    else
+        fail "$problem"
+    fi
+}
+
 domain=$(setting DOMAIN_HOST_WEBUI webui.localhost)
 case "$domain" in
     *[!A-Za-z0-9.-]*|'')
@@ -172,6 +180,9 @@ else
 fi
 
 printf '%s\n' "${BLUE}Running smoke tests against the $mode stack...${RESET}"
+if [ "$mode" = install ]; then
+    check_basic_auth_file
+fi
 check_manager_and_console "$mode"
 check_litellm "$domain"
 check_ollama "$ollama_base_url"
