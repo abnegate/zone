@@ -8,6 +8,7 @@ mod listing;
 mod log;
 mod merged;
 mod method;
+mod origin;
 mod overview;
 mod pull_request;
 mod readiness;
@@ -87,6 +88,7 @@ pub const KEPT_LIMIT: Duration = Duration::from_secs(5 * 60);
 pub const UNRANKED: u32 = 0;
 pub const BATCH: usize = PullRequestService::EVIDENCE_BATCH;
 pub const EVIDENCE_CONCURRENCY: usize = 4;
+pub const EVIDENCE_LIMIT: Duration = Duration::from_secs(20);
 pub const FOREIGN_COMMIT: &str = "That commit is not on this pull request.";
 pub const UNRENDERED_COMMIT: &str = "GitHub would not render this commit's diff.";
 pub const INVALID_SOURCE: &str = "has a GitHub configuration Zone cannot read.";
@@ -431,14 +433,9 @@ async fn fetch(
         &source.source,
         source.configuration.clone(),
         |github| async move {
-            let survey = Survey {
-                github: &github,
-                permits,
-                repository,
-                previous,
-                now,
-            };
-            survey.listing(limit).await
+            Survey::new(&github, permits, repository, previous, now)
+                .listing(limit)
+                .await
         },
     )
     .await

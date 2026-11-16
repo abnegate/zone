@@ -3,6 +3,7 @@ use serde_json::json;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::body_partial_json;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
@@ -287,4 +288,180 @@ async fn a_job_log_is_read_for_the_pull_requests_head_only() {
         github.job_log_tail(job, COMMIT, now).await.unwrap_err(),
         Fault::missing(FOREIGN_JOB)
     );
+}
+
+const REPOSITORY_ID: &str = "R_repository";
+const CURSOR: &str = "Y3Vyc29y";
+const LATER: &str = "bGF0ZXI=";
+
+fn open_row(number: u64) -> Value {
+    json!({
+        "id": format!("PR_{number}"),
+        "number": number,
+        "title": format!("Change {number}"),
+        "url": format!("{REPOSITORY_URL}/pull/{number}"),
+        "state": "OPEN",
+        "isDraft": false,
+        "updatedAt": "2026-11-14T03:00:00Z",
+        "headRefName": "feature",
+        "headRefOid": HEAD,
+        "baseRefName": "main",
+        "author": {"__typename": "User", "login": "octocat"},
+    })
+}
+
+/// A page of open pull requests `numbers` in the repository `id`, asked for
+/// `first` at a time after `after`, followed by the page after `next`.
+async fn open_page(
+    server: &MockServer,
+    id: &str,
+    first: u64,
+    after: Option<&str>,
+    numbers: std::ops::RangeInclusive<u64>,
+    next: Option<&str>,
+) {
+    let rows: Vec<Value> = numbers.map(open_row).collect();
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(
+            json!({"variables": {"first": first, "after": after}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "repository": {
+                "id": id,
+                "pullRequests": {
+                    "pageInfo": {"hasNextPage": next.is_some(), "endCursor": next},
+                    "nodes": rows,
+                },
+            },
+        }})))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+fn numbers(rows: &[ListedPullRequest]) -> Vec<u64> {
+    rows.iter()
+        .map(|row| row.reference.number().get())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_second_page_asks_for_what_the_limit_leaves_after_the_first_cursor() {
+    let server = MockServer::start().await;
+    open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
+    open_page(
+        &server,
+        REPOSITORY_ID,
+        20,
+        Some(CURSOR),
+        100..=120,
+        Some(LATER),
+    )
+    .await;
+    let github = mocked(&server);
+    let permits = Semaphore::new(1);
+
+    let (repository, rows, complete) = github.open_pull_requests(&permits, 120).await.unwrap();
+
+    assert_eq!(repository, RepositoryId::new(REPOSITORY_ID));
+    assert_eq!(
+        numbers(&rows),
+        (1..=120).collect::<Vec<u64>>(),
+        "a pull request listed on both pages is listed once"
+    );
+    assert!(!complete, "more pages follow the limit");
+    assert_eq!(permits.available_permits(), 1);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_last_page_inside_the_limit_is_every_open_pull_request() {
+    let server = MockServer::start().await;
+    open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
+    open_page(&server, REPOSITORY_ID, 50, Some(CURSOR), 101..=130, None).await;
+    let github = mocked(&server);
+
+    let (_, rows, complete) = github
+        .open_pull_requests(&Semaphore::new(1), 150)
+        .await
+        .unwrap();
+
+    assert_eq!(numbers(&rows), (1..=130).collect::<Vec<u64>>());
+    assert!(complete);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn pages_of_another_repository_part_way_through_are_refused() {
+    let server = MockServer::start().await;
+    open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
+    open_page(&server, "R_elsewhere", 50, Some(CURSOR), 101..=130, None).await;
+    let github = mocked(&server);
+
+    let refused = github.open_pull_requests(&Semaphore::new(1), 150).await;
+
+    assert_eq!(refused.err(), Some(Fault::upstream(MOVED_REPOSITORY)));
+    server.verify().await;
+}
+
+fn listed_row(github: &Github, number: u64) -> ListedPullRequest {
+    ListedPullRequest::new(
+        github.reference(number).unwrap(),
+        format!("PR_{number}"),
+        format!("{REPOSITORY_URL}/pull/{number}"),
+        abnegate_vcs::BranchName::parse("feature").unwrap(),
+        abnegate_vcs::BranchName::parse("main").unwrap(),
+    )
+}
+
+fn read(row: ListedPullRequest) -> EvidenceSlot {
+    EvidenceSlot::Read(Box::new(PullRequestEvidence::new(
+        row,
+        abnegate_vcs::MergeableState::Clean,
+        abnegate_vcs::ReviewThreadCount::new(0, 0, true),
+        Collected::new(Vec::new(), true),
+    )))
+}
+
+#[tokio::test]
+async fn slots_count_only_when_github_answered_for_every_pull_request_asked() {
+    let server = MockServer::start().await;
+    let github = mocked(&server);
+    let first = listed_row(&github, 1);
+    let second = listed_row(&github, 2);
+    let mut renumbered = second.clone();
+    renumbered.reference = github.reference(9).unwrap();
+
+    let short = github.vouched(vec![read(first.clone())], &[&first, &second]);
+    let vouched = github.vouched(
+        vec![read(first.clone()), read(renumbered)],
+        &[&first, &second],
+    );
+
+    assert_eq!(short, [None, None], "a short answer vouches for none");
+    assert!(vouched[0].is_some());
+    assert!(vouched[1].is_none(), "a slot for another pull request");
+}
+
+#[tokio::test]
+async fn a_batch_sent_once_the_listing_stopped_asks_github_for_nothing() {
+    let server = MockServer::start().await;
+    let github = mocked(&server);
+    let row = listed_row(&github, 1);
+    let stop = AtomicBool::new(true);
+
+    let read = github
+        .evidence(
+            &Semaphore::new(1),
+            &RepositoryId::new(REPOSITORY_ID),
+            &[&row],
+            Duration::from_secs(1),
+            &stop,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(read, [None]);
+    assert!(server.received_requests().await.unwrap().is_empty());
 }

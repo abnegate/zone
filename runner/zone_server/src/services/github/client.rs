@@ -61,6 +61,7 @@ use crate::services::prioritisation::pull_request;
 use crate::utils::text::truncate;
 use review::Review;
 pub(crate) use rows::Rows;
+pub(crate) use survey::sufficient;
 
 const API_VERSION: &str = "2026-03-10";
 pub(crate) const PER_PAGE: NonZeroU8 = NonZeroU8::new(100).expect("a page holds rows");

@@ -8,6 +8,7 @@ use crate::common::create_test_router;
 use crate::common::create_test_state;
 use crate::common::eventually::eventually;
 use crate::common::github_app;
+use crate::common::logs::capturing;
 use crate::common::test_email;
 use crate::common::test_password;
 
@@ -68,6 +69,7 @@ const BOT_SUFFIX: &str = "[bot]";
 const REPOSITORY_ID: &str = "R_acme_widgets";
 const ELSEWHERE: &str = "R_elsewhere";
 const OPEN_PAGE: u64 = 50;
+const LISTING_LOGS: &str = "zone_server::services::github=info";
 const EVIDENCE_BATCH: usize = 10;
 const EXPECTED: &str = "expected";
 const LISTING: &str = "states:OPEN";
@@ -2641,4 +2643,50 @@ async fn a_listing_past_its_limit_keeps_the_most_recently_updated_pull_requests(
     assert_eq!(listing["partial"], json!(true));
     assert_eq!(board.hub.opens().await, 1);
     assert_eq!(board.hub.requests_to("/repos/acme/widgets/pulls").await, 0);
+}
+
+/// Runs on the current thread so every log line the listing writes reaches
+/// the subscriber set as this thread's default.
+#[tokio::test(flavor = "current_thread")]
+async fn a_listing_logs_where_each_of_its_verdicts_came_from() {
+    let (captured, _capturing) = capturing(LISTING_LOGS);
+    let board = Board::new(Hub::hosted().await).await;
+    let pulls = [
+        Pull::ready(),
+        Pull {
+            overflowing: true,
+            ..Pull::numbered(2)
+        },
+        Pull::numbered(3),
+    ];
+    board.hub.rest_list(&pulls).await;
+    board.hub.open(&pulls).await;
+    let nodes = [board.hub.node(&pulls[0]), board.hub.node(&pulls[1])];
+    board
+        .hub
+        .evidence_answering(move |id| match id {
+            "PR_1" => nodes[0].clone(),
+            "PR_2" => nodes[1].clone(),
+            _ => Value::Null,
+        })
+        .await;
+
+    let listing = board.listed("").await;
+    board
+        .state
+        .github_snapshots()
+        .pull_requests
+        .invalidate(&board.source);
+    board.listed("?refresh=1").await;
+
+    assert_eq!(listing["counts"]["total"], json!(3), "{listing}");
+    let logged = captured.text();
+    assert!(
+        logged.contains("repository=acme/widgets kept=0 batched=1 followed=1 rested=1"),
+        "{logged}"
+    );
+    assert!(
+        logged.contains("repository=acme/widgets kept=3 batched=0 followed=0 rested=0"),
+        "{logged}"
+    );
 }

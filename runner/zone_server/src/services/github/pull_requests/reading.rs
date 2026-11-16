@@ -1,10 +1,15 @@
+use std::collections::HashSet;
 use std::num::NonZeroU8;
 use std::num::NonZeroU32;
 use std::num::NonZeroU64;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use abnegate_vcs::ChangedFile;
 use abnegate_vcs::Collected;
 use abnegate_vcs::CommitSha as Revision;
+use abnegate_vcs::EvidenceSlot;
 use abnegate_vcs::Excerpt;
 use abnegate_vcs::ListedPullRequest;
 use abnegate_vcs::PullRequestCommit;
@@ -79,7 +84,8 @@ impl Github {
         limit: u32,
     ) -> Result<(RepositoryId, Vec<ListedPullRequest>, bool), Fault> {
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-        let mut pulls = Vec::new();
+        let mut pulls: Vec<ListedPullRequest> = Vec::new();
+        let mut listed = HashSet::new();
         let mut repository: Option<RepositoryId> = None;
         let mut after: Option<String> = None;
         loop {
@@ -98,7 +104,11 @@ impl Github {
             if *identified != page.repository_id {
                 return Err(Fault::upstream(MOVED_REPOSITORY));
             }
-            pulls.extend(page.items);
+            pulls.extend(
+                page.items
+                    .into_iter()
+                    .filter(|row| listed.insert(row.node_id.clone())),
+            );
             match page.next {
                 Some(next) if pulls.len() < limit => after = Some(next),
                 next => {
@@ -111,44 +121,101 @@ impl Github {
     }
 
     /// The evidence on each pull request `rows` lists, read in one GraphQL
-    /// request under one of `permits` that is let go once GitHub answers. A
-    /// pull request read for another, or that GitHub could not answer for, is
-    /// `None`, and so is every one of them when GitHub refused the request
-    /// for any reason short of a halt, to be read through REST instead.
+    /// request under one of `permits` that is let go once GitHub answers or
+    /// `limit` passes, whichever is first. A pull request read for another,
+    /// or that GitHub could not answer for, is `None`, and so is every one of
+    /// them when GitHub refused the request for any reason short of a halt or
+    /// took too long, to be read through REST instead.
+    ///
+    /// A refusal that every later batch would meet too, or a batch GitHub
+    /// could not answer at all, sets `stop`, and a batch sent once `stop` is
+    /// set asks GitHub for nothing.
     pub(crate) async fn evidence(
         &self,
         permits: &Semaphore,
         repository: &RepositoryId,
         rows: &[&ListedPullRequest],
+        limit: Duration,
+        stop: &AtomicBool,
     ) -> Result<Vec<Option<PullRequestEvidence>>, Fault> {
+        let unread = || rows.iter().map(|_| None).collect();
         let ids: Vec<&str> = rows.iter().map(|row| row.node_id.as_str()).collect();
         let read = {
             let _permit = admitted(permits).await?;
-            self.service()
-                .fetch_pull_request_evidence(self.repository(), self.token(), repository, &ids)
-                .await
+            if stop.load(Ordering::Acquire) {
+                return Ok(unread());
+            }
+            tokio::time::timeout(
+                limit,
+                self.service().fetch_pull_request_evidence(
+                    self.repository(),
+                    self.token(),
+                    repository,
+                    &ids,
+                ),
+            )
+            .await
         };
-        let slots = match read.map_err(Fault::from) {
-            Ok(slots) if slots.len() == rows.len() => slots,
-            Ok(slots) => {
-                tracing::warn!(
-                    asked = rows.len(),
-                    answered = slots.len(),
-                    "GitHub answered for a different number of pull requests than asked"
+        let slots = match read {
+            Ok(Ok(slots)) => slots,
+            Ok(Err(error)) => {
+                let doomed = matches!(
+                    error,
+                    PullRequestError::Forbidden | PullRequestError::GitHubApi(_)
                 );
-                return Ok(rows.iter().map(|_| None).collect());
+                let fault = Fault::from(error);
+                if fault.halts() {
+                    return Err(fault);
+                }
+                if doomed {
+                    stop.store(true, Ordering::Release);
+                }
+                tracing::warn!(
+                    repository = %self.repository(),
+                    %fault,
+                    "Reading pull requests through REST after GitHub refused their batch"
+                );
+                return Ok(unread());
             }
-            Err(fault) if fault.halts() => return Err(fault),
-            Err(fault) => {
-                tracing::warn!(%fault, "Reading pull requests through REST after GitHub refused their batch");
-                return Ok(rows.iter().map(|_| None).collect());
+            Err(_) => {
+                stop.store(true, Ordering::Release);
+                tracing::warn!(
+                    repository = %self.repository(),
+                    seconds = limit.as_secs_f64(),
+                    "Reading pull requests through REST after GitHub took too long over their batch"
+                );
+                return Ok(unread());
             }
         };
-        Ok(slots
+        if !slots.is_empty()
+            && slots
+                .iter()
+                .all(|slot| matches!(slot, EvidenceSlot::Unanswered))
+        {
+            stop.store(true, Ordering::Release);
+        }
+        Ok(self.vouched(slots, rows))
+    }
+
+    fn vouched(
+        &self,
+        slots: Vec<EvidenceSlot>,
+        rows: &[&ListedPullRequest],
+    ) -> Vec<Option<PullRequestEvidence>> {
+        if slots.len() != rows.len() {
+            tracing::warn!(
+                repository = %self.repository(),
+                asked = rows.len(),
+                answered = slots.len(),
+                "GitHub answered for a different number of pull requests than asked"
+            );
+            return rows.iter().map(|_| None).collect();
+        }
+        slots
             .into_iter()
             .zip(rows)
             .map(|(slot, row)| slot.into_evidence().filter(|read| answers(read, row)))
-            .collect())
+            .collect()
     }
 
     pub(crate) async fn pull_commits(

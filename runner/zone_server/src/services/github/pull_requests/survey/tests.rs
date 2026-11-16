@@ -1,4 +1,7 @@
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
+use std::time::Instant;
 
 use serde_json::Value;
 use serde_json::json;
@@ -311,14 +314,22 @@ async fn surveyed(
     previous: Option<&Listing>,
     limit: u32,
 ) -> Result<Listing, Fault> {
+    surveyed_within(server, permits, previous, limit, EVIDENCE_LIMIT).await
+}
+
+/// A listing whose evidence batches GitHub has `patience` to answer.
+async fn surveyed_within(
+    server: &MockServer,
+    permits: &Semaphore,
+    previous: Option<&Listing>,
+    limit: u32,
+    patience: Duration,
+) -> Result<Listing, Fault> {
     let github = mocked(server);
     let repository = repository();
     let survey = Survey {
-        github: &github,
-        permits,
-        repository: &repository,
-        previous,
-        now: now(),
+        limit: patience,
+        ..Survey::new(&github, permits, &repository, previous, now())
     };
     tokio::time::timeout(BUDGET, survey.listing(limit))
         .await
@@ -716,5 +727,308 @@ async fn a_kept_verdict_on_a_failing_pull_request_is_read_again_once_it_ages() {
         .unwrap();
 
     assert_eq!(batches(&server).await, [vec![1], vec![1]]);
+    server.verify().await;
+}
+
+/// When each request of each kind reached GitHub.
+#[derive(Clone, Default)]
+struct Arrivals(Arc<Mutex<Vec<(&'static str, Instant)>>>);
+
+impl Arrivals {
+    fn record(&self, kind: &'static str) {
+        self.0.lock().unwrap().push((kind, Instant::now()));
+    }
+
+    fn of(&self, kind: Option<&str>) -> Vec<Instant> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(arrived, _)| kind.is_none_or(|kind| kind == *arrived))
+            .map(|(_, at)| *at)
+            .collect()
+    }
+
+    /// The most requests that reached GitHub within `window` of one
+    /// another, each held for longer than that, so all of them at once.
+    fn peak(&self, kind: Option<&str>, window: Duration) -> usize {
+        let arrivals = self.of(kind);
+        arrivals
+            .iter()
+            .map(|start| {
+                arrivals
+                    .iter()
+                    .filter(|at| **at >= *start && at.duration_since(*start) < window)
+                    .count()
+            })
+            .max()
+            .unwrap_or_default()
+    }
+}
+
+const EVIDENCE: &str = "evidence";
+const THREADS: &str = "threads";
+const HELD: Duration = Duration::from_millis(300);
+const OVERLAP: Duration = Duration::from_millis(200);
+const PATIENCE: Duration = Duration::from_millis(200);
+const SLOW: Duration = Duration::from_secs(3);
+
+/// Evidence on every pull request, each with threads that overflow, and
+/// the thread counts read again for each, held for [`HELD`], every arrival
+/// recorded.
+async fn recorded(
+    server: &MockServer,
+    arrivals: &Arrivals,
+    held: impl Fn(&[String]) -> Duration + Send + Sync + 'static,
+) {
+    let recording = arrivals.clone();
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("\"ids\""))
+        .respond_with(move |request: &Request| {
+            recording.record(EVIDENCE);
+            let ids = asked_ids(request);
+            let nodes: Vec<Value> = ids.iter().map(|id| overflowing(number_of(id))).collect();
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": {"nodes": nodes}}))
+                .set_delay(held(&ids))
+        })
+        .mount(server)
+        .await;
+    let recording = arrivals.clone();
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("\"number\""))
+        .respond_with(move |request: &Request| {
+            recording.record(THREADS);
+            counted(asked_number(request).unwrap_or_default()).set_delay(HELD)
+        })
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn no_more_requests_reach_github_at_once_than_the_listing_allows() {
+    let count: u64 = 80;
+    let server = silent().await;
+    open(
+        &server,
+        u64::from(LIMIT * 2),
+        (1..=count)
+            .map(|number| open_row(number, UPDATED_AT))
+            .collect(),
+        None,
+    )
+    .await;
+    let arrivals = Arrivals::default();
+    recorded(&server, &arrivals, |_| HELD).await;
+    let permits = Semaphore::new(CREDENTIAL_PERMITS);
+
+    let listing = surveyed(&server, &permits, None, LIMIT * 2).await.unwrap();
+
+    assert_eq!(listing.pull_requests.len(), 80);
+    assert!(listing.complete, "{:?}", listing.warnings);
+    let evidence = arrivals.peak(Some(EVIDENCE), OVERLAP);
+    let every = arrivals.peak(None, OVERLAP);
+    assert!(
+        evidence <= EVIDENCE_CONCURRENCY,
+        "{evidence} evidence reads at once"
+    );
+    assert!(every <= CREDENTIAL_PERMITS, "{every} reads at once");
+    assert!(every > 1, "reads ran one at a time");
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_batch_is_assessed_as_soon_as_its_evidence_arrives() {
+    let server = silent().await;
+    opened(&server, 1..=20).await;
+    let arrivals = Arrivals::default();
+    recorded(&server, &arrivals, |ids| {
+        match ids.contains(&identifier(20)) {
+            true => SLOW,
+            false => Duration::ZERO,
+        }
+    })
+    .await;
+    let permits = Semaphore::new(CREDENTIAL_PERMITS);
+
+    let listing = surveyed(&server, &permits, None, LIMIT).await.unwrap();
+
+    assert_eq!(listing.pull_requests.len(), 20);
+    let slow = arrivals
+        .of(Some(EVIDENCE))
+        .into_iter()
+        .max()
+        .expect("both batches were read");
+    let follow_ups = arrivals.of(Some(THREADS));
+    assert_eq!(follow_ups.len(), 20);
+    assert!(
+        follow_ups
+            .iter()
+            .filter(|at| at.duration_since(slow) < SLOW)
+            .count()
+            >= 10,
+        "the fast batch's follow-ups waited out the slow batch"
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_batch_github_takes_too_long_over_is_read_through_rest_and_stops_the_rest() {
+    let server = silent().await;
+    opened(&server, 1..=12).await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("\"ids\""))
+        .respond_with(|request: &Request| {
+            let nodes: Vec<Value> = asked_ids(request)
+                .iter()
+                .map(|id| node(number_of(id)))
+                .collect();
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": {"nodes": nodes}}))
+                .set_delay(SLOW)
+        })
+        .mount(&server)
+        .await;
+    for number in 1..=12 {
+        rested(&server, number).await;
+    }
+    let permits = Semaphore::new(1);
+    let started = Instant::now();
+
+    let listing = surveyed_within(&server, &permits, None, LIMIT, PATIENCE)
+        .await
+        .unwrap();
+
+    assert!(started.elapsed() < SLOW, "{:?}", started.elapsed());
+    assert_eq!(numbers(&listing), (1..=12).collect::<Vec<u64>>());
+    assert!(listing.complete, "{:?}", listing.warnings);
+    assert_eq!(
+        batches(&server).await.len(),
+        1,
+        "the second batch was never sent"
+    );
+    for number in 1..=12 {
+        assert_eq!(
+            reads_of(&server, &format!("pulls/{number}")).await,
+            1,
+            "#{number}"
+        );
+    }
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_batch_every_later_batch_would_fail_alike_stops_them_for_that_listing_only() {
+    for (name, refusal) in [
+        (
+            "a token refused checks",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"nodes": []},
+                "errors": [{"type": "FORBIDDEN", "path": ["nodes", 0, "commits"],
+                            "message": "Resource not accessible by integration"}],
+            })),
+        ),
+        (
+            "a schema without a field",
+            ResponseTemplate::new(200).set_body_json(json!({"data": null, "errors": [{
+                "message": "Field 'fullDatabaseId' doesn't exist on type 'IssueComment'",
+                "extensions": {"code": "undefinedField"},
+            }]})),
+        ),
+        ("a gateway that never answers", ResponseTemplate::new(502)),
+    ] {
+        let server = silent().await;
+        opened(&server, 1..=30).await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("\"ids\""))
+            .respond_with(refusal)
+            .mount(&server)
+            .await;
+        for number in 1..=30 {
+            rested(&server, number).await;
+        }
+        let permits = Semaphore::new(1);
+
+        let listing = surveyed(&server, &permits, None, LIMIT)
+            .await
+            .unwrap_or_else(|fault| panic!("{name}: {fault}"));
+
+        assert_eq!(listing.pull_requests.len(), 30, "{name}");
+        assert!(listing.complete, "{name}: {:?}", listing.warnings);
+        let asked: Vec<u64> = batches(&server).await.into_iter().flatten().collect();
+        assert!(
+            asked.iter().all(|number| *number <= 10),
+            "{name}: later batches were sent: {asked:?}"
+        );
+        for number in 1..=30 {
+            assert_eq!(
+                reads_of(&server, &format!("pulls/{number}")).await,
+                1,
+                "{name}: #{number}"
+            );
+        }
+        let sent = batches(&server).await.len();
+
+        surveyed(&server, &permits, None, LIMIT)
+            .await
+            .unwrap_or_else(|fault| panic!("{name}: {fault}"));
+
+        assert_eq!(
+            batches(&server).await.len(),
+            sent * 2,
+            "{name}: the next listing tries its first batch again"
+        );
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn a_listing_finishes_under_a_single_permit() {
+    let server = silent().await;
+    opened(&server, 1..=23).await;
+    evidence(&server, |id| match number_of(id) {
+        number if number % 5 == 0 => Value::Null,
+        number if number % 2 == 0 => overflowing(number),
+        number => node(number),
+    })
+    .await;
+    for number in (5..=20).step_by(5) {
+        rested(&server, number).await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("\"number\""))
+        .respond_with(|request: &Request| counted(asked_number(request).unwrap_or_default()))
+        .with_priority(UNMATCHED - 1)
+        .mount(&server)
+        .await;
+    let permits = Semaphore::new(1);
+
+    let listing = surveyed(&server, &permits, None, LIMIT).await.unwrap();
+
+    assert_eq!(numbers(&listing), (1..=23).collect::<Vec<u64>>());
+    assert!(listing.complete, "{:?}", listing.warnings);
+    assert_eq!(permits.available_permits(), 1);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_listing_under_a_closed_credential_reads_no_evidence_and_assesses_nothing() {
+    let server = silent().await;
+    rest_listed(&server, 1..=2).await;
+    let permits = Semaphore::new(0);
+    permits.close();
+
+    let listing = surveyed(&server, &permits, None, LIMIT).await.unwrap();
+
+    assert!(listing.pull_requests.is_empty(), "{listing:?}");
+    assert!(!listing.complete);
+    assert_eq!(listing.warnings.len(), 2, "{:?}", listing.warnings);
+    assert_eq!(opens(&server).await, 0);
+    assert!(batches(&server).await.is_empty());
     server.verify().await;
 }

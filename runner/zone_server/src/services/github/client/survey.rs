@@ -43,15 +43,7 @@ impl Github {
             head,
             ..
         } = evidence;
-        let read = pull_request
-            .head_sha
-            .as_ref()
-            .and_then(|sha| CommitSha::parse(sha.as_str()));
-        let listed = row
-            .head_sha
-            .as_ref()
-            .and_then(|sha| CommitSha::parse(sha.as_str()))
-            .filter(|listed| read.as_ref() == Some(listed));
+        let listed = agreed(row, &pull_request);
         let batched = match head {
             Some(head) if whole(&head, listed.as_ref()) => {
                 let HeadChecks {
@@ -115,6 +107,29 @@ impl Github {
             (None, None) => Ok((CheckEvidence::default(), Vec::new())),
         }
     }
+}
+
+/// Whether `evidence` holds everything a verdict on the pull request `row`
+/// lists weighs, so assessing it reads nothing more from GitHub.
+pub(crate) fn sufficient(row: &ListedPullRequest, evidence: &PullRequestEvidence) -> bool {
+    let listed = agreed(row, &evidence.pull_request);
+    evidence.threads.complete
+        && (listed.is_none()
+            || evidence
+                .head
+                .as_ref()
+                .is_some_and(|head| whole(head, listed.as_ref())))
+}
+
+fn agreed(row: &ListedPullRequest, read: &ListedPullRequest) -> Option<CommitSha> {
+    let read = read
+        .head_sha
+        .as_ref()
+        .and_then(|sha| CommitSha::parse(sha.as_str()));
+    row.head_sha
+        .as_ref()
+        .and_then(|sha| CommitSha::parse(sha.as_str()))
+        .filter(|listed| read.as_ref() == Some(listed))
 }
 
 fn whole(head: &HeadChecks, listed: Option<&CommitSha>) -> bool {
