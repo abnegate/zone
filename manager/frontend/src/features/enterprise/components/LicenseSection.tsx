@@ -1,6 +1,6 @@
 import { Button } from '@zone/ui';
 import { useId, useState } from 'react';
-import { useLicense } from '../hooks';
+import { useLicense, useLicenseChanging } from '../hooks';
 import { LicenseStatus } from '../schemas';
 import { overSeatNotice, statusNotice, storesLicense } from '../status';
 import type { LicenseResponse } from '../types';
@@ -12,6 +12,7 @@ import './LicenseSection.css';
 export function LicenseSection() {
   const headingId = useId();
   const { response, loading, error, refresh } = useLicense();
+  const changing = useLicenseChanging();
   const [removing, setRemoving] = useState<LicenseResponse | null>(null);
 
   if (loading) {
@@ -50,7 +51,13 @@ export function LicenseSection() {
           {overSeats}
         </div>
       )}
-      {response && <LicenseSummary response={response} onRemove={() => setRemoving(response)} />}
+      {response && (
+        <LicenseSummary
+          response={response}
+          changing={changing}
+          onRemove={() => setRemoving(response)}
+        />
+      )}
       {response && <LicenseKeyForm licensed={storesLicense(response)} />}
       {removing && (
         <RemoveLicenseDialog

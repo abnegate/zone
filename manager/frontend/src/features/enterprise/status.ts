@@ -105,9 +105,9 @@ export function statusNotice(response: LicenseResponse): string | null {
   }
   switch (status) {
     case LicenseStatus.Grace:
-      return `This license expired on ${licenseDate(license.expires_at)}. Its grace period ends ${licenseDate(license.grace_ends_at)}; renew before then to keep configuring Enterprise features.`;
+      return `This license expired on ${licenseDate(license.expires_at)}. Its grace period ends ${licenseDate(license.grace_ends_at)}; renew before then.`;
     case LicenseStatus.Lapsed:
-      return `This license lapsed on ${licenseDate(license.grace_ends_at)}. Configuring Enterprise features has stopped. Sign-in and existing policies keep working.`;
+      return `This license lapsed on ${licenseDate(license.grace_ends_at)}. Paste a renewed license key to replace it.`;
     default:
       return null;
   }

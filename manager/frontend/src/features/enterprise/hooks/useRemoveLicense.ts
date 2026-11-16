@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { licenseApi } from '../api';
-import { licenseQueryKeys } from '../queryKeys';
+import { licenseMutationKeys, licenseQueryKeys } from '../queryKeys';
 import type { LicenseResponse } from '../types';
 
 export interface RemoveLicenseState {
@@ -14,8 +14,10 @@ export function useRemoveLicense(): RemoveLicenseState {
   const queryClient = useQueryClient();
 
   const { mutate, isPending, error, reset } = useMutation({
+    mutationKey: licenseMutationKeys.change,
     mutationFn: () => licenseApi.remove(),
-    onSuccess: (response) => {
+    onSuccess: async (response) => {
+      await queryClient.cancelQueries({ queryKey: licenseQueryKeys.current });
       queryClient.setQueryData(licenseQueryKeys.current, response);
     },
   });

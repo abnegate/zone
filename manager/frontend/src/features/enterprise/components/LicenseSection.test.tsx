@@ -5,6 +5,7 @@ import { ApiError } from '../../../api/ApiError';
 import {
   ACTIVE,
   COMMUNITY,
+  ENFORCEMENT_CLAIM,
   GRACE,
   LAPSED,
   OVER_SEATS,
@@ -52,6 +53,10 @@ async function loaded(response: LicenseResponse) {
 
 function keyBox(): HTMLTextAreaElement {
   return screen.getByRole('textbox', { name: 'License key' }) as HTMLTextAreaElement;
+}
+
+function keyBoxBehindDialog(): HTMLTextAreaElement {
+  return screen.getByRole('textbox', { name: 'License key', hidden: true }) as HTMLTextAreaElement;
 }
 
 function paste(text: string) {
@@ -162,17 +167,19 @@ describe('LicenseSection', () => {
       const warning = screen.getByRole('status');
       expect(warning).toHaveClass('alert-warning');
       expect(warning).toHaveTextContent('grace period ends Dec 1, 2027');
+      expect(warning).not.toHaveTextContent(ENFORCEMENT_CLAIM);
       expect(details().Expired).toBe('Nov 1, 2027');
     });
 
-    it('warns that a lapsed license stopped configuration while still showing it and its edition', async () => {
+    it('warns that a license lapsed and asks for a renewed key while still showing it and its edition', async () => {
       await loaded(LAPSED);
 
       expect(screen.getByText('Lapsed')).toBeInTheDocument();
       const warning = screen.getByRole('status');
       expect(warning).toHaveClass('alert-error');
-      expect(warning).toHaveTextContent('Configuring Enterprise features has stopped');
-      expect(warning).toHaveTextContent('Sign-in and existing policies keep working');
+      expect(warning).toHaveTextContent('lapsed on Dec 1, 2027');
+      expect(warning).toHaveTextContent('Paste a renewed license key');
+      expect(warning).not.toHaveTextContent(ENFORCEMENT_CLAIM);
       expect(screen.getByText('Team', { selector: '.license-edition-name' })).toBeTruthy();
       expect(details().Customer).toBe('Acme Ltd');
       expect(details().Tier).toBe('Team');
@@ -338,6 +345,63 @@ describe('LicenseSection', () => {
     });
   });
 
+  describe('one change at a time', () => {
+    function deferred(): { promise: Promise<unknown>; settle: (value: unknown) => void } {
+      let settle: (value: unknown) => void = () => {};
+      const promise = new Promise((resolve) => (settle = resolve));
+      return { promise, settle };
+    }
+
+    it('disables removal while a key is saved and offers it again once the save settles', async () => {
+      const save = deferred();
+      set.mockImplementation(() => save.promise);
+      await loaded(ACTIVE);
+
+      paste('payload.signature');
+      fireEvent.click(screen.getByRole('button', { name: 'Replace license' }));
+
+      await waitFor(() => expect(removeButton()).toBeDisabled());
+      fireEvent.click(removeButton());
+      expect(screen.queryByRole('dialog', { name: REMOVE_DIALOG })).not.toBeInTheDocument();
+
+      save.settle(GRACE);
+
+      await screen.findByText('License replaced.');
+      expect(removeButton()).toBeEnabled();
+      expect(remove).not.toHaveBeenCalled();
+    });
+
+    it('disables saving a key while the license is removed', async () => {
+      remove.mockImplementation(() => new Promise(() => {}));
+      await loaded(ACTIVE);
+      paste('payload.signature');
+
+      confirmRemoval();
+
+      await waitFor(() => expect(keyBoxBehindDialog()).toBeDisabled());
+      const replace = screen.getByRole('button', { name: 'Replace license', hidden: true });
+      expect(replace).toBeDisabled();
+      fireEvent.submit(replace.closest('form') as HTMLFormElement);
+      expect(set).not.toHaveBeenCalled();
+    });
+
+    it('will not confirm a removal while a key is saved', async () => {
+      set.mockImplementation(() => new Promise(() => {}));
+      await loaded(ACTIVE);
+      paste('payload.signature');
+      fireEvent.click(removeButton());
+      const dialog = screen.getByRole('dialog', { name: REMOVE_DIALOG });
+
+      fireEvent.submit(keyBoxBehindDialog().closest('form') as HTMLFormElement);
+
+      const confirm = within(dialog).getByRole('button', { name: 'Remove license' });
+      await waitFor(() => expect(confirm).toBeDisabled());
+      fireEvent.click(confirm);
+      expect(remove).not.toHaveBeenCalled();
+      expect(set).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('removing the license', () => {
     it('asks for confirmation before removing, then shows Community', async () => {
       remove.mockResolvedValue(COMMUNITY);
@@ -345,7 +409,8 @@ describe('LicenseSection', () => {
 
       fireEvent.click(removeButton());
       const dialog = screen.getByRole('dialog', { name: REMOVE_DIALOG });
-      expect(dialog).toHaveTextContent('configuring Enterprise features stops');
+      expect(dialog).toHaveTextContent('This server goes back to the Community edition.');
+      expect(dialog).not.toHaveTextContent(ENFORCEMENT_CLAIM);
       expect(remove).not.toHaveBeenCalled();
 
       fireEvent.click(within(dialog).getByRole('button', { name: 'Remove license' }));
@@ -366,7 +431,7 @@ describe('LicenseSection', () => {
       const dialog = screen.getByRole('dialog', { name: REMOVE_DIALOG });
       expect(dialog).toHaveTextContent("deletes the stored key this version of Zone can't verify");
       expect(dialog).toHaveTextContent('stays on the Community edition');
-      expect(dialog).not.toHaveTextContent('configuring Enterprise features stops');
+      expect(dialog).not.toHaveTextContent('goes back to the Community edition');
 
       fireEvent.click(within(dialog).getByRole('button', { name: 'Remove license' }));
 

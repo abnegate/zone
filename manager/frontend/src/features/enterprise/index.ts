@@ -1,7 +1,7 @@
 export { LicenseSection } from './components';
 export * from './hooks';
 export { LicenseRefusal } from './LicenseRefusal';
-export { licenseQueryKeys } from './queryKeys';
+export { licenseMutationKeys, licenseQueryKeys } from './queryKeys';
 export {
   EDITIONS,
   Edition,

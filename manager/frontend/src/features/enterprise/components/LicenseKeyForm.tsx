@@ -1,6 +1,6 @@
 import { Button } from '@zone/ui';
 import { type FormEvent, useId, useState } from 'react';
-import { useSetLicense } from '../hooks';
+import { useLicenseChanging, useSetLicense } from '../hooks';
 import { refusalMessage } from '../status';
 
 interface LicenseKeyFormProps {
@@ -12,6 +12,7 @@ export function LicenseKeyForm({ licensed }: LicenseKeyFormProps) {
   const hintId = useId();
   const errorId = useId();
   const { set, pending, refusal, error, reset } = useSetLicense();
+  const changing = useLicenseChanging();
   const [key, setKey] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -29,7 +30,7 @@ export function LicenseKeyForm({ licensed }: LicenseKeyFormProps) {
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (trimmed === '' || pending) {
+    if (trimmed === '' || changing) {
       return;
     }
     const saved = licensed ? 'License replaced.' : 'License added.';
@@ -50,7 +51,7 @@ export function LicenseKeyForm({ licensed }: LicenseKeyFormProps) {
           value={key}
           spellCheck={false}
           autoComplete="off"
-          disabled={pending}
+          disabled={changing}
           aria-invalid={failure ? true : undefined}
           aria-describedby={describedBy}
           onChange={(event) => change(event.target.value)}
@@ -70,7 +71,7 @@ export function LicenseKeyForm({ licensed }: LicenseKeyFormProps) {
             {notice}
           </span>
         )}
-        <Button type="submit" disabled={trimmed === ''} loading={pending}>
+        <Button type="submit" disabled={trimmed === '' || changing} loading={pending}>
           {licensed ? 'Replace license' : 'Add license'}
         </Button>
       </div>

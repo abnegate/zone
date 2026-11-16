@@ -1,19 +1,19 @@
 import { Button, Modal } from '@zone/ui';
-import { useRemoveLicense } from '../hooks';
+import { useLicenseChanging, useRemoveLicense } from '../hooks';
 
 interface RemoveLicenseDialogProps {
   verified: boolean;
   onClose: () => void;
 }
 
-const VERIFIED_CONSEQUENCE =
-  'This server goes back to the Community edition and configuring Enterprise features stops. Sign-in and existing policies keep working.';
+const VERIFIED_CONSEQUENCE = 'This server goes back to the Community edition.';
 
 const UNVERIFIED_CONSEQUENCE =
   "This deletes the stored key this version of Zone can't verify. The server stays on the Community edition.";
 
 export function RemoveLicenseDialog({ verified, onClose }: RemoveLicenseDialogProps) {
   const { remove, pending, error } = useRemoveLicense();
+  const changing = useLicenseChanging();
 
   return (
     <Modal isOpen onClose={pending ? undefined : onClose} title="Remove the license?" size="sm">
@@ -28,7 +28,12 @@ export function RemoveLicenseDialog({ verified, onClose }: RemoveLicenseDialogPr
           <Button variant="ghost" disabled={pending} onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="danger" loading={pending} onClick={() => remove(onClose)}>
+          <Button
+            variant="danger"
+            disabled={changing}
+            loading={pending}
+            onClick={() => remove(onClose)}
+          >
             Remove license
           </Button>
         </div>

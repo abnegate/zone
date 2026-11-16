@@ -56,6 +56,25 @@ describe('useSetLicense', () => {
     expect(get).not.toHaveBeenCalled();
   });
 
+  it('keeps the new license when a license read in flight settles after the save', async () => {
+    let settleRead: (value: LicenseResponse) => void = () => {};
+    get.mockImplementation(() => new Promise((settle) => (settleRead = settle)));
+    set.mockResolvedValue(ACTIVE);
+    const saved = mock();
+    const { queryClient, result } = setup();
+    const read = queryClient
+      .fetchQuery({ queryKey: licenseQueryKeys.current, queryFn: get })
+      .catch(() => undefined);
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(1));
+
+    act(() => result.current.set('payload.signature', saved));
+    await waitFor(() => expect(saved).toHaveBeenCalled());
+    settleRead(COMMUNITY);
+    await read;
+
+    expect(queryClient.getQueryData<LicenseResponse>(licenseQueryKeys.current)).toEqual(ACTIVE);
+  });
+
   it('is pending while the key is checked', async () => {
     let resolve: (value: unknown) => void = () => {};
     set.mockImplementation(() => new Promise((settle) => (resolve = settle)));
