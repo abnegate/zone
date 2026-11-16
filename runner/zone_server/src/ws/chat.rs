@@ -3668,15 +3668,17 @@ fn equipped(
 }
 
 /// A pull request the agent opened is recorded to be watched on GitHub, which
-/// an offline chat never reaches.
-fn pull_requests(
+/// an offline chat never reaches, so an offline turn watches only its subagents.
+fn observers(
     state: &AppState,
     chat_id: Uuid,
     workspace_id: Uuid,
     user_id: Uuid,
     offline: bool,
-) -> Option<Recorder> {
-    (!offline).then(|| Recorder::new(state.clone(), chat_id, workspace_id, user_id))
+    subagents: Tracker,
+) -> Observers {
+    let recorder = (!offline).then(|| Recorder::new(state.clone(), chat_id, workspace_id, user_id));
+    Observers::new(recorder, subagents)
 }
 
 /// `jobs` collects the background jobs this turn started and has not yet
@@ -3754,8 +3756,12 @@ async fn handle_chat_generation(
             stream: ChatStream::of(chat_id),
         }),
     );
-    let observer: Arc<dyn Observer> = Arc::new(Observers::new(
-        pull_requests(state, chat_id, workspace_id, user_id, offline),
+    let observer: Arc<dyn Observer> = Arc::new(observers(
+        state,
+        chat_id,
+        workspace_id,
+        user_id,
+        offline,
         tracker,
     ));
     let mut llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, builtin);
@@ -10086,16 +10092,20 @@ cat 'DIR/reply.jsonl'
     }
 
     #[tokio::test]
-    async fn an_offline_chat_records_no_pull_requests() {
+    async fn an_offline_turns_observers_record_no_pull_requests() {
         let state = AppState::for_tests();
         let (chat, workspace, user) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let watching = |offline| {
+            let (tracker, _) = Tracker::listening();
+            observers(&state, chat, workspace, user, offline, tracker).records_pull_requests()
+        };
 
         assert!(
-            pull_requests(&state, chat, workspace, user, true).is_none(),
+            !watching(true),
             "a recorded pull request is watched on GitHub, which an offline chat never reaches"
         );
         assert!(
-            pull_requests(&state, chat, workspace, user, false).is_some(),
+            watching(false),
             "an online chat records the pull requests its agent opens"
         );
     }

@@ -22,6 +22,11 @@ impl Observers {
             subagents,
         }
     }
+
+    #[cfg(test)]
+    pub fn records_pull_requests(&self) -> bool {
+        self.pull_requests.is_some()
+    }
 }
 
 impl fmt::Debug for Observers {
