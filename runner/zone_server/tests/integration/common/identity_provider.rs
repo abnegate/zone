@@ -18,7 +18,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use chrono::Utc;
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
@@ -82,6 +82,7 @@ struct Inner {
     userinfo: Mutex<Option<Value>>,
     mismatched_issuer: AtomicBool,
     token_failure: AtomicBool,
+    forged_signature: AtomicBool,
 }
 
 impl Inner {
@@ -114,6 +115,7 @@ impl IdentityProvider {
             userinfo: Mutex::default(),
             mismatched_issuer: AtomicBool::new(false),
             token_failure: AtomicBool::new(false),
+            forged_signature: AtomicBool::new(false),
         });
         let router = Router::new()
             .route(DISCOVERY_PATH, get(discovery))
@@ -180,6 +182,11 @@ impl IdentityProvider {
     /// Makes the token endpoint answer every request with HTTP 500.
     pub fn fail_token_endpoint(&self, failing: bool) {
         self.inner.token_failure.store(failing, Ordering::SeqCst);
+    }
+
+    /// Makes the token endpoint answer with ID tokens whose signature doesn't verify.
+    pub fn forge_signature(&self, forged: bool) {
+        self.inner.forged_signature.store(forged, Ordering::SeqCst);
     }
 
     /// What userinfo answers for an access token the token endpoint issued. With `None`, the
@@ -260,13 +267,29 @@ async fn token(
     }
     let access_token = format!("access-{}", Uuid::new_v4().simple());
     lock(&inner.access_tokens).insert(access_token.clone());
+    let mut id_token = testing::id_token(&grant.claims);
+    if inner.forged_signature.load(Ordering::SeqCst) {
+        id_token = forged(&id_token);
+    }
     Json(json!({
         "access_token": access_token,
         "token_type": "Bearer",
         "expires_in": 300,
-        "id_token": testing::id_token(&grant.claims),
+        "id_token": id_token,
     }))
     .into_response()
+}
+
+/// The same header and claims under a signature of other bytes.
+fn forged(id_token: &str) -> String {
+    let (signed, signature) = id_token
+        .rsplit_once('.')
+        .expect("a compact JWS has a signature segment");
+    let mut bytes = URL_SAFE_NO_PAD
+        .decode(signature)
+        .expect("the signature is base64url");
+    bytes[0] ^= 0xff;
+    format!("{signed}.{}", URL_SAFE_NO_PAD.encode(bytes))
 }
 
 fn authenticated(
@@ -456,6 +479,18 @@ mod tests {
             Ok(expected())
         );
         assert_eq!(identity_provider.requests(USERINFO_PATH), 1);
+    }
+
+    #[tokio::test]
+    async fn a_forged_signature_is_refused() {
+        let identity_provider = IdentityProvider::start().await;
+        identity_provider.forge_signature(true);
+        let pkce = Pkce::generate();
+        identity_provider.grant(CODE, &pkce.challenge, identity_provider.claims(NONCE));
+        assert!(matches!(
+            redeem(&identity_provider, &pkce.verifier, REDIRECT_URI).await,
+            Err(Error::IdTokenInvalid(_))
+        ));
     }
 
     #[test]
