@@ -5,7 +5,7 @@ pub const CALLBACK_PATH: &str = "/sso/callback";
 /// Where identity providers send people back: the console's callback page, which hands the code
 /// to the server.
 pub fn redirect_uri(app_base_url: &str) -> String {
-    format!("{}{CALLBACK_PATH}", app_base_url.trim_end_matches('/'))
+    format!("{}{CALLBACK_PATH}", callback_origin(app_base_url))
 }
 
 /// The scheme, host and port of the console. A sign-in has to start on this origin, because the
@@ -21,7 +21,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_redirect_uri_is_the_console_callback_under_the_app_base_url() {
+    fn the_redirect_uri_is_the_console_callback_on_the_app_base_url_origin() {
         for base in ["https://zone.example.com", "https://zone.example.com/"] {
             assert_eq!(
                 redirect_uri(base),
@@ -31,8 +31,25 @@ mod tests {
         }
         assert_eq!(
             redirect_uri("https://example.com/zone"),
-            "https://example.com/zone/sso/callback"
+            "https://example.com/sso/callback"
         );
+    }
+
+    #[test]
+    fn the_redirect_uri_is_the_callback_path_on_the_callback_origin() {
+        for base in [
+            "https://zone.example.com",
+            "https://zone.example.com/",
+            "https://example.com/zone",
+            "https://zone.example.com:8443/app/",
+            "http://localhost:3000",
+        ] {
+            assert_eq!(
+                redirect_uri(base),
+                format!("{}{CALLBACK_PATH}", callback_origin(base)),
+                "{base}"
+            );
+        }
     }
 
     #[test]

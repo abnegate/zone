@@ -56,10 +56,13 @@ Every provider needs Zone's redirect URI. It's always:
 {APP_BASE_URL}/sso/callback
 ```
 
-For example, with `APP_BASE_URL=https://zone.example.com` the redirect URI
-is `https://zone.example.com/sso/callback`. The Single sign-on section shows
-the exact value with a copy button. Register it with your provider exactly
-as shown, because providers compare it character for character.
+Zone takes only the scheme, host and port of `APP_BASE_URL`, because the
+console is served at the root of its origin: with
+`APP_BASE_URL=https://zone.example.com` or `https://zone.example.com/zone`,
+the redirect URI is `https://zone.example.com/sso/callback`. The Single
+sign-on section shows the exact value with a copy button. Register it with
+your provider exactly as shown, because providers compare it character for
+character.
 
 If you change `APP_BASE_URL` later, the redirect URI changes with it, and
 you have to update it at every identity provider.
