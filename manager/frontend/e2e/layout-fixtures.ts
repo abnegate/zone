@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import type { Overview } from '../src/features/analytics/types';
 import type { SourceStatus } from '../src/features/github/sourceStatus';
 import {
   wireCommits,
@@ -824,12 +825,280 @@ export function releaseVerdict(subject: Release) {
   return { pipeline, state, succeeded, complete, blockers };
 }
 
+type Outcomes = Overview['runs']['outcomes'];
+type Completion = Overview['runs']['completion'];
+type DailyRuns = [number, number, number];
+type Span = Overview['window'];
+
+const analyticsWeek: Span = { start: '2026-11-03T00:00:00', end: '2026-11-10T00:00:00' };
+
+const DAYS_IN_WEEK = 7;
+
+function analyticsDay(offset: number): Span {
+  const day = (index: number) => `2026-11-${String(3 + index).padStart(2, '0')}T00:00:00`;
+  return { start: day(offset), end: day(offset + 1) };
+}
+
+function tally<Name extends string>(name: Name, count: number): { name: Name; count: number } {
+  return { name, count };
+}
+
+function outcomes(
+  succeeded: number,
+  failed: number,
+  cancelled: number,
+  recentSuccessRate: number | null,
+  categories: Outcomes['categories'] = []
+): Outcomes {
+  const total = succeeded + failed + cancelled;
+  return {
+    total,
+    succeeded,
+    failed,
+    cancelled,
+    success_rate: total === 0 ? null : Number((succeeded / total).toFixed(4)),
+    recent_success_rate: recentSuccessRate,
+    categories,
+  };
+}
+
+function completion(
+  measured: number,
+  medianSeconds: number | null,
+  ninetiethSeconds: number | null,
+  meanSeconds: number | null
+): Completion {
+  return {
+    measured,
+    median_seconds: medianSeconds,
+    ninetieth_seconds: ninetiethSeconds,
+    mean_seconds: meanSeconds,
+  };
+}
+
+const dailyRuns: DailyRuns[] = [
+  [5, 1, 0],
+  [6, 2, 0],
+  [4, 0, 1],
+  [7, 1, 1],
+  [4, 0, 0],
+  [6, 1, 0],
+  [8, 1, 0],
+];
+
+function analyticsOverview(shape: {
+  outcomes: Outcomes;
+  completion: Completion;
+  series: DailyRuns[];
+  trend: Overview['runs']['trend'];
+  sources: Overview['sources'];
+  models: Overview['models'];
+  tasks: Overview['tasks'];
+  pullRequests: Overview['pull_requests'];
+  evaluations: Overview['evaluations'];
+}): Overview {
+  return {
+    period: 'week',
+    window: analyticsWeek,
+    truncated: false,
+    runs: {
+      period: 'week',
+      window: analyticsWeek,
+      outcomes: shape.outcomes,
+      completion: shape.completion,
+      series: shape.series.map(([succeeded, failed, cancelled], index) => ({
+        window: analyticsDay(index),
+        total: succeeded + failed + cancelled,
+        succeeded,
+        failed,
+        cancelled,
+      })),
+      trend: shape.trend,
+    },
+    sources: shape.sources,
+    models: shape.models,
+    tasks: shape.tasks,
+    pull_requests: shape.pullRequests,
+    evaluations: shape.evaluations,
+  };
+}
+
+function taskTallies(counts: {
+  statuses: [number, number, number, number, number, number, number, number];
+  origins: [number, number, number];
+  created: number;
+  shipped: number;
+  reopened: number;
+}): Overview['tasks'] {
+  const [created, queued, inProgress, blocked, paused, review, complete, cancelled] =
+    counts.statuses;
+  const [member, reminder, automation] = counts.origins;
+  return {
+    statuses: [
+      tally('created', created),
+      tally('queued', queued),
+      tally('in_progress', inProgress),
+      tally('blocked', blocked),
+      tally('paused', paused),
+      tally('review', review),
+      tally('complete', complete),
+      tally('cancelled', cancelled),
+    ],
+    origins: [
+      tally('member', member),
+      tally('reminder', reminder),
+      tally('automation', automation),
+    ],
+    created: counts.created,
+    shipped: counts.shipped,
+    reopened: counts.reopened,
+  };
+}
+
+function qualityTallies(
+  poor: number,
+  mixed: number,
+  solid: number,
+  exemplary: number
+): Overview['pull_requests']['quality'] {
+  return [
+    tally('poor', poor),
+    tally('mixed', mixed),
+    tally('solid', solid),
+    tally('exemplary', exemplary),
+  ];
+}
+
+export const emptyAnalytics: Overview = analyticsOverview({
+  outcomes: outcomes(0, 0, 0, null),
+  completion: completion(0, null, null, null),
+  series: Array.from({ length: DAYS_IN_WEEK }, (): DailyRuns => [0, 0, 0]),
+  trend: {
+    direction: 'steady',
+    earlier_success_rate: null,
+    later_success_rate: null,
+    change: null,
+  },
+  sources: [],
+  models: [],
+  tasks: taskTallies({
+    statuses: [0, 0, 0, 0, 0, 0, 0, 0],
+    origins: [0, 0, 0],
+    created: 0,
+    shipped: 0,
+    reopened: 0,
+  }),
+  pullRequests: {
+    opened: 0,
+    merged: 0,
+    closed: 0,
+    open: 0,
+    merge_rate: null,
+    median_minutes_to_merge: null,
+    mean_review_cycles: null,
+    mean_approvals: null,
+    quality: qualityTallies(0, 0, 0, 0),
+  },
+  evaluations: { improved: 0, unchanged: 0, regressed: 0, not_measured: 0 },
+});
+
+export const populatedAnalytics: Overview = analyticsOverview({
+  outcomes: outcomes(40, 6, 2, 0.88, [
+    {
+      category: 'timeout',
+      occurrences: 3,
+      recent_weight: 2.4,
+      distinct_tasks: 2,
+      last_seen: '2026-11-09T14:12:00',
+    },
+  ]),
+  completion: completion(40, 412, 1260, 538),
+  series: dailyRuns,
+  trend: {
+    direction: 'improving',
+    earlier_success_rate: 0.78,
+    later_success_rate: 0.87,
+    change: 0.09,
+  },
+  sources: [
+    {
+      source_id: 'src-2',
+      name: 'Main Repository',
+      source_type: 'github',
+      outcomes: outcomes(26, 3, 1, 0.9, [
+        {
+          category: 'timeout',
+          occurrences: 2,
+          recent_weight: 1.6,
+          distinct_tasks: 1,
+          last_seen: '2026-11-09T14:12:00',
+        },
+      ]),
+      merged_pull_requests: 9,
+    },
+    {
+      source_id: 'src-1',
+      name: 'Documentation',
+      source_type: 'web',
+      outcomes: outcomes(6, 0, 0, 1),
+      merged_pull_requests: 0,
+    },
+    {
+      source_id: null,
+      name: null,
+      source_type: null,
+      outcomes: outcomes(8, 3, 1, 0.75, [
+        {
+          category: 'timeout',
+          occurrences: 1,
+          recent_weight: 0.8,
+          distinct_tasks: 1,
+          last_seen: '2026-11-06T09:41:00',
+        },
+      ]),
+      merged_pull_requests: 0,
+    },
+  ],
+  models: [
+    {
+      model: 'llama3.2:latest',
+      outcomes: outcomes(26, 3, 1, 0.91),
+      completion: completion(26, 388, 1104, 502),
+    },
+    {
+      model: 'mistral:7b',
+      outcomes: outcomes(14, 3, 1, 0.82),
+      completion: completion(14, 465, 1380, 605),
+    },
+  ],
+  tasks: taskTallies({
+    statuses: [3, 2, 4, 1, 0, 3, 12, 1],
+    origins: [18, 4, 4],
+    created: 14,
+    shipped: 12,
+    reopened: 2,
+  }),
+  pullRequests: {
+    opened: 14,
+    merged: 9,
+    closed: 2,
+    open: 5,
+    merge_rate: 0.82,
+    median_minutes_to_merge: 186,
+    mean_review_cycles: 1.6,
+    mean_approvals: 1.3,
+    quality: qualityTallies(1, 2, 5, 1),
+  },
+  evaluations: { improved: 4, unchanged: 3, regressed: 1, not_measured: 1 },
+});
+
 const pullRequestsPath = /\/workspaces\/[^/]+\/pull-requests$/;
 const pullRequestPath =
   /\/workspaces\/[^/]+\/pull-requests\/([^/]+)\/(\d+)(?:\/(diff|commits|jobs\/\d+\/log))?$/;
 const releasesPath = /\/workspaces\/[^/]+\/releases$/;
 const releaseOptionsPath = /\/workspaces\/[^/]+\/releases\/options$/;
 const releasePipelinePath = /\/workspaces\/[^/]+\/releases\/([^/]+)\/(\d+)\/pipeline$/;
+const analyticsPath = /\/workspaces\/[^/]+\/analytics$/;
 
 const PullRequestArtifact = {
   diff: 'diff',
@@ -860,6 +1129,7 @@ function githubBody(path: string, populated: boolean): unknown {
   if (releasesPath.test(path)) return populated ? populatedReleases : emptyReleases;
   if (releaseOptionsPath.test(path))
     return populated ? releaseOptions : { ...releaseOptions, sources: [] };
+  if (analyticsPath.test(path)) return populated ? populatedAnalytics : emptyAnalytics;
   const pipeline = releasePipelinePath.exec(path);
   if (pipeline) {
     const sourceId = decodeURIComponent(pipeline[1]);

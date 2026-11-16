@@ -1,9 +1,10 @@
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { emptyPullRequests, emptyReleases } from './layout-fixtures';
+import { emptyPullRequests, emptyReleases, populatedAnalytics } from './layout-fixtures';
 import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
 const pullRequestsListPattern = /\/api\/workspaces\/[^/]+\/pull-requests(\?|$)/;
 const releasesListPattern = /\/api\/workspaces\/[^/]+\/releases(\?|$)/;
+const analyticsPattern = /\/api\/workspaces\/[^/]+\/analytics(\?|$)/;
 const tasksRoutePattern = /\/api\/workspaces\/[^/]+\/tasks/;
 const tasksListPattern = /\/api\/workspaces\/[^/]+\/tasks\/?$/;
 const sourcesRoutePattern = /\/api\/workspaces\/[^/]+\/sources/;
@@ -89,6 +90,10 @@ test.describe('Navigation', () => {
       route.fulfill({ status: 200, json: emptyReleases })
     );
 
+    await routeApi(page, analyticsPattern, (route) =>
+      route.fulfill({ status: 200, json: populatedAnalytics })
+    );
+
     await routeApi(page, '**/api/knowledge*', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
@@ -158,15 +163,16 @@ test.describe('Navigation', () => {
 
   test('sidebar shows all navigation items', async ({ page }) => {
     const navItems = page.locator('.nav-item');
-    await expect(navItems).toHaveCount(8);
+    await expect(navItems).toHaveCount(9);
     await expect(navItems.nth(0)).toContainText('Chats');
     await expect(navItems.nth(1)).toContainText('Projects');
     await expect(navItems.nth(2)).toContainText('Tasks');
     await expect(navItems.nth(3)).toContainText('Pull Requests');
     await expect(navItems.nth(4)).toContainText('Releases');
-    await expect(navItems.nth(5)).toContainText('Models');
-    await expect(navItems.nth(6)).toContainText('Wiki');
-    await expect(navItems.nth(7)).toContainText('Settings');
+    await expect(navItems.nth(5)).toContainText('Analytics');
+    await expect(navItems.nth(6)).toContainText('Models');
+    await expect(navItems.nth(7)).toContainText('Wiki');
+    await expect(navItems.nth(8)).toContainText('Settings');
     await expect(page.locator('a[href="/sources"]')).toHaveCount(0);
   });
 
@@ -227,6 +233,17 @@ test.describe('Navigation', () => {
     ).toBeVisible();
     await expect(page.getByText('No GitHub sources', { exact: true })).toBeVisible();
     await expect(page.locator('.nav-item:has-text("Releases")')).toHaveClass(/active/);
+  });
+
+  test('navigates to Analytics page', async ({ page }) => {
+    await page.click('a[href="/analytics"]');
+    await expect(page).toHaveURL('/analytics');
+    await expect(
+      page.getByRole('heading', { name: 'Analytics', exact: true })
+    ).toBeVisible();
+    await expect(page.locator('[data-testid="analytics-tile"]').first()).toBeVisible();
+    await expect(page.locator('.page-bar .ui-tabs-list')).toBeVisible();
+    await expect(page.locator('.nav-item:has-text("Analytics")')).toHaveClass(/active/);
   });
 
   test('redirects Sources to workspace settings', async ({ page }) => {
