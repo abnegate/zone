@@ -1,5 +1,5 @@
-import { test, expect } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { blockServiceWorker, routeApi } from './test-utils';
 
 const generateMockModels = (count: number, startId = 0) => {

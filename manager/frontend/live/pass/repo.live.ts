@@ -10,9 +10,9 @@ import {
   logMark,
   ownerToken,
   record,
+  SOURCES_PATH,
   shot,
   signIn,
-  SOURCES_PATH,
   sql,
   stamp,
   state,
@@ -25,8 +25,7 @@ import {
  * read back from task_tool_calls and the run logs, never from the model's prose.
  */
 
-const REPO =
-  process.env.ZONE_LIVE_REPO_URL ?? 'https://github.com/abnegate/zone-tests';
+const REPO = process.env.ZONE_LIVE_REPO_URL ?? 'https://github.com/abnegate/zone-tests';
 const TOKEN = process.env.ZONE_LIVE_REPO_TOKEN ?? '';
 const [OWNER, NAME] = REPO.replace(/^https:\/\/github\.com\//, '').split('/');
 const SOURCE = 'Scratch repo';
@@ -54,17 +53,10 @@ async function taskById(taskId: string): Promise<Record<string, unknown>> {
   const { body } = await api('GET', `/api/tasks/${taskId}`, {
     token: await ownerToken(),
   });
-  return ((body as { task?: Record<string, unknown> }).task ?? body) as Record<
-    string,
-    unknown
-  >;
+  return ((body as { task?: Record<string, unknown> }).task ?? body) as Record<string, unknown>;
 }
 
-async function finished(
-  taskId: string,
-  timeout = 1_800_000,
-  atLeast = 1,
-): Promise<Run> {
+async function finished(taskId: string, timeout = 1_800_000, atLeast = 1): Promise<Run> {
   // The newest run is the one that matters: a task run again already has a
   // finished run in its list.
   await expect
@@ -73,7 +65,7 @@ async function finished(
         const runs = await runsOf(taskId);
         return runs.length >= atLeast ? runs[0].status : 'none';
       },
-      { timeout, intervals: [3_000] },
+      { timeout, intervals: [3_000] }
     )
     .toMatch(/completed|failed|cancelled/);
   return (await runsOf(taskId))[0];
@@ -93,26 +85,21 @@ function toolCalls(runId: string): string[] {
   // task_tool_calls stays empty for these runs; the run log carries each call
   // as "Executing tool: X" with its args and "Tool X finished" with its result.
   return sql(
-    `select case when message like 'Executing tool:%' then replace(message, 'Executing tool: ', '') || ' | call | ' || left(replace(coalesce(metadata->>'args', ''), E'\n', ' '), 200) else replace(replace(message, 'Tool ', ''), ' finished', '') || ' | ' || case when metadata->>'success' = 'true' then 'ok' else 'failed' end || ' | ' || left(replace(coalesce(metadata->>'error', metadata->>'output', ''), E'\n', ' '), 200) end from task_run_logs where task_run_id = '${runId}' and (message like 'Executing tool:%' or message like 'Tool % finished') order by created_at`,
+    `select case when message like 'Executing tool:%' then replace(message, 'Executing tool: ', '') || ' | call | ' || left(replace(coalesce(metadata->>'args', ''), E'\n', ' '), 200) else replace(replace(message, 'Tool ', ''), ' finished', '') || ' | ' || case when metadata->>'success' = 'true' then 'ok' else 'failed' end || ' | ' || left(replace(coalesce(metadata->>'error', metadata->>'output', ''), E'\n', ' '), 200) end from task_run_logs where task_run_id = '${runId}' and (message like 'Executing tool:%' or message like 'Tool % finished') order by created_at`
   );
 }
 
 function runLogs(runId: string): string[] {
   return sql(
-    `select phase || ' | ' || log_level || ' | ' || left(message, 200) from task_run_logs where task_run_id = '${runId}' order by created_at`,
+    `select phase || ' | ' || log_level || ' | ' || left(message, 200) from task_run_logs where task_run_id = '${runId}' order by created_at`
   );
 }
 
-async function toggle(
-  dialog: Locator,
-  title: string,
-  wanted: boolean,
-): Promise<void> {
+async function toggle(dialog: Locator, title: string, wanted: boolean): Promise<void> {
   const label = dialog.locator('label.toggle-label', { hasText: title });
   await expect(label).toBeVisible();
   const box = label.locator('input[type="checkbox"]');
-  if ((await box.isChecked()) !== wanted)
-    await label.locator('.toggle-slider').click();
+  if ((await box.isChecked()) !== wanted) await label.locator('.toggle-slider').click();
   await expect(box).toBeChecked({ checked: wanted });
 }
 
@@ -124,7 +111,7 @@ async function createTask(
     project: string;
     planApproval?: boolean;
     source?: string;
-  },
+  }
 ): Promise<string> {
   await page.goto('/tasks');
   await page.getByRole('button', { name: /new task/i }).click();
@@ -151,17 +138,13 @@ async function createTask(
   }
   await dialog.getByRole('button', { name: 'Create Task' }).click();
   await expect(dialog).toBeHidden({ timeout: 30_000 });
-  await expect(
-    page.locator('.task-card', { hasText: options.title }),
-  ).toBeVisible();
-  const { body } = await api(
-    'GET',
-    `/api/workspaces/${state.owner.workspace.id}/tasks`,
-    { token: await ownerToken() },
+  await expect(page.locator('.task-card', { hasText: options.title })).toBeVisible();
+  const { body } = await api('GET', `/api/workspaces/${state.owner.workspace.id}/tasks`, {
+    token: await ownerToken(),
+  });
+  const found = ((body as { tasks?: { id: string; title: string }[] }).tasks ?? []).find(
+    (t) => t.title === options.title
   );
-  const found = (
-    (body as { tasks?: { id: string; title: string }[] }).tasks ?? []
-  ).find((t) => t.title === options.title);
   if (!found) throw new Error(`no task titled ${options.title}`);
   return found.id;
 }
@@ -169,31 +152,24 @@ async function createTask(
 async function startRun(page: Page, title: string): Promise<void> {
   await page.goto('/tasks');
   await chooseTaskAction(page, title, 'Run');
-  await page
-    .getByRole('button', { name: /start execution|run again|try again/i })
-    .click();
+  await page.getByRole('button', { name: /start execution|run again|try again/i }).click();
   await expect(page.locator('.execution-logs')).toContainText('Execution Logs');
 }
 
 async function projectId(name: string): Promise<string | null> {
-  const { body } = await api(
-    'GET',
-    `/api/projects?workspace_id=${state.owner.workspace.id}`,
-    { token: await ownerToken() },
-  );
-  const list =
-    (body as { projects?: { id: string; name: string }[] }).projects ?? [];
+  const { body } = await api('GET', `/api/projects?workspace_id=${state.owner.workspace.id}`, {
+    token: await ownerToken(),
+  });
+  const list = (body as { projects?: { id: string; name: string }[] }).projects ?? [];
   return list.find((p) => p.name === name)?.id ?? null;
 }
 
 async function sourceId(name: string): Promise<string | null> {
-  const { body } = await api(
-    'GET',
-    `/api/workspaces/${state.owner.workspace.id}/sources`,
-    { token: await ownerToken() },
-  );
-  const list = ((body as { sources?: { id: string; name: string }[] })
-    .sources ?? (Array.isArray(body) ? body : [])) as {
+  const { body } = await api('GET', `/api/workspaces/${state.owner.workspace.id}/sources`, {
+    token: await ownerToken(),
+  });
+  const list = ((body as { sources?: { id: string; name: string }[] }).sources ??
+    (Array.isArray(body) ? body : [])) as {
     id: string;
     name: string;
   }[];
@@ -204,16 +180,14 @@ async function createProjectInConsole(
   page: Page,
   name: string,
   source: string | null,
-  status: string,
+  status: string
 ): Promise<void> {
   await page.goto('/projects');
   await page.getByRole('button', { name: 'New project' }).click();
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();
   await dialog.locator('#project-name').fill(name);
-  await dialog
-    .locator('#project-description')
-    .fill(`Created by the real pass for ${name}`);
+  await dialog.locator('#project-description').fill(`Created by the real pass for ${name}`);
   await dialog.getByRole('button', { name: 'Next' }).click();
   await page.waitForTimeout(400);
   const option = source
@@ -222,10 +196,7 @@ async function createProjectInConsole(
   await option.first().click();
   await dialog.getByRole('button', { name: 'Next' }).click();
   await page.waitForTimeout(400);
-  await dialog
-    .locator('.status-selection-option', { hasText: status })
-    .first()
-    .click();
+  await dialog.locator('.status-selection-option', { hasText: status }).first().click();
   await dialog.getByRole('button', { name: 'Create Project' }).click();
   await expect(dialog).toBeHidden({ timeout: 30_000 });
   await expect(page.locator('.project-card', { hasText: name })).toBeVisible();
@@ -251,9 +222,7 @@ test.describe('sources, projects and tasks', () => {
       .click();
     const wizard = page.getByRole('dialog');
     await expect(wizard).toContainText('Add Source');
-    const kinds = await wizard
-      .locator('.source-type-option .source-type-name')
-      .allInnerTexts();
+    const kinds = await wizard.locator('.source-type-option .source-type-name').allInnerTexts();
     await wizard
       .locator('.source-type-option')
       .filter({ has: page.getByText('GitHub', { exact: true }) })
@@ -271,9 +240,7 @@ test.describe('sources, projects and tasks', () => {
     await shot(page, '20-source-github-form');
     await wizard.getByRole('button', { name: 'Next' }).click();
     await wizard.locator('#name').fill(SOURCE);
-    await wizard
-      .locator('#description')
-      .fill('The live pass scratch repository');
+    await wizard.locator('#description').fill('The live pass scratch repository');
     await wizard.getByRole('button', { name: 'Add Source' }).click();
     await expect(wizard).toBeHidden({ timeout: 30_000 });
     const card = page.locator('.source-card', { hasText: SOURCE });
@@ -281,10 +248,9 @@ test.describe('sources, projects and tasks', () => {
     const statusAfterAdd = await card.locator('.source-status').innerText();
 
     await card.getByRole('button', { name: 'Verify' }).click();
-    await expect(card.locator('.source-status')).toHaveText(
-      /Verified|Error|Unverified/,
-      { timeout: 60_000 },
-    );
+    await expect(card.locator('.source-status')).toHaveText(/Verified|Error|Unverified/, {
+      timeout: 60_000,
+    });
     await page.waitForTimeout(1_000);
     const statusAfterVerify = await card.locator('.source-status').innerText();
     const banner =
@@ -305,7 +271,7 @@ test.describe('sources, projects and tasks', () => {
     });
     const id = await sourceId(SOURCE);
     const db = sql(
-      `select source_type, is_active, last_verified_at is not null from sources where id = '${id}'`,
+      `select source_type, is_active, last_verified_at is not null from sources where id = '${id}'`
     ).join(' | ');
     record(20, {
       result: /Verified/.test(statusAfterVerify) ? 'WORKS' : 'FAILS',
@@ -331,9 +297,7 @@ test.describe('sources, projects and tasks', () => {
     expect(statusAfterVerify).toMatch(/Verified/);
   });
 
-  test('21: the other source kinds, with the credentials this machine lacks', async ({
-    page,
-  }) => {
+  test('21: the other source kinds, with the credentials this machine lacks', async ({ page }) => {
     await signIn(page);
     await page.goto(SOURCES_PATH);
     page.on('dialog', (d) => d.accept());
@@ -342,7 +306,7 @@ test.describe('sources, projects and tasks', () => {
     async function add(
       kind: string,
       fill: (wizard: Locator) => Promise<void>,
-      name: string,
+      name: string
     ): Promise<string> {
       await page
         .locator('.settings-content')
@@ -366,10 +330,7 @@ test.describe('sources, projects and tasks', () => {
           .innerText()
           .catch(() => '')) || '';
       if (error) {
-        await shot(
-          page,
-          `21-${kind.toLowerCase().replace(/\W+/g, '-')}-refused`,
-        );
+        await shot(page, `21-${kind.toLowerCase().replace(/\W+/g, '-')}-refused`);
         await wizard.getByRole('button', { name: 'Cancel' }).click();
         return `wizard refused: ${error}`;
       }
@@ -397,9 +358,7 @@ test.describe('sources, projects and tasks', () => {
         .first()
         .click();
       const wizard = page.getByRole('dialog');
-      const names = await wizard
-        .locator('.source-type-option .source-type-name')
-        .allInnerTexts();
+      const names = await wizard.locator('.source-type-option .source-type-name').allInnerTexts();
       await wizard.getByRole('button', { name: 'Cancel' }).click();
       return names;
     })();
@@ -410,33 +369,28 @@ test.describe('sources, projects and tasks', () => {
         await w.locator('#glProjectId').fill('gitlab-org/gitlab');
         await w.locator('#credentials').fill('glpat-not-a-real-token');
       },
-      'GitLab bad token',
+      'GitLab bad token'
     );
     outcomes.web_url = await add(
       'Web URL',
       async (w) => w.locator('#webUrl').fill('https://example.com/'),
-      'Example URL',
+      'Example URL'
     );
     outcomes.text = await add(
       'Text',
       async (w) => {
         await w.locator('#textLabel').fill('Notes');
-        await w
-          .locator('#textContent')
-          .fill('The live pass wrote this text source.');
+        await w.locator('#textContent').fill('The live pass wrote this text source.');
       },
-      'Text notes',
+      'Text notes'
     );
     for (const kind of UNOFFERED_KINDS) {
       outcomes[kind.toLowerCase()] = kinds.includes(kind)
         ? 'offered although the server has no adapter for it'
         : 'not offered (no adapter on the server)';
     }
-    const reachedVerify = (outcome: string) =>
-      outcome.startsWith('added; verify ->');
-    const unoffered = UNOFFERED_KINDS.filter(
-      (kind) => !kinds.includes(kind),
-    );
+    const reachedVerify = (outcome: string) => outcome.startsWith('added; verify ->');
+    const unoffered = UNOFFERED_KINDS.filter((kind) => !kinds.includes(kind));
     const works =
       reachedVerify(outcomes.gitlab) &&
       reachedVerify(outcomes.web_url) &&
@@ -457,11 +411,7 @@ test.describe('sources, projects and tasks', () => {
       note: 'GitLab is verified with a deliberately bad token, so its verdict is the adapter refusing the credential, which is the point: the adapter answered',
       wizard_kinds: kinds,
       outcomes,
-      screenshots: [
-        '21-gitlab-verify.png',
-        '21-web-url-verify.png',
-        '21-text-verify.png',
-      ],
+      screenshots: ['21-gitlab-verify.png', '21-web-url-verify.png', '21-text-verify.png'],
     });
   });
 
@@ -477,25 +427,19 @@ test.describe('sources, projects and tasks', () => {
           const { body } = await api(
             'GET',
             `/api/workspaces/${state.owner.workspace.id}/sources/${id}`,
-            { token },
+            { token }
           );
           return JSON.stringify(body);
         },
-        { timeout: 600_000, intervals: [5_000] },
+        { timeout: 600_000, intervals: [5_000] }
       )
-      .toMatch(
-        /"index_status":\s*"(completed|indexed|ready)"|"items_indexed":\s*[1-9]/,
-      );
-    const detail = await api(
-      'GET',
-      `/api/workspaces/${state.owner.workspace.id}/sources/${id}`,
-      { token },
-    );
-    const items = sql(
-      `select count(*) from content_items where source_id = '${id}'`,
-    ).join(',');
+      .toMatch(/"index_status":\s*"(completed|indexed|ready)"|"items_indexed":\s*[1-9]/);
+    const detail = await api('GET', `/api/workspaces/${state.owner.workspace.id}/sources/${id}`, {
+      token,
+    });
+    const items = sql(`select count(*) from content_items where source_id = '${id}'`).join(',');
     const sample = sql(
-      `select uri from content_items where source_id = '${id}' order by uri limit 8`,
+      `select uri from content_items where source_id = '${id}' order by uri limit 8`
     );
 
     await signIn(page);
@@ -503,16 +447,12 @@ test.describe('sources, projects and tasks', () => {
     await page.getByRole('tab', { name: 'Hybrid' }).click();
     const pill = page.locator('.source-pill', { hasText: SOURCE });
     if (await pill.count()) await pill.click();
-    await page
-      .getByPlaceholder('Search knowledge and sources...')
-      .fill('widget area calculation');
+    await page.getByPlaceholder('Search knowledge and sources...').fill('widget area calculation');
     await page.getByRole('button', { name: 'Search', exact: true }).click();
     await page.waitForTimeout(6_000);
     const cards = page.locator('.result-card');
     const results = await cards.count();
-    const first = results
-      ? (await cards.first().innerText()).replace(/\s+/g, ' ')
-      : '';
+    const first = results ? (await cards.first().innerText()).replace(/\s+/g, ' ') : '';
     await shot(page, '22-context-search-github');
 
     record(22, {
@@ -537,12 +477,7 @@ test.describe('sources, projects and tasks', () => {
   }) => {
     await signIn(page);
     const token = await ownerToken();
-    for (const name of [
-      REPO_PROJECT,
-      SCRATCH_PROJECT,
-      BROKEN_PROJECT,
-      'Real pass throwaway',
-    ]) {
+    for (const name of [REPO_PROJECT, SCRATCH_PROJECT, BROKEN_PROJECT, 'Real pass throwaway']) {
       const existing = await projectId(name);
       if (existing) await api('DELETE', `/api/projects/${existing}`, { token });
     }
@@ -570,35 +505,31 @@ test.describe('sources, projects and tasks', () => {
           (r) =>
             /\/api\/projects\/[^/]+$/.test(r.url()) &&
             ['PUT', 'PATCH'].includes(r.request().method()),
-          { timeout: 30_000 },
+          { timeout: 30_000 }
         )
         .catch(() => null);
       await modal.getByRole('button', { name: 'Save Changes' }).click();
       const response = await saved;
       editResponses.push(
-        `${label}: ${response ? response.request().method() : 'no'} -> ${response ? response.status() : 'no request'} ${response ? (await response.text()).slice(0, 120) : ''}`,
+        `${label}: ${response ? response.request().method() : 'no'} -> ${response ? response.status() : 'no request'} ${response ? (await response.text()).slice(0, 120) : ''}`
       );
       await page.waitForTimeout(1_500);
       if (await modal.isVisible().catch(() => false)) {
         editResponses.push(
-          `${label}: modal stayed open: ${(await modal.innerText()).replace(/\s+/g, ' ').slice(0, 160)}`,
+          `${label}: modal stayed open: ${(await modal.innerText()).replace(/\s+/g, ' ').slice(0, 160)}`
         );
         await modal.getByRole('button', { name: 'Cancel' }).click();
       }
       statuses.push(
-        `${label}: ${await page.locator('.project-card', { hasText: REPO_PROJECT }).locator('.ui-badge').first().innerText()}`,
+        `${label}: ${await page.locator('.project-card', { hasText: REPO_PROJECT }).locator('.ui-badge').first().innerText()}`
       );
       if (label === 'Cancelled') await shot(page, '23-project-cancelled');
     }
-    const dbStatus = sql(
-      `select status from projects where name = '${REPO_PROJECT}'`,
-    ).join(',');
+    const dbStatus = sql(`select status from projects where name = '${REPO_PROJECT}'`).join(',');
 
     const unlinkResponse = page
       .waitForResponse(
-        (r) =>
-          /\/api\/projects\/[^/]+\/source$/.test(r.url()) &&
-          r.request().method() === 'DELETE',
+        (r) => /\/api\/projects\/[^/]+\/source$/.test(r.url()) && r.request().method() === 'DELETE'
       )
       .catch(() => null);
     const unlink = details.getByRole('button', { name: 'Unlink' });
@@ -615,7 +546,7 @@ test.describe('sources, projects and tasks', () => {
     }
     await page.waitForTimeout(1_000);
     const linkedAfterUnlink = sql(
-      `select source_id is not null from projects where name = '${REPO_PROJECT}'`,
+      `select source_id is not null from projects where name = '${REPO_PROJECT}'`
     ).join(',');
     await shot(page, '23-project-after-unlink');
 
@@ -623,20 +554,14 @@ test.describe('sources, projects and tasks', () => {
     await details.getByRole('button', { name: '+ Add Sync' }).click();
     const sync = page.getByRole('dialog', { name: 'Add External Sync' });
     await expect(sync).toBeVisible();
-    const providers = await sync
-      .locator('#sync-provider option')
-      .allInnerTexts();
-    const directions = await sync
-      .locator('#sync-direction option')
-      .allInnerTexts();
+    const providers = await sync.locator('#sync-provider option').allInnerTexts();
+    const directions = await sync.locator('#sync-direction option').allInnerTexts();
     await sync.locator('#sync-provider').selectOption('github');
     await sync.locator('#sync-direction').selectOption('bidirectional');
     await sync.locator('#sync-repo-url').fill(REPO);
     await shot(page, '24-add-sync-form');
     const syncResponse = page.waitForResponse(
-      (r) =>
-        /\/api\/projects\/[^/]+\/sync$/.test(r.url()) &&
-        r.request().method() === 'POST',
+      (r) => /\/api\/projects\/[^/]+\/sync$/.test(r.url()) && r.request().method() === 'POST'
     );
     await sync.getByRole('button', { name: 'Add Sync Config' }).click();
     const syncStatus = (await syncResponse).status();
@@ -654,18 +579,16 @@ test.describe('sources, projects and tasks', () => {
       await sync.getByRole('button', { name: 'Cancel' }).click();
 
     // Delete the throwaway project from its details pane.
-    await page
-      .locator('.project-card', { hasText: 'Real pass throwaway' })
-      .click();
+    await page.locator('.project-card', { hasText: 'Real pass throwaway' }).click();
     await page
       .locator('aside.project-details')
       .getByRole('button', { name: 'Delete', exact: true })
       .click();
     const confirm = page.getByRole('dialog', { name: 'Delete Project' });
     await confirm.getByRole('button', { name: 'Delete Project' }).click();
-    await expect(
-      page.locator('.project-card', { hasText: 'Real pass throwaway' }),
-    ).toHaveCount(0, { timeout: 30_000 });
+    await expect(page.locator('.project-card', { hasText: 'Real pass throwaway' })).toHaveCount(0, {
+      timeout: 30_000,
+    });
     await shot(page, '23-project-deleted');
 
     const wizardHadGithubOption = false;
@@ -705,8 +628,7 @@ test.describe('sources, projects and tasks', () => {
           : `product: + Add Sync posts to /api/projects/{id}/sync and the server answers ${syncStatus}; nothing is synced`,
       providers,
       directions,
-      rollout_and_scope_controls:
-        'none; the form offers Provider and Direction only',
+      rollout_and_scope_controls: 'none; the form offers Provider and Direction only',
       add_sync_status: syncStatus,
       sync_section_text: syncText.slice(0, 200),
       sync_configs_in_db: syncRows,
@@ -759,13 +681,10 @@ test.describe('sources, projects and tasks', () => {
     const calls = toolCalls(run.id);
     const logs = runLogs(run.id);
     const reads = calls.filter((c) =>
-      /^(read_file|read_repository_file|run_shell|run_command|list_files|search)\w* \| call/.test(
-        c,
-      ),
+      /^(read_file|read_repository_file|run_shell|run_command|list_files|search)\w* \| call/.test(c)
     );
     record(25, {
-      result:
-        run.status === 'completed' && reads.length > 0 ? 'WORKS' : 'FAILS',
+      result: run.status === 'completed' && reads.length > 0 ? 'WORKS' : 'FAILS',
       task_id: taskId,
       run_id: run.id,
       run_status: run.status,
@@ -773,10 +692,7 @@ test.describe('sources, projects and tasks', () => {
       tool_calls: calls,
       logs_tail: logs.slice(-8),
       dialog_text: dialogText.slice(0, 500),
-      server_log: logLines(mark, /tool=|Killed the background|checkout/i).slice(
-        0,
-        6,
-      ),
+      server_log: logLines(mark, /tool=|Killed the background|checkout/i).slice(0, 6),
       screenshots: [
         '25-task-created.png',
         '25-execution-logs-streaming.png',
@@ -784,9 +700,7 @@ test.describe('sources, projects and tasks', () => {
       ],
     });
     expect(run.status).toBe('completed');
-    expect(reads.length, `tool calls: ${calls.join(' || ')}`).toBeGreaterThan(
-      0,
-    );
+    expect(reads.length, `tool calls: ${calls.join(' || ')}`).toBeGreaterThan(0);
   });
 
   test('26 and 30: plan approval holds a write, Approve carries it out and the change becomes a pull request; Revise sends a second one back', async ({
@@ -815,9 +729,10 @@ test.describe('sources, projects and tasks', () => {
           .innerText()
           .catch(() => '')
       ).replace(/\s+/g, ' ');
-      held = (
-        await page.getByRole('dialog').locator('.execution-summary').innerText()
-      ).replace(/\s+/g, ' ');
+      held = (await page.getByRole('dialog').locator('.execution-summary').innerText()).replace(
+        /\s+/g,
+        ' '
+      );
       await shot(page, '26-plan-approval-parked');
       await prompt.getByRole('radio', { name: 'Approve' }).check();
       await prompt.locator('[data-testid="question-submit"]').click();
@@ -826,18 +741,12 @@ test.describe('sources, projects and tasks', () => {
     await shot(page, '26-approved-run-finished');
     const calls = toolCalls(done.id);
     const refusedWrite = calls.find(
-      (c) =>
-        /^(write_file|apply_patch) \| failed/.test(c) &&
-        /plan|approv|refus|hold/i.test(c),
+      (c) => /^(write_file|apply_patch) \| failed/.test(c) && /plan|approv|refus|hold/i.test(c)
     );
-    const writes = calls.filter((c) =>
-      /^(write_file|apply_patch) \| ok/.test(c),
-    );
+    const writes = calls.filter((c) => /^(write_file|apply_patch) \| ok/.test(c));
     record(26, {
       result:
-        parked.status === 'waiting' &&
-        done.status === 'completed' &&
-        writes.length > 0
+        parked.status === 'waiting' && done.status === 'completed' && writes.length > 0
           ? 'WORKS'
           : 'FAILS',
       task_id: taskId,
@@ -845,14 +754,10 @@ test.describe('sources, projects and tasks', () => {
       parked_status: parked.status,
       summary_while_parked: held,
       plan_preview: planText.slice(0, 400),
-      early_write_refused:
-        refusedWrite ?? 'no refused write recorded before the plan',
+      early_write_refused: refusedWrite ?? 'no refused write recorded before the plan',
       writes_after_approval: writes,
       tool_calls: calls,
-      screenshots: [
-        '26-plan-approval-parked.png',
-        '26-approved-run-finished.png',
-      ],
+      screenshots: ['26-plan-approval-parked.png', '26-approved-run-finished.png'],
     });
 
     // Row 30: the change was pushed and opened as a pull request.
@@ -873,23 +778,14 @@ test.describe('sources, projects and tasks', () => {
     const number = prUrl.match(/pull\/(\d+)/)?.[1] ?? '';
     const merge = execFileSync(
       'gh',
-      [
-        'pr',
-        'merge',
-        number,
-        '-R',
-        `${OWNER}/${NAME}`,
-        '--squash',
-        '--delete-branch',
-      ],
+      ['pr', 'merge', number, '-R', `${OWNER}/${NAME}`, '--squash', '--delete-branch'],
       {
         encoding: 'utf8',
         env: {
           ...process.env,
-          GH_CONFIG_DIR:
-            process.env.GH_CONFIG_DIR ?? `${process.env.HOME}/.config/gh`,
+          GH_CONFIG_DIR: process.env.GH_CONFIG_DIR ?? `${process.env.HOME}/.config/gh`,
         },
-      },
+      }
     ).trim();
     await expect
       .poll(async () => String((await taskById(taskId)).pr_status ?? ''), {
@@ -898,10 +794,9 @@ test.describe('sources, projects and tasks', () => {
       })
       .toBe('merged');
     await page.reload();
-    await expect(page.locator('.task-card', { hasText: title })).toContainText(
-      /PR merged/,
-      { timeout: 60_000 },
-    );
+    await expect(page.locator('.task-card', { hasText: title })).toContainText(/PR merged/, {
+      timeout: 60_000,
+    });
     await shot(page, '30-task-pr-merged');
     const branchGone = execFileSync(
       'gh',
@@ -910,10 +805,9 @@ test.describe('sources, projects and tasks', () => {
         encoding: 'utf8',
         env: {
           ...process.env,
-          GH_CONFIG_DIR:
-            process.env.GH_CONFIG_DIR ?? `${process.env.HOME}/.config/gh`,
+          GH_CONFIG_DIR: process.env.GH_CONFIG_DIR ?? `${process.env.HOME}/.config/gh`,
         },
-      },
+      }
     );
     record(30, {
       result: 'WORKS',
@@ -940,9 +834,7 @@ test.describe('sources, projects and tasks', () => {
     const prompt2 = page.locator('.execution-question');
     const options = await prompt2
       .getByRole('radio')
-      .evaluateAll((els) =>
-        els.map((e) => (e as HTMLInputElement).labels?.[0]?.innerText ?? ''),
-      );
+      .evaluateAll((els) => els.map((e) => (e as HTMLInputElement).labels?.[0]?.innerText ?? ''));
     // Revise says "say what to change under Other", and the text box opens
     // only under Other, so the instruction to stop is sent as Other.
     await prompt2.getByRole('radio', { name: 'Other' }).check();
@@ -953,15 +845,10 @@ test.describe('sources, projects and tasks', () => {
     await prompt2.locator('[data-testid="question-submit"]').click();
     const done2 = await finished(task2);
     const calls2 = toolCalls(done2.id);
-    const writes2 = calls2.filter((c) =>
-      /^(write_file|apply_patch) \| ok/.test(c),
-    );
+    const writes2 = calls2.filter((c) => /^(write_file|apply_patch) \| ok/.test(c));
     await shot(page, '26-plan-revise-outcome');
     record(26.5, {
-      result:
-        parked2.status === 'waiting' && writes2.length === 0
-          ? 'WORKS'
-          : 'FAILS',
+      result: parked2.status === 'waiting' && writes2.length === 0 ? 'WORKS' : 'FAILS',
       note: 'The plan card offers Approve, Revise and Other; there is no Reject. What to change goes under Other, so the instruction to stop was sent there.',
       options,
       task_id: task2,
@@ -1010,14 +897,10 @@ test.describe('sources, projects and tasks', () => {
     await shot(page, '27-resumed-and-finished');
     const calls = toolCalls(done.id);
     const asked = calls.filter((c) => c.startsWith('ask_user | call'));
-    const wrote = calls.filter(
-      (c) => /^write_file \| call/.test(c) && /green/i.test(c),
-    );
+    const wrote = calls.filter((c) => /^write_file \| call/.test(c) && /green/i.test(c));
     record(27, {
       result:
-        parked.status === 'waiting' &&
-        done.status === 'completed' &&
-        asked.length > 0
+        parked.status === 'waiting' && done.status === 'completed' && asked.length > 0
           ? 'WORKS'
           : 'FAILS',
       task_id: taskId,
@@ -1034,9 +917,7 @@ test.describe('sources, projects and tasks', () => {
     expect(asked.length).toBeGreaterThan(0);
   });
 
-  test('28: a run backgrounds a long command, waits on it and tails its log', async ({
-    page,
-  }) => {
+  test('28: a run backgrounds a long command, waits on it and tails its log', async ({ page }) => {
     await signIn(page);
     const s = stamp();
     const title = `Background job ${s}`;
@@ -1052,17 +933,14 @@ test.describe('sources, projects and tasks', () => {
     const background = calls.filter(
       (c) =>
         /^run_(shell|command) \| call/.test(c) &&
-        /\\"background\\":\s*true|"background":\s*true/.test(c),
+        /\\"background\\":\s*true|"background":\s*true/.test(c)
     );
     const waits = calls.filter((c) => c.startsWith('wait_for | call'));
     const tails = calls.filter((c) => c.startsWith('tail_job | call'));
     const logs = runLogs(done.id);
     record(28, {
       result:
-        done.status === 'completed' &&
-        background.length > 0 &&
-        waits.length > 0 &&
-        tails.length > 0
+        done.status === 'completed' && background.length > 0 && waits.length > 0 && tails.length > 0
           ? 'WORKS'
           : 'FAILS',
       cause:
@@ -1075,9 +953,7 @@ test.describe('sources, projects and tasks', () => {
       background_calls: background,
       wait_for_calls: waits,
       tail_job_calls: tails,
-      logs_with_job_output: logs
-        .filter((l) => l.includes(`JOB-DONE-${s}`))
-        .slice(0, 3),
+      logs_with_job_output: logs.filter((l) => l.includes(`JOB-DONE-${s}`)).slice(0, 3),
       tool_calls: calls,
       screenshots: ['28-background-job-run.png'],
     });
@@ -1087,9 +963,7 @@ test.describe('sources, projects and tasks', () => {
     expect(tails.length).toBeGreaterThan(0);
   });
 
-  test('29: a refused command is corrected in the same attempt', async ({
-    page,
-  }) => {
+  test('29: a refused command is corrected in the same attempt', async ({ page }) => {
     await signIn(page);
     const s = stamp();
     const title = `Semicolon text ${s}`;
@@ -1103,16 +977,11 @@ test.describe('sources, projects and tasks', () => {
     await shot(page, '29-refused-then-corrected');
     const calls = toolCalls(done.id);
     const runs = await runsOf(taskId);
-    const refused = calls.filter((c) =>
-      /^run_(shell|command) \| failed/.test(c),
-    );
+    const refused = calls.filter((c) => /^run_(shell|command) \| failed/.test(c));
     const corrected = calls.filter((c) => /^run_(shell|command) \| ok/.test(c));
     const logs = runLogs(done.id);
     record(29, {
-      result:
-        runs.length === 1 && refused.length > 0 && corrected.length > 0
-          ? 'WORKS'
-          : 'FAILS',
+      result: runs.length === 1 && refused.length > 0 && corrected.length > 0 ? 'WORKS' : 'FAILS',
       cause:
         refused.length > 0
           ? undefined
@@ -1137,14 +1006,12 @@ test.describe('sources, projects and tasks', () => {
     await signIn(page);
     const token = await ownerToken();
     page.on('dialog', (d) => d.accept());
-    const { body } = await api(
-      'GET',
-      `/api/workspaces/${state.owner.workspace.id}/tasks`,
-      { token },
+    const { body } = await api('GET', `/api/workspaces/${state.owner.workspace.id}/tasks`, {
+      token,
+    });
+    const readTask = ((body as { tasks?: { id: string; title: string }[] }).tasks ?? []).find((t) =>
+      t.title.startsWith('Read the widget checks')
     );
-    const readTask = (
-      (body as { tasks?: { id: string; title: string }[] }).tasks ?? []
-    ).find((t) => t.title.startsWith('Read the widget checks'));
     expect(readTask, 'row 25 left a finished task').toBeTruthy();
     const before = (await runsOf(readTask!.id)).length;
     await page.goto('/tasks');
@@ -1153,9 +1020,7 @@ test.describe('sources, projects and tasks', () => {
     await expect(again).toBeVisible({ timeout: 30_000 });
     await shot(page, '31-run-again-offered');
     await again.click();
-    await expect(page.locator('.execution-logs')).toContainText(
-      'Execution Logs',
-    );
+    await expect(page.locator('.execution-logs')).toContainText('Execution Logs');
     const rerun = await finished(readTask!.id, 1_800_000, before + 1);
     const after = (await runsOf(readTask!.id)).length;
     await shot(page, '31-run-again-finished');
@@ -1199,13 +1064,10 @@ test.describe('sources, projects and tasks', () => {
 
     await page.goto('/tasks');
     await deleteTask(page, title);
-    await expect(page.locator('.task-card', { hasText: title })).toHaveCount(
-      0,
-      { timeout: 30_000 },
-    );
-    const gone = sql(`select count(*) from tasks where id = '${taskId}'`).join(
-      ',',
-    );
+    await expect(page.locator('.task-card', { hasText: title })).toHaveCount(0, {
+      timeout: 30_000,
+    });
+    const gone = sql(`select count(*) from tasks where id = '${taskId}'`).join(',');
     await shot(page, '31-task-deleted');
     record(31, {
       result:
@@ -1234,10 +1096,7 @@ test.describe('sources, projects and tasks', () => {
     });
     expect(rerun.status).toBe('completed');
     expect(failed.status).toBe('failed');
-    expect(
-      tryAgain || runAgain,
-      `after a failure the dialog offers ${notice}`,
-    ).toBe(true);
+    expect(tryAgain || runAgain, `after a failure the dialog offers ${notice}`).toBe(true);
     expect(gone).toBe('0');
   });
 });

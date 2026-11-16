@@ -1,7 +1,7 @@
-import { test, expect } from './fixtures';
 import type { Locator, Page } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { chooseSelect } from './helpers/select';
-import { setupAuth, blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, routeApi, setupAuth } from './test-utils';
 
 type InstalledModel = {
   name: string;
@@ -84,9 +84,27 @@ const PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
 const mockBrowseModels = [
-  { id: 'llama3.2', name: 'llama3.2', description: 'Meta Llama 3.2', downloads: 1500000, details: { family: 'llama', parameter_size: '3.2B' } },
-  { id: 'mistral', name: 'mistral', description: 'Mistral AI 7B', downloads: 800000, details: { family: 'mistral', parameter_size: '7B' } },
-  { id: 'codellama', name: 'codellama', description: 'Code Llama', downloads: 500000, details: { family: 'llama' } },
+  {
+    id: 'llama3.2',
+    name: 'llama3.2',
+    description: 'Meta Llama 3.2',
+    downloads: 1500000,
+    details: { family: 'llama', parameter_size: '3.2B' },
+  },
+  {
+    id: 'mistral',
+    name: 'mistral',
+    description: 'Mistral AI 7B',
+    downloads: 800000,
+    details: { family: 'mistral', parameter_size: '7B' },
+  },
+  {
+    id: 'codellama',
+    name: 'codellama',
+    description: 'Code Llama',
+    downloads: 500000,
+    details: { family: 'llama' },
+  },
 ];
 
 function trainedAdapter(name: string): InstalledModel {
@@ -231,7 +249,10 @@ function trainRequests(page: Page): TrainRequest[] {
 }
 
 // Setup API routes for models page
-async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof mockBrowseModels; installedModels?: InstalledModel[] }): Promise<void> {
+async function setupModelsRoutes(
+  page: Page,
+  options?: { browseModels?: typeof mockBrowseModels; installedModels?: InstalledModel[] }
+): Promise<void> {
   const installedModels = [...(options?.installedModels ?? mockInstalledModels)];
   const browseModels = options?.browseModels ?? mockBrowseModels;
   const uploads = staged(page);
@@ -411,9 +432,7 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
 }
 
 function trainPanel(page: Page): Locator {
-  return page
-    .locator('.card')
-    .filter({ has: page.getByRole('heading', { name: 'Train a LoRA' }) });
+  return page.locator('.card').filter({ has: page.getByRole('heading', { name: 'Train a LoRA' }) });
 }
 
 async function routeTrainResult(page: Page, result: TrainResult): Promise<void> {
@@ -532,7 +551,9 @@ test.describe('Models Page', () => {
   test('shows the train tab and a simple LoRA form', async ({ page }) => {
     await page.getByRole('tab', { name: 'Train' }).click();
     await expect(page.getByRole('heading', { name: 'Train a LoRA' })).toBeVisible();
-    await expect(page.getByText('Drop images, clips, or a folder, pick an installed base')).toBeVisible();
+    await expect(
+      page.getByText('Drop images, clips, or a folder, pick an installed base')
+    ).toBeVisible();
     await expect(page.getByRole('button', { name: 'Train' })).toBeVisible();
   });
 
@@ -545,8 +566,20 @@ test.describe('Models Page', () => {
           sampled: 24,
           sampled_fps: 8,
           frames: [
-            { filename: 'frame-0000.png', bytes_base64: 'aaa', timestamp_ms: 0, mirrored: false, group: 0 },
-            { filename: 'frame-0001.png', bytes_base64: 'bbb', timestamp_ms: 250, mirrored: true, group: 0 },
+            {
+              filename: 'frame-0000.png',
+              bytes_base64: 'aaa',
+              timestamp_ms: 0,
+              mirrored: false,
+              group: 0,
+            },
+            {
+              filename: 'frame-0001.png',
+              bytes_base64: 'bbb',
+              timestamp_ms: 250,
+              mirrored: true,
+              group: 0,
+            },
           ],
         }),
       })
@@ -557,9 +590,7 @@ test.describe('Models Page', () => {
       mimeType: 'video/mp4',
       buffer: Buffer.from('clip'),
     });
-    await expect(
-      page.getByText('subject.mp4: 24 frames read at 8.0/s, 2 kept')
-    ).toBeVisible();
+    await expect(page.getByText('subject.mp4: 24 frames read at 8.0/s, 2 kept')).toBeVisible();
     await expect(page.getByLabel('Caption for subject.mp4 frame-0000.png')).toBeVisible();
     await expect(
       page.getByText('subject.mp4 frame-0001.png (mirrored)', { exact: true })
@@ -673,13 +704,11 @@ test.describe('Models Page', () => {
     await firstInstruction.fill('add a red coat');
     await expect(submit).toBeDisabled();
 
-    await panel
-      .getByLabel('Reference image for target 2: target-b.png')
-      .setInputFiles({
-        name: 'reference-b.png',
-        mimeType: 'image/png',
-        buffer: Buffer.from('reference b'),
-      });
+    await panel.getByLabel('Reference image for target 2: target-b.png').setInputFiles({
+      name: 'reference-b.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from('reference b'),
+    });
     await panel
       .getByLabel('Instruction for target 2: target-b.png')
       .fill('move the subject outside');
@@ -729,9 +758,7 @@ test.describe('Models Page', () => {
       mimeType: 'image/png',
       buffer: Buffer.from(PNG_BASE64, 'base64'),
     });
-    await panel
-      .getByLabel('Instruction for target 1: target.png')
-      .fill('remove the background');
+    await panel.getByLabel('Instruction for target 1: target.png').fill('remove the background');
 
     await selectTrainBase(page, panel, 'FLUX.1 Schnell');
     await expect(panel.getByLabel('Reference image for target 1: target.png')).toHaveCount(0);
@@ -776,11 +803,9 @@ test.describe('Models Page', () => {
       { name: 'c.png', mimeType: 'image/png', buffer: Buffer.from(PNG_BASE64, 'base64') },
     ]);
     await panel.getByRole('button', { name: 'Auto-caption images' }).click();
-    await expect.poll(async () => (await requested.promise).map((image) => image.filename)).toEqual([
-      'a.png',
-      'b.png',
-      'c.png',
-    ]);
+    await expect
+      .poll(async () => (await requested.promise).map((image) => image.filename))
+      .toEqual(['a.png', 'b.png', 'c.png']);
 
     await panel.getByRole('button', { name: 'Move target 3: c.png up' }).click();
     await panel.getByRole('button', { name: 'Remove target 1: a.png' }).click();
@@ -1252,9 +1277,8 @@ test.describe('Models Page', () => {
 
       if (method === 'GET' && url.includes('?')) {
         const params = new URL(url).searchParams;
-        const models = params.get('sort') === 'name_desc'
-          ? [...mockBrowseModels].reverse()
-          : mockBrowseModels;
+        const models =
+          params.get('sort') === 'name_desc' ? [...mockBrowseModels].reverse() : mockBrowseModels;
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -1285,9 +1309,8 @@ test.describe('Models Page', () => {
 
       if (method === 'GET' && url.includes('?')) {
         const params = new URL(url).searchParams;
-        const models = params.get('family') === 'mistral'
-          ? [mockBrowseModels[1]]
-          : mockBrowseModels;
+        const models =
+          params.get('family') === 'mistral' ? [mockBrowseModels[1]] : mockBrowseModels;
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -1374,15 +1397,17 @@ test.describe('Models Page', () => {
             contentType: 'application/json',
             body: JSON.stringify({
               source: 'huggingface',
-              models: [{
-                id: 'TheBloke/Llama-2-7B-GGUF',
-                name: 'Llama-2-7B-GGUF',
-                description: 'GGUF format Llama 2',
-                downloads: 250000,
-                tags: ['gguf'],
-                author: 'TheBloke',
-                install_name: 'hf.co/TheBloke/Llama-2-7B-GGUF',
-              }],
+              models: [
+                {
+                  id: 'TheBloke/Llama-2-7B-GGUF',
+                  name: 'Llama-2-7B-GGUF',
+                  description: 'GGUF format Llama 2',
+                  downloads: 250000,
+                  tags: ['gguf'],
+                  author: 'TheBloke',
+                  install_name: 'hf.co/TheBloke/Llama-2-7B-GGUF',
+                },
+              ],
               next_cursor: null,
             }),
           });
@@ -1406,7 +1431,10 @@ test.describe('Models Page', () => {
 
     // Click HuggingFace tab
     await page.click('button[role="tab"]:has-text("HuggingFace")');
-    await expect(page.locator('button[role="tab"]:has-text("HuggingFace")')).toHaveAttribute('data-state', 'active');
+    await expect(page.locator('button[role="tab"]:has-text("HuggingFace")')).toHaveAttribute(
+      'data-state',
+      'active'
+    );
     await expect(page.locator('.browse-name').first()).toHaveText('Llama-2-7B-GGUF');
   });
 
@@ -1803,7 +1831,10 @@ test.describe('Models Page', () => {
     await page.click('button[role="tab"]:has-text("HuggingFace")');
 
     // Should show HuggingFace tab as active
-    await expect(page.locator('button[role="tab"]:has-text("HuggingFace")')).toHaveAttribute('data-state', 'active');
+    await expect(page.locator('button[role="tab"]:has-text("HuggingFace")')).toHaveAttribute(
+      'data-state',
+      'active'
+    );
   });
 
   test('shows browse model details from click', async ({ page }) => {
@@ -1839,7 +1870,12 @@ test.describe('Models Page', () => {
     const modelsWithVariousSizes = [
       { name: 'tiny:latest', size: 500, modified_at: '2024-01-15T10:30:00Z', details: {} },
       { name: 'small:latest', size: 1024 * 500, modified_at: '2024-01-15T10:30:00Z', details: {} },
-      { name: 'medium:latest', size: 1024 * 1024 * 500, modified_at: '2024-01-15T10:30:00Z', details: {} },
+      {
+        name: 'medium:latest',
+        size: 1024 * 1024 * 500,
+        modified_at: '2024-01-15T10:30:00Z',
+        details: {},
+      },
     ];
 
     await page.unroute('**/api/models**');
@@ -1904,8 +1940,14 @@ test.describe('Models Page', () => {
     await page.fill('.browse-search input', 'test');
     await page.click('.browse-search button');
 
-    await expect(page.locator('.browse-item').nth(0).locator('.browse-spec')).toContainText('500 B');
-    await expect(page.locator('.browse-item').nth(1).locator('.browse-spec')).toContainText('500 KB');
-    await expect(page.locator('.browse-item').nth(2).locator('.browse-spec')).toContainText('500 MB');
+    await expect(page.locator('.browse-item').nth(0).locator('.browse-spec')).toContainText(
+      '500 B'
+    );
+    await expect(page.locator('.browse-item').nth(1).locator('.browse-spec')).toContainText(
+      '500 KB'
+    );
+    await expect(page.locator('.browse-item').nth(2).locator('.browse-spec')).toContainText(
+      '500 MB'
+    );
   });
 });

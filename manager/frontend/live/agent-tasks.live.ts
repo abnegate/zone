@@ -49,7 +49,9 @@ async function fetched<T>(
   }
   const picked = pick(body);
   if (picked === undefined) {
-    throw new Error(`${method} ${path} answered an unexpected shape: ${JSON.stringify(body).slice(0, 300)}`);
+    throw new Error(
+      `${method} ${path} answered an unexpected shape: ${JSON.stringify(body).slice(0, 300)}`
+    );
   }
   return picked;
 }
@@ -74,7 +76,11 @@ async function ensureProject(name: string): Promise<string> {
       const project = (body as { project?: unknown }).project ?? body;
       return isProject(project) ? project : undefined;
     },
-    { token, body: { name, description: 'live verification', workspace_id: state.owner.workspace.id }, ok: [200, 201] }
+    {
+      token,
+      body: { name, description: 'live verification', workspace_id: state.owner.workspace.id },
+      ok: [200, 201],
+    }
   );
   return created.id;
 }
@@ -179,7 +185,10 @@ async function waitingRun(taskId: string, timeout = 180_000): Promise<Run> {
 
 async function finished(taskId: string, timeout = 240_000): Promise<Run> {
   await expect
-    .poll(async () => (await runsOf(taskId)).map((r) => r.status).join(','), { timeout, intervals: [1_000] })
+    .poll(async () => (await runsOf(taskId)).map((r) => r.status).join(','), {
+      timeout,
+      intervals: [1_000],
+    })
     .toMatch(/completed|failed|cancelled/);
   const [latest] = await runsOf(taskId);
   return latest;
@@ -196,11 +205,42 @@ test('a task that requires plan approval refuses a write, parks on its plan, and
   // The resumed turn's trigger is the server's own words, so it is read from here on.
   const since = await latest();
   await script(`PLANTASK ${s}`, [
-    { calls: [{ name: 'write_file', arguments: { path: 'notes.txt', content: 'too early', reason: 'a write before the plan, which the hold refuses' } }] },
-    { calls: [{ name: 'submit_plan', arguments: { plan: `1. Write notes-${s}.txt with the summary.\n2. Read it back to check.\nLeft out: nothing.` } }] },
+    {
+      calls: [
+        {
+          name: 'write_file',
+          arguments: {
+            path: 'notes.txt',
+            content: 'too early',
+            reason: 'a write before the plan, which the hold refuses',
+          },
+        },
+      ],
+    },
+    {
+      calls: [
+        {
+          name: 'submit_plan',
+          arguments: {
+            plan: `1. Write notes-${s}.txt with the summary.\n2. Read it back to check.\nLeft out: nothing.`,
+          },
+        },
+      ],
+    },
   ]);
   await script('Plan approval', [
-    { calls: [{ name: 'write_file', arguments: { path: `notes-${s}.txt`, content: `Approved and written ${s}`, reason: 'the approved first step' } }] },
+    {
+      calls: [
+        {
+          name: 'write_file',
+          arguments: {
+            path: `notes-${s}.txt`,
+            content: `Approved and written ${s}`,
+            reason: 'the approved first step',
+          },
+        },
+      ],
+    },
     { calls: [{ name: 'read_file', arguments: { path: `notes-${s}.txt` } }] },
     { text: `Wrote and read notes-${s}.txt.` },
   ]);
@@ -237,7 +277,9 @@ test('a task that requires plan approval refuses a write, parks on its plan, and
   expect(held[1].tool_results.map((r) => r.content).join('\n')).toMatch(/plan/i);
   const resumed = await settledRounds('Plan approval', 3, 60_000, since);
   expect(resumed[0].tools, 'submit_plan is withdrawn with the hold').not.toContain('submit_plan');
-  expect(resumed[2].tool_results.map((r) => r.content).join('\n')).toContain(`Approved and written ${s}`);
+  expect(resumed[2].tool_results.map((r) => r.content).join('\n')).toContain(
+    `Approved and written ${s}`
+  );
   expect(consoleErrors).toEqual([]);
 });
 
@@ -274,7 +316,11 @@ test('a task run parks on a question and resumes with the answer given in the co
   await signIn(page);
   await ensureProject(PROJECT);
   const title = `Ask me ${s}`;
-  const taskId = await createTask(page, { title, description: `ASKTASK ${s}: pick the banner colour.`, project: PROJECT });
+  const taskId = await createTask(page, {
+    title,
+    description: `ASKTASK ${s}: pick the banner colour.`,
+    project: PROJECT,
+  });
   await startRun(page, title);
 
   const parked = await waitingRun(taskId);
@@ -301,7 +347,19 @@ test('a task run backgrounds a command, parks on the wait, and finishes with the
   const jobId = '$re:^Started ([A-Za-z0-9_-]+) \\(pid';
   await script(`JOBTASK ${s}`, [
     // A task run has run_command, an allow-listed program with arguments, rather than a shell.
-    { calls: [{ name: 'run_command', arguments: { command: 'python3', args: ['-c', `print(__import__('time').sleep(8) or 'job-${s}')`], background: true, reason: 'a build that outlives one round' } }] },
+    {
+      calls: [
+        {
+          name: 'run_command',
+          arguments: {
+            command: 'python3',
+            args: ['-c', `print(__import__('time').sleep(8) or 'job-${s}')`],
+            background: true,
+            reason: 'a build that outlives one round',
+          },
+        },
+      ],
+    },
     { calls: [{ name: 'wait_for', arguments: { kind: 'job', id: jobId, timeout_secs: 90 } }] },
     { calls: [{ name: 'tail_job', arguments: { id: jobId } }] },
     { text: `The job printed job-${s}.` },
@@ -310,7 +368,11 @@ test('a task run backgrounds a command, parks on the wait, and finishes with the
   await signIn(page);
   await ensureProject(PROJECT);
   const title = `Job me ${s}`;
-  const taskId = await createTask(page, { title, description: `JOBTASK ${s}: run the slow job and wait for it.`, project: PROJECT });
+  const taskId = await createTask(page, {
+    title,
+    description: `JOBTASK ${s}: run the slow job and wait for it.`,
+    project: PROJECT,
+  });
   await startRun(page, title);
 
   // The park is short-lived and `waiting_on` is on the run itself, so it is
@@ -349,15 +411,41 @@ test('a task run corrects a refused command in the same attempt rather than star
   const s = stamp();
   await script(`FIXTASK ${s}`, [
     // An argument carrying a semicolon is refused. The refusal is a tool result the model can act on.
-    { calls: [{ name: 'run_command', arguments: { command: 'python3', args: ['-c', `print('first'); print('fix-${s}')`], reason: 'print the marker' } }] },
-    { calls: [{ name: 'run_command', arguments: { command: 'python3', args: ['-c', `print('fix-${s}')`], reason: 'print the marker without the semicolon' } }] },
+    {
+      calls: [
+        {
+          name: 'run_command',
+          arguments: {
+            command: 'python3',
+            args: ['-c', `print('first'); print('fix-${s}')`],
+            reason: 'print the marker',
+          },
+        },
+      ],
+    },
+    {
+      calls: [
+        {
+          name: 'run_command',
+          arguments: {
+            command: 'python3',
+            args: ['-c', `print('fix-${s}')`],
+            reason: 'print the marker without the semicolon',
+          },
+        },
+      ],
+    },
     { text: `The command printed fix-${s}.` },
   ]);
 
   await signIn(page);
   await ensureProject(PROJECT);
   const title = `Fix me ${s}`;
-  const taskId = await createTask(page, { title, description: `FIXTASK ${s}: print the marker.`, project: PROJECT });
+  const taskId = await createTask(page, {
+    title,
+    description: `FIXTASK ${s}: print the marker.`,
+    project: PROJECT,
+  });
   await startRun(page, title);
 
   const done = await finished(taskId, 240_000);
@@ -390,7 +478,18 @@ test('a task with a repository works in a worktree, and its change is pushed and
   test.setTimeout(600_000);
   const s = stamp();
   await script(`REPOTASK ${s}`, [
-    { calls: [{ name: 'write_file', arguments: { path: `live-verify/${s}.md`, content: `# Live verification ${s}\n\nWritten by a task run in a worktree.\n`, reason: 'the change to publish' } }] },
+    {
+      calls: [
+        {
+          name: 'write_file',
+          arguments: {
+            path: `live-verify/${s}.md`,
+            content: `# Live verification ${s}\n\nWritten by a task run in a worktree.\n`,
+            reason: 'the change to publish',
+          },
+        },
+      ],
+    },
     { calls: [{ name: 'read_file', arguments: { path: `live-verify/${s}.md` } }] },
     { text: `Added live-verify/${s}.md.` },
   ]);
@@ -401,7 +500,10 @@ test('a task with a repository works in a worktree, and its change is pushed and
   const token = await owner();
   const linked = await api('POST', `/api/projects/${projectId}/github`, {
     token,
-    body: { repo_url: repo, access_token: process.env.ZONE_LIVE_REPO_TOKEN ?? 'proxy-authenticated' },
+    body: {
+      repo_url: repo,
+      access_token: process.env.ZONE_LIVE_REPO_TOKEN ?? 'proxy-authenticated',
+    },
   });
   expect([200, 201], JSON.stringify(linked.body)).toContain(linked.status);
 
@@ -420,13 +522,17 @@ test('a task with a repository works in a worktree, and its change is pushed and
     `/api/tasks/${taskId}`,
     (body) => {
       const detail = (body as { task?: unknown }).task ?? body;
-      return typeof (detail as { id?: unknown })?.id === 'string' ? (detail as { pr_url?: string | null }) : undefined;
+      return typeof (detail as { id?: unknown })?.id === 'string'
+        ? (detail as { pr_url?: string | null })
+        : undefined;
     },
     { token }
   );
   expect(task.pr_url ?? '').toMatch(/pull\/\d+/);
   const rounds = await roundsFor(`REPOTASK ${s}`);
   expect(rounds).toHaveLength(3);
-  expect(rounds[2].tool_results.map((r) => r.content).join('\n')).toContain(`Live verification ${s}`);
+  expect(rounds[2].tool_results.map((r) => r.content).join('\n')).toContain(
+    `Live verification ${s}`
+  );
   expect(consoleErrors).toEqual([]);
 });

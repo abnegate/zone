@@ -1,7 +1,6 @@
-import { test, expect } from './fixtures';
 import type { Page } from '@playwright/test';
 import { pullRequestKey } from '../src/features/pull-requests/utils/identity';
-import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
+import { expect, test } from './fixtures';
 import {
   githubNow,
   mockTasks,
@@ -11,6 +10,7 @@ import {
   setupCommonRoutes,
   tasksNow,
 } from './layout-fixtures';
+import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
 
 const runScreenshots = process.env.RUN_SCREENSHOTS === 'true';
 const describeScreenshots = runScreenshots ? test.describe : test.describe.skip;
@@ -63,10 +63,7 @@ async function fontsLoaded(page: Page): Promise<void> {
   });
 }
 
-async function capturePage(
-  page: Page,
-  options: Parameters<Page['screenshot']>[0]
-): Promise<void> {
+async function capturePage(page: Page, options: Parameters<Page['screenshot']>[0]): Promise<void> {
   const populated: Record<string, string> = {
     'screenshots/models-populated.png': '.model-item',
     'screenshots/chats-populated.png': '.chat-item',
@@ -88,8 +85,7 @@ async function capturePage(
     await expect(page.locator(content).first()).toBeVisible();
     await expect(page.locator(SKELETON_CARD)).toHaveCount(0);
   }
-  if (options?.path?.includes('modal-'))
-    await expect(page.getByRole('dialog')).toBeVisible();
+  if (options?.path?.includes('modal-')) await expect(page.getByRole('dialog')).toBeVisible();
   await fontsLoaded(page);
   await page.screenshot({ ...options, animations: 'disabled', style: SETTLED_FILE_BUTTONS });
 }
@@ -105,16 +101,13 @@ async function verifyNoErrors(page: Page) {
   await expect(tokenError).not.toBeVisible({ timeout: 1000 });
 
   // Check for generic error messages
-  const genericError = page
-    .locator('[class*="error"]')
-    .filter({ hasText: /failed|error/i });
+  const genericError = page.locator('[class*="error"]').filter({ hasText: /failed|error/i });
   const errorCount = await genericError.count();
   if (errorCount > 0) {
     const errorText = await genericError.first().textContent();
     if (
       errorText &&
-      (errorText.includes('Validation failed') ||
-        errorText.includes('Unexpected token'))
+      (errorText.includes('Validation failed') || errorText.includes('Unexpected token'))
     ) {
       throw new Error(`Page has error: ${errorText}`);
     }
@@ -406,13 +399,11 @@ describeScreenshots('Screenshots - Populated States', () => {
         buffer: Buffer.from(PNG_BASE64, 'base64'),
       },
     ]);
-    await panel
-      .getByLabel('Reference image for target 1: blue-studio-target.png')
-      .setInputFiles({
-        name: 'blue-studio-reference.png',
-        mimeType: 'image/png',
-        buffer: Buffer.from(PNG_BASE64, 'base64'),
-      });
+    await panel.getByLabel('Reference image for target 1: blue-studio-target.png').setInputFiles({
+      name: 'blue-studio-reference.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(PNG_BASE64, 'base64'),
+    });
     await panel
       .getByLabel('Instruction for target 1: blue-studio-target.png')
       .fill('Change the background to a blue studio');
@@ -444,9 +435,9 @@ describeScreenshots('Screenshots - Populated States', () => {
       window.scrollTo({ top: 0 });
       document.documentElement.setAttribute('data-theme', 'light');
     });
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
-      true
-    );
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+    ).toBe(true);
     await capturePage(page, {
       path: 'screenshots/models-train-qwen-narrow.png',
       fullPage: true,
@@ -506,13 +497,11 @@ describeScreenshots('Screenshots - Populated States', () => {
       mimeType: 'image/png',
       buffer: Buffer.from(PNG_BASE64, 'base64'),
     });
-    await panel
-      .getByLabel('Reference image for target 1: blue-studio-target.png')
-      .setInputFiles({
-        name: 'blue-studio-reference.png',
-        mimeType: 'image/png',
-        buffer: Buffer.from(PNG_BASE64, 'base64'),
-      });
+    await panel.getByLabel('Reference image for target 1: blue-studio-target.png').setInputFiles({
+      name: 'blue-studio-reference.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(PNG_BASE64, 'base64'),
+    });
     await panel
       .getByLabel('Instruction for target 1: blue-studio-target.png')
       .fill('Change the background to a blue studio');
@@ -911,9 +900,7 @@ describeScreenshots('Screenshots - Modals', () => {
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
 
     // Click new project button
-    const newProjectBtn = page
-      .locator('button')
-      .filter({ hasText: /New Project/i });
+    const newProjectBtn = page.locator('button').filter({ hasText: /New Project/i });
     await expect(newProjectBtn).toBeVisible();
     await newProjectBtn.click();
     await page.waitForTimeout(300);
@@ -983,9 +970,7 @@ describeScreenshots('Screenshots - Modals', () => {
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
 
     // Click add knowledge button
-    const addKnowledgeBtn = page
-      .locator('button')
-      .filter({ hasText: /Add Knowledge/i });
+    const addKnowledgeBtn = page.locator('button').filter({ hasText: /Add Knowledge/i });
     await expect(addKnowledgeBtn).toBeVisible();
     await addKnowledgeBtn.click();
     await page.waitForTimeout(300);
@@ -1012,9 +997,7 @@ describeScreenshots('Screenshots - Modals', () => {
     await page.waitForTimeout(100);
 
     // Click new project button
-    const newProjectBtn = page
-      .locator('button')
-      .filter({ hasText: /New Project/i });
+    const newProjectBtn = page.locator('button').filter({ hasText: /New Project/i });
     await expect(newProjectBtn).toBeVisible();
     await newProjectBtn.click();
     await page.waitForTimeout(300);

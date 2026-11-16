@@ -1,8 +1,8 @@
 import type { Page } from '@playwright/test';
 import type { ActionReceipt, Message, MessageRole } from '../src/features/chats/types';
-import { test, expect } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker, routeApi, CHAT_PROVIDERS } from './test-utils';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
+import { blockServiceWorker, CHAT_PROVIDERS, routeApi } from './test-utils';
 
 // Mock data generators
 const generateMockChat = (
@@ -134,9 +134,7 @@ test.describe('Chats Page', () => {
   });
 
   for (const width of [390, 769, 820, 1280]) {
-    test(`search text clears the search and clear icons at ${width}px`, async ({
-      page,
-    }) => {
+    test(`search text clears the search and clear icons at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       const input = page.getByTestId('chat-search-input');
       await input.fill('Search spacing');
@@ -145,9 +143,7 @@ test.describe('Chats Page', () => {
         const field = element.getBoundingClientRect();
         const style = getComputedStyle(element);
         const icon = document.querySelector('.chat-search-icon')!.getBoundingClientRect();
-        const clear = document
-          .querySelector('.chat-search-clear')!
-          .getBoundingClientRect();
+        const clear = document.querySelector('.chat-search-clear')!.getBoundingClientRect();
         return {
           start: field.left + Number.parseFloat(style.paddingLeft),
           end: field.right - Number.parseFloat(style.paddingRight),
@@ -366,9 +362,12 @@ test.describe('Chats Page', () => {
       await openNewChatFromSidebar(page);
       await page.getByLabel('Select Model').click();
       await page.getByRole('option', { name: 'llama3.2' }).click();
-      await page.getByRole('dialog', { name: 'New Chat' }).getByRole('button', {
-        name: 'Create Chat',
-      }).click();
+      await page
+        .getByRole('dialog', { name: 'New Chat' })
+        .getByRole('button', {
+          name: 'Create Chat',
+        })
+        .click();
 
       // Modal should close
       await expect(page.getByRole('dialog', { name: 'New Chat' })).toHaveCount(0);
@@ -494,7 +493,9 @@ test.describe('Chats Page', () => {
       await page.click('.chat-item');
 
       await expect(page.locator('.message-form textarea')).toBeVisible();
-      await expect(page.locator('.message-form').getByRole('button', { name: 'Send' })).toBeVisible();
+      await expect(
+        page.locator('.message-form').getByRole('button', { name: 'Send' })
+      ).toBeVisible();
     });
 
     test('sends message successfully', async ({ page }) => {
@@ -520,7 +521,9 @@ test.describe('Chats Page', () => {
 
     test('disables send button when input is empty', async ({ page }) => {
       await page.click('.chat-item');
-      await expect(page.locator('.message-form').getByRole('button', { name: 'Send' })).toBeDisabled();
+      await expect(
+        page.locator('.message-form').getByRole('button', { name: 'Send' })
+      ).toBeDisabled();
     });
 
     test('clears input after sending', async ({ page }) => {
@@ -824,15 +827,21 @@ test.describe('Chats Page', () => {
       await expect(page.getByTestId('sandbox-toggle')).toHaveCount(0);
       await expect(page.getByRole('button', { name: 'Host access' })).toHaveCount(0);
       await expect(page.locator('.message-form textarea')).toBeVisible();
-      await page.screenshot({ path: testInfo.outputPath('agent-header.png'), fullPage: true, animations: 'disabled' });
+      await page.screenshot({
+        path: testInfo.outputPath('agent-header.png'),
+        fullPage: true,
+        animations: 'disabled',
+      });
       await openNewChatFromSidebar(page);
       await page.getByRole('checkbox', { name: 'Agent mode', exact: true }).check();
       await expect(page.getByRole('checkbox', { name: 'Sandboxed' })).toHaveCount(0);
-      await expect(
-        page.getByText('run tools when asked', { exact: false })
-      ).toBeVisible();
+      await expect(page.getByText('run tools when asked', { exact: false })).toBeVisible();
       await expect(page.getByRole('button', { name: 'Create Chat', exact: true })).toBeVisible();
-      await page.screenshot({ path: testInfo.outputPath('agent-form.png'), fullPage: true, animations: 'disabled' });
+      await page.screenshot({
+        path: testInfo.outputPath('agent-form.png'),
+        fullPage: true,
+        animations: 'disabled',
+      });
     });
 
     test('sends a message and renders the tool the agent ran', async ({ page }) => {
@@ -852,9 +861,7 @@ test.describe('Chats Page', () => {
       const trace = page.getByTestId('tool-trace');
       await expect(trace).toBeVisible();
       await expect(trace.getByTestId('tool-call')).toContainText('Listed projects');
-      await expect(trace.getByTestId('tool-call')).toContainText(
-        'This workspace has no projects.'
-      );
+      await expect(trace.getByTestId('tool-call')).toContainText('This workspace has no projects.');
       await expect(page.locator('.message-assistant .message-content')).toContainText(
         'There are no projects in this workspace.'
       );
@@ -910,7 +917,12 @@ test.describe('Chats Page', () => {
           }
           if (payload.type !== 'send') return;
           const frames = [
-            { type: 'message_saved', message_id: 'msg-next', role: 'user', content: payload.content },
+            {
+              type: 'message_saved',
+              message_id: 'msg-next',
+              role: 'user',
+              content: payload.content,
+            },
             { type: 'message_start', message_id: 'msg-live', role: 'assistant' },
             {
               type: 'tool_call',
@@ -1008,7 +1020,12 @@ test.describe('Chats Page', () => {
           }
           if (payload.type !== 'send') return;
           const frames: object[] = [
-            { type: 'message_saved', message_id: 'msg-user', role: 'user', content: payload.content },
+            {
+              type: 'message_saved',
+              message_id: 'msg-user',
+              role: 'user',
+              content: payload.content,
+            },
             { type: 'message_start', message_id: 'msg-asst', role: 'assistant' },
           ];
           [opening, middle].forEach((text, index) => {
@@ -1066,15 +1083,12 @@ test.describe('Chats Page', () => {
               : (part.textContent?.trim() ?? '')
           )
         );
-      const expected = [
-        opening.trim(),
-        'tools: projects',
-        middle.trim(),
-        'tools: tasks',
-        closing,
-      ];
+      const expected = [opening.trim(), 'tools: projects', middle.trim(), 'tools: tasks', closing];
       expect(await order()).toEqual(expected);
-      await page.screenshot({ path: testInfo.outputPath('turn-order-live.png'), animations: 'disabled' });
+      await page.screenshot({
+        path: testInfo.outputPath('turn-order-live.png'),
+        animations: 'disabled',
+      });
 
       await mockChatRoutes(page, agentChat, [
         generateMockMessage('msg-user', 'chat-1', 'user', 'Is anything in flight?'),
@@ -1087,7 +1101,10 @@ test.describe('Chats Page', () => {
       await page.click('.chat-item');
       await expect(answer).toContainText(closing);
       expect(await order()).toEqual(expected);
-      await page.screenshot({ path: testInfo.outputPath('turn-order-reload.png'), animations: 'disabled' });
+      await page.screenshot({
+        path: testInfo.outputPath('turn-order-reload.png'),
+        animations: 'disabled',
+      });
     });
 
     test('shows a durable receipt for a workspace write and keeps it after reload', async ({

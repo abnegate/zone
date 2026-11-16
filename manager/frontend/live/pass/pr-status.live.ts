@@ -1,15 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import {
-  api,
-  enabled,
-  expect,
-  ownerToken,
-  record,
-  shot,
-  signIn,
-  sql,
-  test,
-} from './rig';
+import { api, enabled, expect, ownerToken, record, shot, signIn, sql, test } from './rig';
 
 /**
  * Row 30, second half: the pull request a task run opened was merged on
@@ -17,8 +7,7 @@ import {
  * it the task card reads "PR merged". The scratch branch is deleted last.
  */
 
-const REPO =
-  process.env.ZONE_LIVE_REPO_URL ?? 'https://github.com/abnegate/zone-tests';
+const REPO = process.env.ZONE_LIVE_REPO_URL ?? 'https://github.com/abnegate/zone-tests';
 const [OWNER, NAME] = REPO.replace(/^https:\/\/github\.com\//, '').split('/');
 const gh = {
   ...process.env,
@@ -33,7 +22,7 @@ test.describe('pull request status', () => {
     page,
   }) => {
     const rows = sql(
-      `select id || '|' || title || '|' || coalesce(pr_url, '') || '|' || coalesce(pr_status, '') || '|' || coalesce(branch_name, '') from tasks where pr_url is not null order by created_at desc limit 5`,
+      `select id || '|' || title || '|' || coalesce(pr_url, '') || '|' || coalesce(pr_status, '') || '|' || coalesce(branch_name, '') from tasks where pr_url is not null order by created_at desc limit 5`
     ).map((r) => r.split('|'));
     const merged = rows.find((r) => {
       const number = r[2].match(/pull\/(\d+)/)?.[1];
@@ -41,13 +30,13 @@ test.describe('pull request status', () => {
       const view = execFileSync(
         'gh',
         ['pr', 'view', number, '-R', `${OWNER}/${NAME}`, '--json', 'state'],
-        { encoding: 'utf8', env: gh },
+        { encoding: 'utf8', env: gh }
       );
       return JSON.parse(view).state === 'MERGED';
     });
     expect(
       merged,
-      `a task whose pull request GitHub reports merged: ${rows.map((r) => r.slice(1, 4).join(' ')).join(' || ')}`,
+      `a task whose pull request GitHub reports merged: ${rows.map((r) => r.slice(1, 4).join(' ')).join(' || ')}`
     ).toBeTruthy();
     const [taskId, title, prUrl, statusBefore, branch] = merged as string[];
     const token = await ownerToken();
@@ -60,23 +49,21 @@ test.describe('pull request status', () => {
         async () => {
           const { body } = await api('GET', `/api/tasks/${taskId}`, { token });
           status = String(
-            (
-              (body as { task?: { pr_status?: string } }).task ??
-              (body as { pr_status?: string })
-            ).pr_status ?? '',
+            ((body as { task?: { pr_status?: string } }).task ?? (body as { pr_status?: string }))
+              .pr_status ?? ''
           );
           return status;
         },
-        { timeout: 180_000, intervals: [15_000] },
+        { timeout: 180_000, intervals: [15_000] }
       )
       .toBe('merged')
       .catch(() => undefined);
     const minutes = Math.round((Date.now() - waitedFrom) / 60_000);
     const artifacts = sql(
-      `select artifacts->'pr' from task_runs where task_id = '${taskId}' order by started_at desc limit 1`,
+      `select artifacts->'pr' from task_runs where task_id = '${taskId}' order by started_at desc limit 1`
     ).join('');
     const receptions = sql(
-      `select count(*) from task_runs where task_id = '${taskId}' and artifacts->'pr'->>'merged_at' is not null`,
+      `select count(*) from task_runs where task_id = '${taskId}' and artifacts->'pr'->>'merged_at' is not null`
     ).join(',');
     await signIn(page);
     await page.goto('/tasks');
@@ -89,18 +76,13 @@ test.describe('pull request status', () => {
       const branches = execFileSync(
         'gh',
         ['api', `repos/${OWNER}/${NAME}/branches`, '--jq', '.[].name'],
-        { encoding: 'utf8', env: gh },
+        { encoding: 'utf8', env: gh }
       );
       if (branches.split('\n').includes(branch)) {
         execFileSync(
           'gh',
-          [
-            'api',
-            '-X',
-            'DELETE',
-            `repos/${OWNER}/${NAME}/git/refs/heads/${branch}`,
-          ],
-          { env: gh },
+          ['api', '-X', 'DELETE', `repos/${OWNER}/${NAME}/git/refs/heads/${branch}`],
+          { env: gh }
         );
         branchDeleted = `deleted ${branch}`;
       }
@@ -121,10 +103,7 @@ test.describe('pull request status', () => {
       card_text: cardText.slice(0, 200),
       sync: 'reception-sync housekeeping sweep, every 30 minutes; it ran at 04:42 UTC after the 04:13 merge',
       branch: branchDeleted,
-      screenshots: [
-        '30-task-pr-open.png',
-        '30-task-card-after-merge-and-sync.png',
-      ],
+      screenshots: ['30-task-pr-open.png', '30-task-card-after-merge-and-sync.png'],
     });
     expect(merged_shown, cardText).toBe(true);
   });

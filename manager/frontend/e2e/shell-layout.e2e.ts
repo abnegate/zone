@@ -1,10 +1,6 @@
 import type { Page, TestInfo } from '@playwright/test';
 import { expect, test } from './fixtures';
-import {
-  aiSettingsResponse,
-  setupAdminAuth,
-  setupCommonRoutes,
-} from './layout-fixtures';
+import { aiSettingsResponse, setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
 
 const timestamp = '2026-09-05T00:00:00Z';
@@ -21,31 +17,23 @@ async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
   await blockServiceWorker(page.context());
   await page.emulateMedia({ colorScheme: mode });
   await setupCommonRoutes(page, true);
-  await routeApi(
-    page,
-    /\/api\/auth\/(verify-email|forgot-password)/,
-    async (route) => {
-      await route.fulfill({
-        json: { success: true, message: 'Request completed successfully' },
-      });
-    },
-  );
-  await routeApi(
-    page,
-    /\/api\/invitations\/layout-invitation-token/,
-    async (route) => {
-      await route.fulfill({
-        json: {
-          organization_name: 'Acme Corp',
-          org_role: 'member',
-          workspace_name: 'Engineering',
-          workspace_role: 'member',
-          invited_by_email: 'admin@example.com',
-          expires_at: '2099-01-01T00:00:00Z',
-        },
-      });
-    },
-  );
+  await routeApi(page, /\/api\/auth\/(verify-email|forgot-password)/, async (route) => {
+    await route.fulfill({
+      json: { success: true, message: 'Request completed successfully' },
+    });
+  });
+  await routeApi(page, /\/api\/invitations\/layout-invitation-token/, async (route) => {
+    await route.fulfill({
+      json: {
+        organization_name: 'Acme Corp',
+        org_role: 'member',
+        workspace_name: 'Engineering',
+        workspace_role: 'member',
+        invited_by_email: 'admin@example.com',
+        expires_at: '2099-01-01T00:00:00Z',
+      },
+    });
+  });
   await routeApi(page, /\/settings\/ai/, async (route) => {
     const path = new URL(route.request().url()).pathname;
     await route.fulfill({
@@ -120,7 +108,7 @@ async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
                 }
               : { invitations: [] };
       await route.fulfill({ json: body });
-    },
+    }
   );
 }
 
@@ -143,21 +131,14 @@ async function shell(page: Page): Promise<ShellLayout> {
       return target !== null && target.getBoundingClientRect().height > 0;
     };
     return {
-      columns: layout
-        ? getComputedStyle(layout).gridTemplateColumns.split(' ').length
-        : 0,
+      columns: layout ? getComputedStyle(layout).gridTemplateColumns.split(' ').length : 0,
       navigation: visible('.settings-nav'),
       back: visible('.settings-back'),
     };
   });
 }
 
-async function openSection(
-  page: Page,
-  width: number,
-  group: string,
-  label: string,
-): Promise<void> {
+async function openSection(page: Page, width: number, group: string, label: string): Promise<void> {
   const compact = width <= narrowLayoutWidth;
   if (compact) {
     await page.getByRole('link', { name: 'Back to settings', exact: true }).click();
@@ -177,25 +158,15 @@ async function openSection(
   await expect.poll(() => shell(page)).toEqual(expectedShell(width));
 }
 
-async function capture(
-  page: Page,
-  information: TestInfo,
-  name: string,
-): Promise<void> {
+async function capture(page: Page, information: TestInfo, name: string): Promise<void> {
   await page.evaluate(() => document.fonts.ready);
   await page.locator('.settings-page .page-body').evaluateAll((elements) => {
     for (const element of elements) element.scrollTop = 0;
   });
   await expect
-    .poll(() =>
-      page.evaluate(
-        () => document.documentElement.scrollWidth <= window.innerWidth,
-      ),
-    )
+    .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
     .toBe(true);
-  await expect(
-    page.getByText(/Validation failed|Unexpected token/),
-  ).toHaveCount(0);
+  await expect(page.getByText(/Validation failed|Unexpected token/)).toHaveCount(0);
   await page.screenshot({
     path: information.outputPath(`${name}.png`),
     fullPage: true,
@@ -206,7 +177,7 @@ async function capture(
 async function signIn(
   page: Page,
   scenario: (typeof scenarios)[number],
-  path: string,
+  path: string
 ): Promise<void> {
   await page.setViewportSize({
     width: scenario.width,
@@ -219,9 +190,7 @@ async function signIn(
 }
 
 for (const scenario of scenarios) {
-  test(`authentication layouts ${scenario.name}`, async ({
-    page,
-  }, information) => {
+  test(`authentication layouts ${scenario.name}`, async ({ page }, information) => {
     await page.setViewportSize({
       width: scenario.width,
       height: scenario.height,
@@ -240,14 +209,8 @@ for (const scenario of scenarios) {
       '/invitations?token=layout-invitation-token',
     ]) {
       await page.goto(route, { waitUntil: 'domcontentloaded' });
-      await expect(
-        page.locator('.auth-container, .auth-card, .invitation-card'),
-      ).toBeVisible();
-      await capture(
-        page,
-        information,
-        route.slice(1).replaceAll(/[^a-z-]+/g, '-'),
-      );
+      await expect(page.locator('.auth-container, .auth-card, .invitation-card')).toBeVisible();
+      await capture(page, information, route.slice(1).replaceAll(/[^a-z-]+/g, '-'));
     }
     await page.goto('/login', { waitUntil: 'domcontentloaded' });
     const input = page.getByLabel('Email', { exact: true });
@@ -258,9 +221,7 @@ for (const scenario of scenarios) {
     await expect(button).toHaveCSS('font-size', '14px');
   });
 
-  test(`workspace settings layouts ${scenario.name}`, async ({
-    page,
-  }, information) => {
+  test(`workspace settings layouts ${scenario.name}`, async ({ page }, information) => {
     await signIn(page, scenario, '/settings/workspace/general');
     await expect(page.locator('#font-family')).toBeVisible();
     await expect.poll(() => shell(page)).toEqual(expectedShell(scenario.width));
@@ -270,14 +231,13 @@ for (const scenario of scenarios) {
       .first()
       .evaluate((form) => {
         const sections = Array.from(form.children).filter(
-          (child) => !child.classList.contains('settings-actions'),
+          (child) => !child.classList.contains('settings-actions')
         );
         return sections
           .slice(1)
           .map(
             (section, index) =>
-              section.getBoundingClientRect().top -
-              sections[index].getBoundingClientRect().bottom,
+              section.getBoundingClientRect().top - sections[index].getBoundingClientRect().bottom
           );
       });
     expect(rhythm.length).toBeGreaterThan(1);
@@ -289,22 +249,16 @@ for (const scenario of scenarios) {
       await openSection(page, scenario.width, 'Workspace', section);
       await capture(page, information, `workspace-${section.toLowerCase()}`);
       if (section === 'Members') {
-        await page
-          .getByRole('button', { name: 'Add Member', exact: true })
-          .click();
+        await page.getByRole('button', { name: 'Add Member', exact: true }).click();
         await expect(page.getByRole('dialog')).toBeVisible();
         await page.getByRole('combobox', { name: 'Role', exact: true }).click();
         await expect(page.getByRole('listbox')).toBeVisible();
         const stacking = await page.evaluate(() => ({
           popover: Number(
-            getComputedStyle(
-              document.querySelector('.ui-select-content') as Element,
-            ).zIndex,
+            getComputedStyle(document.querySelector('.ui-select-content') as Element).zIndex
           ),
           modal: Number(
-            getComputedStyle(
-              document.querySelector('.ui-dialog-content') as Element,
-            ).zIndex,
+            getComputedStyle(document.querySelector('.ui-dialog-content') as Element).zIndex
           ),
         }));
         expect(stacking.popover).toBeGreaterThan(stacking.modal);
@@ -315,13 +269,9 @@ for (const scenario of scenarios) {
     }
   });
 
-  test(`organization settings layouts ${scenario.name}`, async ({
-    page,
-  }, information) => {
+  test(`organization settings layouts ${scenario.name}`, async ({ page }, information) => {
     await signIn(page, scenario, '/settings/organization/ai');
-    await expect(
-      page.getByRole('region', { name: 'AI defaults', exact: true }),
-    ).toBeVisible();
+    await expect(page.getByRole('region', { name: 'AI defaults', exact: true })).toBeVisible();
     await expect.poll(() => shell(page)).toEqual(expectedShell(scenario.width));
     await capture(page, information, 'organization-ai-defaults');
     for (const section of ['Members', 'Devices', 'Billing', 'Audit log']) {
@@ -329,26 +279,18 @@ for (const scenario of scenarios) {
       await capture(
         page,
         information,
-        `organization-${section.toLowerCase().replaceAll(' ', '-')}`,
+        `organization-${section.toLowerCase().replaceAll(' ', '-')}`
       );
       if (section === 'Members') {
-        await page
-          .getByRole('button', { name: 'Invite Member', exact: true })
-          .click();
+        await page.getByRole('button', { name: 'Invite Member', exact: true }).click();
         await expect(page.getByRole('dialog')).toBeVisible();
-        await expect(
-          page.getByLabel('Email Address', { exact: true }),
-        ).toHaveCSS('height', '32px');
+        await expect(page.getByLabel('Email Address', { exact: true })).toHaveCSS('height', '32px');
         await capture(page, information, 'invitation-dialog');
         if (scenario.width === 390) {
           const bounds = await page.getByRole('dialog').boundingBox();
           expect.soft(bounds ? Math.round(bounds.x) : null).toBe(16);
           expect
-            .soft(
-              bounds
-                ? Math.round(scenario.width - bounds.x - bounds.width)
-                : null,
-            )
+            .soft(bounds ? Math.round(scenario.width - bounds.x - bounds.width) : null)
             .toBe(16);
         }
         await page.getByRole('button', { name: 'Cancel', exact: true }).click();
@@ -356,31 +298,18 @@ for (const scenario of scenarios) {
     }
   });
 
-  test(`sessions and navigation layouts ${scenario.name}`, async ({
-    page,
-  }, information) => {
+  test(`sessions and navigation layouts ${scenario.name}`, async ({ page }, information) => {
     await signIn(page, scenario, '/settings/you/sessions');
-    await expect(page.locator('.settings-page .page-bar-title')).toHaveCSS(
-      'font-size',
-      '18px',
-    );
-    await expect(
-      page.getByRole('heading', { name: 'Active Sessions' }),
-    ).toBeVisible();
+    await expect(page.locator('.settings-page .page-bar-title')).toHaveCSS('font-size', '18px');
+    await expect(page.getByRole('heading', { name: 'Active Sessions' })).toBeVisible();
     await expect.poll(() => shell(page)).toEqual(expectedShell(scenario.width));
-    await expect(
-      page.getByRole('table', { name: 'Active sessions' }),
-    ).toBeVisible();
+    await expect(page.getByRole('table', { name: 'Active sessions' })).toBeVisible();
     await capture(page, information, 'sessions');
-    await page
-      .getByRole('button', { name: 'Revoke All Other Sessions' })
-      .click();
+    await page.getByRole('button', { name: 'Revoke All Other Sessions' }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     const layers = await page.evaluate(() => {
       const level = (selector: string): number =>
-        Number(
-          getComputedStyle(document.querySelector(selector) as Element).zIndex,
-        );
+        Number(getComputedStyle(document.querySelector(selector) as Element).zIndex);
       return {
         overlay: level('.ui-dialog-overlay'),
         dialog: level('.ui-dialog-content'),
@@ -390,16 +319,12 @@ for (const scenario of scenarios) {
     expect(layers.overlay).toBeGreaterThan(layers.sidebar);
     expect(layers.dialog).toBeGreaterThanOrEqual(layers.overlay);
 
-    await expect(
-      page.getByRole('button', { name: 'Cancel', exact: true }),
-    ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeVisible();
     await capture(page, information, 'session-confirmation');
     await page.getByRole('button', { name: 'Cancel', exact: true }).click();
     if (scenario.width <= narrowLayoutWidth) {
       await page.getByRole('button', { name: /Toggle menu/i }).click();
-      await expect
-        .poll(async () => (await page.locator('.sidebar').boundingBox())?.x)
-        .toBe(0);
+      await expect.poll(async () => (await page.locator('.sidebar').boundingBox())?.x).toBe(0);
       // The open drawer carries its own close control, so the row to measure
       // is close, logo, theme toggle inside the drawer's header.
       const header = await page.evaluate(() => {
@@ -421,9 +346,7 @@ for (const scenario of scenarios) {
   });
 }
 
-test('workspace custom typography preserves shared proportions', async ({
-  page,
-}, information) => {
+test('workspace custom typography preserves shared proportions', async ({ page }, information) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await prepare(page, 'dark');
   await routeApi(page, /\/workspaces\/[^/]+\/theme(?:\?|$)/, async (route) => {
@@ -448,14 +371,8 @@ test('workspace custom typography preserves shared proportions', async ({
   await setupAdminAuth(page);
   await page.goto('/settings/workspace/general', { waitUntil: 'domcontentloaded' });
   await expect(page.getByRole('combobox', { name: 'Font Family' })).toHaveText('Roboto');
-  await expect(page.locator('.settings-page .page-bar-title')).toHaveCSS(
-    'font-size',
-    '20.25px',
-  );
-  await expect(page.locator('.settings-page .page-bar-title')).toHaveCSS(
-    'font-family',
-    /Roboto/,
-  );
+  await expect(page.locator('.settings-page .page-bar-title')).toHaveCSS('font-size', '20.25px');
+  await expect(page.locator('.settings-page .page-bar-title')).toHaveCSS('font-family', /Roboto/);
   await expect(page.locator('#font-family')).toHaveCSS('height', '36px');
   await capture(page, information, 'workspace-custom-font');
 });

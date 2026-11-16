@@ -559,10 +559,7 @@ test.describe('Tasks Page', () => {
       await expect(card(column(page, 'Blocked'), 'Wait on API keys')).toBeVisible();
     });
 
-    test('a card shows its project, priority, pull request and age', async ({
-      context,
-      page,
-    }) => {
+    test('a card shows its project, priority, pull request and age', async ({ context, page }) => {
       await serveTasks(context, page);
 
       const login = card(page, 'Implement login page');
@@ -589,10 +586,7 @@ test.describe('Tasks Page', () => {
       await expect(unprioritised.getByRole('img', { name: /^Priority/ })).toHaveCount(0);
     });
 
-    test('filters by project only, and shows empty columns as such', async ({
-      context,
-      page,
-    }) => {
+    test('filters by project only, and shows empty columns as such', async ({ context, page }) => {
       const server = await serveTasks(context, page);
 
       const filters = page.locator('.tasks-filters').getByRole('combobox');
@@ -627,9 +621,9 @@ test.describe('Tasks Page', () => {
 
       await pointerDrag(page, 'Fix navigation bug', column(page, 'Blocked'));
 
-      await expect.poll(() => moves(server)).toEqual([
-        { method: 'PUT', id: 'task-3', body: { status: 'blocked' } },
-      ]);
+      await expect
+        .poll(() => moves(server))
+        .toEqual([{ method: 'PUT', id: 'task-3', body: { status: 'blocked' } }]);
       await expect(card(column(page, 'Blocked'), 'Fix navigation bug')).toBeVisible();
       await expect(column(page, 'In progress').locator('p.board-column-empty')).toHaveText(
         'No tasks'
@@ -653,9 +647,9 @@ test.describe('Tasks Page', () => {
       await pressAndAnnounce(page, 'ArrowRight', 'Implement login page is over In progress.');
       await pressAndAnnounce(page, 'Space', 'Implement login page moved to In progress.');
 
-      await expect.poll(() => moves(server)).toEqual([
-        { method: 'PUT', id: 'task-1', body: { status: 'in_progress' } },
-      ]);
+      await expect
+        .poll(() => moves(server))
+        .toEqual([{ method: 'PUT', id: 'task-1', body: { status: 'in_progress' } }]);
       await expect(card(column(page, 'In progress'), 'Implement login page')).toBeVisible();
       await expect(grip).toBeFocused();
     });
@@ -677,9 +671,9 @@ test.describe('Tasks Page', () => {
       await expect(announcer(page)).toHaveText('Implement login page is over In review.');
       await pressAndAnnounce(page, 'Space', 'Implement login page moved to In review.');
 
-      await expect.poll(() => moves(server)).toEqual([
-        { method: 'PUT', id: 'task-1', body: { status: 'review' } },
-      ]);
+      await expect
+        .poll(() => moves(server))
+        .toEqual([{ method: 'PUT', id: 'task-1', body: { status: 'review' } }]);
       await expect(card(column(page, 'In review'), 'Implement login page')).toBeInViewport();
     });
 
@@ -696,9 +690,9 @@ test.describe('Tasks Page', () => {
       }
       await pressAndAnnounce(page, 'Space', 'Implement login page moved to Cancelled.');
 
-      await expect.poll(() => moves(server)).toEqual([
-        { method: 'PUT', id: 'task-1', body: { status: 'cancelled' } },
-      ]);
+      await expect
+        .poll(() => moves(server))
+        .toEqual([{ method: 'PUT', id: 'task-1', body: { status: 'cancelled' } }]);
       await expect(card(column(page, 'Cancelled'), 'Implement login page')).toBeInViewport();
       await expect(grip).toBeFocused();
     });
@@ -806,9 +800,7 @@ test.describe('Tasks Page', () => {
       );
       await expect(card(column(page, 'In progress'), 'Fix navigation bug')).toBeVisible();
       await expect(card(column(page, 'Blocked'), 'Fix navigation bug')).toHaveCount(0);
-      expect(moves(server)).toEqual([
-        { method: 'PUT', id: 'task-3', body: { status: 'blocked' } },
-      ]);
+      expect(moves(server)).toEqual([{ method: 'PUT', id: 'task-3', body: { status: 'blocked' } }]);
     });
 
     test('a reload before a move is answered leaves the card where it was dropped', async ({
@@ -836,9 +828,9 @@ test.describe('Tasks Page', () => {
       );
       release();
 
-      await expect.poll(() => server.tasks.find((task) => task.id === 'task-3')?.status).toBe(
-        'blocked'
-      );
+      await expect
+        .poll(() => server.tasks.find((task) => task.id === 'task-3')?.status)
+        .toBe('blocked');
       await expect(card(column(page, 'Blocked'), 'Fix navigation bug')).toBeVisible();
       await expect(page.getByText("Couldn't move Fix navigation bug")).toHaveCount(0);
     });
@@ -1130,9 +1122,9 @@ test.describe('Tasks Page', () => {
       expect(moves(server)).toEqual([]);
 
       await pointerDrag(page, 'Fix navigation bug', column(page, 'Blocked'));
-      await expect.poll(() => moves(server)).toEqual([
-        { method: 'PUT', id: 'task-3', body: { status: 'blocked' } },
-      ]);
+      await expect
+        .poll(() => moves(server))
+        .toEqual([{ method: 'PUT', id: 'task-3', body: { status: 'blocked' } }]);
       const moved = card(column(page, 'Blocked'), 'Fix navigation bug');
       await expect(moved.getByRole('button', { name: /^Open / })).toHaveCount(2);
 
@@ -1146,11 +1138,13 @@ test.describe('Tasks Page', () => {
       await page.mouse.up();
       await expect(page.locator('.task-card-overlay')).toHaveCount(0);
 
-      await expect.poll(() => moves(server).at(-1)).toEqual({
-        method: 'PUT',
-        id: 'task-3',
-        body: { status: 'in_progress' },
-      });
+      await expect
+        .poll(() => moves(server).at(-1))
+        .toEqual({
+          method: 'PUT',
+          id: 'task-3',
+          body: { status: 'in_progress' },
+        });
       await expect(card(column(page, 'In progress'), 'Fix navigation bug')).toBeVisible();
       await expect(page).toHaveURL('/tasks');
     });
@@ -1168,9 +1162,9 @@ test.describe('Tasks Page', () => {
       await input.fill('Ship the onboarding flow');
       await input.press('Enter');
 
-      await expect.poll(() => server.mutations).toEqual([
-        { method: 'PUT', id: 'task-7', body: { title: 'Ship the onboarding flow' } },
-      ]);
+      await expect
+        .poll(() => server.mutations)
+        .toEqual([{ method: 'PUT', id: 'task-7', body: { title: 'Ship the onboarding flow' } }]);
       await expect(input).toHaveCount(0);
       await expect(
         page.getByRole('button', { name: 'Ship the onboarding flow', exact: true })
@@ -1228,9 +1222,11 @@ test.describe('Tasks Page', () => {
       await moved.pressSequentially('s');
       await moved.press('Enter');
 
-      await expect.poll(() => server.mutations).toEqual([
-        { method: 'PUT', id: 'task-2', body: { title: 'Queue nightly build and deplsoy' } },
-      ]);
+      await expect
+        .poll(() => server.mutations)
+        .toEqual([
+          { method: 'PUT', id: 'task-2', body: { title: 'Queue nightly build and deplsoy' } },
+        ]);
     });
 
     test('focus follows a card that a reload moves to another column', async ({
@@ -1342,9 +1338,11 @@ test.describe('Tasks Page', () => {
       await chooseSelect(status, 'Blocked');
       await dialog.getByRole('button', { name: 'Save changes', exact: true }).click();
 
-      await expect.poll(() => edits(server)).toEqual([
-        { method: 'PATCH', id: '', body: { ids: ['task-1', 'task-3'], status: 'blocked' } },
-      ]);
+      await expect
+        .poll(() => edits(server))
+        .toEqual([
+          { method: 'PATCH', id: '', body: { ids: ['task-1', 'task-3'], status: 'blocked' } },
+        ]);
       await expect(dialog).toHaveCount(0);
       const blocked = column(page, 'Blocked');
       await expect(card(blocked, 'Implement login page')).toBeVisible();
@@ -1404,18 +1402,15 @@ test.describe('Tasks Page', () => {
       expect(gap).toBe(8);
     });
 
-    test('dragging a selected card by its grip moves only that card', async ({
-      context,
-      page,
-    }) => {
+    test('dragging a selected card by its grip moves only that card', async ({ context, page }) => {
       const server = await serveTasks(context, page);
 
       await select(page, ['Implement login page', 'Fix navigation bug']);
       await pointerDrag(page, 'Fix navigation bug', column(page, 'Blocked'));
 
-      await expect.poll(() => server.mutations).toEqual([
-        { method: 'PUT', id: 'task-3', body: { status: 'blocked' } },
-      ]);
+      await expect
+        .poll(() => server.mutations)
+        .toEqual([{ method: 'PUT', id: 'task-3', body: { status: 'blocked' } }]);
       await expect(card(column(page, 'Blocked'), 'Fix navigation bug')).toBeVisible();
       await expect(card(column(page, 'Planned'), 'Implement login page')).toBeVisible();
       await expect(column(page, 'Blocked').locator('.board-column-count')).toHaveText('2');
@@ -1582,9 +1577,9 @@ test.describe('Tasks Page', () => {
           await expect(announcer(page)).toHaveText('Implement login page is over Blocked.');
           await touch.up();
 
-          await expect.poll(() => moves(server)).toEqual([
-            { method: 'PUT', id: 'task-1', body: { status: 'blocked' } },
-          ]);
+          await expect
+            .poll(() => moves(server))
+            .toEqual([{ method: 'PUT', id: 'task-1', body: { status: 'blocked' } }]);
           await expect(card(column(page, 'Blocked'), 'Implement login page')).toBeInViewport();
         });
       });

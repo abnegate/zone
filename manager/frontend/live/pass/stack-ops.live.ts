@@ -33,7 +33,7 @@ async function signInStack(page: Page): Promise<void> {
     {
       organization: stack.owner.organization.id,
       workspace: stack.owner.workspace.id,
-    },
+    }
   );
   await page.goto(`${CONSOLE}/login`);
   await page.evaluate(() => {
@@ -46,22 +46,16 @@ async function signInStack(page: Page): Promise<void> {
   await page.getByLabel('Password').fill(stack.owner.password);
   await page.getByRole('button', { name: /sign in|log in/i }).click();
   await expect(page).not.toHaveURL(/\/login/, { timeout: 60_000 });
-  await page.waitForFunction(
-    () => Boolean(localStorage.getItem('manager_access_token')),
-    { timeout: 30_000 },
-  );
+  await page.waitForFunction(() => Boolean(localStorage.getItem('manager_access_token')), {
+    timeout: 30_000,
+  });
 }
 
 test.describe('compose stack operations', () => {
-  test.skip(
-    !statePath.includes('stack'),
-    'run with ZONE_LIVE_STATE pointing at the stack tenants',
-  );
+  test.skip(!statePath.includes('stack'), 'run with ZONE_LIVE_STATE pointing at the stack tenants');
   test.describe.configure({ timeout: 900_000 });
 
-  test('59: the models ollama-init pulled show on the Models page', async ({
-    page,
-  }) => {
+  test('59: the models ollama-init pulled show on the Models page', async ({ page }) => {
     test.skip(step !== '59', 'ZONE_STACK_STEP=59');
     const initLog = readFileSync(`${evidence}/59-ollama-init.log`, 'utf8');
     const list = readFileSync(`${evidence}/59-bundled-ollama-list.txt`, 'utf8');
@@ -70,13 +64,9 @@ test.describe('compose stack operations', () => {
     await expect(page.locator('.model-item').first()).toBeVisible({
       timeout: 120_000,
     });
-    const models = await page
-      .locator('.model-item .model-name')
-      .allInnerTexts();
+    const models = await page.locator('.model-item .model-name').allInnerTexts();
     await shot(page, '59-models-page-bundled-ollama');
-    const pulled = list
-      .split('\n')
-      .filter((l) => /llama3\.2:1b|nomic-embed-text/.test(l));
+    const pulled = list.split('\n').filter((l) => /llama3\.2:1b|nomic-embed-text/.test(l));
     record(59, {
       result:
         pulled.length >= 2 &&
@@ -101,13 +91,11 @@ test.describe('compose stack operations', () => {
     expect(models.some((m) => /llama3\.2:1b/.test(m))).toBe(true);
   });
 
-  test('60: after backup, a fresh database and restore, the chats are back', async ({
-    page,
-  }) => {
+  test('60: after backup, a fresh database and restore, the chats are back', async ({ page }) => {
     test.skip(step !== '60', 'ZONE_STACK_STEP=60');
-    const before = JSON.parse(
-      readFileSync(`${evidence}/60-chats-before.json`, 'utf8'),
-    ) as { chats: { id: string; title: string }[] };
+    const before = JSON.parse(readFileSync(`${evidence}/60-chats-before.json`, 'utf8')) as {
+      chats: { id: string; title: string }[];
+    };
     await signInStack(page);
     await page.goto(`${CONSOLE}/chats`);
     await page.waitForTimeout(3_000);
@@ -121,33 +109,24 @@ test.describe('compose stack operations', () => {
         password: stack.owner.password,
       }),
     });
-    const token = ((await response.json()) as { access_token: string })
-      .access_token;
-    const listed = await fetch(
-      `${stack.api}/api/chats?workspace_id=${stack.owner.workspace.id}`,
-      { headers: { authorization: `Bearer ${token}` } },
-    );
+    const token = ((await response.json()) as { access_token: string }).access_token;
+    const listed = await fetch(`${stack.api}/api/chats?workspace_id=${stack.owner.workspace.id}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
     const after = (await listed.json()) as {
       chats?: { id: string; title: string }[];
     };
-    const restored = before.chats.filter((c) =>
-      (after.chats ?? []).some((a) => a.id === c.id),
-    );
+    const restored = before.chats.filter((c) => (after.chats ?? []).some((a) => a.id === c.id));
     const backupLog = execFileSync(
       'sh',
-      [
-        '-c',
-        `grep -E '== 60' ${process.env.ZONE_STACK_LOG ?? '/dev/null'} | tail -6`,
-      ],
-      { encoding: 'utf8' },
+      ['-c', `grep -E '== 60' ${process.env.ZONE_STACK_LOG ?? '/dev/null'} | tail -6`],
+      { encoding: 'utf8' }
     )
       .trim()
       .split('\n');
     record(60, {
       result:
-        restored.length === before.chats.length && before.chats.length > 0
-          ? 'WORKS'
-          : 'FAILS',
+        restored.length === before.chats.length && before.chats.length > 0 ? 'WORKS' : 'FAILS',
       chats_before_backup: before.chats.map((c) => c.title),
       chats_after_restore: (after.chats ?? []).map((c) => c.title),
       titles_on_page: titles,

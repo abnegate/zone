@@ -32,13 +32,13 @@ const ollama = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434';
 
 function entries(chatId: string): string[] {
   return sql(
-    `select position || ' | ' || (message->>'role') || ' | ' || coalesce(message->'tool_calls'->0->'function'->>'name', '') || ' | ' || left(coalesce(message->>'content', ''), 160) from chat_entries where chat_id = '${chatId}' order by position`,
+    `select position || ' | ' || (message->>'role') || ' | ' || coalesce(message->'tool_calls'->0->'function'->>'name', '') || ' | ' || left(coalesce(message->>'content', ''), 160) from chat_entries where chat_id = '${chatId}' order by position`
   );
 }
 
 function toolNames(chatId: string): string[] {
   return sql(
-    `select c->'function'->>'name' from chat_entries, jsonb_array_elements(coalesce(nullif(message->'tool_calls', 'null'::jsonb), '[]'::jsonb)) c where chat_id = '${chatId}' order by position`,
+    `select c->'function'->>'name' from chat_entries, jsonb_array_elements(coalesce(nullif(message->'tool_calls', 'null'::jsonb), '[]'::jsonb)) c where chat_id = '${chatId}' order by position`
   );
 }
 
@@ -73,7 +73,7 @@ test.describe('chats', () => {
     await ask(
       page,
       `The secret word for this chat is zebra-${s}. Repeat it back in one sentence.`,
-      { replies: 1, timeout: 600_000 },
+      { replies: 1, timeout: 600_000 }
     );
     await shot(page, '33-reasoning-model-chat');
 
@@ -84,18 +84,16 @@ test.describe('chats', () => {
     await page.getByRole('menuitem', { name: 'Rename' }).click();
     await page.locator('#chat-name').fill(`Renamed ${s}`);
     await page.getByRole('button', { name: 'Save name' }).click();
-    await expect(
-      page.locator('.chat-item', { hasText: `Renamed ${s}` }),
-    ).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('.chat-item', { hasText: `Renamed ${s}` })).toBeVisible({
+      timeout: 30_000,
+    });
     await shot(page, '33-renamed');
     const renamedItem = page.locator('.chat-item', { hasText: `Renamed ${s}` });
     await renamedItem.hover();
     await renamedItem.locator('.ui-action-menu-trigger').click();
     await page.getByRole('menuitem', { name: 'Archive' }).click();
     await page.waitForTimeout(3_000);
-    const archivedInDb = sql(
-      `select archived from chats where id = '${reasonChat}'`,
-    ).join(',');
+    const archivedInDb = sql(`select archived from chats where id = '${reasonChat}'`).join(',');
     const stillListedAfterArchive = await page
       .locator('.chat-item', { hasText: `Renamed ${s}` })
       .count();
@@ -104,9 +102,7 @@ test.describe('chats', () => {
       await page.reload();
       await page.waitForTimeout(2_000);
     }
-    const listedAfterReload = await page
-      .locator('.chat-item', { hasText: `Renamed ${s}` })
-      .count();
+    const listedAfterReload = await page.locator('.chat-item', { hasText: `Renamed ${s}` }).count();
     await page.getByRole('tab', { name: 'Archived' }).click();
     const archived = page.locator('.chat-item', { hasText: `Renamed ${s}` });
     await expect(archived).toBeVisible({ timeout: 30_000 });
@@ -116,17 +112,15 @@ test.describe('chats', () => {
     await page.getByRole('menuitem', { name: 'Unarchive' }).click();
     await page.waitForTimeout(3_000);
     const stillListedAfterUnarchive = await archived.count();
-    const unarchivedInDb = sql(
-      `select archived from chats where id = '${reasonChat}'`,
-    ).join(',');
+    const unarchivedInDb = sql(`select archived from chats where id = '${reasonChat}'`).join(',');
     if (stillListedAfterUnarchive > 0) {
       await page.reload();
       await page.waitForTimeout(2_000);
     }
     await page.getByRole('tab', { name: 'Active' }).click();
-    await expect(
-      page.locator('.chat-item', { hasText: `Renamed ${s}` }),
-    ).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('.chat-item', { hasText: `Renamed ${s}` })).toBeVisible({
+      timeout: 30_000,
+    });
 
     // Search across chats for the word only the reasoning chat carries.
     await page.locator('[data-testid="chat-search-input"]').fill(`zebra-${s}`);
@@ -158,12 +152,10 @@ test.describe('chats', () => {
     const confirm = page.getByRole('dialog');
     await expect(confirm).toContainText('Delete Chat');
     await confirm.getByRole('button', { name: 'Delete', exact: true }).click();
-    await expect(
-      page.locator('.chat-item', { hasText: `Renamed ${s}` }),
-    ).toHaveCount(0, { timeout: 30_000 });
-    const deleted = sql(
-      `select count(*) from chats where id = '${reasonChat}'`,
-    ).join(',');
+    await expect(page.locator('.chat-item', { hasText: `Renamed ${s}` })).toHaveCount(0, {
+      timeout: 30_000,
+    });
+    const deleted = sql(`select count(*) from chats where id = '${reasonChat}'`).join(',');
     await shot(page, '33-deleted');
 
     // Agent mode off: a request that needs a tool gets no tool; on: it does.
@@ -171,7 +163,7 @@ test.describe('chats', () => {
     await ask(
       page,
       'Run the shell command uname -a on this machine and tell me the exact output.',
-      { replies: 1, timeout: 600_000 },
+      { replies: 1, timeout: 600_000 }
     );
     const plainCalls = await page.locator('[data-testid="tool-call"]').count();
     const plainTools = toolNames(plainChat);
@@ -184,7 +176,7 @@ test.describe('chats', () => {
     await ask(
       page,
       'Run the shell command uname -a on this machine and tell me the exact output.',
-      { replies: 1, timeout: 600_000 },
+      { replies: 1, timeout: 600_000 }
     );
     const agentCalls = await page.locator('[data-testid="tool-call"]').count();
     const agentTools = toolNames(agentChat);
@@ -260,30 +252,26 @@ test.describe('chats', () => {
     await ask(
       page,
       'Think it through carefully and explain step by step why 91 is not a prime number.',
-      { replies: 1, timeout: 600_000 },
+      { replies: 1, timeout: 600_000 }
     );
     const reasoning = await page.locator('[data-testid="reasoning"]').count();
     const reasoningText = reasoning
-      ? (
-          await page.locator('[data-testid="reasoning"]').first().innerText()
-        ).replace(/\s+/g, ' ')
+      ? (await page.locator('[data-testid="reasoning"]').first().innerText()).replace(/\s+/g, ' ')
       : '';
     const afterFirst = await contextMeter(page);
     await shot(page, '34-reasoning-block');
 
     await send(
       page,
-      'Write a 2000 word essay about the history of the Auckland Harbour Bridge, in full.',
+      'Write a 2000 word essay about the history of the Auckland Harbour Bridge, in full.'
     );
     await expect(page.locator('.message-status')).toHaveCount(1, {
       timeout: 120_000,
     });
     await expect
-      .poll(
-        async () =>
-          (await page.locator('.message-assistant').last().innerText()).length,
-        { timeout: 300_000 },
-      )
+      .poll(async () => (await page.locator('.message-assistant').last().innerText()).length, {
+        timeout: 300_000,
+      })
       .toBeGreaterThan(200);
     await page.getByRole('button', { name: 'Stop' }).click();
     await expect(page.locator('.message-status')).toHaveCount(0, {
@@ -294,15 +282,12 @@ test.describe('chats', () => {
     await page.waitForTimeout(3_000);
     const afterStop = await contextMeter(page);
     const stored = sql(
-      `select count(*) from messages where chat_id = '${chatId}' and role = 'assistant'`,
+      `select count(*) from messages where chat_id = '${chatId}' and role = 'assistant'`
     ).join(',');
 
     record(34, {
       result:
-        reasoning > 0 &&
-        partial.length > 100 &&
-        partial.length < 12_000 &&
-        afterFirst !== before
+        reasoning > 0 && partial.length > 100 && partial.length < 12_000 && afterFirst !== before
           ? 'WORKS'
           : 'FAILS',
       chat_id: chatId,
@@ -319,9 +304,7 @@ test.describe('chats', () => {
     expect(partial.length).toBeGreaterThan(100);
   });
 
-  test('35: a character saved on a chat answers in persona', async ({
-    page,
-  }) => {
+  test('35: a character saved on a chat answers in persona', async ({ page }) => {
     await signIn(page);
     const s = stamp();
     let chatId = '';
@@ -334,9 +317,7 @@ test.describe('chats', () => {
         .catch(() => false);
       if (toggleVisible) break;
     }
-    const chosen = sql(
-      `select model_name from chats where id = '${chatId}'`,
-    ).join(',');
+    const chosen = sql(`select model_name from chats where id = '${chatId}'`).join(',');
     if (!toggleVisible) {
       await shot(page, '35-no-character-control');
       record(35, {
@@ -356,17 +337,16 @@ test.describe('chats', () => {
     await shot(page, '35-character-editor');
     await page.getByRole('button', { name: 'Save character' }).click();
     await page.waitForTimeout(1_500);
-    const reply = await ask(
-      page,
-      'Introduce yourself in two sentences and tell me what you do.',
-      { replies: 1, timeout: 600_000 },
-    );
+    const reply = await ask(page, 'Introduce yourself in two sentences and tell me what you do.', {
+      replies: 1,
+      timeout: 600_000,
+    });
     await shot(page, '35-persona-reply');
-    const stored = sql(
-      `select left(character::text, 200) from chats where id = '${chatId}'`,
-    ).join(',');
+    const stored = sql(`select left(character::text, 200) from chats where id = '${chatId}'`).join(
+      ','
+    );
     const systemEntries = sql(
-      `select left(message->>'content', 200) from chat_entries where chat_id = '${chatId}' and message->>'role' = 'system' order by position`,
+      `select left(message->>'content', 200) from chat_entries where chat_id = '${chatId}' and message->>'role' = 'system' order by position`
     );
     const inPersona = /quill|matey|arr/i.test(reply);
     record(35, {
@@ -386,26 +366,18 @@ test.describe('chats', () => {
     expect(inPersona).toBe(true);
   });
 
-  test('36: an image and a text file are attached and read', async ({
-    page,
-  }) => {
+  test('36: an image and a text file are attached and read', async ({ page }) => {
     await signIn(page);
     const s = stamp();
     const dir = mkdtempSync(join(tmpdir(), 'zone-pass-'));
     const textFile = join(dir, `launch-${s}.txt`);
     writeFileSync(
       textFile,
-      `Mission notes\n\nThe launch code for the ${s} mission is 4471-${s}.\nDo not share it.\n`,
+      `Mission notes\n\nThe launch code for the ${s} mission is 4471-${s}.\nDo not share it.\n`
     );
     const imageFile =
       process.env.ZONE_PASS_IMAGE ??
-      join(
-        process.env.ZONE_LIVE_WORK ?? '/tmp',
-        '..',
-        'prep',
-        'comfy-direct',
-        'image.png',
-      );
+      join(process.env.ZONE_LIVE_WORK ?? '/tmp', '..', 'prep', 'comfy-direct', 'image.png');
 
     const chatId = await newChat(page, { model: 'Automatic' });
     const input = page.locator('input[type="file"][multiple]');
@@ -419,25 +391,24 @@ test.describe('chats', () => {
         .innerText()
         .catch(() => '')) || '';
     await shot(page, '36-image-attached');
-    const imageReply = await ask(
-      page,
-      'Describe what is in the attached image in one sentence.',
-      { replies: 1, timeout: 900_000 },
-    );
+    const imageReply = await ask(page, 'Describe what is in the attached image in one sentence.', {
+      replies: 1,
+      timeout: 900_000,
+    });
     await shot(page, '36-image-described');
     const loaded = (await (await fetch(`${ollama}/api/ps`)).json()) as {
       models?: { name: string }[];
     };
 
     await input.setInputFiles(textFile);
-    await expect(
-      page.locator('.attachment-chip', { hasText: `launch-${s}.txt` }),
-    ).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('.attachment-chip', { hasText: `launch-${s}.txt` })).toBeVisible({
+      timeout: 30_000,
+    });
     await shot(page, '36-text-attached');
     const textReply = await ask(
       page,
       'What launch code does the attached file mention? Answer with the code only.',
-      { replies: 2, timeout: 600_000 },
+      { replies: 2, timeout: 600_000 }
     );
     await shot(page, '36-text-answered');
     const stored = entries(chatId);
@@ -445,7 +416,7 @@ test.describe('chats', () => {
     const imageWords = new RegExp(
       process.env.ZONE_PASS_IMAGE_WORDS ??
         'lighthouse|sea|coast|storm|rock|tower|water|wave|cliff|sky',
-      'i',
+      'i'
     );
     const imageMentions = imageWords.test(imageReply);
     record(36, {
@@ -494,26 +465,24 @@ test.describe('chats', () => {
     await option.locator('input[type="checkbox"]').click();
     await expect(popover).toContainText('Saved per chat');
     await expect(
-      page.locator('[data-testid="chat-source-chip"]', { hasText: 'Scratch repo' }),
+      page.locator('[data-testid="chat-source-chip"]', { hasText: 'Scratch repo' })
     ).toBeVisible({ timeout: 30_000 });
     await shot(page, '37-repository-attached');
     await page.keyboard.press('Escape');
     const chip = await page.locator('[data-testid="chat-source-chip"]').count();
     const attachedRows = sql(
-      `select count(*) from chat_attached_sources where chat_id = '${chatId}'`,
+      `select count(*) from chat_attached_sources where chat_id = '${chatId}'`
     ).join(',');
     const reply = await ask(
       page,
       'In the GitHub source called "Scratch repo" in this workspace, read check.sh and tell me exactly which script it runs. Cite the file you read.',
-      { replies: 1, timeout: 900_000 },
+      { replies: 1, timeout: 900_000 }
     );
     const tools = toolNames(chatId);
-    const citations = await page
-      .locator('[data-testid="citation"]')
-      .allInnerTexts();
+    const citations = await page.locator('[data-testid="citation"]').allInnerTexts();
     await shot(page, '37-code-question');
     const storedCitations = sql(
-      `select left((metadata->'citations')::text, 400) from messages where chat_id = '${chatId}' and role = 'assistant' and metadata ? 'citations' order by created_at desc limit 1`,
+      `select left((metadata->'citations')::text, 400) from messages where chat_id = '${chatId}' and role = 'assistant' and metadata ? 'citations' order by created_at desc limit 1`
     );
     record(37, {
       result:
@@ -532,9 +501,7 @@ test.describe('chats', () => {
       attached_rows: attachedRows,
       code_question_reply: reply.slice(0, 300),
       tools_the_agent_used: tools,
-      citations_rendered: citations.map((c) =>
-        c.replace(/\s+/g, ' ').slice(0, 120),
-      ),
+      citations_rendered: citations.map((c) => c.replace(/\s+/g, ' ').slice(0, 120)),
       citations_stored: storedCitations,
       screenshots: [
         '37-composer-sources-chip.png',
@@ -551,10 +518,7 @@ test.describe('chats', () => {
   }) => {
     await signIn(page);
     const chatId = await newChat(page, { model });
-    await send(
-      page,
-      'Write a 1500 word story about a lighthouse keeper and a storm, in full.',
-    );
+    await send(page, 'Write a 1500 word story about a lighthouse keeper and a storm, in full.');
     await expect(page.locator('.message-status')).toHaveCount(1, {
       timeout: 120_000,
     });
@@ -568,7 +532,7 @@ test.describe('chats', () => {
               .innerText()
               .catch(() => '')
           ).length,
-        { timeout: 300_000 },
+        { timeout: 300_000 }
       )
       .toBeGreaterThan(50);
     execFileSync('sh', [process.env.ZONE_PASS_OLLAMA_CTL ?? '', 'stop']);
@@ -577,15 +541,9 @@ test.describe('chats', () => {
       timeout: 300_000,
     });
     await page.waitForTimeout(2_000);
-    const alert = page.locator(
-      '.messages-container [role="alert"], .chats-error[role="alert"]',
-    );
-    const alertText = (await alert.allInnerTexts())
-      .join(' | ')
-      .replace(/\s+/g, ' ');
-    const thread = (
-      await page.locator('.messages-container').innerText()
-    ).replace(/\s+/g, ' ');
+    const alert = page.locator('.messages-container [role="alert"], .chats-error[role="alert"]');
+    const alertText = (await alert.allInnerTexts()).join(' | ').replace(/\s+/g, ' ');
+    const thread = (await page.locator('.messages-container').innerText()).replace(/\s+/g, ' ');
     await shot(page, '39-ollama-stopped-mid-turn');
 
     execFileSync('sh', [process.env.ZONE_PASS_OLLAMA_CTL ?? '', 'start']);
@@ -595,10 +553,9 @@ test.describe('chats', () => {
       timeout: 600_000,
     });
     await shot(page, '39-chat-usable-after');
-    const reported =
-      /error|fail|unavailable|could not|lost|interrupt|stopped|connection/i.test(
-        `${alertText} ${thread}`,
-      );
+    const reported = /error|fail|unavailable|could not|lost|interrupt|stopped|connection/i.test(
+      `${alertText} ${thread}`
+    );
     record(39, {
       result: reported && reply.trim().length > 0 ? 'WORKS' : 'FAILS',
       note: 'Judged on a reply arriving after Ollama is back; the model may answer the interrupted request again rather than the new one-word instruction',
@@ -606,15 +563,9 @@ test.describe('chats', () => {
       failure_alert: alertText.slice(0, 300),
       thread_tail: thread.slice(-300),
       reply_after_restart: reply.slice(0, 120),
-      screenshots: [
-        '39-ollama-stopped-mid-turn.png',
-        '39-chat-usable-after.png',
-      ],
+      screenshots: ['39-ollama-stopped-mid-turn.png', '39-chat-usable-after.png'],
     });
-    expect(
-      reported,
-      `nothing reported the failure: ${thread.slice(-200)}`,
-    ).toBe(true);
+    expect(reported, `nothing reported the failure: ${thread.slice(-200)}`).toBe(true);
     expect(reply.trim().length, 'no reply after the restart').toBeGreaterThan(0);
   });
 });

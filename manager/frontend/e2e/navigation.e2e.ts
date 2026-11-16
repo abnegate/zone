@@ -1,7 +1,8 @@
-import { test, expect } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { emptyPullRequests, emptyReleases, populatedAnalytics } from './layout-fixtures';
 import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
+
 const pullRequestsListPattern = /\/api\/workspaces\/[^/]+\/pull-requests(\?|$)/;
 const releasesListPattern = /\/api\/workspaces\/[^/]+\/releases(\?|$)/;
 const analyticsPattern = /\/api\/workspaces\/[^/]+\/analytics(\?|$)/;
@@ -45,10 +46,7 @@ test.describe('Navigation', () => {
     });
 
     await routeApi(page, tasksRoutePattern, (route) => {
-      if (
-        route.request().method() === 'GET' &&
-        isTasksListRequest(route.request().url())
-      ) {
+      if (route.request().method() === 'GET' && isTasksListRequest(route.request().url())) {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -68,10 +66,7 @@ test.describe('Navigation', () => {
     });
 
     await routeApi(page, sourcesRoutePattern, (route) => {
-      if (
-        route.request().method() === 'GET' &&
-        isSourcesListRequest(route.request().url())
-      ) {
+      if (route.request().method() === 'GET' && isSourcesListRequest(route.request().url())) {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -178,49 +173,37 @@ test.describe('Navigation', () => {
 
   test('Chats page is default route', async ({ page }) => {
     await expect(page.locator('.nav-item:has-text("Chats")')).toHaveClass(/active/);
-    await expect(
-      page.getByRole('heading', { name: 'Chats', exact: true })
-    ).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Chats', exact: true })).toBeVisible();
   });
 
   test('navigates to Models page', async ({ page }) => {
     await page.click('a[href="/models"]');
     await expect(page).toHaveURL('/models');
-    await expect(
-      page.getByRole('heading', { name: 'Models', exact: true })
-    ).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Models', exact: true })).toBeVisible();
   });
 
   test('navigates to Chats page', async ({ page }) => {
     await page.click('a[href="/chats"]');
     await expect(page).toHaveURL('/chats');
-    await expect(
-      page.getByRole('heading', { name: 'Chats', exact: true })
-    ).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Chats', exact: true })).toBeVisible();
   });
 
   test('navigates to Projects page', async ({ page }) => {
     await page.click('a[href="/projects"]');
     await expect(page).toHaveURL('/projects');
-    await expect(
-      page.getByRole('heading', { name: 'Projects', exact: true })
-    ).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
   });
 
   test('navigates to Tasks page', async ({ page }) => {
     await page.click('a[href="/tasks"]');
     await expect(page).toHaveURL('/tasks');
-    await expect(
-      page.getByRole('heading', { name: 'Tasks', exact: true })
-    ).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
   });
 
   test('navigates to Pull Requests page', async ({ page }) => {
     await page.click('a[href="/pull-requests"]');
     await expect(page).toHaveURL('/pull-requests');
-    await expect(
-      page.getByRole('heading', { name: 'Pull Requests', exact: true })
-    ).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Pull Requests', exact: true })).toBeVisible();
     await expect(page.getByText('No GitHub sources', { exact: true })).toBeVisible();
     await expect(page.locator('.nav-item:has-text("Pull Requests")')).toHaveClass(/active/);
   });
@@ -228,9 +211,7 @@ test.describe('Navigation', () => {
   test('navigates to Releases page', async ({ page }) => {
     await page.click('a[href="/releases"]');
     await expect(page).toHaveURL('/releases');
-    await expect(
-      page.getByRole('heading', { name: 'Releases', exact: true })
-    ).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Releases', exact: true })).toBeVisible();
     await expect(page.getByText('No GitHub sources', { exact: true })).toBeVisible();
     await expect(page.locator('.nav-item:has-text("Releases")')).toHaveClass(/active/);
   });
@@ -238,9 +219,7 @@ test.describe('Navigation', () => {
   test('navigates to Analytics page', async ({ page }) => {
     await page.click('a[href="/analytics"]');
     await expect(page).toHaveURL('/analytics');
-    await expect(
-      page.getByRole('heading', { name: 'Analytics', exact: true })
-    ).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Analytics', exact: true })).toBeVisible();
     await expect(page.locator('[data-testid="analytics-tile"]').first()).toBeVisible();
     await expect(page.locator('.page-bar .ui-tabs-list')).toBeVisible();
     await expect(page.locator('.nav-item:has-text("Analytics")')).toHaveClass(/active/);
@@ -317,9 +296,7 @@ test.describe('Navigation', () => {
 
   test('direct URL navigation works', async ({ page }) => {
     await page.goto('/projects');
-    await expect(
-      page.getByRole('heading', { name: 'Projects', exact: true })
-    ).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
     await expect(page.locator('.nav-item:has-text("Projects")')).toHaveClass(/active/);
   });
 

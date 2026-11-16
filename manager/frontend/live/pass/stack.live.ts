@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import type { Page } from '@playwright/test';
-import { expect, record, shot, SOURCES_PATH, test } from './rig';
 import { setChecked } from '../stub';
+import { expect, record, SOURCES_PATH, shot, test } from './rig';
 
 /**
  * Rows 53, 57, 58, 61 and 62: the compose stack behind Traefik, driven at
@@ -14,8 +14,7 @@ import { setChecked } from '../stub';
  */
 
 const CONSOLE = process.env.ZONE_STACK_CONSOLE ?? 'http://manager.localhost';
-const GRAFANA =
-  process.env.ZONE_STACK_GRAFANA ?? 'http://grafana.webui.localhost';
+const GRAFANA = process.env.ZONE_STACK_GRAFANA ?? 'http://grafana.webui.localhost';
 const statePath = process.env.ZONE_LIVE_STATE ?? '';
 const stack = JSON.parse(readFileSync(statePath, 'utf8')) as {
   api: string;
@@ -44,7 +43,7 @@ async function signInStack(page: Page): Promise<void> {
     {
       organization: stack.owner.organization.id,
       workspace: stack.owner.workspace.id,
-    },
+    }
   );
   await page.goto(`${CONSOLE}/login`);
   await page.evaluate(() => {
@@ -57,15 +56,14 @@ async function signInStack(page: Page): Promise<void> {
   await page.getByLabel('Password').fill(stack.owner.password);
   await page.getByRole('button', { name: /sign in|log in/i }).click();
   await expect(page).not.toHaveURL(/\/login/, { timeout: 30_000 });
-  await page.waitForFunction(
-    () => Boolean(localStorage.getItem('manager_access_token')),
-    { timeout: 30_000 },
-  );
+  await page.waitForFunction(() => Boolean(localStorage.getItem('manager_access_token')), {
+    timeout: 30_000,
+  });
 }
 
 async function newStackChat(
   page: Page,
-  options: { model: string; agent?: boolean },
+  options: { model: string; agent?: boolean }
 ): Promise<string> {
   await page.goto(`${CONSOLE}/chats`);
   await page
@@ -77,14 +75,8 @@ async function newStackChat(
   await dialog.getByRole('combobox', { name: /select model/i }).click();
   await page.getByRole('option', { name: options.model, exact: true }).click();
   if (options.agent) {
-    await setChecked(
-      dialog.getByRole('checkbox', { name: 'Agent mode' }),
-      true,
-    );
-    await setChecked(
-      dialog.getByRole('checkbox', { name: /auto-approve/i }),
-      true,
-    );
+    await setChecked(dialog.getByRole('checkbox', { name: 'Agent mode' }), true);
+    await setChecked(dialog.getByRole('checkbox', { name: /auto-approve/i }), true);
   }
   await dialog.getByRole('button', { name: 'Create Chat' }).click();
   await expect(page).toHaveURL(/\/chats\?id=/, { timeout: 30_000 });
@@ -95,7 +87,7 @@ async function turn(
   page: Page,
   message: string,
   replies: number,
-  timeout = 900_000,
+  timeout = 900_000
 ): Promise<string> {
   const box = page.getByPlaceholder(/type a message/i).first();
   await box.fill(message);
@@ -110,8 +102,7 @@ async function turn(
       (await page.locator('.message-status').count()) === 0
     )
       break;
-    if (Date.now() > deadline)
-      throw new Error(`turn did not finish: ${message}`);
+    if (Date.now() > deadline) throw new Error(`turn did not finish: ${message}`);
     await page.waitForTimeout(1_000);
   }
   return assistant.last().innerText();
@@ -140,21 +131,14 @@ async function toolNames(chatId: string): Promise<string[]> {
       metadata?: { tool_calls?: { name: string }[] } | null;
     }[];
   };
-  return (body.messages ?? []).flatMap((m) =>
-    (m.metadata?.tool_calls ?? []).map((c) => c.name),
-  );
+  return (body.messages ?? []).flatMap((m) => (m.metadata?.tool_calls ?? []).map((c) => c.name));
 }
 
 test.describe('compose stack', () => {
-  test.skip(
-    !statePath.includes('stack'),
-    'run with ZONE_LIVE_STATE pointing at the stack tenants',
-  );
+  test.skip(!statePath.includes('stack'), 'run with ZONE_LIVE_STATE pointing at the stack tenants');
   test.describe.configure({ timeout: 2_400_000 });
 
-  test('57: the console behind Traefik works as it does on the rig', async ({
-    page,
-  }) => {
+  test('57: the console behind Traefik works as it does on the rig', async ({ page }) => {
     await signInStack(page);
     await shot(page, '57-traefik-signed-in');
     const visited: Record<string, string> = {};
@@ -183,23 +167,18 @@ test.describe('compose stack', () => {
     await expect(page.locator('.model-item').first()).toBeVisible({
       timeout: 60_000,
     });
-    const models = await page
-      .locator('.model-item .model-name')
-      .allInnerTexts();
+    const models = await page.locator('.model-item .model-name').allInnerTexts();
     await shot(page, '57-traefik-models');
-    const traefik = execFileSync(
-      'docker',
-      ['logs', '--since', '10m', 'traefik'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-    )
+    const traefik = execFileSync('docker', ['logs', '--since', '10m', 'traefik'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
       .split('\n')
       .filter((l) => /manager.localhost/.test(l))
       .slice(-2);
     record(57, {
       result:
-        Object.values(visited).filter(Boolean).length >= 8 && models.length > 0
-          ? 'WORKS'
-          : 'FAILS',
+        Object.values(visited).filter(Boolean).length >= 8 && models.length > 0 ? 'WORKS' : 'FAILS',
       console_url: CONSOLE,
       note: 'The stack routes the console at manager.localhost (the checklist names webui.localhost, which is the DOMAIN_HOST_WEBUI suffix the traefik, litellm, grafana and prometheus hosts hang off)',
       page_headings: visited,
@@ -216,42 +195,32 @@ test.describe('compose stack', () => {
     await signInStack(page);
     const since = new Date().toISOString();
     const chatId = await newStackChat(page, { model: 'Automatic' });
-    const trivial = await turn(
-      page,
-      'What is 2 plus 2? Answer with the number only.',
-      1,
-    );
+    const trivial = await turn(page, 'What is 2 plus 2? Answer with the number only.', 1);
     await shot(page, '58-trivial-question');
     const afterTrivial = dockerLogs('litellm', since);
     const hard = await turn(
       page,
       'Prove step by step that the sum of the first n odd numbers is n squared, and analyze the edge cases of the proof.',
       2,
-      1_500_000,
+      1_500_000
     );
     await shot(page, '58-hard-question');
     const afterHard = dockerLogs('litellm', since);
     const modelsSeen = (text: string) => [
-      ...new Set(
-        [...text.matchAll(/model[=:]\s*'?([A-Za-z0-9_.:\-\/]+)/g)].map(
-          (m) => m[1],
-        ),
-      ),
+      ...new Set([...text.matchAll(/model[=:]\s*'?([A-Za-z0-9_.:\-\/]+)/g)].map((m) => m[1])),
     ];
     const fastLog = modelsSeen(afterTrivial);
     const hardLog = modelsSeen(afterHard).filter((m) => !fastLog.includes(m));
-    const ps = (await (
-      await fetch('http://127.0.0.1:11434/api/ps')
-    ).json()) as { models?: { name: string }[] };
+    const ps = (await (await fetch('http://127.0.0.1:11434/api/ps')).json()) as {
+      models?: { name: string }[];
+    };
     record(58, {
       result:
-        fastLog.some((m) => /llama3\.2/.test(m)) &&
-        hardLog.some((m) => /qwen3\.8/.test(m))
+        fastLog.some((m) => /llama3\.2/.test(m)) && hardLog.some((m) => /qwen3\.8/.test(m))
           ? 'WORKS'
           : 'FAILS',
       cause:
-        fastLog.some((m) => /llama3\.2/.test(m)) &&
-        hardLog.some((m) => /qwen3\.8/.test(m))
+        fastLog.some((m) => /llama3\.2/.test(m)) && hardLog.some((m) => /qwen3\.8/.test(m))
           ? undefined
           : `litellm log names: trivial ${fastLog.join(',')} then ${hardLog.join(',')}`,
       chat_id: chatId,
@@ -278,35 +247,32 @@ test.describe('compose stack', () => {
     const searched = await turn(
       page,
       'Search the web for the current stable version of the Rust programming language and tell me the version and the page you found it on.',
-      1,
+      1
     );
     await shot(page, '61-web-search');
-    const searxng = execFileSync(
-      'docker',
-      ['logs', '--since', '10m', 'zone-pass-searxng'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-    )
+    const searxng = execFileSync('docker', ['logs', '--since', '10m', 'zone-pass-searxng'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
       .split('\n')
       .filter((l) => /search|GET/.test(l))
       .slice(-3);
     const prom = await turn(
       page,
       'Ask Prometheus how many scrape targets are up right now, and tell me the number.',
-      2,
+      2
     );
     await shot(page, '53-query-prometheus');
     const grafana = await turn(
       page,
       'List the Grafana dashboards that exist in this deployment.',
-      3,
+      3
     );
     await shot(page, '53-list-grafana-dashboards');
     const tools = await toolNames(chatId);
     record(61, {
       result:
-        tools.includes('web_search') &&
-        /rust/i.test(searched) &&
-        /1\.\d\d/.test(searched)
+        tools.includes('web_search') && /rust/i.test(searched) && /1\.\d\d/.test(searched)
           ? 'WORKS'
           : 'FAILS',
       cause: tools.includes('web_search')
@@ -320,23 +286,18 @@ test.describe('compose stack', () => {
     });
     record(53, {
       result:
-        tools.includes('query_prometheus') &&
-        tools.includes('list_grafana_dashboards')
+        tools.includes('query_prometheus') && tools.includes('list_grafana_dashboards')
           ? 'WORKS'
           : 'FAILS',
       cause:
-        tools.includes('query_prometheus') &&
-        tools.includes('list_grafana_dashboards')
+        tools.includes('query_prometheus') && tools.includes('list_grafana_dashboards')
           ? undefined
           : `model: tools used were ${tools.join(', ')}`,
       chat_id: chatId,
       prometheus_reply: prom.slice(0, 200),
       grafana_reply: grafana.slice(0, 200),
       tools,
-      screenshots: [
-        '53-query-prometheus.png',
-        '53-list-grafana-dashboards.png',
-      ],
+      screenshots: ['53-query-prometheus.png', '53-list-grafana-dashboards.png'],
     });
     expect(tools).toContain('web_search');
     expect(tools).toContain('query_prometheus');
@@ -350,7 +311,7 @@ test.describe('compose stack', () => {
         '-c',
         "grep -E '^MONITORING_GRAFANA_ADMIN_PASSWORD=' /Users/jakebarnby/Local/zone/.claude/worktrees/zone-e2e-verification-dba4d9/.env | cut -d= -f2-",
       ],
-      { encoding: 'utf8' },
+      { encoding: 'utf8' }
     ).trim();
     await page.goto(`${GRAFANA}/login`);
     await page.getByLabel(/email or username/i).fill('admin');
@@ -381,9 +342,9 @@ test.describe('compose stack', () => {
       await shot(page, '62-grafana-dashboard-open');
     }
     const promTargets = (await (
-      await fetch('http://127.0.0.1/api/v1/targets', { headers: { host: 'prometheus.webui.localhost' } }).catch(
-        () => new Response('{}'),
-      )
+      await fetch('http://127.0.0.1/api/v1/targets', {
+        headers: { host: 'prometheus.webui.localhost' },
+      }).catch(() => new Response('{}'))
     )
       .json()
       .catch(() => ({}))) as {
@@ -394,17 +355,13 @@ test.describe('compose stack', () => {
       .map((t) => t.labels.job);
     const hasNumbers = /\d+(\.\d+)?\s*(ms|MiB|mins?|s)\b/.test(panelText);
     record(62, {
-      result:
-        /dashboard/i.test(list) && listed > 0 && hasNumbers ? 'WORKS' : 'FAILS',
+      result: /dashboard/i.test(list) && listed > 0 && hasNumbers ? 'WORKS' : 'FAILS',
       note: 'A panel reading No data is a signal the stack has not produced yet; the row is judged on the panels that carry live numbers',
       grafana: GRAFANA,
       dashboards_page: list.slice(0, 300),
       opened_dashboard: panelText.slice(0, 300),
       prometheus_targets_up: up,
-      screenshots: [
-        '62-grafana-dashboards.png',
-        '62-grafana-dashboard-open.png',
-      ],
+      screenshots: ['62-grafana-dashboards.png', '62-grafana-dashboard-open.png'],
     });
     expect(listed).toBeGreaterThan(0);
     expect(hasNumbers, panelText.slice(0, 200)).toBe(true);

@@ -62,11 +62,9 @@ test('an audio checkpoint set on the organization survives a reload', async ({
   await expect(page.locator('#model-audio')).toHaveText(AUDIO_CHECKPOINT);
 
   const token = await tokenFor(state.owner);
-  const stored = await api(
-    'GET',
-    `/api/organizations/${state.owner.organization.id}/settings/ai`,
-    { token }
-  );
+  const stored = await api('GET', `/api/organizations/${state.owner.organization.id}/settings/ai`, {
+    token,
+  });
   expect(stored.status).toBe(200);
   expect(JSON.stringify(stored.body)).toContain(AUDIO_CHECKPOINT);
   expect(consoleErrors).toEqual([]);
