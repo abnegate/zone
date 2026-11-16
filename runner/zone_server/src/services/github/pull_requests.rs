@@ -431,6 +431,7 @@ async fn fetch(
     let repository = &Repository::of(source, &state.config().github_web_url);
     let permits = &state.github_snapshots().throttle.credential(&source.source);
     let previous = previous.as_deref();
+    let deadline = tokio::time::Instant::now() + SURVEY_DEADLINE;
     credentialed(
         state,
         &source.source,
@@ -443,7 +444,7 @@ async fn fetch(
                 previous,
                 now,
                 GRAPHQL_LIMIT,
-                SURVEY_DEADLINE,
+                deadline,
             )
             .listing(limit)
             .await

@@ -39,6 +39,14 @@ impl Guard {
             }
         }
     }
+
+    /// What `read` answers unless GitHub takes too long over it, which says
+    /// nothing of the reads after it.
+    pub(crate) async fn limited<T>(&self, read: impl Future<Output = T>) -> Result<T, Fault> {
+        tokio::time::timeout(self.patience, read)
+            .await
+            .map_err(|_| Fault::upstream(GRAPHQL_SLOW))
+    }
 }
 
 #[cfg(test)]
@@ -61,6 +69,19 @@ mod tests {
         assert_eq!(slow, Err(Fault::upstream(GRAPHQL_SLOW)));
         assert_eq!(after, Err(Fault::upstream(GRAPHQL_SLOW)));
         assert!(!sent.load(Ordering::Acquire), "a read after it was sent");
+    }
+
+    #[tokio::test]
+    async fn a_limited_read_past_its_patience_leaves_the_reads_after_it_alone() {
+        let guard = Guard::new(Duration::from_millis(10));
+
+        let slow = guard
+            .limited(tokio::time::sleep(Duration::from_secs(5)))
+            .await;
+        let after = guard.bounded(async { 7 }).await;
+
+        assert_eq!(slow, Err(Fault::upstream(GRAPHQL_SLOW)));
+        assert_eq!(after, Ok(7));
     }
 
     #[tokio::test]

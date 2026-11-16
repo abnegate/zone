@@ -260,12 +260,21 @@ fn counted(number: u64) -> ResponseTemplate {
 }
 
 async fn rest_listed(server: &MockServer, numbers: impl IntoIterator<Item = u64>) {
-    let rows: Vec<Value> = numbers
+    rest_listed_at(
+        server,
+        numbers.into_iter().map(|number| (number, UPDATED_AT)),
+    )
+    .await;
+}
+
+/// GitHub's REST listing of each pull request, last updated when it says.
+async fn rest_listed_at<'a>(server: &MockServer, rows: impl IntoIterator<Item = (u64, &'a str)>) {
+    let rows: Vec<Value> = rows
         .into_iter()
-        .map(|number| {
+        .map(|(number, updated_at)| {
             json!({"node_id": identifier(number), "number": number, "state": "open",
                    "title": format!("Change {number}"), "draft": false,
-                   "html_url": format!("{WEB}/pull/{number}"), "updated_at": UPDATED_AT,
+                   "html_url": format!("{WEB}/pull/{number}"), "updated_at": updated_at,
                    "user": {"login": "octocat"},
                    "head": {"ref": format!("feature-{number}"), "sha": head(number)},
                    "base": {"ref": "main", "sha": head(0)}})
@@ -348,7 +357,7 @@ async fn surveyed_by(
         previous,
         now(),
         patience,
-        deadline,
+        tokio::time::Instant::now() + deadline,
     );
     tokio::time::timeout(BUDGET, survey.listing(limit))
         .await
@@ -922,12 +931,15 @@ async fn a_batch_github_takes_too_long_over_is_read_through_rest_and_stops_the_r
         .unwrap();
 
     assert!(started.elapsed() < SLOW, "{:?}", started.elapsed());
+    assert_eq!(numbers(&listing), (1..=12).collect::<Vec<u64>>());
+    assert!(listing.complete, "{:?}", listing.warnings);
     assert!(
-        listing.pull_requests.is_empty(),
-        "a listing read before would keep its verdicts"
+        listing
+            .pull_requests
+            .iter()
+            .all(|pull_request| pull_request.threads_complete && pull_request.checks.complete),
+        "every pull request read through REST has a whole verdict: {listing:?}"
     );
-    assert!(!listing.complete);
-    assert_eq!(listing.warnings.len(), 12, "{:?}", listing.warnings);
     assert_eq!(
         batches(&server).await.len(),
         1,
@@ -942,8 +954,8 @@ async fn a_batch_github_takes_too_long_over_is_read_through_rest_and_stops_the_r
     }
     assert_eq!(
         thread_counts(&server).await,
-        0,
-        "no GraphQL thread count is asked for once GraphQL took too long"
+        12,
+        "a batch that took too long leaves thread counts to be read"
     );
     server.verify().await;
 }
@@ -1085,7 +1097,7 @@ async fn settled(numbers: std::ops::RangeInclusive<u64>) -> Listing {
 }
 
 #[tokio::test]
-async fn a_listing_page_github_is_slow_over_is_read_through_rest_in_time() {
+async fn a_listing_page_github_is_slow_over_is_read_through_rest_in_time_and_changes_are_read() {
     let first = settled(1..=2).await;
     let server = silent().await;
     let rows: Vec<Value> = (1..=2).map(|number| open_row(number, UPDATED_AT)).collect();
@@ -1105,7 +1117,8 @@ async fn a_listing_page_github_is_slow_over_is_read_through_rest_in_time() {
         )
         .mount(&server)
         .await;
-    rest_listed(&server, 1..=2).await;
+    rest_listed_at(&server, [(1, UPDATED_AT), (2, CHANGED_AT)]).await;
+    rested(&server, 2).await;
     let permits = Semaphore::new(CREDENTIAL_PERMITS);
     let started = Instant::now();
 
@@ -1114,14 +1127,35 @@ async fn a_listing_page_github_is_slow_over_is_read_through_rest_in_time() {
         .unwrap();
 
     assert!(started.elapsed() < SLOW, "{:?}", started.elapsed());
-    assert_eq!(again, first);
+    assert_eq!(numbers(&again), [1, 2]);
+    assert!(again.complete, "{:?}", again.warnings);
+    assert_eq!(again.pull_requests[0], first.pull_requests[0]);
+    let changed = &again.pull_requests[1];
+    assert_eq!(changed.updated_at, CHANGED_AT, "the change was read again");
+    assert!(!changed.threads_complete);
+    assert!(
+        changed
+            .blockers
+            .iter()
+            .any(|blocker| blocker.code == BlockerCode::ThreadsIncomplete),
+        "{:?}",
+        changed.blockers
+    );
     assert_eq!(opens(&server).await, 1);
     assert_eq!(reads_of(&server, "pulls").await, 1);
+    assert_eq!(reads_of(&server, "pulls/1").await, 0);
+    assert_eq!(reads_of(&server, "pulls/2").await, 1);
+    assert_eq!(
+        thread_counts(&server).await,
+        0,
+        "GraphQL is not asked to count threads once its listing took too long"
+    );
     server.verify().await;
 }
 
 #[tokio::test]
-async fn thread_counts_github_is_slow_over_keep_the_last_verdicts_and_are_not_asked_again() {
+async fn a_thread_count_github_is_slow_over_leaves_the_pull_request_listed_with_threads_unverified()
+{
     let first = settled(1..=2).await;
     let server = silent().await;
     open(
@@ -1154,9 +1188,26 @@ async fn thread_counts_github_is_slow_over_keep_the_last_verdicts_and_are_not_as
         .unwrap();
 
     assert!(started.elapsed() < SLOW, "{:?}", started.elapsed());
-    assert!(!again.complete);
-    assert_eq!(again.warnings.len(), 2, "{:?}", again.warnings);
-    assert_eq!(again.pull_requests, first.pull_requests);
+    assert_eq!(first.pull_requests.len(), 2);
+    assert!(again.complete, "{:?}", again.warnings);
+    assert_eq!(numbers(&again), [1, 2]);
+    for pull_request in &again.pull_requests {
+        assert_eq!(
+            pull_request.updated_at, CHANGED_AT,
+            "#{}",
+            pull_request.number
+        );
+        assert!(!pull_request.threads_complete, "#{}", pull_request.number);
+        assert!(
+            pull_request
+                .blockers
+                .iter()
+                .any(|blocker| blocker.code == BlockerCode::ThreadsIncomplete),
+            "#{}: {:?}",
+            pull_request.number,
+            pull_request.blockers
+        );
+    }
     assert_eq!(
         thread_counts(&server).await,
         1,

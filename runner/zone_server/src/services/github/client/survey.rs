@@ -89,7 +89,7 @@ impl Github {
         if threads.complete {
             return Ok(threads);
         }
-        self.thread_counts(&self.reference(row.reference.number().get())?)
+        self.thread_counts(&self.reference(row.reference.number().get())?, threads)
             .await
     }
 

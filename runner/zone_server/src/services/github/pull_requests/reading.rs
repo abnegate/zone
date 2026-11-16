@@ -143,7 +143,7 @@ impl Github {
             if stop.load(Ordering::Acquire) {
                 return Ok(unread());
             }
-            self.bounded(self.service().fetch_pull_request_evidence(
+            self.limited(self.service().fetch_pull_request_evidence(
                 self.repository(),
                 self.token(),
                 repository,

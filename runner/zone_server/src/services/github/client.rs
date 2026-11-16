@@ -243,16 +243,33 @@ impl Github {
         }
     }
 
+    /// What `read` answers unless it outlasts this client's guard, which
+    /// leaves the reads after it alone.
+    pub(crate) async fn limited<T>(&self, read: impl Future<Output = T>) -> Result<T, Fault> {
+        match &self.guard {
+            Some(guard) => guard.limited(read).await,
+            None => Ok(read.await),
+        }
+    }
+
+    /// How many of a pull request's review threads are open, or `partial`,
+    /// what was counted of them already, when GitHub's GraphQL API is too slow
+    /// to count them. A refusal of the count is the fault it was.
     pub(crate) async fn thread_counts(
         &self,
         reference: &PullRequestReference,
+        partial: ReviewThreadCount,
     ) -> Result<ReviewThreadCount, Fault> {
-        self.bounded(
-            self.service
-                .fetch_review_thread_counts(reference, &self.token),
-        )
-        .await?
-        .map_err(thread_described)
+        match self
+            .bounded(
+                self.service
+                    .fetch_review_thread_counts(reference, &self.token),
+            )
+            .await
+        {
+            Ok(counted) => counted.map_err(thread_described),
+            Err(_) => Ok(partial),
+        }
     }
 
     pub(crate) fn reference(&self, number: u64) -> Result<PullRequestReference, String> {
@@ -534,7 +551,10 @@ impl Github {
         let reference = self.reference(detail.number.get())?;
         let threads = match threads {
             Some(collected) => recorded_evidence(collected),
-            None => thread_evidence(self.thread_counts(&reference).await?),
+            None => thread_evidence(
+                self.thread_counts(&reference, ReviewThreadCount::new(0, 0, false))
+                    .await?,
+            ),
         };
         Ok(Review {
             draft: detail.draft,

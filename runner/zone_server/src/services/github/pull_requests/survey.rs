@@ -44,7 +44,7 @@ pub(super) struct Survey<'a> {
 
 impl<'a> Survey<'a> {
     /// A listing that waits `patience` on each GraphQL read and starts no
-    /// assessment `deadline` from now, nor finishes one begun before.
+    /// assessment after `deadline`, nor finishes one begun before.
     pub(super) fn new(
         github: Github,
         permits: &'a Semaphore,
@@ -52,7 +52,7 @@ impl<'a> Survey<'a> {
         previous: Option<&'a Listing>,
         now: DateTime<Utc>,
         patience: Duration,
-        deadline: Duration,
+        deadline: Instant,
     ) -> Self {
         Self {
             github: github.guarded(Guard::new(patience)),
@@ -60,7 +60,7 @@ impl<'a> Survey<'a> {
             repository,
             previous,
             now,
-            deadline: Instant::now() + deadline,
+            deadline,
             stop: AtomicBool::new(false),
         }
     }
