@@ -20,6 +20,7 @@ use zone_context::embeddings::EmbeddingService;
 use zone_core::llm::{LlmBackend, cli};
 #[cfg(any(test, feature = "testing"))]
 use zone_enterprise::Keyring;
+use zone_enterprise::sso::Oidc;
 use zone_enterprise::{Edition, License};
 
 use crate::cache::Cache;
@@ -130,6 +131,7 @@ struct AppStateInner {
     pub github: OnceLock<Provider>,
     pub network_denial: OnceCell<NetworkDenial>,
     pub licenses: Licenses,
+    pub oidc: Oidc,
     /// Terminal frames for task runs, for sockets and waits to subscribe to.
     /// The process's one instance, which the writers that finish a run also
     /// publish to, so a state built per test observes the same runs.
@@ -260,6 +262,7 @@ impl AppState {
                 github: OnceLock::new(),
                 network_denial: OnceCell::new(),
                 licenses: Licenses::new(),
+                oidc: Oidc::new(),
                 task_progress: task_progress::progress(),
                 device_connections: DashMap::new(),
                 pull_request_statuses: StatusCache::default(),
@@ -457,6 +460,10 @@ impl AppState {
         &self.inner.licenses
     }
 
+    pub fn oidc(&self) -> &Oidc {
+        &self.inner.oidc
+    }
+
     pub async fn license(&self) -> Option<License> {
         self.inner.licenses.current(&self.inner.db).await
     }
@@ -643,6 +650,13 @@ mod tests {
             state.licenses().keyring(),
             clone.licenses().keyring()
         ));
+    }
+
+    #[tokio::test]
+    async fn every_clone_shares_one_oidc_client() {
+        let state = AppState::for_tests();
+        let clone = state.clone();
+        assert!(std::ptr::eq(state.oidc(), clone.oidc()));
     }
 
     #[tokio::test]

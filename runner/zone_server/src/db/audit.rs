@@ -58,6 +58,8 @@ pub mod actions {
     pub const USER_CREATED: &str = "user.created";
     pub const USER_UPDATED: &str = "user.updated";
     pub const USER_DELETED: &str = "user.deleted";
+    pub const USER_SSO_SIGNED_IN: &str = "user.sso_signed_in";
+    pub const USER_BREAK_GLASS_SIGNED_IN: &str = "user.break_glass_signed_in";
 
     pub const MEMBER_ADDED: &str = "member.added";
     pub const MEMBER_REMOVED: &str = "member.removed";
@@ -111,6 +113,11 @@ pub mod actions {
     pub const MCP_SERVER_DELETED: &str = "mcp_server.deleted";
     pub const MCP_SERVER_RECONNECTED: &str = "mcp_server.reconnected";
     pub const WORKSPACE_MCP_SERVERS_UPDATED: &str = "workspace_mcp_servers.updated";
+
+    pub const SSO_PROVIDER_CREATED: &str = "sso_provider.created";
+    pub const SSO_PROVIDER_UPDATED: &str = "sso_provider.updated";
+    pub const SSO_PROVIDER_DELETED: &str = "sso_provider.deleted";
+    pub const SSO_ENFORCEMENT_UPDATED: &str = "sso_enforcement.updated";
 }
 
 pub mod resources {
@@ -130,6 +137,9 @@ pub mod resources {
     pub const MCP_SERVER: &str = "mcp_server";
     pub const WORKSPACE_MCP_SERVERS: &str = "workspace_mcp_servers";
     pub const LICENSE: &str = "license";
+    pub const SSO_PROVIDER: &str = "sso_provider";
+    pub const SSO_SETTINGS: &str = "sso_settings";
+    pub const USER: &str = "user";
 }
 
 /// Log an action to the audit trail
