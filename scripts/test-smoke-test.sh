@@ -1,13 +1,19 @@
 #!/bin/sh
 set -eu
 
-unset DOMAIN_HOST_WEBUI OLLAMA_BASE_URL COMPOSE_PROFILES ZONE_COMPOSE
+unset DOMAIN_HOST_WEBUI OLLAMA_BASE_URL COMPOSE_PROFILES ZONE_COMPOSE ZONE_ENV_FILE \
+    LITELLM_STATUS LITELLM_HEALTH OLLAMA_HEALTH UNREACHABLE CONTAINERS PROFILES \
+    MANAGER_CONFIG_FILES CONSOLE_CONFIG_FILES
 
 directory=$(mktemp -d)
 trap 'rm -rf "$directory"' EXIT HUP INT TERM
-script=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/smoke-test.sh
+source=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/smoke-test.sh
+sandbox=$directory/zone
+script=$sandbox/scripts/smoke-test.sh
 
-mkdir "$directory/bin"
+mkdir -p "$directory/bin" "$sandbox/scripts"
+cp "$source" "$script"
+
 cat > "$directory/bin/curl" <<'CURL'
 #!/bin/sh
 printf '%s\n' "$*" >> "$CURL_LOG"
@@ -46,10 +52,23 @@ case "$1" in
         for argument do
             container=$argument
         done
-        case "$container" in
-            litellm) printf '%s\n' "${LITELLM_HEALTH:-healthy}" ;;
-            ollama) printf '%s\n' "${OLLAMA_HEALTH:-healthy}" ;;
-            *) exit 1 ;;
+        case "$*" in
+            *com.docker.compose.project.config_files*)
+                case "$container" in
+                    manager) files=${MANAGER_CONFIG_FILES:-} ;;
+                    console) files=${CONSOLE_CONFIG_FILES:-} ;;
+                    *) files='' ;;
+                esac
+                [ -n "$files" ] || exit 1
+                printf '%s\n' "$files"
+                ;;
+            *)
+                case "$container" in
+                    litellm) printf '%s\n' "${LITELLM_HEALTH:-healthy}" ;;
+                    ollama) printf '%s\n' "${OLLAMA_HEALTH:-healthy}" ;;
+                    *) exit 1 ;;
+                esac
+                ;;
         esac
         ;;
     *) exit 1 ;;
@@ -58,12 +77,11 @@ DOCKER
 
 cat > "$directory/bin/fake-compose" <<'COMPOSE'
 #!/bin/sh
+printf '%s\n' "$*" >> "$COMPOSE_LOG"
 [ "$1" = print-profiles ] || exit 1
 printf '%s\n' "${PROFILES:-}"
 COMPOSE
 chmod +x "$directory/bin/curl" "$directory/bin/docker" "$directory/bin/fake-compose"
-
-: > "$directory/empty.env"
 
 fail() {
     printf '%s\n' "$1" >&2
@@ -76,17 +94,25 @@ fail() {
     exit 1
 }
 
+write_env() {
+    printf '%s\n' "$@" > "$sandbox/.env"
+}
+
 smoke() {
     : > "$directory/curl.log"
     : > "$directory/docker.log"
+    : > "$directory/compose.log"
+    status=0
     env \
         PATH="$directory/bin:$PATH" \
         CURL_LOG="$directory/curl.log" \
         DOCKER_LOG="$directory/docker.log" \
+        COMPOSE_LOG="$directory/compose.log" \
         ZONE_COMPOSE=fake-compose \
-        ZONE_ZONE_ENV_FILE="$directory/empty.env" \
         "$@" \
-        sh "$script" > "$directory/output" 2>&1
+        sh "$script" > "$directory/output" 2>&1 || status=$?
+    rm -f "$sandbox/.env"
+    return "$status"
 }
 
 requested() {
@@ -113,6 +139,20 @@ assert_never_legacy_probes() {
     assert_not_requested '/api/health'
 }
 
+assert_dev_probes() {
+    assert_output 'against the dev stack'
+    assert_requested 'http://localhost:3001/'
+    assert_requested 'http://localhost:8000/health'
+    assert_not_requested 'manager.localhost'
+}
+
+assert_install_probes() {
+    assert_output 'against the install stack'
+    assert_requested 'https://manager.localhost/health'
+    assert_not_requested 'localhost:3001'
+    assert_not_requested 'localhost:8000'
+}
+
 smoke || fail 'Expected an install with LiteLLM answering 401 behind basic auth to pass'
 assert_requested '--resolve litellm.webui.localhost:443:127.0.0.1'
 assert_requested 'https://litellm.webui.localhost/health/readiness'
@@ -120,8 +160,7 @@ assert_requested '--resolve manager.localhost:443:127.0.0.1'
 assert_requested 'https://manager.localhost/health'
 assert_requested 'https://manager.localhost/'
 assert_requested 'http://127.0.0.1:11434/api/tags'
-assert_not_requested 'localhost:3001'
-assert_not_requested 'localhost:8000'
+assert_install_probes
 assert_never_legacy_probes
 grep -qF 'inspect' "$directory/docker.log" || fail 'Expected the LiteLLM container health to be inspected'
 assert_output '✓ LiteLLM'
@@ -141,32 +180,83 @@ if smoke LITELLM_HEALTH=unhealthy; then
 fi
 assert_output '✗ LiteLLM container (unhealthy)'
 
-printf '%s\n' 'DOMAIN_HOST_WEBUI=from-file.example' > "$directory/custom.env"
-smoke ZONE_ENV_FILE="$directory/custom.env" || fail 'Expected DOMAIN_HOST_WEBUI from .env to pass'
+write_env 'DOMAIN_HOST_WEBUI=from-file.example'
+smoke || fail 'Expected DOMAIN_HOST_WEBUI from the repository .env to pass'
 assert_requested '--resolve litellm.from-file.example:443:127.0.0.1'
 assert_requested 'https://litellm.from-file.example/health/readiness'
 
-smoke DOMAIN_HOST_WEBUI=zone.example ZONE_ENV_FILE="$directory/custom.env" \
-    || fail 'Expected DOMAIN_HOST_WEBUI from the environment to pass'
+printf '%s\n' 'DOMAIN_HOST_WEBUI=override.example' > "$directory/custom.env"
+write_env 'DOMAIN_HOST_WEBUI=from-file.example'
+smoke ZONE_ENV_FILE="$directory/custom.env" || fail 'Expected DOMAIN_HOST_WEBUI from ZONE_ENV_FILE to pass'
+assert_requested 'https://litellm.override.example/health/readiness'
+assert_not_requested 'from-file.example'
+
+write_env 'DOMAIN_HOST_WEBUI=from-file.example'
+smoke DOMAIN_HOST_WEBUI=zone.example || fail 'Expected DOMAIN_HOST_WEBUI from the environment to pass'
 assert_requested '--resolve litellm.zone.example:443:127.0.0.1'
 assert_requested 'https://litellm.zone.example/health/readiness'
 assert_not_requested 'from-file.example'
 assert_not_requested 'webui.localhost'
 
+write_env \
+    '# DOMAIN_HOST_WEBUI=commented.example' \
+    'DOMAIN_HOST_WEBUI=first.example' \
+    'DOMAIN_HOST_WEBUI=zone.example # the public host' \
+    'OLLAMA_BASE_URL="http://models.example:11434/" # quoted with a comment'
+smoke || fail 'Expected .env values with trailing comments and double quotes to pass'
+assert_requested 'https://litellm.zone.example/health/readiness'
+assert_requested 'http://models.example:11434/api/tags'
+assert_not_requested 'commented.example'
+assert_not_requested 'first.example'
+assert_not_requested '#'
+
+write_env \
+    "export DOMAIN_HOST_WEBUI='single.example'   # single quoted" \
+    "OLLAMA_BASE_URL='http://models.example:11434' "
+smoke || fail 'Expected single-quoted .env values to pass'
+assert_requested 'https://litellm.single.example/health/readiness'
+assert_requested 'http://models.example:11434/api/tags'
+
+write_env 'DOMAIN_HOST_WEBUI=zone.example#not-a-comment'
+if smoke; then
+    fail 'Expected a # without leading whitespace to stay part of the value, as Compose reads it'
+fi
+assert_output 'DOMAIN_HOST_WEBUI is not a host name: zone.example#not-a-comment'
+
 if smoke DOMAIN_HOST_WEBUI='bad host'; then
     fail 'Expected a DOMAIN_HOST_WEBUI that is not a host name to be rejected'
 fi
+assert_output 'DOMAIN_HOST_WEBUI is not a host name: bad host'
+[ ! -s "$directory/curl.log" ] || fail 'Expected no probes once DOMAIN_HOST_WEBUI is rejected'
 
 smoke PROFILES=dev,vpn || fail 'Expected the dev stack to pass'
-assert_requested 'http://localhost:3001/'
-assert_requested 'http://localhost:8000/health'
+assert_dev_probes
 assert_requested '--resolve litellm.webui.localhost:443:127.0.0.1'
-assert_not_requested 'manager.localhost'
 assert_never_legacy_probes
 
 smoke PROFILES=monitoring || fail 'Expected a stack without the dev profile to pass as an install'
-assert_requested 'https://manager.localhost/health'
-assert_not_requested 'localhost:8000'
+assert_install_probes
+
+smoke MANAGER_CONFIG_FILES=/srv/zone/docker-compose.yml,/srv/zone/docker-compose.dev.yml \
+    || fail 'Expected a running manager started with the dev overlay to pass as the dev stack'
+assert_dev_probes
+[ ! -s "$directory/compose.log" ] || fail 'Expected the running stack to decide the mode without reading persisted profiles'
+
+smoke PROFILES=dev MANAGER_CONFIG_FILES=/srv/zone/docker-compose.yml \
+    || fail 'Expected a running manager without the dev overlay to pass as an install'
+assert_install_probes
+
+smoke CONSOLE_CONFIG_FILES=docker-compose.yml,docker-compose.dev.yml,docker-compose.override.yml \
+    || fail 'Expected a running console started with the dev overlay to pass as the dev stack'
+assert_dev_probes
+
+smoke MANAGER_CONFIG_FILES=/srv/zone/docker-compose.yml,/srv/zone/old-docker-compose.dev.yml \
+    || fail 'Expected only the dev overlay itself to mark the dev stack'
+assert_install_probes
+
+smoke PROFILES=dev || fail 'Expected the persisted dev profile to decide when no stack is running'
+assert_dev_probes
+grep -qx 'print-profiles' "$directory/compose.log" || fail 'Expected persisted profiles to be read when no stack is running'
 
 if smoke UNREACHABLE='manager.localhost/health'; then
     fail 'Expected an unreachable manager to fail'
@@ -184,8 +274,8 @@ if smoke UNREACHABLE='11434'; then
 fi
 assert_output '✗ Ollama'
 
-printf '%s\n' 'OLLAMA_BASE_URL=http://models.example:11434/' > "$directory/ollama.env"
-smoke ZONE_ENV_FILE="$directory/ollama.env" || fail 'Expected an external Ollama from .env to pass'
+write_env 'OLLAMA_BASE_URL=http://models.example:11434/'
+smoke || fail 'Expected an external Ollama from .env to pass'
 assert_requested 'http://models.example:11434/api/tags'
 
 smoke CONTAINERS='litellm ollama' || fail 'Expected a healthy bundled Ollama to pass'

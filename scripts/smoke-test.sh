@@ -29,13 +29,39 @@ read_env_value() {
     if [ ! -f "$file" ]; then
         return 0
     fi
-    awk -F= -v name="$name" '
-        $0 ~ "^[[:space:]]*(export[[:space:]]+)?" name "[[:space:]]*=" {
-            value = $0
-            sub(/^[[:space:]]*(export[[:space:]]+)?[^=]+=/, "", value)
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-            gsub(/^["'\'']|["'\'']$/, "", value)
-            found = value
+    awk -v name="$name" '
+        function unquote(raw,    quote, value, position, character) {
+            quote = substr(raw, 1, 1)
+            if (quote != "\"" && quote != "'\''") {
+                position = index(raw, " #")
+                if (position) raw = substr(raw, 1, position - 1)
+                sub(/[[:space:]]+$/, "", raw)
+                return raw
+            }
+            value = ""
+            for (position = 2; position <= length(raw); position++) {
+                character = substr(raw, position, 1)
+                if (character == quote) return value
+                if (character == "\\" && position < length(raw)) {
+                    position++
+                    character = substr(raw, position, 1)
+                    if (quote == "'\''") character = "\\" character
+                    else if (character == "n") character = "\n"
+                }
+                value = value character
+            }
+            return raw
+        }
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            sub(/^[[:space:]]+/, "", line)
+            if (line ~ /^export[[:space:]]/) sub(/^export[[:space:]]+/, "", line)
+            if (substr(line, 1, length(name)) != name) next
+            rest = substr(line, length(name) + 1)
+            if (rest !~ /^[[:space:]]*=/) next
+            sub(/^[[:space:]]*=[[:space:]]*/, "", rest)
+            found = unquote(rest)
         }
         END { if (found != "") print found }
     ' "$file"
@@ -92,7 +118,26 @@ container_listed() {
     docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$1"
 }
 
+running_config_files() {
+    for container in manager console; do
+        files=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$container" 2>/dev/null) || continue
+        if [ -n "$files" ]; then
+            printf '%s\n' "$files"
+            return 0
+        fi
+    done
+    return 1
+}
+
+lists_dev_overlay() {
+    printf '%s\n' "$1" | tr ',' '\n' | grep -Eq '(^|/)docker-compose\.dev\.yml$'
+}
+
 is_dev_mode() {
+    if files=$(running_config_files); then
+        lists_dev_overlay "$files"
+        return
+    fi
     profiles=$("$ZONE_COMPOSE" print-profiles) || {
         printf '%s\n' "${RED}Could not read the active Compose profiles from $ZONE_COMPOSE${RESET}" >&2
         exit 1
