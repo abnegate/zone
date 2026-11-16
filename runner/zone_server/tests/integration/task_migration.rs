@@ -1092,6 +1092,58 @@ async fn the_run_finish_index_builds_while_runs_keep_beating() {
 }
 
 #[tokio::test]
+async fn an_upgrade_stops_gathering_from_notion_sources() {
+    const BEFORE_NOTION_DEACTIVATION: i64 = 15;
+    const NOTION: &str = "notion";
+    const GITHUB: &str = "github";
+    let database = Database::new(PREFIX).await;
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    Migrator::new(directory.as_path())
+        .await
+        .unwrap()
+        .run_to(BEFORE_NOTION_DEACTIVATION, &database.pool)
+        .await
+        .unwrap();
+    let (workspace, _) = database.workspace().await;
+    sqlx::query(
+        "INSERT INTO source_types(name, category, description) VALUES ($1, 'file', 'Notion')",
+    )
+    .bind(NOTION)
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    for (name, source_type) in [("Wiki", NOTION), ("Repository", GITHUB)] {
+        sqlx::query(
+            "INSERT INTO sources(workspace_id, name, source_type, is_active) \
+             VALUES ($1, $2, $3, TRUE)",
+        )
+        .bind(workspace)
+        .bind(format!("{name} {workspace}"))
+        .bind(source_type)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    }
+
+    migrations::run(&database.pool).await.unwrap();
+
+    let active: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT source_type, is_active FROM sources WHERE workspace_id = $1 ORDER BY source_type",
+    )
+    .bind(workspace)
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    database.cleanup().await;
+
+    assert_eq!(
+        active,
+        vec![(GITHUB.to_string(), true), (NOTION.to_string(), false)],
+        "a Notion source has no adapter left to gather it, so only it is turned off"
+    );
+}
+
+#[tokio::test]
 async fn an_index_build_interrupted_on_an_earlier_boot_is_built_again() {
     const BEFORE_CONCURRENT_INDEXES: i64 = 13;
     const UNRELATED: &str = "idx_migration_unrelated";
