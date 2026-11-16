@@ -326,6 +326,10 @@ export interface MessageMetadata {
   handovers?: Handover[];
   source?: string;
   reminder_id?: string;
+  /** Set on a task_run notice: the task it is about and how its run ended. */
+  task_id?: string;
+  run_id?: string;
+  status?: string;
 }
 
 export interface Message {

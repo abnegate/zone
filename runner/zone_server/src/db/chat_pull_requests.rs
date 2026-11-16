@@ -400,22 +400,7 @@ pub async fn announce(
     content: &str,
     metadata: serde_json::Value,
 ) -> DbResult<serde_json::Value> {
-    let mut transaction = pool.begin().await?;
-    let stored: serde_json::Value = sqlx::query_scalar(
-        "INSERT INTO messages (chat_id, role, content, metadata) VALUES ($1, 'assistant', $2, $3)
-         RETURNING to_jsonb(messages.*)",
-    )
-    .bind(chat_id)
-    .bind(content)
-    .bind(metadata)
-    .fetch_one(&mut *transaction)
-    .await?;
-    sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
-        .bind(chat_id)
-        .execute(&mut *transaction)
-        .await?;
-    transaction.commit().await?;
-    Ok(stored)
+    crate::db::chats::announce(pool, chat_id, content, metadata).await
 }
 
 pub async fn retitle<'e, E>(executor: E, id: Uuid, title: &str) -> DbResult<()>

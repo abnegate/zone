@@ -500,6 +500,36 @@ pub async fn create_message(
     create_message_with_id(pool, Uuid::new_v4(), chat_id, role, content, metadata).await
 }
 
+/// Say something in `chat_id` as the assistant, marked in `metadata` as the
+/// automation that wrote it rather than a turn somebody typed, and answer
+/// with the stored message for publishing.
+///
+/// The chat is touched so it sorts as recently active, since a reader who is
+/// being told something has a reason to look at it.
+pub async fn announce(
+    pool: &PgPool,
+    chat_id: Uuid,
+    content: &str,
+    metadata: serde_json::Value,
+) -> DbResult<serde_json::Value> {
+    let mut transaction = pool.begin().await?;
+    let stored: serde_json::Value = sqlx::query_scalar(
+        "INSERT INTO messages (chat_id, role, content, metadata) VALUES ($1, 'assistant', $2, $3)
+         RETURNING to_jsonb(messages.*)",
+    )
+    .bind(chat_id)
+    .bind(content)
+    .bind(metadata)
+    .fetch_one(&mut *transaction)
+    .await?;
+    sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
+        .bind(chat_id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(stored)
+}
+
 /// Create a message with a caller-provided ID.
 ///
 /// Streaming protocols can publish this ID before persistence and later use it

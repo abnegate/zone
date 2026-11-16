@@ -66,6 +66,23 @@ describe('AutomationBadge', () => {
     expect(badge).toHaveTextContent('Written by auto-fix as it worked on a pull request');
   });
 
+  it('labels the notice a finished task run left, and how it ended', () => {
+    render(<AutomationBadge metadata={{ source: 'task_run', status: 'failed' }} />);
+
+    const badge = screen.getByTestId('automation-badge');
+    expect(badge).toHaveTextContent('Task run');
+    expect(badge).toHaveAttribute(
+      'title',
+      'Written when a task this chat started finished, not typed in this chat. Run failed.'
+    );
+  });
+
+  it('labels a task run whose status never reached the notice', () => {
+    render(<AutomationBadge metadata={{ source: 'task_run' }} />);
+
+    expect(screen.getByTestId('automation-badge')).toHaveTextContent('Task run');
+  });
+
   it('renders nothing for a message a person typed', () => {
     const { container } = render(<AutomationBadge metadata={{ attachments: [] }} />);
 

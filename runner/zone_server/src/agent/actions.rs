@@ -1,6 +1,7 @@
 //! Authenticated workspace mutations and durable reminders.
 use super::tools::WorkspaceScope;
 use crate::db::{actions, reminders, tasks};
+use crate::services::chat::task_notice;
 use crate::workers::titles;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -500,8 +501,23 @@ impl WorkspaceAction {
                         titles::spawn_task(scope.state.clone(), task_id);
                     }
                     let state = scope.state.clone();
+                    // A run started from a chat is answered in that chat when
+                    // it ends. Whoever asked for it has finished their turn by
+                    // then and learns nothing otherwise.
+                    let finished = scope.chat_id.map(|chat_id| task_notice::Finished {
+                        chat_id,
+                        task_id,
+                        title: started
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    });
                     tokio::spawn(async move {
                         crate::workers::task::execute_task_run(&state, run_id, task_id).await;
+                        if let Some(finished) = finished {
+                            finished.say(&state, run_id).await;
+                        }
                     });
                 }
                 Ok(started)
