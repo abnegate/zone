@@ -31,7 +31,7 @@ pub async fn get(State(state): State<AppState>, _admin: ServerAdmin) -> Response
         Ok(required) => required,
         Err(error) => return unavailable(&error),
     };
-    let records = match providers::list(state.db(), state.master_key()).await {
+    let records = match providers::list(state.db()).await {
         Ok(records) => records,
         Err(error) => return unavailable(&error),
     };

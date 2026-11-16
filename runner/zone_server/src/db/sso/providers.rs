@@ -10,7 +10,6 @@ use super::provider::ProviderRecord;
 use super::provider_changes::ProviderChanges;
 use super::provider_error::{ProviderError, ProviderResult};
 use crate::db::DbResult;
-use crate::secret::Unseal;
 
 pub const DUPLICATE_KEY: &str = "sso_providers_issuer_client_id_key";
 
@@ -32,19 +31,16 @@ struct Row {
 }
 
 impl Row {
-    fn open(self, key: &MasterKey) -> ProviderResult<ProviderRecord> {
+    fn record(self) -> ProviderResult<ProviderRecord> {
         let protocol = Protocol::parse(&self.protocol)
             .ok_or_else(|| ProviderError::Protocol(self.id, self.protocol.clone()))?;
-        let client_secret = key
-            .open_strict(&self.client_secret)
-            .map_err(|error| ProviderError::Unopenable(self.id, error))?;
         Ok(ProviderRecord {
             id: self.id,
             protocol,
             display_name: self.display_name,
             issuer: self.issuer,
             client_id: self.client_id,
-            client_secret,
+            sealed_secret: self.client_secret,
             allowed_domains: self.allowed_domains,
             require_verified_email: self.require_verified_email,
             enabled: self.enabled,
@@ -69,16 +65,13 @@ fn classify(error: sqlx::Error) -> ProviderError {
     }
 }
 
-pub async fn list(
-    executor: impl PgExecutor<'_>,
-    key: &MasterKey,
-) -> ProviderResult<Vec<ProviderRecord>> {
+pub async fn list(executor: impl PgExecutor<'_>) -> ProviderResult<Vec<ProviderRecord>> {
     let rows: Vec<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM sso_providers ORDER BY created_at, id"
     )))
     .fetch_all(executor)
     .await?;
-    rows.into_iter().map(|row| row.open(key)).collect()
+    rows.into_iter().map(Row::record).collect()
 }
 
 pub async fn list_enabled(executor: impl PgExecutor<'_>) -> DbResult<Vec<Listing>> {
@@ -91,7 +84,6 @@ pub async fn list_enabled(executor: impl PgExecutor<'_>) -> DbResult<Vec<Listing
 
 pub async fn get(
     executor: impl PgExecutor<'_>,
-    key: &MasterKey,
     id: Uuid,
 ) -> ProviderResult<Option<ProviderRecord>> {
     let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -100,12 +92,11 @@ pub async fn get(
     .bind(id)
     .fetch_optional(executor)
     .await?;
-    row.map(|row| row.open(key)).transpose()
+    row.map(Row::record).transpose()
 }
 
 pub async fn lock(
     connection: &mut PgConnection,
-    key: &MasterKey,
     id: Uuid,
 ) -> ProviderResult<Option<ProviderRecord>> {
     let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -114,7 +105,7 @@ pub async fn lock(
     .bind(id)
     .fetch_optional(connection)
     .await?;
-    row.map(|row| row.open(key)).transpose()
+    row.map(Row::record).transpose()
 }
 
 pub async fn create(
@@ -139,7 +130,7 @@ pub async fn create(
     .fetch_one(executor)
     .await
     .map_err(classify)?;
-    row.open(key)
+    row.record()
 }
 
 pub async fn update(
@@ -149,7 +140,7 @@ pub async fn update(
     changes: &ProviderChanges,
 ) -> ProviderResult<Option<ProviderRecord>> {
     if changes.is_empty() {
-        return get(executor, key, id).await;
+        return get(executor, id).await;
     }
     let sealed = changes
         .client_secret
@@ -204,7 +195,7 @@ pub async fn update(
         .fetch_optional(executor)
         .await
         .map_err(classify)?;
-    row.map(|row| row.open(key)).transpose()
+    row.map(Row::record).transpose()
 }
 
 pub async fn delete(executor: impl PgExecutor<'_>, id: Uuid) -> DbResult<bool> {

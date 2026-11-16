@@ -83,11 +83,12 @@ pub async fn complete(
 }
 
 async fn enabled(state: &AppState, provider_id: Uuid) -> Result<Provider, SignInFailure> {
-    let record = providers::get(state.db(), state.master_key(), provider_id)
+    let record = providers::get(state.db(), provider_id)
         .await?
         .filter(|record| record.enabled)
         .ok_or(Error::ProviderNotFound)?;
-    Ok(Provider::parse(&record.fields())?)
+    let client_secret = record.client_secret(state.master_key())?;
+    Ok(Provider::parse(&record.fields(&client_secret))?)
 }
 
 /// Two first sign-ins of one person can race to create the same user or identity. The loser

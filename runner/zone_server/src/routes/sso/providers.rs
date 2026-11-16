@@ -209,7 +209,6 @@ pub async fn delete(
 
 #[cfg(test)]
 mod tests {
-    use abnegate_secret::SecretValue;
     use serde_json::json;
 
     use super::*;
@@ -222,7 +221,7 @@ mod tests {
             display_name: "Okta".into(),
             issuer: "https://acme.okta.com".into(),
             client_id: "0oa1".into(),
-            client_secret: SecretValue::new("s3cret"),
+            sealed_secret: "ENC[v1:s3cret]".into(),
             allowed_domains: vec!["acme.com".into()],
             require_verified_email: true,
             enabled: false,

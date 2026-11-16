@@ -117,6 +117,19 @@ when editing, Zone keeps the current secret. Rotate secrets before the
 provider expires them, because an expired secret makes every sign-in fail
 with `sso_token_exchange_failed`.
 
+### Changing the issuer or client ID
+
+A provider's subject (`sub`) is only unique within one issuer, and some
+providers, such as Entra ID, give each application its own subject for the
+same person. So when you change a provider's Issuer URL or client ID, Zone
+unlinks every account linked through that provider, in the same save. On
+each person's next sign-in, Zone matches them by email again, as described
+in [Accounts](#accounts-matching-linking-and-jit-provisioning). The
+`sso_provider.updated` audit entry records how many links were removed as
+`identities_cleared`.
+
+Changing any other setting, the client secret included, keeps every link.
+
 ## Okta
 
 ### Register Zone in Okta
@@ -350,7 +363,10 @@ Zone refuses the sign-in with `sso_email_conflict` when:
 
 - the email matches more than one Zone account, ignoring case
 - the matching account is already linked to a different subject at the
-  same provider
+  same provider. This also happens when the provider starts sending a new
+  subject for the same person without the issuer or client ID changing in
+  Zone. To link everyone again by email, delete the provider and add it
+  again.
 - **Require verified email** is off and the matching account is a server
   admin. Zone never links a server admin on an email that the provider
   hasn't confirmed as verified.
@@ -483,7 +499,7 @@ log. None of them ever contains a client secret.
 | Action | When | Recorded values |
 |---|---|---|
 | `sso_provider.created` | A provider is added | The provider's settings, and `client_secret_changed: true` |
-| `sso_provider.updated` | A provider is edited | The changed settings, before and after, plus `client_secret_changed: true` when the secret was replaced |
+| `sso_provider.updated` | A provider is edited | The changed settings, before and after, plus `client_secret_changed: true` when the secret was replaced, and `identities_cleared` (the number of accounts unlinked) when the issuer or client ID changed |
 | `sso_provider.deleted` | A provider is deleted | The provider's settings |
 | `sso_enforcement.updated` | Enforcement is turned on or off | `required`, before and after |
 | `user.sso_signed_in` | Someone signs in with SSO | `provider_id`, `subject`, `provisioned`, `linked`, `reclaimed` |
@@ -580,8 +596,9 @@ Whichever bridge you use, set it up so that:
 
 - the `sub` claim comes from the SAML provider's persistent NameID, or
   another attribute that never changes for a user. Zone links accounts by
-  provider and subject, so a `sub` that changes signs the same person in as
-  someone new.
+  provider and subject, so when the `sub` changes, the person's account is
+  still linked to the old one and their sign-in is refused with
+  `sso_email_conflict`.
 - `email` and `email_verified` are passed through to the ID token. Without
   `email_verified`, turn **Require verified email** off and set allowed
   domains, as described in [Verified email](#verified-email).
