@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
 use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Observer};
+use zone_enterprise::policy::Effective;
 
 use crate::agent::learned;
 use crate::agent::wait::{self, Outcome, WaitSettled, Waited, Waiting};
@@ -63,6 +64,7 @@ use crate::services::chat::subagent::{Announcer, ChatSubagent, Tracker};
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
 use crate::services::endpoint::{Endpoint, Origin};
 use crate::services::login::router;
+use crate::services::policy::{self, Auditor, Subject};
 use crate::services::project_directory::{self, Start};
 use crate::services::route::Route;
 use crate::state::AppState;
@@ -2907,7 +2909,23 @@ async fn handle_send_message(
                 if unattended {
                     chat.auto_approve = false;
                 }
-                let web_search_requested = !chat.offline
+                request
+                    .approvals
+                    .set_ceiling(route.policy().and_then(policy::ceiling));
+                let restricted = route.policy().is_some_and(Effective::restricts_network);
+                let auditor = route.policy().map(|_| {
+                    Auditor::new(
+                        state.clone(),
+                        workspace_id,
+                        route.organization(),
+                        Some(user_id),
+                        Subject::Chat(chat_id),
+                    )
+                });
+                if let Some(auditor) = &auditor {
+                    request.approvals.set_recorder(auditor.approvals());
+                }
+                let web_search_requested = !(chat.offline || restricted)
                     && state
                         .config()
                         .web_search
@@ -2922,6 +2940,9 @@ async fn handle_send_message(
                     _ = session.guard.lost() => { return Err(OWNERSHIP_LOST.into()); }
                     result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, *route, web_search_requested) => result?,
                 };
+                if let Some(auditor) = &auditor {
+                    preparation.tools.set_recorder(auditor.egress());
+                }
                 handle_chat_generation(state, stream, chat_id, workspace_id, user_id, preparation, &mut request, &mut session, &mut jobs).await
             }
         }
@@ -3382,6 +3403,8 @@ async fn prepare_chat(
     }
     let current = resolved.login.clone();
     let chosen = route.chosen().is_some();
+    let policy = route.policy().cloned().map(Arc::new);
+    let restricted = policy.as_deref().is_some_and(Effective::restricts_network);
     let endpoint = route.into_endpoint()?;
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &resolved.backend)
@@ -3414,6 +3437,7 @@ async fn prepare_chat(
             session: previous.clone(),
             directory: directory.clone(),
             origin: db::tasks::Origin::of_turn(metadata),
+            policy,
         }),
         endpoint,
         driver,
@@ -3434,7 +3458,14 @@ async fn prepare_chat(
         }
         _ => None,
     };
-    let search = load_web_search(state, chat_id, content, web_search_requested, chat.offline).await;
+    let search = load_web_search(
+        state,
+        chat_id,
+        content,
+        web_search_requested,
+        chat.offline || restricted,
+    )
+    .await;
     let agentic = preparation.agentic;
     let character = chat.character.as_ref();
     let prompt = session::system_prompt(

@@ -37,6 +37,7 @@ use zone_core::llm::BuiltinTools;
 use zone_core::llm::LlmBackend;
 use zone_core::llm::LlmClient;
 use zone_enterprise::policy::Denial;
+use zone_enterprise::policy::Effective;
 
 use crate::agent;
 use crate::agent::AgentEvent;
@@ -65,6 +66,8 @@ use crate::services::endpoint::Endpoint;
 use crate::services::failure::unreachable;
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router;
+use crate::services::policy::Auditor;
+use crate::services::policy::Subject;
 use crate::services::route::Reason;
 use crate::services::route::Route;
 use crate::services::route::Unusable;
@@ -1354,6 +1357,7 @@ async fn execute_in_checkout<'a>(
     // validates `triggered_by` against active membership, and a task whose
     // author has since been cleared must not cost its initiator their memory.
     let actor = run.triggered_by;
+    let enforcement = Enforcement::of(state, &route, workspace_id, actor, task_id);
 
     // The model the run runs on is written down so the reviewer can be chosen
     // against it.
@@ -1413,6 +1417,7 @@ async fn execute_in_checkout<'a>(
     // starts from it rather than asking the person again.
     let approval = plan::Approval::default();
     let approval = &approval;
+    let enforcement = enforcement.as_ref();
 
     let result = run_with_policy(
         policy,
@@ -1446,6 +1451,7 @@ async fn execute_in_checkout<'a>(
                 unattended,
                 approval,
                 LoopBudget::task(),
+                enforcement,
             )
             .await;
             let outcome = match outcome {
@@ -2392,6 +2398,7 @@ async fn attempt_run<'a>(
     unattended: bool,
     approval: &plan::Approval,
     budget: LoopBudget,
+    enforcement: Option<&Enforcement>,
 ) -> Result<TaskOutcome, Fault> {
     // A task that requires its plan approved changes nothing until it is:
     // every tool that would is refused, turn after turn, until the answer
@@ -2411,6 +2418,7 @@ async fn attempt_run<'a>(
             workspace,
             plan_held,
             unattended,
+            enforcement,
         )
         .await,
     );
@@ -2432,6 +2440,7 @@ async fn attempt_run<'a>(
     }
     let mut system_prompt = prompt::task(&tools, &environment);
     system_prompt.push_str(guidance);
+    let approvals = enforcement.map_or_else(ApprovalPolicy::unattended, Enforcement::approvals);
     let mut agent_tools = crate::mcp::AgentTools::serve(
         backend,
         &mut tools,
@@ -2439,7 +2448,7 @@ async fn attempt_run<'a>(
             workspace: workspace_id,
             chat: run_id,
             user: actor,
-            approval: ApprovalPolicy::unattended(),
+            approval: approvals.clone(),
             calls: budget.max_tool_calls,
             builtin: BuiltinTools::Withheld,
         },
@@ -2494,6 +2503,7 @@ async fn attempt_run<'a>(
                 &callback,
                 agent_tools.as_mut().map(|served| &mut served.calls),
                 metered.as_mut().map(|metered| &mut metered.meter),
+                approvals.clone(),
             )
             .await
             {
@@ -2537,6 +2547,7 @@ async fn attempt_run<'a>(
                         workspace,
                         plan_held,
                         unattended,
+                        enforcement,
                     )
                     .await;
                 }
@@ -2565,6 +2576,7 @@ async fn attempt_run<'a>(
                         workspace,
                         plan_held,
                         unattended,
+                        enforcement,
                     )
                     .await;
                 }
@@ -2746,10 +2758,16 @@ async fn task_tools(
     workspace: &Path,
     plan_held: bool,
     unattended: bool,
+    enforcement: Option<&Enforcement>,
 ) -> ChatTools {
-    let tools = ChatTools::for_task(state, workspace.to_path_buf(), workspace_id, actor)
-        .await
-        .with_task_lease(state.db().clone(), run_id, owner);
+    let policy = enforcement.map(|enforcement| enforcement.policy.clone());
+    let tools =
+        ChatTools::for_task_with(state, workspace.to_path_buf(), workspace_id, actor, policy)
+            .await
+            .with_task_lease(state.db().clone(), run_id, owner);
+    if let Some(enforcement) = enforcement {
+        tools.set_recorder(enforcement.auditor.egress());
+    }
     let tools = if unattended {
         tools.unattended()
     } else {
@@ -2759,6 +2777,46 @@ async fn task_tools(
         tools.with_plan_approval().holding_for_plan()
     } else {
         tools
+    }
+}
+
+/// The organization's agent policy a run's tools are held to, and where every
+/// call it refuses is audited.
+struct Enforcement {
+    policy: Arc<Effective>,
+    auditor: Auditor,
+}
+
+impl Enforcement {
+    /// The enforcement `route`'s policy asks of a run of `task` started by
+    /// `actor`, none when no policy is enforced.
+    fn of(
+        state: &AppState,
+        route: &Route,
+        workspace: Uuid,
+        actor: Option<Uuid>,
+        task: Uuid,
+    ) -> Option<Self> {
+        let policy = route.policy()?;
+        Some(Self {
+            policy: Arc::new(policy.clone()),
+            auditor: Auditor::new(
+                state.clone(),
+                workspace,
+                route.organization(),
+                actor,
+                Subject::Task(task),
+            ),
+        })
+    }
+
+    /// Nobody attends a run, so a call above the ceiling is withheld rather
+    /// than asked about, and audited.
+    fn approvals(&self) -> ApprovalPolicy {
+        let approvals = ApprovalPolicy::unattended()
+            .with_ceiling(crate::services::policy::ceiling(&self.policy));
+        approvals.set_recorder(self.auditor.approvals());
+        approvals
     }
 }
 
@@ -3290,6 +3348,7 @@ async fn run_task_loop(
     callback: &DatabaseTaskCallback,
     calls: Option<&mut mpsc::UnboundedReceiver<AgentEvent>>,
     mut meter: Option<&mut Meter<'_>>,
+    approval: ApprovalPolicy,
 ) -> Result<TurnOutcome, Halt> {
     callback.on_phase_change(AgentPhase::Thinking, None);
     let mut summary = String::new();
@@ -3303,7 +3362,7 @@ async fn run_task_loop(
             tools,
             messages: Vec::new(),
             budget,
-            approval: ApprovalPolicy::unattended(),
+            approval,
         },
         &mut context,
         true,
@@ -4319,6 +4378,7 @@ mod tests {
                 &callback,
                 None,
                 None,
+                ApprovalPolicy::unattended(),
             ),
         )
         .await
@@ -4478,6 +4538,7 @@ mod tests {
                 &callback,
                 None,
                 None,
+                ApprovalPolicy::unattended(),
             ),
         )
         .await
@@ -5247,6 +5308,7 @@ mod retry_tests {
                 &callback,
                 None,
                 None,
+                ApprovalPolicy::unattended(),
             ),
         )
         .await
@@ -7054,6 +7116,7 @@ mod watchdog_tests {
                 false,
                 &plan::Approval::default(),
                 PARKING_CEILING,
+                None,
             ),
         )
         .await
@@ -7915,6 +7978,7 @@ mod watchdog_tests {
             false,
             &approval,
             LoopBudget::task(),
+            None,
         );
         // The row is watched on the real clock: a paused one jumps to the next
         // timer while a query is in flight. Only once the run is parked, with
@@ -8059,6 +8123,7 @@ mod watchdog_tests {
             false,
             &plan::Approval::default(),
             LoopBudget::task(),
+            None,
         )
         .await
         .expect("an attempt that waits on nothing finishes");
@@ -9256,6 +9321,7 @@ mod cli_tests {
             false,
             &plan::Approval::default(),
             LoopBudget::task(),
+            None,
         )
         .await
     }
@@ -9449,6 +9515,7 @@ mod cli_tests {
             &callback,
             Some(&mut calls),
             None,
+            ApprovalPolicy::unattended(),
         )
         .await
         .expect("the turn finishes");

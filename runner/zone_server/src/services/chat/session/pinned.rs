@@ -204,6 +204,7 @@ mod tests {
             session: Some(previous(login)),
             directory: None,
             origin: crate::db::tasks::Origin::Member,
+            policy: None,
         }
     }
 

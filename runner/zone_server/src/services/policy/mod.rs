@@ -1,10 +1,12 @@
 //! The agent and model policy an organization, and each of its workspaces, holds its agents to,
 //! enforced while a Team or Enterprise license is installed, lapsed or not.
 
+pub mod auditor;
 pub mod denied;
 pub mod subject;
 pub mod upstream;
 
+pub use auditor::Auditor;
 pub use denied::Denied;
 pub use subject::Subject;
 
