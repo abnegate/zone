@@ -350,9 +350,10 @@ impl Github {
             self.service
                 .collect_statuses(&self.repository, &self.token, &commit),
         );
+        let workflows = entire(workflows.map_err(ci_described)?)?;
         vetted(
             &commit,
-            workflows.map_err(ci_described)?,
+            workflows,
             checks.map_err(ci_described)?,
             statuses.map_err(ci_described)?,
         )
@@ -725,9 +726,7 @@ pub(crate) fn vetted(
     checks: Collected<CheckRun>,
     statuses: Collected<CommitStatus>,
 ) -> Result<Rows, Fault> {
-    if !workflows.complete {
-        return Err(Fault::upstream(PARTIAL_WORKFLOW_RUNS));
-    }
+    let workflows = entire(workflows)?;
     if statuses
         .items
         .iter()
@@ -758,6 +757,13 @@ pub(crate) fn vetted(
         statuses: statuses.items,
         complete,
     })
+}
+
+fn entire(workflows: Collected<WorkflowRun>) -> Result<Collected<WorkflowRun>, Fault> {
+    match workflows.complete {
+        true => Ok(workflows),
+        false => Err(Fault::upstream(PARTIAL_WORKFLOW_RUNS)),
+    }
 }
 
 fn workflow_detail(run: &WorkflowRun) -> CheckDetail {
