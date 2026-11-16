@@ -300,7 +300,7 @@ setup_basic_auth() {
         fi
     fi
 
-    if ! auth_file=$(sh "${AUTH_SCRIPT}" prepare); then
+    if ! sh "${AUTH_SCRIPT}" prepare > /dev/null; then
         log_error "Could not prepare the basic auth file at ${auth_file}"
         exit 1
     fi
