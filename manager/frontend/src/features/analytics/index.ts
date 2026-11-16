@@ -1,5 +1,13 @@
 export { type Analytics, NO_WORKSPACE, STALE_MS, useAnalytics } from './hooks';
-export { DEFAULT_PERIOD, isPeriod, PERIODS, type PeriodOption, periodLabel } from './period';
+export {
+  DEFAULT_PERIOD,
+  isPeriod,
+  PERIOD_PARAM,
+  PERIODS,
+  type PeriodOption,
+  periodLabel,
+  periodOf,
+} from './period';
 export { ANALYTICS_KEY, analyticsKeys } from './queryKeys';
 export {
   AgentAnalyticsSchema,

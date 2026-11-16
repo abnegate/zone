@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { render, screen, within } from '@testing-library/react';
 import { overview } from '../../../test/analytics';
-import { NOT_MEASURED } from '../format';
+import { NOT_MEASURED } from '../AnalyticsFormat';
 import { PULL_REQUESTS_TITLE, PullRequestSummaryCard } from './PullRequestSummaryCard';
 
 const { pull_requests: pullRequests } = overview();

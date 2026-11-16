@@ -14,7 +14,6 @@ describe('analytics query keys', () => {
     const workspace = analyticsKeys.workspace('workspace-1');
     expect(workspace).toEqual([ANALYTICS_KEY, 'workspace-1']);
     expect(analyticsKeys.overview('workspace-1', 'quarter').slice(0, 2)).toEqual([...workspace]);
-    expect(analyticsKeys.all).toEqual([ANALYTICS_KEY]);
   });
 
   it('keys each period apart', () => {

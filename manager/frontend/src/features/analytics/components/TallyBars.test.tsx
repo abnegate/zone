@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { render, screen, within } from '@testing-library/react';
 import { overview } from '../../../test/analytics';
-import { qualityLabel, qualityTone, Tone, taskStatusLabel, taskStatusTone } from '../labels';
+import { AnalyticsLabel } from '../AnalyticsLabel';
 import { TallyBars } from './TallyBars';
 
 const { tasks, pull_requests: pullRequests } = overview();
@@ -16,8 +16,8 @@ describe('TallyBars', () => {
       <TallyBars
         label="By status"
         tallies={tasks.statuses}
-        labelOf={taskStatusLabel}
-        toneOf={taskStatusTone}
+        labelOf={AnalyticsLabel.taskStatus}
+        toneOf={AnalyticsLabel.taskStatusTone}
       />
     );
 
@@ -43,8 +43,8 @@ describe('TallyBars', () => {
       <TallyBars
         label="By status"
         tallies={tasks.statuses}
-        labelOf={taskStatusLabel}
-        toneOf={taskStatusTone}
+        labelOf={AnalyticsLabel.taskStatus}
+        toneOf={AnalyticsLabel.taskStatusTone}
       />
     );
 
@@ -60,8 +60,8 @@ describe('TallyBars', () => {
       <TallyBars
         label="Review quality"
         tallies={pullRequests.quality}
-        labelOf={qualityLabel}
-        toneOf={qualityTone}
+        labelOf={AnalyticsLabel.quality}
+        toneOf={AnalyticsLabel.qualityTone}
       />
     );
 
@@ -73,16 +73,16 @@ describe('TallyBars', () => {
     ]);
   });
 
-  it('humanizes a name it has no label for', () => {
+  it('shows a name it has no label for as the server sent it', () => {
     render(
       <TallyBars
         label="By origin"
         tallies={[{ name: 'webhook_call', count: 2 }]}
-        labelOf={taskStatusLabel}
-        toneOf={() => Tone.Accent}
+        labelOf={AnalyticsLabel.taskStatus}
+        toneOf={AnalyticsLabel.originTone}
       />
     );
 
-    expect(screen.getByText('Webhook call')).toBeDefined();
+    expect(screen.getByText('webhook_call')).toBeDefined();
   });
 });

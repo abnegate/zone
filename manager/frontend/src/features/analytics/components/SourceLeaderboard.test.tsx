@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { render, screen, within } from '@testing-library/react';
 import { overview } from '../../../test/analytics';
-import { NO_SOURCE } from '../labels';
+import { NO_SOURCE } from '../AnalyticsLabel';
 import { NO_SOURCES, SOURCES_LABEL, SourceLeaderboard } from './SourceLeaderboard';
 
 const { sources } = overview();
@@ -17,7 +17,7 @@ describe('SourceLeaderboard', () => {
 
     const [first, second] = bodyRows();
     expect(within(first).getByText('acme/zone')).toBeDefined();
-    expect(within(first).getByText('Github')).toBeDefined();
+    expect(within(first).getByText('GitHub')).toBeDefined();
     expect(within(first).getByText('28')).toBeDefined();
     expect(within(first).getByText('79%')).toBeDefined();
     expect(within(first).getByText('9')).toBeDefined();

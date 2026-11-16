@@ -1,5 +1,5 @@
-import { count } from '../format';
-import type { Tone } from '../labels';
+import { AnalyticsFormat } from '../AnalyticsFormat';
+import type { Tone } from '../Tone';
 import type { Tally } from '../types';
 import { MeterRow } from './MeterRow';
 
@@ -22,7 +22,7 @@ export function TallyBars({ label, tallies, labelOf, toneOf }: TallyBarsProps) {
             label={labelOf(tally.name)}
             value={tally.count}
             maximum={maximum}
-            display={count(tally.count)}
+            display={AnalyticsFormat.count(tally.count)}
             tone={toneOf(tally.name)}
           />
         ))}

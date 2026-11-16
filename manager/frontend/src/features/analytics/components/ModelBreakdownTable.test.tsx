@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 import { render, screen, within } from '@testing-library/react';
 import { overview } from '../../../test/analytics';
-import { NOT_MEASURED } from '../format';
-import { NO_MODEL } from '../labels';
+import { NOT_MEASURED } from '../AnalyticsFormat';
+import { NO_MODEL } from '../AnalyticsLabel';
 import { MODELS_LABEL, ModelBreakdownTable, NO_MODELS } from './ModelBreakdownTable';
 
 const { models } = overview();

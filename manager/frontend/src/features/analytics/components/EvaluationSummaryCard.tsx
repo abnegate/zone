@@ -1,6 +1,6 @@
 import { EmptyState } from '@zone/ui';
-import { count } from '../format';
-import { Tone } from '../labels';
+import { AnalyticsFormat } from '../AnalyticsFormat';
+import { Tone } from '../Tone';
 import type { EvaluationSummary } from '../types';
 import { SectionCard } from './SectionCard';
 
@@ -60,7 +60,9 @@ export function EvaluationSummaryCard({ evaluations }: EvaluationSummaryCardProp
                   <span className="analytics-dot" aria-hidden="true" />
                   {verdict.label}
                 </dt>
-                <dd className="analytics-figure-value">{count(evaluations[verdict.key])}</dd>
+                <dd className="analytics-figure-value">
+                  {AnalyticsFormat.count(evaluations[verdict.key])}
+                </dd>
               </div>
             ))}
           </dl>

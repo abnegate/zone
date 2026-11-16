@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { render, screen } from '@testing-library/react';
 import { emptyOverview, overview } from '../../../test/analytics';
-import { NOT_MEASURED } from '../format';
+import { NOT_MEASURED } from '../AnalyticsFormat';
 import { RunTiles } from './RunTiles';
 
 function tile(label: string): HTMLElement {

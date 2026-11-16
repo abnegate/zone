@@ -118,6 +118,47 @@ describe('useAnalytics', () => {
     expect(result.current.refreshing).toBe(false);
   });
 
+  it('drops the last period rather than show it under the next period’s error', async () => {
+    const week = overview();
+    mockOverview
+      .mockResolvedValueOnce(week)
+      .mockRejectedValueOnce(new Error('Failed to load analytics: 502'));
+
+    const { result, rerender } = renderHook(
+      ({ period }: { period: TimePeriod }) => useAnalytics(period),
+      { wrapper: provider(), initialProps: { period: 'week' } }
+    );
+    await waitFor(() => expect(result.current.overview).toEqual(week));
+
+    rerender({ period: 'month' });
+
+    await waitFor(() => expect(result.current.error).toBe('Failed to load analytics: 502'));
+    expect(result.current.overview).toBeUndefined();
+    expect(result.current.refreshing).toBe(false);
+  });
+
+  it('dims the last period again, with no error, while a failed period retries', async () => {
+    const week = overview();
+    mockOverview
+      .mockResolvedValueOnce(week)
+      .mockRejectedValueOnce(new Error('down'))
+      .mockReturnValueOnce(new Promise<Overview>(() => {}));
+
+    const { result, rerender } = renderHook(
+      ({ period }: { period: TimePeriod }) => useAnalytics(period),
+      { wrapper: provider(), initialProps: { period: 'week' } }
+    );
+    await waitFor(() => expect(result.current.overview).toEqual(week));
+    rerender({ period: 'month' });
+    await waitFor(() => expect(result.current.error).toBe('down'));
+
+    result.current.retry();
+
+    await waitFor(() => expect(result.current.error).toBeNull());
+    expect(result.current.overview).toEqual(week);
+    expect(result.current.refreshing).toBe(true);
+  });
+
   it('never shows one workspace the numbers of another', async () => {
     const first = overview();
     const second = pending<Overview>();

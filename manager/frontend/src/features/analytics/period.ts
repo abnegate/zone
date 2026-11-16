@@ -15,14 +15,19 @@ const LABELS: Record<TimePeriod, string> = {
 
 export const DEFAULT_PERIOD: TimePeriod = TimePeriodSchema.enum.week;
 
-export const PERIODS: readonly PeriodOption[] = [
-  TimePeriodSchema.enum.week,
-  TimePeriodSchema.enum.month,
-  TimePeriodSchema.enum.quarter,
-].map((value) => ({ value, label: LABELS[value] }));
+export const PERIOD_PARAM = 'period';
 
-export function isPeriod(value: string): value is TimePeriod {
+export const PERIODS: readonly PeriodOption[] = TimePeriodSchema.options.map((value) => ({
+  value,
+  label: LABELS[value],
+}));
+
+export function isPeriod(value: string | null): value is TimePeriod {
   return TimePeriodSchema.safeParse(value).success;
+}
+
+export function periodOf(value: string | null): TimePeriod {
+  return isPeriod(value) ? value : DEFAULT_PERIOD;
 }
 
 export function periodLabel(period: TimePeriod): string {

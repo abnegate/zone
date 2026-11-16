@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { render, screen, within } from '@testing-library/react';
 import { overview } from '../../../test/analytics';
-import { chartCaption, RunSeriesChart } from './RunSeriesChart';
+import { chartCaption, NO_SERIES, RunSeriesChart } from './RunSeriesChart';
 
 const { series } = overview().runs;
 
@@ -75,6 +75,52 @@ describe('RunSeriesChart', () => {
       '1',
       '1',
     ]);
+  });
+
+  it('draws a series shorter than its window from the buckets it has', () => {
+    const { container } = render(<RunSeriesChart series={series.slice(4)} period="week" />);
+
+    expect(container.querySelectorAll('.analytics-chart-bar')).toHaveLength(3);
+    expect(
+      [...container.querySelectorAll('.analytics-chart-ticks > span')].map(
+        (tick) => tick.textContent
+      )
+    ).toEqual(['Nov 13', 'Nov 14', 'Nov 15']);
+    expect(container.querySelector('.analytics-chart-axis')?.textContent).toBe('1050');
+  });
+
+  it('says so rather than drawing an empty frame when no bucket came back', () => {
+    const { container } = render(<RunSeriesChart series={[]} period="week" />);
+
+    expect(screen.getByText(NO_SERIES)).toBeDefined();
+    expect(container.querySelector('svg')).toBeNull();
+  });
+
+  it('labels hourly buckets by the UTC hour and says the axis is UTC', () => {
+    const hours = [0, 1, 2].map((hour) => ({
+      ...series[0],
+      window: {
+        start: `2026-11-16T0${hour}:00:00`,
+        end: `2026-11-16T0${hour + 1}:00:00`,
+      },
+    }));
+    const { container } = render(<RunSeriesChart series={hours} period="day" />);
+
+    const ticks = [...container.querySelectorAll('.analytics-chart-ticks > span')].map(
+      (tick) => tick.textContent
+    );
+    expect(ticks[0]).toMatch(/^12\sAM$/);
+    expect(ticks[2]).toMatch(/^2\sAM$/);
+    expect(container.querySelector('.analytics-legend-note')?.textContent).toBe('Hours in UTC');
+    expect(container.querySelector('.analytics-chart-bar > title')?.textContent).toMatch(
+      /^Nov 16\b.*\b12\sAM UTC: /
+    );
+  });
+
+  it('says the day buckets are UTC days', () => {
+    const { container } = chart();
+
+    expect(container.querySelector('.analytics-legend-note')?.textContent).toBe('Days in UTC');
   });
 
   it('totals each outcome in the legend', () => {

@@ -52,6 +52,21 @@ describe('analytics overview schema', () => {
     expect(overview.pull_requests.mean_approvals).toBeNull();
   });
 
+  it('reads a negative pull request average rather than blanking the page', () => {
+    const overview = OverviewSchema.parse({
+      ...wireOverview,
+      pull_requests: {
+        ...wireOverview.pull_requests,
+        median_minutes_to_merge: -3,
+        mean_review_cycles: -0.5,
+        mean_approvals: -1,
+      },
+    });
+    expect(overview.pull_requests.median_minutes_to_merge).toBe(-3);
+    expect(overview.pull_requests.mean_review_cycles).toBe(-0.5);
+    expect(overview.pull_requests.mean_approvals).toBe(-1);
+  });
+
   it('accepts a trend with neither half measured', () => {
     const runs = {
       ...wireOverview.runs,
