@@ -86,7 +86,8 @@ pub mod actions {
     pub const INVITATION_ACCEPTED: &str = "invitation.accepted";
     pub const INVITATION_REVOKED: &str = "invitation.revoked";
 
-    pub const SUBSCRIPTION_CHANGED: &str = "subscription.changed";
+    pub const LICENSE_SET: &str = "license.set";
+    pub const LICENSE_REMOVED: &str = "license.removed";
 
     pub const AGENT_SIGNED_IN: &str = "agent.signed_in";
     pub const AGENT_SIGNED_OUT: &str = "agent.signed_out";
@@ -128,6 +129,7 @@ pub mod resources {
     pub const RELEASE: &str = "release";
     pub const MCP_SERVER: &str = "mcp_server";
     pub const WORKSPACE_MCP_SERVERS: &str = "workspace_mcp_servers";
+    pub const LICENSE: &str = "license";
 }
 
 /// Log an action to the audit trail

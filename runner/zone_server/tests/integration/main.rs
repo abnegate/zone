@@ -76,6 +76,7 @@ mod knowledge_url;
 mod knowledge_vector_search;
 mod layout;
 mod learning_thresholds;
+mod license;
 mod license_store;
 mod lora_flows;
 mod mcp_agent;

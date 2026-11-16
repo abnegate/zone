@@ -5,7 +5,9 @@
 //! - Password hashing with Argon2id
 //! - Authentication middleware for axum
 //! - Organization and workspace membership guards
+//! - The server admin guard for server-wide settings
 
+pub mod admin_guard;
 pub mod device;
 pub mod github_guard;
 pub mod jwt;
@@ -17,6 +19,7 @@ pub mod permission;
 pub mod time_zone;
 pub mod workspace_guard;
 
+pub use admin_guard::ServerAdmin;
 pub use github_guard::{PullRequestMerger, ReleaseCreator};
 pub use jwt::{
     AccessClaims, create_access_token, create_refresh_token, create_session_access_token,
