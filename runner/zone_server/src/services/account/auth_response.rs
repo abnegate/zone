@@ -1,3 +1,6 @@
+use std::fmt;
+
+use abnegate_secret::REDACTED;
 use serde::Serialize;
 
 use super::tokens::Tokens;
@@ -6,7 +9,7 @@ use crate::db::users::UserWithPermissions;
 
 pub const TOKEN_TYPE: &str = "Bearer";
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct AuthResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -15,6 +18,21 @@ pub struct AuthResponse {
     pub user: UserResponse,
     pub roles: Vec<String>,
     pub permissions: Vec<String>,
+}
+
+impl fmt::Debug for AuthResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthResponse")
+            .field("access_token", &REDACTED)
+            .field("refresh_token", &REDACTED)
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("user", &self.user)
+            .field("roles", &self.roles)
+            .field("permissions", &self.permissions)
+            .finish()
+    }
 }
 
 impl AuthResponse {

@@ -1,3 +1,6 @@
+use std::fmt;
+
+use abnegate_secret::REDACTED;
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
@@ -40,16 +43,36 @@ impl From<Listing> for PublicProvider {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct AuthorizationResponse {
     pub url: String,
     pub state: String,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for AuthorizationResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthorizationResponse")
+            .field("url", &REDACTED)
+            .field("state", &REDACTED)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 pub struct CallbackRequest {
     pub state: String,
     pub code: String,
+}
+
+impl fmt::Debug for CallbackRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CallbackRequest")
+            .field("state", &REDACTED)
+            .field("code", &REDACTED)
+            .finish()
+    }
 }
 
 /// GET /api/auth/sso/providers
@@ -159,5 +182,21 @@ mod tests {
         let request: CallbackRequest =
             serde_json::from_value(json!({ "state": "s", "code": "c" })).unwrap();
         assert_eq!((request.state.as_str(), request.code.as_str()), ("s", "c"));
+    }
+
+    #[test]
+    fn debug_never_shows_a_state_or_code() {
+        let callback = CallbackRequest {
+            state: "state-secret".into(),
+            code: "code-secret".into(),
+        };
+        let authorization = AuthorizationResponse {
+            url: "https://idp.example.com/authorize?state=state-secret".into(),
+            state: "state-secret".into(),
+        };
+        for shown in [format!("{callback:?}"), format!("{authorization:?}")] {
+            assert!(!shown.contains("secret"), "{shown}");
+            assert!(shown.contains(REDACTED), "{shown}");
+        }
     }
 }
