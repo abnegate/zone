@@ -666,7 +666,7 @@ impl Route {
     }
 
     /// The models these settings prefer for completions sent to this route's
-    /// endpoint.
+    /// endpoint, choosing only models its policy lets run.
     pub fn preferences(&self, classifier: &str) -> Preferences {
         match (self.settings(), self.endpoint()) {
             (Some(settings), Ok(endpoint)) => {
@@ -674,6 +674,7 @@ impl Route {
             }
             _ => Preferences::from_optional_settings(None, classifier),
         }
+        .under(self.policy())
     }
 }
 
