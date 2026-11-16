@@ -102,6 +102,12 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/auth/forgot-password", post(auth::forgot_password))
         .route("/api/auth/reset-password", post(auth::reset_password))
+        .route("/api/auth/sso/providers", get(sso::sign_in::providers))
+        .route(
+            "/api/auth/sso/providers/{provider_id}/authorizations",
+            post(sso::sign_in::authorize),
+        )
+        .route("/api/auth/sso/callbacks", post(sso::sign_in::callback))
         // Public invitation route (to view invitation details)
         .route("/api/invitations/{token}", get(invitations::get_invitation))
         // Artifact reads (public - a bearer header or an HMAC-signed URL, checked
