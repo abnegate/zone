@@ -41,21 +41,23 @@ pub async fn overview(
     let window = period.window_ending(now);
     let (start, end) = (window.start, window.end);
 
-    let (rows, pull_requests, statuses, origins, activity, verdicts) = tokio::try_join!(
-        analytics::attributed_runs(pool, workspace_id, start, end, MAXIMUM_RUNS),
-        analytics::pull_requests(pool, workspace_id, start, end),
-        analytics::task_statuses(pool, workspace_id),
-        analytics::task_origins(pool, workspace_id, start, end),
-        analytics::task_activity(pool, workspace_id, start, end),
-        analytics::evaluation_verdicts(
-            pool,
-            workspace_id,
-            start,
-            end,
-            evaluation::PHASE,
-            evaluation::AGENT,
-        ),
-    )?;
+    let mut snapshot = analytics::snapshot(pool).await?;
+    let rows =
+        analytics::attributed_runs(&mut *snapshot, workspace_id, start, end, MAXIMUM_RUNS).await?;
+    let pull_requests = analytics::pull_requests(&mut *snapshot, workspace_id, start, end).await?;
+    let statuses = analytics::task_statuses(&mut *snapshot, workspace_id).await?;
+    let origins = analytics::task_origins(&mut *snapshot, workspace_id, start, end).await?;
+    let activity = analytics::task_activity(&mut *snapshot, workspace_id, start, end).await?;
+    let verdicts = analytics::evaluation_verdicts(
+        &mut *snapshot,
+        workspace_id,
+        start,
+        end,
+        evaluation::PHASE,
+        evaluation::AGENT,
+    )
+    .await?;
+    snapshot.commit().await?;
 
     let truncated = rows.len() as i64 >= MAXIMUM_RUNS;
     let attributed: Vec<(AgentRun, &AttributedRunRow)> = rows

@@ -10,7 +10,10 @@
 //! from the same runs is worse than no digest.
 
 use chrono::NaiveDateTime;
+use sqlx::Executor;
 use sqlx::PgPool;
+use sqlx::Postgres;
+use sqlx::Transaction;
 use uuid::Uuid;
 
 use super::DbResult;
@@ -31,11 +34,25 @@ pub use run_row::RunRow;
 pub use shipped_task_row::ShippedTaskRow;
 pub use task_activity_row::TaskActivityRow;
 
+/// A read-only transaction whose every query sees the same snapshot, so the
+/// numbers an overview assembles from several reads cannot disagree with one
+/// another, and the reads queue on one connection instead of taking several.
+pub async fn snapshot(pool: &PgPool) -> DbResult<Transaction<'static, Postgres>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
+}
+
 /// Active workspaces with a run that finished inside the window.
-pub async fn reportable_workspaces(
-    pool: &PgPool,
+pub async fn reportable_workspaces<'e, E>(
+    executor: E,
     since: NaiveDateTime,
-) -> DbResult<Vec<ReportableWorkspace>> {
+) -> DbResult<Vec<ReportableWorkspace>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as(
         r#"
         SELECT DISTINCT
@@ -51,7 +68,7 @@ pub async fn reportable_workspaces(
         "#,
     )
     .bind(since)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
 }
 
@@ -64,13 +81,16 @@ pub async fn reportable_workspaces(
 /// the day and week windows entirely on exactly the busiest workspaces.
 /// Nothing downstream reads these in order; each consumer filters or weights
 /// by `finished_at`.
-pub async fn finished_runs(
-    pool: &PgPool,
+pub async fn finished_runs<'e, E>(
+    executor: E,
     workspace_id: Uuid,
     start: NaiveDateTime,
     end: NaiveDateTime,
     limit: i64,
-) -> DbResult<Vec<RunRow>> {
+) -> DbResult<Vec<RunRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as(
         r#"
         SELECT
@@ -95,20 +115,23 @@ pub async fn finished_runs(
     .bind(start)
     .bind(end)
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
 }
 
 /// Tasks that reached `complete` inside `[start, end)`, most recent first,
 /// wherever they stand now. `completed_at` is not that: every run that ends
 /// writes it, whether or not the task was ever finished.
-pub async fn shipped_tasks(
-    pool: &PgPool,
+pub async fn shipped_tasks<'e, E>(
+    executor: E,
     workspace_id: Uuid,
     start: NaiveDateTime,
     end: NaiveDateTime,
     limit: i64,
-) -> DbResult<Vec<ShippedTaskRow>> {
+) -> DbResult<Vec<ShippedTaskRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as(
         r#"
         SELECT
@@ -131,20 +154,23 @@ pub async fn shipped_tasks(
     .bind(start)
     .bind(end)
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
 }
 
 /// [`finished_runs`], with the source each run's task belongs to and the model
 /// the run used. A task without a source, or whose source was deleted, reads
 /// back with every source column null.
-pub async fn attributed_runs(
-    pool: &PgPool,
+pub async fn attributed_runs<'e, E>(
+    executor: E,
     workspace_id: Uuid,
     start: NaiveDateTime,
     end: NaiveDateTime,
     limit: i64,
-) -> DbResult<Vec<AttributedRunRow>> {
+) -> DbResult<Vec<AttributedRunRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as(
         r#"
         SELECT
@@ -174,7 +200,7 @@ pub async fn attributed_runs(
     .bind(start)
     .bind(end)
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
 }
 
@@ -183,12 +209,15 @@ pub async fn attributed_runs(
 ///
 /// A run that recorded the pull request as a bare URL predates reception
 /// tracking, so it contributes no timing, review or quality.
-pub async fn pull_requests(
-    pool: &PgPool,
+pub async fn pull_requests<'e, E>(
+    executor: E,
     workspace_id: Uuid,
     start: NaiveDateTime,
     end: NaiveDateTime,
-) -> DbResult<Vec<PullRequestRow>> {
+) -> DbResult<Vec<PullRequestRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as(
         r#"
         SELECT
@@ -234,12 +263,15 @@ pub async fn pull_requests(
     .bind(workspace_id)
     .bind(start)
     .bind(end)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
 }
 
 /// How many of the workspace's tasks stand in each status right now.
-pub async fn task_statuses(pool: &PgPool, workspace_id: Uuid) -> DbResult<Vec<CountRow>> {
+pub async fn task_statuses<'e, E>(executor: E, workspace_id: Uuid) -> DbResult<Vec<CountRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as(
         r#"
         SELECT
@@ -251,17 +283,20 @@ pub async fn task_statuses(pool: &PgPool, workspace_id: Uuid) -> DbResult<Vec<Co
         "#,
     )
     .bind(workspace_id)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
 }
 
 /// How many tasks each origin put on the board inside `[start, end)`.
-pub async fn task_origins(
-    pool: &PgPool,
+pub async fn task_origins<'e, E>(
+    executor: E,
     workspace_id: Uuid,
     start: NaiveDateTime,
     end: NaiveDateTime,
-) -> DbResult<Vec<CountRow>> {
+) -> DbResult<Vec<CountRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as(
         r#"
         SELECT
@@ -277,18 +312,21 @@ pub async fn task_origins(
     .bind(workspace_id)
     .bind(start)
     .bind(end)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
 }
 
 /// Tasks created inside `[start, end)`, tasks shipped inside it, and how many
 /// of those shipped have since been reopened.
-pub async fn task_activity(
-    pool: &PgPool,
+pub async fn task_activity<'e, E>(
+    executor: E,
     workspace_id: Uuid,
     start: NaiveDateTime,
     end: NaiveDateTime,
-) -> DbResult<TaskActivityRow> {
+) -> DbResult<TaskActivityRow>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as(
         r#"
         SELECT
@@ -310,21 +348,24 @@ pub async fn task_activity(
     .bind(workspace_id)
     .bind(start)
     .bind(end)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await
 }
 
 /// How many runs that finished inside `[start, end)` reached each evaluation
 /// verdict, reading each run's newest log from `phase` and `agent` that
 /// carries one.
-pub async fn evaluation_verdicts(
-    pool: &PgPool,
+pub async fn evaluation_verdicts<'e, E>(
+    executor: E,
     workspace_id: Uuid,
     start: NaiveDateTime,
     end: NaiveDateTime,
     phase: &str,
     agent: &str,
-) -> DbResult<Vec<CountRow>> {
+) -> DbResult<Vec<CountRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as(
         r#"
         SELECT
@@ -353,6 +394,6 @@ pub async fn evaluation_verdicts(
     .bind(end)
     .bind(phase)
     .bind(agent)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
 }

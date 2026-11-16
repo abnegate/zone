@@ -14,6 +14,7 @@ use serde_json::Value;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
+use zone_server::db::analytics;
 use zone_server::db::workspace_members;
 use zone_server::db::workspace_members::WorkspaceRole;
 
@@ -74,7 +75,7 @@ const REGRESSED: &str = "regressed";
 const TIMEOUT: &str = "timeout";
 const TEXT_SOURCE: &str = "text";
 
-fn analytics(workspace: Uuid) -> String {
+fn endpoint(workspace: Uuid) -> String {
     format!("/api/workspaces/{workspace}/analytics")
 }
 
@@ -160,7 +161,7 @@ impl Board {
     async fn read_as(&self, query: &str, token: &str) -> (StatusCode, Value) {
         let response = self
             .client
-            .get_auth(&format!("{}{query}", analytics(self.workspace)), token)
+            .get_auth(&format!("{}{query}", endpoint(self.workspace)), token)
             .await;
         (response.status, response.json_value())
     }
@@ -882,6 +883,53 @@ async fn a_workspace_past_the_run_cap_is_marked_truncated() {
 }
 
 #[tokio::test]
+async fn the_overview_reads_one_read_only_snapshot() {
+    let board = Board::new().await;
+    let seeder = board.seeder();
+    let task = seeder.task(None, IN_PROGRESS, MEMBER).await;
+    let mut snapshot = analytics::snapshot(board.pool())
+        .await
+        .expect("a snapshot begins");
+
+    let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+        .fetch_one(&mut *snapshot)
+        .await
+        .expect("the isolation level is readable");
+    assert_eq!(isolation, "repeatable read");
+    let read_only: String = sqlx::query_scalar("SHOW transaction_read_only")
+        .fetch_one(&mut *snapshot)
+        .await
+        .expect("the access mode is readable");
+    assert_eq!(read_only, "on");
+
+    seeder
+        .run(
+            task,
+            Run {
+                status: COMPLETED,
+                model: None,
+                finished: Some(seeder.ago(Duration::hours(1))),
+                artifacts: json!({}),
+            },
+        )
+        .await;
+    let runs = analytics::attributed_runs(
+        &mut *snapshot,
+        board.workspace,
+        seeder.ago(Duration::days(1)),
+        seeder.now,
+        i64::from(RUN_CAP),
+    )
+    .await
+    .expect("runs are readable inside the snapshot");
+    assert!(
+        runs.is_empty(),
+        "a run written after the snapshot began must not appear partway through it"
+    );
+    snapshot.commit().await.expect("the snapshot ends");
+}
+
+#[tokio::test]
 async fn a_viewer_reads_the_overview() {
     let board = Board::new().await;
     seed(&board).await;
@@ -910,6 +958,6 @@ async fn a_member_of_another_organization_is_refused() {
 async fn an_unauthenticated_request_is_refused() {
     let board = Board::new().await;
 
-    let response = board.client.get(&analytics(board.workspace)).await;
+    let response = board.client.get(&endpoint(board.workspace)).await;
     response.assert_status(StatusCode::UNAUTHORIZED);
 }
