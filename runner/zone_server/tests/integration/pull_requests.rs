@@ -6,6 +6,7 @@ use crate::common::TestClient;
 use crate::common::context_database_url;
 use crate::common::create_test_router;
 use crate::common::create_test_state;
+use crate::common::eventually::eventually;
 use crate::common::github_app;
 use crate::common::test_email;
 use crate::common::test_password;
@@ -67,13 +68,15 @@ const FAILURE: &str = "error: the build failed\n";
 const LONG_LOG_BYTES: usize = 17 * 1024 * 1024;
 const SLOW_RELEASES: u64 = 6;
 const RELEASE_LOOKUP_DELAY: Duration = Duration::from_millis(300);
+const ASSESSMENT_DELAY: Duration = Duration::from_secs(2);
+const ASSESSMENT_BUDGET: Duration = Duration::from_millis(3500);
 const DIFF: &str = "diff --git a/src/lib.rs b/src/lib.rs\nindex 1..2 100644\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1,2 @@\n fn main() {}\n+fn added() {}\n";
 
 /// One open pull request GitHub knows about, how its checks stand, and
 /// whether GitHub says it merges into its base.
 struct Pull {
     number: u64,
-    head: &'static str,
+    head: String,
     conclusion: Option<&'static str>,
     mergeable_state: &'static str,
     threads: Vec<Value>,
@@ -92,10 +95,10 @@ impl Pull {
         Self::of(3, FAILED_HEAD, Some("failure"))
     }
 
-    fn of(number: u64, head: &'static str, conclusion: Option<&'static str>) -> Self {
+    fn of(number: u64, head: impl Into<String>, conclusion: Option<&'static str>) -> Self {
         Self {
             number,
-            head,
+            head: head.into(),
             conclusion,
             mergeable_state: CLEAN,
             threads: Vec::new(),
@@ -225,7 +228,7 @@ impl Hub {
             .await;
         Mock::given(method("GET"))
             .and(path(self.endpoint("actions/runs")))
-            .and(query_param("head_sha", pull.head))
+            .and(query_param("head_sha", pull.head.as_str()))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_json(json!({"workflow_runs": [], "total_count": 0})),
@@ -1825,4 +1828,72 @@ async fn a_malformed_request_is_refused_in_the_api_shape() {
     let (status, body) = board.merge(1, json!({"method": "squash"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["success"], json!(false));
+}
+
+#[tokio::test]
+async fn an_expired_listing_is_served_at_once_and_read_again_behind_it() {
+    let hub = Hub::hosted().await;
+    let mut config = hub.config();
+    config.github.pull_request_ttl = Duration::ZERO;
+    let board = Board::configured(hub, config).await;
+    board.hub.list(&[Pull::ready()]).await;
+
+    let first = board.listed("").await;
+    let again = board.listed("").await;
+
+    assert_eq!(first["sources"][0]["freshness"], json!("refreshed"));
+    assert_eq!(again["sources"][0]["freshness"], json!("revalidating"));
+    assert_eq!(again["stale"], json!(false));
+    assert_eq!(numbers(&again), numbers(&first));
+    let hub = &board.hub;
+    assert!(
+        eventually(move || async move { hub.requests_to("/repos/acme/widgets/pulls").await == 2 })
+            .await,
+        "the expired listing is read again behind the one served"
+    );
+}
+
+#[tokio::test]
+async fn a_source_assesses_as_many_pull_requests_at_once_as_its_credential_allows() {
+    let board = Board::new(Hub::hosted().await).await;
+    let pulls: Vec<Pull> = (1..=CREDENTIAL_PERMITS as u64)
+        .map(|number| Pull::of(number, format!("a{number:039x}"), Some("success")))
+        .collect();
+    board.hub.list(&pulls).await;
+    for pull in &pulls {
+        Mock::given(method("GET"))
+            .and(path(board.hub.endpoint(&format!("pulls/{}", pull.number))))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(board.hub.row(pull))
+                    .set_delay(ASSESSMENT_DELAY),
+            )
+            .with_priority(1)
+            .mount(&board.hub.server)
+            .await;
+    }
+
+    let started = Instant::now();
+    let listing = board.listed("").await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(numbers(&listing).len(), CREDENTIAL_PERMITS, "{listing}");
+    for pull in &pulls {
+        assert_eq!(
+            board
+                .hub
+                .requests_to(&format!("/repos/acme/widgets/pulls/{}", pull.number))
+                .await,
+            1,
+            "each assessment reads its pull request once"
+        );
+    }
+    assert!(
+        elapsed >= ASSESSMENT_DELAY,
+        "every assessment waited on GitHub: {elapsed:?}"
+    );
+    assert!(
+        elapsed < ASSESSMENT_BUDGET,
+        "every pull request is assessed at once: {elapsed:?}"
+    );
 }
