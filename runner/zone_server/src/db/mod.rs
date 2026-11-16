@@ -33,6 +33,7 @@ pub mod migrations;
 pub mod organization_members;
 pub mod organizations;
 pub mod password_reset;
+pub mod policies;
 pub mod projects;
 pub mod recovery;
 pub mod refresh_tokens;

@@ -119,6 +119,10 @@ pub mod actions {
     pub const SSO_PROVIDER_UPDATED: &str = "sso_provider.updated";
     pub const SSO_PROVIDER_DELETED: &str = "sso_provider.deleted";
     pub const SSO_ENFORCEMENT_UPDATED: &str = "sso_enforcement.updated";
+
+    pub const AGENT_POLICY_UPDATED: &str = "agent_policy.updated";
+    pub const AGENT_POLICY_TURN_DENIED: &str = "agent_policy.turn_denied";
+    pub const AGENT_POLICY_TOOL_DENIED: &str = "agent_policy.tool_denied";
 }
 
 pub mod resources {
@@ -141,6 +145,10 @@ pub mod resources {
     pub const SSO_PROVIDER: &str = "sso_provider";
     pub const SSO_SETTINGS: &str = "sso_settings";
     pub const USER: &str = "user";
+    pub const ORGANIZATION_AGENT_POLICY: &str = "organization_agent_policy";
+    pub const WORKSPACE_AGENT_POLICY: &str = "workspace_agent_policy";
+    pub const CHAT: &str = "chat";
+    pub const TASK: &str = "task";
 }
 
 /// Log an action to the audit trail
