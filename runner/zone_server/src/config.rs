@@ -21,10 +21,13 @@ use zone_core::servers;
 use crate::services::hosts::Hosts;
 use crate::services::login::claude::ROOT_PATH;
 
+mod environment;
+
 pub use abnegate_comfy::Config as ComfyUiConfig;
 pub use abnegate_llm::catalog::DEFAULT_GPT4ALL_MODELS_URL;
 pub use abnegate_llm::catalog::DEFAULT_HUGGINGFACE_MODELS_URL;
 pub use abnegate_search::WebSearchConfig;
+pub use environment::Environment;
 
 /// GitHub's own REST origin, which `GITHUB_API_URL` overrides for GitHub
 /// Enterprise. The origin answers only for repositories on the host it names,
