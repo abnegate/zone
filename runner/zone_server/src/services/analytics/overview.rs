@@ -1,6 +1,9 @@
+use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
-use super::{EvaluationSummary, ModelBreakdown, PullRequestSummary, SourceBreakdown, TaskSummary};
+use super::{
+    EvaluationSummary, ModelBreakdown, PullRequestSummary, SourceBreakdown, TaskSummary, Truncation,
+};
 use crate::workers::analytics::{AgentAnalytics, TimePeriod, TimeWindow};
 
 /// Everything a workspace's analytics page shows for one period.
@@ -8,7 +11,8 @@ use crate::workers::analytics::{AgentAnalytics, TimePeriod, TimeWindow};
 pub struct Overview {
     pub period: TimePeriod,
     pub window: TimeWindow,
-    pub truncated: bool,
+    pub truncated: Truncation,
+    pub measured_from: Option<NaiveDateTime>,
     pub runs: AgentAnalytics,
     pub sources: Vec<SourceBreakdown>,
     pub models: Vec<ModelBreakdown>,
@@ -35,7 +39,8 @@ mod tests {
         Overview {
             period,
             window,
-            truncated: false,
+            truncated: Truncation::default(),
+            measured_from: None,
             runs: AgentAnalytics::empty(period, window),
             sources: vec![SourceBreakdown {
                 source_id: None,
@@ -92,6 +97,7 @@ mod tests {
             keys,
             vec![
                 "evaluations",
+                "measured_from",
                 "models",
                 "period",
                 "pull_requests",
@@ -103,6 +109,11 @@ mod tests {
             ]
         );
         assert_eq!(value["period"], "week");
+        assert_eq!(
+            value["truncated"],
+            serde_json::json!({"runs": false, "pull_requests": false})
+        );
+        assert!(value["measured_from"].is_null());
         assert!(value["sources"][0]["source_id"].is_null());
         assert!(value["sources"][0]["name"].is_null());
         assert!(value["sources"][0]["source_type"].is_null());
@@ -139,6 +150,7 @@ mod tests {
                 "period",
                 "window",
                 "truncated",
+                "measured_from",
                 "runs",
                 "sources",
                 "models",

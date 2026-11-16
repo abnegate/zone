@@ -450,6 +450,30 @@ Busiest day
     }
 
     #[test]
+    fn a_window_too_thin_to_compare_says_so_without_inventing_rates() {
+        let thin: Vec<_> = super::fixtures::runs().into_iter().skip(5).collect();
+        let digest = generate(
+            "Platform",
+            TimePeriod::Week,
+            window(),
+            &thin,
+            Vec::new(),
+            0,
+            moment(8, 8),
+        );
+
+        assert!(
+            digest
+                .body()
+                .contains("  Trend steady: too little to compare\n"),
+            "one run against six is no trend: {}",
+            digest.body()
+        );
+        assert_eq!(digest.analytics.trend.change, 0.0);
+        assert_eq!(digest.severity(), Severity::Info);
+    }
+
+    #[test]
     fn rendering_is_stable_across_repeated_calls() {
         let digest = digest(Vec::new(), 0);
 

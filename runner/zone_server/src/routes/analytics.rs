@@ -20,7 +20,7 @@ pub async fn overview(
     query: Result<Query<PeriodQuery>, QueryRejection>,
 ) -> Result<Json<Overview>, ServerError> {
     let Query(query) = query.map_err(|_| ServerError::BadRequest(INVALID_PERIOD.to_string()))?;
-    let period = query.period()?;
+    let period = query.period();
     let overview = analytics::overview(
         state.db(),
         member.workspace_id,

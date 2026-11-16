@@ -1,6 +1,5 @@
 use serde::Deserialize;
 
-use crate::error::ServerError;
 use crate::workers::analytics::TimePeriod;
 
 pub const INVALID_PERIOD: &str = "period must be one of day, week, month, quarter";
@@ -9,61 +8,54 @@ const DEFAULT_PERIOD: TimePeriod = TimePeriod::Week;
 
 #[derive(Debug, Default, Deserialize)]
 pub struct PeriodQuery {
-    pub period: Option<String>,
+    pub period: Option<TimePeriod>,
 }
 
 impl PeriodQuery {
-    pub fn period(&self) -> Result<TimePeriod, ServerError> {
-        match self.period.as_deref() {
-            None => Ok(DEFAULT_PERIOD),
-            Some(text) => TimePeriod::parse(text)
-                .ok_or_else(|| ServerError::BadRequest(INVALID_PERIOD.to_string())),
-        }
+    pub fn period(&self) -> TimePeriod {
+        self.period.unwrap_or(DEFAULT_PERIOD)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use axum::http::Uri;
+
     use super::*;
 
-    fn query(period: Option<&str>) -> PeriodQuery {
-        PeriodQuery {
-            period: period.map(str::to_string),
-        }
-    }
-
-    fn refused(period: &str) -> String {
-        match query(Some(period)).period() {
-            Err(ServerError::BadRequest(message)) => message,
-            other => panic!("expected a bad request for {period:?}, got {other:?}"),
-        }
+    fn read(query: &str) -> Option<TimePeriod> {
+        let uri: Uri = format!("/analytics{query}").parse().expect("a valid uri");
+        Query::<PeriodQuery>::try_from_uri(&uri)
+            .ok()
+            .map(|Query(query)| query.period())
     }
 
     #[test]
     fn no_period_reads_as_a_week() {
-        assert_eq!(query(None).period().ok(), Some(TimePeriod::Week));
+        assert_eq!(read(""), Some(TimePeriod::Week));
     }
 
     #[test]
     fn every_period_parses() {
-        for (text, period) in [
-            ("day", TimePeriod::Day),
-            ("week", TimePeriod::Week),
-            ("month", TimePeriod::Month),
-            ("quarter", TimePeriod::Quarter),
-        ] {
-            assert_eq!(query(Some(text)).period().ok(), Some(period), "{text}");
+        for period in TimePeriod::ALL {
+            assert_eq!(
+                read(&format!("?period={}", period.as_str())),
+                Some(period),
+                "{period}"
+            );
         }
     }
 
     #[test]
     fn a_capitalised_period_is_refused() {
-        assert_eq!(refused("Week"), INVALID_PERIOD);
+        assert_eq!(read("?period=Week"), None);
     }
 
     #[test]
-    fn an_unknown_period_is_refused() {
-        assert_eq!(refused("bogus"), INVALID_PERIOD);
+    fn an_unknown_or_empty_period_is_refused() {
+        assert_eq!(read("?period=bogus"), None);
+        assert_eq!(read("?period="), None);
     }
 
     #[test]

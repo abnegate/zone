@@ -1,14 +1,3 @@
-//! Every row the analytics, regression and report passes read.
-//!
-//! Loading lives here and deciding lives outside it, matching the learning loop:
-//! an aggregate, a regression bar and a digest are all pure functions over the
-//! rows below, so each can be exercised without a database.
-//!
-//! The failure category is read back from the artifact the learning loop wrote
-//! rather than recomputed. Two independent classifications of the same error
-//! would eventually disagree, and a digest that contradicts the lessons drawn
-//! from the same runs is worse than no digest.
-
 use chrono::NaiveDateTime;
 use sqlx::Executor;
 use sqlx::PgPool;
@@ -52,10 +41,44 @@ macro_rules! task_source {
               AND membership.task_id = task.id
             ORDER BY project.id
             LIMIT 1
-        ) project ON TRUE
+        ) attribution ON TRUE
         LEFT JOIN sources source
-            ON source.id = COALESCE(task.source_id, project.source_id)
+            ON source.id = COALESCE(task.source_id, attribution.source_id)
            AND source.workspace_id = task.workspace_id
+        "#
+    };
+}
+
+macro_rules! run_columns {
+    () => {
+        r#"
+            run.id AS run_id,
+            run.task_id AS task_id,
+            run.status AS status,
+            run.error_message AS error_message,
+            run.artifacts -> 'failure' ->> 'category' AS error_category,
+            run.started_at AS started_at,
+            COALESCE(run.completed_at, run.started_at) AS finished_at
+        "#
+    };
+}
+
+macro_rules! finished_inside {
+    () => {
+        r#"
+            task.workspace_id = $1
+            AND run.status <> ALL($2)
+            AND COALESCE(run.completed_at, run.started_at) >= $3
+            AND COALESCE(run.completed_at, run.started_at) < $4
+        "#
+    };
+}
+
+macro_rules! newest_first {
+    () => {
+        r#"
+        ORDER BY COALESCE(run.completed_at, run.started_at) DESC, run.id DESC
+        LIMIT $5
         "#
     };
 }
@@ -135,12 +158,30 @@ where
     .await
 }
 
-/// Newest first because `limit` is a cap: over it, the oldest rows are the
-/// ones dropped. Every period summarised from these rows ends at `now`, so
-/// dropping the oldest costs the longest period some of its early history,
-/// while dropping the newest empties the day and week windows entirely on
-/// exactly the busiest workspaces. Nothing downstream reads these in order;
-/// each consumer filters or weights by `finished_at`.
+pub async fn finished_runs<'e, E>(
+    executor: E,
+    workspace_id: Uuid,
+    start: NaiveDateTime,
+    end: NaiveDateTime,
+    limit: i64,
+) -> DbResult<Capped<RunRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let query = sqlx::query_as(concat!(
+        "SELECT",
+        run_columns!(),
+        "FROM task_runs run JOIN tasks task ON task.id = run.task_id WHERE",
+        finished_inside!(),
+        newest_first!(),
+    ))
+    .bind(workspace_id)
+    .bind(UNFINISHED.as_slice())
+    .bind(start)
+    .bind(end);
+    Capped::fetch(query, limit, executor).await
+}
+
 pub async fn attributed_runs<'e, E>(
     executor: E,
     workspace_id: Uuid,
@@ -152,15 +193,9 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     let query = sqlx::query_as(concat!(
-        r#"
-        SELECT
-            run.id AS run_id,
-            run.task_id AS task_id,
-            run.status AS status,
-            run.error_message AS error_message,
-            run.artifacts -> 'failure' ->> 'category' AS error_category,
-            run.started_at AS started_at,
-            COALESCE(run.completed_at, run.started_at) AS finished_at,
+        "SELECT",
+        run_columns!(),
+        r#",
             source.id AS source_id,
             source.name AS source_name,
             source.source_type AS source_type,
@@ -169,14 +204,9 @@ where
         JOIN tasks task ON task.id = run.task_id
         "#,
         task_source!(),
-        r#"
-        WHERE task.workspace_id = $1
-          AND run.status <> ALL($2)
-          AND COALESCE(run.completed_at, run.started_at) >= $3
-          AND COALESCE(run.completed_at, run.started_at) < $4
-        ORDER BY COALESCE(run.completed_at, run.started_at) DESC, run.id DESC
-        LIMIT $5
-        "#
+        "WHERE",
+        finished_inside!(),
+        newest_first!(),
     ))
     .bind(workspace_id)
     .bind(UNFINISHED.as_slice())
@@ -343,7 +373,7 @@ pub async fn evaluation_verdicts<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
-    sqlx::query_as(
+    sqlx::query_as(concat!(
         r#"
         SELECT
             newest.verdict AS name,
@@ -354,18 +384,20 @@ where
             FROM task_run_logs log
             JOIN task_runs run ON run.id = log.task_run_id
             JOIN tasks task ON task.id = run.task_id
-            WHERE task.workspace_id = $1
-              AND log.phase = $4
-              AND log.agent_type = $5
+            WHERE log.phase = $5
+              AND log.agent_type = $6
               AND jsonb_typeof(log.metadata -> 'verdict') = 'string'
-              AND COALESCE(run.completed_at, run.started_at) >= $2
-              AND COALESCE(run.completed_at, run.started_at) < $3
+              AND
+        "#,
+        finished_inside!(),
+        r#"
             ORDER BY log.task_run_id, log.created_at DESC NULLS LAST, log.id DESC
         ) newest
         GROUP BY newest.verdict
-        "#,
-    )
+        "#
+    ))
     .bind(workspace_id)
+    .bind(UNFINISHED.as_slice())
     .bind(start)
     .bind(end)
     .bind(phase)

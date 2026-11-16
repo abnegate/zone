@@ -1,9 +1,3 @@
-//! A workspace's analytics overview: how its runs went, broken down by source
-//! and model, alongside its tasks, pull requests and evaluations.
-//!
-//! Loading happens in [`overview`]; every type below assembles its numbers
-//! from already loaded rows, so each can be exercised without a database.
-
 mod evaluation_summary;
 mod model_breakdown;
 mod overview;
@@ -11,14 +5,18 @@ mod pull_request_summary;
 mod source_breakdown;
 mod tally;
 mod task_summary;
+mod truncation;
 
 use chrono::NaiveDateTime;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::db::DbResult;
-use crate::db::analytics::{self, AttributedRunRow};
-use crate::workers::analytics::{AgentRun, TimePeriod, summarize};
+use crate::db::analytics;
+use crate::db::analytics::AttributedRunRow;
+use crate::workers::analytics::AgentRun;
+use crate::workers::analytics::TimePeriod;
+use crate::workers::analytics::summarize;
 use crate::workers::evaluation;
 
 pub use evaluation_summary::EvaluationSummary;
@@ -28,11 +26,11 @@ pub use pull_request_summary::PullRequestSummary;
 pub use source_breakdown::SourceBreakdown;
 pub use tally::Tally;
 pub use task_summary::TaskSummary;
+pub use truncation::Truncation;
 
 pub const MAXIMUM_RUNS: i64 = 10_000;
 pub const MAXIMUM_PULL_REQUESTS: i64 = 10_000;
 
-/// The workspace's analytics over the `period` ending at `now`.
 pub async fn overview(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -43,7 +41,7 @@ pub async fn overview(
     let (start, end) = (window.start, window.end);
 
     let mut snapshot = analytics::snapshot(pool).await?;
-    let rows =
+    let attributed =
         analytics::attributed_runs(&mut *snapshot, workspace_id, start, end, MAXIMUM_RUNS).await?;
     let pull_requests = analytics::pull_requests(
         &mut *snapshot,
@@ -67,20 +65,30 @@ pub async fn overview(
     .await?;
     snapshot.commit().await?;
 
-    let (runs, attributions): (Vec<AgentRun>, Vec<&AttributedRunRow>) = rows
+    let (runs, attributions): (Vec<AgentRun>, Vec<&AttributedRunRow>) = attributed
         .rows
         .iter()
         .filter_map(|row| AgentRun::from_row(&row.run).map(|run| (run, row)))
         .unzip();
     let summary = summarize(&runs, period, window, now);
-    let oldest = rows.rows.iter().map(|row| row.run.finished_at).min();
+    let measured_from = attributed
+        .rows
+        .iter()
+        .map(|row| row.run.finished_at)
+        .min()
+        .filter(|_| attributed.truncated)
+        .map(|oldest| period.bucket().after(oldest).min(end));
 
     Ok(Overview {
         period,
         window,
-        truncated: rows.truncated || pull_requests.truncated,
-        runs: match oldest.filter(|_| rows.truncated) {
-            Some(oldest) => summary.measured_from(oldest),
+        truncated: Truncation {
+            runs: attributed.truncated,
+            pull_requests: pull_requests.truncated,
+        },
+        measured_from,
+        runs: match measured_from {
+            Some(start) => summary.measured_from(start),
             None => summary,
         },
         sources: SourceBreakdown::group(

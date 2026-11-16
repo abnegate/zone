@@ -9,6 +9,7 @@ use crate::common::test_password;
 use axum::http::StatusCode;
 use chrono::Duration;
 use chrono::NaiveDateTime;
+use chrono::Timelike;
 use chrono::Utc;
 use serde_json::Value;
 use serde_json::json;
@@ -578,6 +579,10 @@ fn timestamp(moment: NaiveDateTime) -> String {
     moment.and_utc().to_rfc3339()
 }
 
+fn not_truncated() -> Value {
+    json!({"runs": false, "pull_requests": false})
+}
+
 fn series_total(analytics: &Value) -> i64 {
     analytics["series"]
         .as_array()
@@ -672,7 +677,8 @@ async fn the_overview_defaults_to_a_week_ending_now() {
     );
     assert_eq!(body["runs"]["period"], body["period"], "{body}");
     assert_eq!(body["runs"]["window"], body["window"], "{body}");
-    assert_eq!(body["truncated"], json!(false), "{body}");
+    assert_eq!(body["truncated"], not_truncated(), "{body}");
+    assert!(body["measured_from"].is_null(), "{body}");
     assert_eq!(count(&body["runs"]["outcomes"]["total"]), 0, "{body}");
 }
 
@@ -734,7 +740,7 @@ async fn only_runs_that_finished_inside_the_window_are_counted() {
     let completion = &body["runs"]["completion"];
     assert_eq!(count(&completion["measured"]), 4, "{body}");
     assert_eq!(rate(&completion["median_seconds"]), RUN_LENGTH_SECONDS);
-    assert_eq!(body["truncated"], json!(false), "{body}");
+    assert_eq!(body["truncated"], not_truncated(), "{body}");
 
     let month = board.overview("?period=month").await;
     assert_eq!(
@@ -919,10 +925,10 @@ async fn a_workspace_past_the_run_cap_is_marked_truncated() {
     let task = seeder.task(None, IN_PROGRESS, MEMBER).await;
     seeder.runs_in_bulk(task, RUN_CAP + 1).await;
 
-    let body = board.overview("").await;
+    let body = board.overview("?period=day").await;
     assert_eq!(
         body["truncated"],
-        json!(true),
+        json!({"runs": true, "pull_requests": false}),
         "the numbers describe only part of the window and must say so"
     );
     let runs = &body["runs"];
@@ -942,13 +948,38 @@ async fn a_workspace_past_the_run_cap_is_marked_truncated() {
         }),
         "a partial load cannot compare the halves of the window"
     );
-    let buckets = runs["series"].as_array().map(Vec::len).unwrap_or_default();
-    assert!(
-        (1..=2).contains(&buckets),
-        "the series starts at the oldest loaded run, three hours back, instead of \
-         drawing the days before it as quiet: {buckets} buckets"
+
+    let oldest = seeder.ago(Duration::seconds(i64::from(RUN_CAP)));
+    let first_complete = oldest
+        .date()
+        .and_hms_opt(oldest.hour(), 0, 0)
+        .expect("a valid hour")
+        + Duration::hours(1);
+    assert_eq!(
+        moment(&body["measured_from"]),
+        first_complete,
+        "the hour holding the oldest loaded run lost the runs before it, so the \
+         measurement starts at the next hour: {body}"
     );
-    assert_eq!(series_total(runs), i64::from(RUN_CAP));
+    let starts: Vec<NaiveDateTime> = runs["series"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a series: {runs}"))
+        .iter()
+        .map(|point| moment(&point["window"]["start"]))
+        .collect();
+    assert_eq!(
+        starts.first(),
+        Some(&first_complete),
+        "the series starts at the first complete bucket: {starts:?}"
+    );
+    let expected = (seeder.now - first_complete)
+        .num_seconds()
+        .clamp(0, i64::from(RUN_CAP));
+    assert_eq!(
+        series_total(runs),
+        expected,
+        "only the runs inside complete buckets are drawn"
+    );
 }
 
 #[tokio::test]
@@ -961,10 +992,11 @@ async fn a_workspace_at_exactly_the_run_cap_is_not_truncated() {
     let body = board.overview("").await;
     assert_eq!(
         body["truncated"],
-        json!(false),
+        not_truncated(),
         "every run in the window was read: {}",
         body["runs"]["outcomes"]
     );
+    assert!(body["measured_from"].is_null(), "{body}");
     assert_eq!(
         count(&body["runs"]["outcomes"]["total"]),
         i64::from(RUN_CAP)
@@ -1343,6 +1375,38 @@ async fn a_newer_log_without_a_verdict_does_not_hide_an_older_one() {
         body["evaluations"],
         json!({"improved": 1, "unchanged": 0, "regressed": 0, "not_measured": 0}),
         "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_still_going_has_no_verdict_to_count() {
+    let board = Board::new().await;
+    let seeder = board.seeder();
+    let task = seeder.task(None, IN_PROGRESS, MEMBER).await;
+    let run = seeder
+        .run(
+            task,
+            Run {
+                status: RUNNING,
+                model: None,
+                finished: None,
+                artifacts: json!({}),
+            },
+        )
+        .await;
+    seeder
+        .evaluation(
+            run,
+            json!({"verdict": IMPROVED}),
+            seeder.ago(Duration::minutes(1)),
+        )
+        .await;
+
+    let body = board.overview("").await;
+    assert_eq!(
+        body["evaluations"],
+        json!({"improved": 0, "unchanged": 0, "regressed": 0, "not_measured": 0}),
+        "the verdict is logged before the run finishes, and the run's outcome is not counted yet: {body}"
     );
 }
 
