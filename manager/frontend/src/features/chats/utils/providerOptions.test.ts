@@ -7,10 +7,13 @@ import {
   DEFAULT_PROVIDER,
   effectiveOffer,
   effortsFor,
+  installedModelOptions,
   isAgentOffer,
   keepEffort,
   modelChoices,
+  modelDenial,
   modelSelectOptions,
+  offerDenial,
   offersAgentOn,
   offersContextOn,
   providerChoices,
@@ -324,6 +327,84 @@ describe('providerChoices', () => {
 
   it('does not repeat an offered selection', () => {
     expect(providerChoices(claude, [codex], select(codex))).toHaveLength(2);
+  });
+});
+
+describe('offerDenial', () => {
+  it('words a denied offer through the policy messages, naming the offer', () => {
+    expect(offerDenial(offer({ label: 'Anthropic', denial: 'policy_provider_denied' }))).toBe(
+      "Your organization's policy doesn't allow Anthropic in this workspace."
+    );
+  });
+
+  it('shows a reason the server worded as it is', () => {
+    expect(offerDenial(offer({ denial: 'Not here.' }))).toBe('Not here.');
+  });
+
+  it('is null for an offer the policy allows', () => {
+    expect(offerDenial(offer())).toBeNull();
+    expect(offerDenial(offer({ denial: null }))).toBeNull();
+  });
+});
+
+describe('providerChoices under an agent policy', () => {
+  const denied = offer({
+    provider: 'codex',
+    label: 'Codex',
+    usable: false,
+    denial: 'policy_agent_denied',
+  });
+  const reason = "Your organization's policy doesn't allow Codex in this workspace.";
+
+  it('disables a denied offer and gives the reason', () => {
+    expect(providerChoices(claude, [offer(), denied]).at(-1)).toEqual({
+      value: 'codex',
+      label: 'Codex',
+      disabled: true,
+      description: reason,
+    });
+  });
+
+  it('disables Default when the policy denies the default provider', () => {
+    expect(providerChoices(denied, [offer()])[0]).toEqual({
+      value: DEFAULT_PROVIDER,
+      label: 'Default (Codex)',
+      disabled: true,
+      description: reason,
+    });
+  });
+
+  it("gives the reason a chat's own denied provider can't be used", () => {
+    expect(providerChoices(claude, [offer()], select(denied)).at(-1)).toEqual({
+      value: 'codex',
+      label: 'Codex (unavailable)',
+      disabled: true,
+      description: reason,
+    });
+  });
+});
+
+describe('installedModelOptions', () => {
+  const reason =
+    "Your organization's policy doesn't allow this model in this workspace. Choose an allowed model.";
+
+  it('lists Automatic, then every model that can chat, disabling those the policy denies', () => {
+    expect(
+      installedModelOptions([
+        { name: 'qwen3:8b', completion: true },
+        { name: 'llama3.2:3b', denial: 'policy_model_denied' },
+        { name: 'nomic-embed-text', completion: false },
+      ])
+    ).toEqual([
+      { value: 'auto', label: 'Automatic' },
+      { value: 'qwen3:8b', label: 'qwen3:8b' },
+      { value: 'llama3.2:3b', label: 'llama3.2:3b', disabled: true, description: reason },
+    ]);
+  });
+
+  it('words a model denial through the policy messages', () => {
+    expect(modelDenial({ denial: 'policy_model_denied' })).toBe(reason);
+    expect(modelDenial({})).toBeNull();
   });
 });
 

@@ -32,6 +32,7 @@ import {
   AuthenticatedImage,
   AuthenticatedVideo,
   AutomationBadge,
+  ChatError,
   ChatMenu,
   ChatPanel,
   ChatSources,
@@ -106,6 +107,7 @@ import {
   formatDate,
   galleryItems,
   imageAttachments,
+  installedModelOptions,
   isAgentOffer,
   isChatFilter,
   isChatGroupBy,
@@ -263,6 +265,7 @@ export default function ChatsPage() {
     contextError,
     previewing,
     error: chatError,
+    denial: chatDenial,
     streaming,
     status: chatStatus,
     generationStarted,
@@ -1900,11 +1903,7 @@ export default function ChatsPage() {
                       );
                     })
                   )}
-                  {chatError ? (
-                    <div className="chats-error" role="alert">
-                      {chatError}
-                    </div>
-                  ) : null}
+                  {chatError ? <ChatError message={chatError} denial={chatDenial} /> : null}
                   {streaming || chatStatus ? (
                     <Generation
                       key={selectedChatId}
@@ -2225,12 +2224,7 @@ export default function ChatsPage() {
               options={
                 newChatOffer
                   ? modelSelectOptions(newChatOffer, newChatModel)
-                  : [
-                      { value: AUTO_MODEL, label: 'Automatic' },
-                      ...models
-                        .filter((model) => model.completion !== false)
-                        .map((model) => ({ value: model.name, label: model.name })),
-                    ]
+                  : installedModelOptions(models)
               }
             />
           )}

@@ -3,8 +3,14 @@ export * from './hooks';
 export { LicenseRefusal } from './LicenseRefusal';
 export {
   denialMessage,
+  denialReason,
+  isDenialCode,
   OrganizationPolicySection,
+  type PolicyDenialCode,
+  type PolicyRules,
   providerDenial,
+  useOrganizationPolicy,
+  useWorkspacePolicy,
   WorkspacePolicySection,
 } from './policy';
 export { licenseMutationKeys, licenseQueryKeys } from './queryKeys';

@@ -5,6 +5,8 @@ export {
   agentLabel,
   ceilingLabel,
   denialMessage,
+  denialReason,
+  isDenialCode,
   providerLabel,
   refusalMessage,
 } from './messages';

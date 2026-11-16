@@ -2159,3 +2159,21 @@
   justify-content: center;
   padding: var(--ui-space-2) 0;
 }
+
+.chats-denial {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ui-space-2);
+}
+
+.chats-denial-message {
+  margin: 0;
+  max-width: 60ch;
+  overflow-wrap: anywhere;
+}
+
+.chats-denial-link {
+  color: var(--ui-accent);
+  font-weight: 500;
+}

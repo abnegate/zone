@@ -10,6 +10,7 @@ export interface InstalledModel {
   ready?: boolean | null;
   recipe_id?: string | null;
   required_files?: string[] | null;
+  denial?: string | null;
 }
 
 export interface ModelDetails {

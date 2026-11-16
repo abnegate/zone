@@ -1,4 +1,5 @@
 import type { SelectOption } from '@zone/ui';
+import { denialReason } from '../../enterprise';
 import { isAgentProvider } from '../../settings/ai/options';
 import { AiProviderSchema } from '../../settings/workspace/schemas';
 import type { AiProvider } from '../../settings/workspace/types';
@@ -32,6 +33,20 @@ export const MODEL_NAME_PLACEHOLDER = 'Type a model name';
 export const AUTO_EFFORT: ReasoningEffort = 'auto';
 
 const SELF_HOSTED: AiProvider = AiProviderSchema.enum.self_hosted;
+
+/** Why the agent policy keeps `offer` out of this chat, or null when it allows it. */
+export function offerDenial(offer: ChatProviderOffer): string | null {
+  return offer.denial ? denialReason(offer.denial, offer.label) : null;
+}
+
+/** Why the agent policy keeps a listed model out of this workspace, or null when it allows it. */
+export function modelDenial(model: { denial?: string | null }): string | null {
+  return model.denial ? denialReason(model.denial) : null;
+}
+
+function choice(value: string, label: string, denial: string | null): SelectOption {
+  return denial === null ? { value, label } : { value, label, disabled: true, description: denial };
+}
 
 export function isAgentOffer(offer: ChatProviderOffer): boolean {
   return isAgentProvider(offer.provider);
@@ -151,16 +166,31 @@ export function providerChoices(
   selected: ChatProviderSelection | null = null
 ): SelectOption[] {
   const options = [
-    { value: DEFAULT_PROVIDER, label: `Default (${fallback.label})` },
-    ...offers.map((offer) => ({ value: offer.provider, label: offer.label })),
+    choice(DEFAULT_PROVIDER, `Default (${fallback.label})`, offerDenial(fallback)),
+    ...offers.map((offer) => choice(offer.provider, offer.label, offerDenial(offer))),
   ];
   if (selected && !offers.some((offer) => offer.provider === selected.provider)) {
-    options.push({
-      value: selected.provider,
-      label: selected.usable ? selected.label : `${selected.label} (unavailable)`,
-    });
+    options.push(
+      choice(
+        selected.provider,
+        selected.usable ? selected.label : `${selected.label} (unavailable)`,
+        offerDenial(selected)
+      )
+    );
   }
   return options;
+}
+
+/** Automatic, then every listed model that can answer a chat, with those the policy denies disabled. */
+export function installedModelOptions<
+  T extends { name: string; completion?: boolean; denial?: string | null },
+>(installed: T[]): SelectOption[] {
+  return [
+    { value: AUTO_MODEL, label: modelLabel(AUTO_MODEL) },
+    ...installed
+      .filter((model) => model.completion !== false)
+      .map((model) => choice(model.name, model.name, modelDenial(model))),
+  ];
 }
 
 export function modelSelectOptions(

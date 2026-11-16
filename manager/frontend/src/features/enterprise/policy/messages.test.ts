@@ -3,6 +3,7 @@ import {
   agentLabel,
   ceilingLabel,
   denialMessage,
+  denialReason,
   fieldDescription,
   fieldLabel,
   isAdminCode,
@@ -128,5 +129,20 @@ describe('refusalField', () => {
     for (const code of [PolicyCode.LicenseRequired, PolicyCode.Wider, PolicyCode.BodyInvalid]) {
       expect(refusalField(code), code).toBeNull();
     }
+  });
+});
+
+describe('denialReason', () => {
+  it('words a denial code the way the console words it', () => {
+    expect(denialReason(PolicyCode.ProviderDenied, 'Anthropic')).toBe(
+      "Your organization's policy doesn't allow Anthropic in this workspace."
+    );
+    expect(denialReason(PolicyCode.ModelDenied)).toBe(denialMessage(PolicyCode.ModelDenied));
+  });
+
+  it('shows a reason the server already worded as it is', () => {
+    const worded = "Your organization's policy doesn't allow AWS Bedrock in this workspace.";
+
+    expect(denialReason(worded, 'Bedrock')).toBe(worded);
   });
 });

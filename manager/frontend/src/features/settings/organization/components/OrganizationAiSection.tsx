@@ -3,6 +3,7 @@ import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
+import { useOrganizationPolicy } from '../../../enterprise';
 import { useModels } from '../../../models';
 import {
   AgentSignIn,
@@ -32,6 +33,7 @@ export function OrganizationAiSection() {
   const { isAuthenticated } = useAuth();
   const { currentOrganization, resolvingRole } = useWorkspace();
   const { models: installedModels } = useModels();
+  const { policy } = useOrganizationPolicy(currentOrganization?.id ?? null);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -168,6 +170,7 @@ export function OrganizationAiSection() {
             configured={configured}
             onChange={(key, value) => setCredentials((previous) => ({ ...previous, [key]: value }))}
             saved={saved}
+            policy={policy?.enforced ? policy.policy : null}
           />
           {agent && (
             <AgentSignIn

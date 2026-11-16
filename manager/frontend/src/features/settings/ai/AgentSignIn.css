@@ -36,6 +36,15 @@
   margin: 0;
 }
 
+.agent-sign-in-state .agent-sign-in-denial {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-warning);
+  overflow-wrap: anywhere;
+}
+
 .agent-sign-in-state:focus-visible,
 .agent-sign-in-code:focus-visible {
   outline: none;
