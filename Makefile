@@ -162,6 +162,7 @@ validate: ## Validate configuration
 			&& echo "$(GREEN)✓ Combined Compose profiles are valid$(NC)" || echo "$(RED)✗ Combined Compose profiles are invalid$(NC)"; \
 		sh scripts/test-model-proxy.sh; \
 		sh scripts/test-vpn-compose.sh; \
+		sh scripts/test-env-file.sh; \
 		sh scripts/test-compose-profiles.sh; \
 		sh scripts/test-dockerfile-members.sh; \
 		sh scripts/test-pull-models.sh; \

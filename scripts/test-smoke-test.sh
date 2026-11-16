@@ -13,6 +13,7 @@ script=$sandbox/scripts/smoke-test.sh
 
 mkdir -p "$directory/bin" "$sandbox/scripts"
 cp "$source" "$script"
+cp "$(dirname -- "$source")/env-file.sh" "$sandbox/scripts/env-file.sh"
 
 cat > "$directory/bin/curl" <<'CURL'
 #!/bin/sh

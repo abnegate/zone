@@ -4,6 +4,9 @@ set -eu
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+# shellcheck source=SCRIPTDIR/env-file.sh
+. "$root/scripts/env-file.sh"
+
 ZONE_ENV_FILE=${ZONE_ENV_FILE:-$root/.env}
 ZONE_COMPOSE=${ZONE_COMPOSE:-./scripts/compose.sh}
 TIMEOUT_SECONDS=10
@@ -22,50 +25,6 @@ else
 fi
 
 failures=0
-
-read_env_value() {
-    name=$1
-    file=$2
-    if [ ! -f "$file" ]; then
-        return 0
-    fi
-    awk -v name="$name" '
-        function unquote(raw,    quote, value, position, character) {
-            quote = substr(raw, 1, 1)
-            if (quote != "\"" && quote != "'\''") {
-                position = index(raw, " #")
-                if (position) raw = substr(raw, 1, position - 1)
-                sub(/[[:space:]]+$/, "", raw)
-                return raw
-            }
-            value = ""
-            for (position = 2; position <= length(raw); position++) {
-                character = substr(raw, position, 1)
-                if (character == quote) return value
-                if (character == "\\" && position < length(raw)) {
-                    position++
-                    character = substr(raw, position, 1)
-                    if (quote == "'\''") character = "\\" character
-                    else if (character == "n") character = "\n"
-                }
-                value = value character
-            }
-            return raw
-        }
-        {
-            line = $0
-            sub(/\r$/, "", line)
-            sub(/^[[:space:]]+/, "", line)
-            if (line ~ /^export[[:space:]]/) sub(/^export[[:space:]]+/, "", line)
-            if (substr(line, 1, length(name)) != name) next
-            rest = substr(line, length(name) + 1)
-            if (rest !~ /^[[:space:]]*=/) next
-            sub(/^[[:space:]]*=[[:space:]]*/, "", rest)
-            found = unquote(rest)
-        }
-        END { if (found != "") print found }
-    ' "$file"
-}
 
 setting() {
     name=$1
