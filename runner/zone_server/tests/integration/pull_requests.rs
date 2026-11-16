@@ -6,6 +6,7 @@ use crate::common::TestClient;
 use crate::common::context_database_url;
 use crate::common::create_test_router;
 use crate::common::create_test_state;
+use crate::common::eventually::eventually;
 use crate::common::github_app;
 use crate::common::test_email;
 use crate::common::test_password;
@@ -69,25 +70,13 @@ const SLOW_RELEASES: u64 = 6;
 const RELEASE_LOOKUP_DELAY: Duration = Duration::from_millis(300);
 const ASSESSMENT_DELAY: Duration = Duration::from_secs(2);
 const ASSESSMENT_BUDGET: Duration = Duration::from_millis(3500);
-const REVALIDATION_WAIT: Duration = Duration::from_secs(5);
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
-const ASSESSED_HEADS: [&str; CREDENTIAL_PERMITS] = [
-    "a000000000000000000000000000000000000001",
-    "a000000000000000000000000000000000000002",
-    "a000000000000000000000000000000000000003",
-    "a000000000000000000000000000000000000004",
-    "a000000000000000000000000000000000000005",
-    "a000000000000000000000000000000000000006",
-    "a000000000000000000000000000000000000007",
-    "a000000000000000000000000000000000000008",
-];
 const DIFF: &str = "diff --git a/src/lib.rs b/src/lib.rs\nindex 1..2 100644\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1,2 @@\n fn main() {}\n+fn added() {}\n";
 
 /// One open pull request GitHub knows about, how its checks stand, and
 /// whether GitHub says it merges into its base.
 struct Pull {
     number: u64,
-    head: &'static str,
+    head: String,
     conclusion: Option<&'static str>,
     mergeable_state: &'static str,
     threads: Vec<Value>,
@@ -106,10 +95,10 @@ impl Pull {
         Self::of(3, FAILED_HEAD, Some("failure"))
     }
 
-    fn of(number: u64, head: &'static str, conclusion: Option<&'static str>) -> Self {
+    fn of(number: u64, head: impl Into<String>, conclusion: Option<&'static str>) -> Self {
         Self {
             number,
-            head,
+            head: head.into(),
             conclusion,
             mergeable_state: CLEAN,
             threads: Vec::new(),
@@ -239,7 +228,7 @@ impl Hub {
             .await;
         Mock::given(method("GET"))
             .and(path(self.endpoint("actions/runs")))
-            .and(query_param("head_sha", pull.head))
+            .and(query_param("head_sha", pull.head.as_str()))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_json(json!({"workflow_runs": [], "total_count": 0})),
@@ -1856,14 +1845,10 @@ async fn an_expired_listing_is_served_at_once_and_read_again_behind_it() {
     assert_eq!(again["sources"][0]["freshness"], json!("revalidating"));
     assert_eq!(again["stale"], json!(false));
     assert_eq!(numbers(&again), numbers(&first));
-    let deadline = Instant::now() + REVALIDATION_WAIT;
-    while board.hub.requests_to("/repos/acme/widgets/pulls").await < 2 && Instant::now() < deadline
-    {
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    assert_eq!(
-        board.hub.requests_to("/repos/acme/widgets/pulls").await,
-        2,
+    let hub = &board.hub;
+    assert!(
+        eventually(move || async move { hub.requests_to("/repos/acme/widgets/pulls").await == 2 })
+            .await,
         "the expired listing is read again behind the one served"
     );
 }
@@ -1871,9 +1856,8 @@ async fn an_expired_listing_is_served_at_once_and_read_again_behind_it() {
 #[tokio::test]
 async fn a_source_assesses_as_many_pull_requests_at_once_as_its_credential_allows() {
     let board = Board::new(Hub::hosted().await).await;
-    let pulls: Vec<Pull> = (1..)
-        .zip(ASSESSED_HEADS)
-        .map(|(number, head)| Pull::of(number, head, Some("success")))
+    let pulls: Vec<Pull> = (1..=CREDENTIAL_PERMITS as u64)
+        .map(|number| Pull::of(number, format!("a{number:039x}"), Some("success")))
         .collect();
     board.hub.list(&pulls).await;
     for pull in &pulls {

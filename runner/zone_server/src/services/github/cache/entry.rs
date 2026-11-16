@@ -8,8 +8,10 @@ use super::super::fault::Fault;
 use super::super::freshness::Freshness;
 use super::super::snapshot::Snapshot;
 use super::RATE_LIMIT_BACKOFF;
+use super::REVALIDATE_WINDOW;
 use super::decision::Decision;
 use super::delta;
+use super::expiry::Expiry;
 
 pub(super) struct Entry<T> {
     snapshot: Option<Snapshot<T>>,
@@ -42,6 +44,7 @@ impl<T> Entry<T> {
         now: DateTime<Utc>,
         ttl: Duration,
         floor: Duration,
+        expiry: Expiry,
     ) -> Decision<T> {
         if self.backing_off(now) {
             let failure = self.failure.clone().unwrap_or(Fault::RateLimited {
@@ -59,17 +62,19 @@ impl<T> Entry<T> {
             return Decision::Fetch;
         };
         let age = now.signed_duration_since(snapshot.generated_at);
+        let revalidating =
+            expiry == Expiry::Revalidate && age < delta(ttl.saturating_add(REVALIDATE_WINDOW));
         match refresh {
             true if age < delta(floor) => Decision::Serve(snapshot.clone(), Freshness::Floored),
             false if age < delta(ttl) => Decision::Serve(snapshot.clone(), Freshness::Cached),
-            true => Decision::Fetch,
-            false => Decision::Revalidate(
+            false if revalidating => Decision::Revalidate(
                 snapshot.warned(self.failure.as_ref().map(ToString::to_string)),
                 match self.failure {
                     Some(_) => Freshness::Stale,
                     None => Freshness::Revalidating,
                 },
             ),
+            _ => Decision::Fetch,
         }
     }
 

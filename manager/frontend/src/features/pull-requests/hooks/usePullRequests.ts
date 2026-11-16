@@ -6,6 +6,7 @@ import {
   errorMessage,
   gatewayFailed,
   NO_WORKSPACE,
+  pollAfter,
   retryDelay,
   retryPolled,
   type SourceStatus,
@@ -76,7 +77,7 @@ export function usePullRequests(): PullRequests {
       return pullRequestsApi.list(workspaceId, false, signal);
     },
     enabled: !!workspaceId,
-    refetchInterval: LIST_POLL_MS,
+    refetchInterval: (query) => pollAfter(query.state.data?.sources, LIST_POLL_MS),
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     retry: retryPolled,

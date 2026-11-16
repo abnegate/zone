@@ -117,13 +117,7 @@ pub(crate) async fn pipeline(
 ) -> Result<ReleasePipeline, Failure> {
     let source = &connect(state, workspace_id, source_id).await?;
     let now = Utc::now();
-    let (listed, _) = listing(state, source, false, now).await?;
-    if !listed
-        .value
-        .releases
-        .iter()
-        .any(|release| release.id == release_id)
-    {
+    if !listed(state, source, release_id, now).await? {
         return Err(Failure::Missing(RELEASE_MISSING.to_string()));
     }
     let snapshots = state.github_snapshots();
@@ -167,25 +161,12 @@ pub(crate) async fn options(
     let now = Utc::now();
     let snapshots = state.github_snapshots();
     let reads = join_all(listed.connected.iter().map(|source| {
-        let permits = snapshots.throttle.credential(&source.source);
-        let fetching = {
-            let (state, source) = (state.clone(), source.clone());
-            move |_| async move {
-                let (state, source) = (&state, &source);
-                let origin = state.config().github_web_url.as_str();
-                let _permit = admitted(&permits).await?;
-                credentialed(
-                    state,
-                    &source.source,
-                    source.configuration.clone(),
-                    move |github| async move { github.source_options(source, origin).await },
-                )
-                .await
-            }
-        };
         snapshots
             .options
-            .serve(source.source.id, refresh, now, fetching)
+            .serve(source.source.id, refresh, now, |_| {
+                let (state, source) = (state.clone(), source.clone());
+                async move { source_options(&state, &source).await }
+            })
     }))
     .await;
     let mut offered = Offered::new(now, unusable(&listed.invalid));
@@ -261,49 +242,85 @@ pub(crate) async fn create(
     created
 }
 
+async fn listed(
+    state: &AppState,
+    source: &ConnectedSource,
+    release_id: u64,
+    now: DateTime<Utc>,
+) -> Result<bool, Fault> {
+    let (snapshot, freshness) = listing(state, source, false, now).await?;
+    let held = snapshot.value.holds(release_id);
+    if held || freshness != Freshness::Revalidating {
+        return Ok(held);
+    }
+    let (snapshot, _) = listing(state, source, true, now).await?;
+    Ok(snapshot.value.holds(release_id))
+}
+
 async fn listing(
     state: &AppState,
     source: &ConnectedSource,
     refresh: bool,
     now: DateTime<Utc>,
 ) -> Result<(Snapshot<Listing>, Freshness), Fault> {
-    let snapshots = state.github_snapshots();
-    let permits = snapshots.throttle.credential(&source.source);
-    let fetching = {
-        let (state, source) = (state.clone(), source.clone());
-        move |previous: Option<Arc<Listing>>| async move {
-            let (state, source) = (&state, &source);
-            let origin = state.config().github_web_url.as_str();
-            let since = now - TimeDelta::days(MAXIMUM_RELEASE_WINDOW_DAYS as i64);
-            let horizon = now
-                .checked_sub_signed(delta(state.config().github.pipeline_horizon()))
-                .unwrap_or(DateTime::<Utc>::MIN_UTC);
-            let checked_at = now.to_rfc3339();
-            let previous = previous.as_deref();
-            credentialed(
-                state,
-                &source.source,
-                source.configuration.clone(),
-                |github| {
-                    let lookups = Lookups {
-                        permits: &permits,
-                        horizon,
-                        checked_at: checked_at.as_str(),
-                    };
-                    async move {
-                        github
-                            .recent_listing(source, origin, since, previous, &lookups)
-                            .await
-                    }
-                },
-            )
-            .await
-        }
-    };
-    snapshots
+    state
+        .github_snapshots()
         .releases
-        .serve(source.source.id, refresh, now, fetching)
+        .serve(source.source.id, refresh, now, |previous| {
+            let (state, source) = (state.clone(), source.clone());
+            async move { recent_listing(&state, &source, previous, now).await }
+        })
         .await
+}
+
+async fn recent_listing(
+    state: &AppState,
+    source: &ConnectedSource,
+    previous: Option<Arc<Listing>>,
+    now: DateTime<Utc>,
+) -> Result<Listing, Fault> {
+    let permits = state.github_snapshots().throttle.credential(&source.source);
+    let origin = state.config().github_web_url.as_str();
+    let since = now - TimeDelta::days(MAXIMUM_RELEASE_WINDOW_DAYS as i64);
+    let horizon = now
+        .checked_sub_signed(delta(state.config().github.pipeline_horizon()))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC);
+    let checked_at = now.to_rfc3339();
+    let previous = previous.as_deref();
+    credentialed(
+        state,
+        &source.source,
+        source.configuration.clone(),
+        |github| {
+            let lookups = Lookups {
+                permits: &permits,
+                horizon,
+                checked_at: checked_at.as_str(),
+            };
+            async move {
+                github
+                    .recent_listing(source, origin, since, previous, &lookups)
+                    .await
+            }
+        },
+    )
+    .await
+}
+
+async fn source_options(
+    state: &AppState,
+    source: &ConnectedSource,
+) -> Result<SourceOptions, Fault> {
+    let permits = state.github_snapshots().throttle.credential(&source.source);
+    let origin = state.config().github_web_url.as_str();
+    let _permit = admitted(&permits).await?;
+    credentialed(
+        state,
+        &source.source,
+        source.configuration.clone(),
+        move |github| async move { github.source_options(source, origin).await },
+    )
+    .await
 }
 
 async fn propose(

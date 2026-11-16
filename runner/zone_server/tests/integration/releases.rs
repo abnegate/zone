@@ -1,3 +1,4 @@
+use crate::common::eventually::eventually;
 use crate::common::github_app;
 use crate::common::{
     TestClient, context_database_url, create_test_router, create_test_state, test_email,
@@ -11,12 +12,14 @@ use chrono::{Duration as Interval, SecondsFormat, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::time::Duration;
-use tokio::time::Instant;
 use uuid::Uuid;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_server::db::sources;
 use zone_server::db::workspace_members::{self, WorkspaceRole};
+use zone_server::services::github::releases::Listing;
+use zone_server::services::github::releases::SourceOptions;
+use zone_server::services::github::snapshots::OPTIONS_TTL;
 use zone_server::state::AppState;
 
 const GITHUB_TOKEN: &str = "ghp_releases_test";
@@ -32,12 +35,12 @@ const NEXT: &str = "v1.4.1";
 const PUBLISHED_ID: u64 = 90;
 const DRAFT_ID: u64 = 91;
 const MARKER: &str = "<!-- zone-release:";
-const REVALIDATION_WAIT: Duration = Duration::from_secs(5);
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const BRANCH_FILTER: &str = "branch";
 const CREATED_FILTER: &str = "created";
 const FRESH: &str = "v1.5.0";
 const FRESH_ID: u64 = 92;
+const SEEDED_TAG: &str = "v0.0.1";
+const EXPIRY_MARGIN: Duration = Duration::from_secs(1);
 const NOTES: &str = "## What's Changed\n\
     * Add widgets by @octo in https://github.com/acme/widgets/pull/12\n\
     * Fix gadgets by @cat in https://github.com/acme/widgets/pull/13\n\
@@ -725,14 +728,92 @@ async fn an_expired_release_listing_is_served_at_once_and_read_again_behind_it()
     assert_eq!(again["sources"][0]["freshness"], "revalidating");
     assert_eq!(again["stale"], false);
     assert_eq!(again["releases"], first["releases"]);
-    let deadline = Instant::now() + REVALIDATION_WAIT;
-    while releases.sent("GET", &listed).await.len() < 2 && Instant::now() < deadline {
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    assert_eq!(
-        releases.sent("GET", &listed).await.len(),
-        2,
+    let (releases, listed) = (&releases, &listed);
+    assert!(
+        eventually(move || async move { releases.sent("GET", listed).await.len() == 2 }).await,
         "the expired listing is read again behind the one served"
+    );
+}
+
+#[tokio::test]
+async fn a_pipeline_for_a_release_newer_than_an_expired_listing_reads_the_listing_again() {
+    let releases = Releases::new().await;
+    let expired = Utc::now()
+        - Interval::from_std(releases.state.config().github.release_ttl + EXPIRY_MARGIN)
+            .expect("a ttl in range");
+    releases
+        .state
+        .github_snapshots()
+        .releases
+        .read(releases.source, false, expired, |_| async {
+            Ok(Listing::default())
+        })
+        .await
+        .expect("an expired listing without the release");
+    let published = release(PUBLISHED_ID, LATEST, Some(&ago(0)), false, NOTES);
+    releases
+        .answer_json("GET", "/releases", 200, json!([published.clone()]))
+        .await;
+    releases
+        .answer_json("GET", &format!("/releases/{PUBLISHED_ID}"), 200, published)
+        .await;
+    releases.runs(vec![run(501, LATEST, "success")]).await;
+
+    let (status, body) = releases.get(&releases.pipeline(PUBLISHED_ID)).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["pipeline"]["release"]["id"], PUBLISHED_ID);
+    assert_eq!(
+        releases
+            .sent("GET", &format!("{REPOSITORY}/releases"))
+            .await
+            .len(),
+        1,
+        "the listing is read once before the release is called missing"
+    );
+}
+
+#[tokio::test]
+async fn expired_options_are_served_at_once_and_read_again_behind_them() {
+    let releases = Releases::new().await;
+    let expired =
+        Utc::now() - Interval::from_std(OPTIONS_TTL + EXPIRY_MARGIN).expect("a ttl in range");
+    let seeded = SourceOptions {
+        source_id: releases.source,
+        repository: "acme/widgets".into(),
+        repository_url: WEB.into(),
+        default_branch: "main".into(),
+        latest_tag: None,
+        next_tag: SEEDED_TAG.into(),
+        previous_tags: Vec::new(),
+        lines: Vec::new(),
+    };
+    releases
+        .state
+        .github_snapshots()
+        .options
+        .read(releases.source, false, expired, |_| async { Ok(seeded) })
+        .await
+        .expect("expired options");
+    releases
+        .answer_json("GET", "/tags", 200, json!([tag_row(LATEST)]))
+        .await;
+    releases
+        .answer_json("GET", "", 200, json!({"default_branch": "main"}))
+        .await;
+    let options = format!("{}/options", releases.releases());
+
+    let (status, served) = releases.get(&options).await;
+
+    assert_eq!(status, StatusCode::OK, "{served}");
+    assert_eq!(served["sources"][0]["next_tag"], SEEDED_TAG);
+    let (releases, options) = (&releases, &options);
+    assert!(
+        eventually(move || async move {
+            releases.get(options).await.1["sources"][0]["next_tag"] == NEXT
+        })
+        .await,
+        "the expired options are read again behind the ones served"
     );
 }
 

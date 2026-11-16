@@ -1,10 +1,13 @@
 mod decision;
 mod entry;
+mod expiry;
 mod slot;
 #[cfg(test)]
 mod tests;
 
+use std::any::Any;
 use std::hash::Hash;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
@@ -14,16 +17,22 @@ use chrono::DateTime;
 use chrono::TimeDelta;
 use chrono::Utc;
 use dashmap::DashMap;
+use futures::FutureExt;
 use tokio::time::Instant;
 
+use super::client::REQUEST_FAILED;
 use super::fault::Fault;
 use super::freshness::Freshness;
 use super::snapshot::Snapshot;
 use decision::Decision;
+use expiry::Expiry;
 use slot::Slot;
 
 pub const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(5 * 60);
 pub const IDLE_EXPIRY: Duration = Duration::from_secs(60 * 60);
+pub const REVALIDATE_WINDOW: Duration = Duration::from_secs(10 * 60);
+pub const REFRESH_DEADLINE: Duration = Duration::from_secs(2 * 60);
+const UNKNOWN_PANIC: &str = "unknown panic";
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 pub struct Cache<K, T> {
@@ -64,7 +73,7 @@ impl<K: Eq + Hash + Clone, T> Cache<K, T> {
     {
         self.sweep(now);
         let slot = self.slot(key.clone(), now);
-        let decide = || slot.decide(refresh, now, self.ttl, self.floor);
+        let decide = || slot.decide(refresh, now, self.ttl, self.floor, Expiry::Wait);
         if let Some(answer) = decide().answer() {
             return answer;
         }
@@ -72,8 +81,7 @@ impl<K: Eq + Hash + Clone, T> Cache<K, T> {
         if let Some(answer) = decide().answer() {
             return answer;
         }
-        let (previous, epoch) = slot.previous();
-        settle(&self.slots, &key, &slot, fetch(previous), epoch, now).await
+        self.fetched(&key, &slot, now, fetch).await
     }
 
     pub fn peek(&self, key: &K) -> Option<Snapshot<T>> {
@@ -95,6 +103,21 @@ impl<K: Eq + Hash + Clone, T> Cache<K, T> {
     #[cfg(test)]
     pub(crate) fn holds(&self, key: &K) -> bool {
         self.slots.contains_key(key)
+    }
+
+    async fn fetched<Fetch, Fetched>(
+        &self,
+        key: &K,
+        slot: &Arc<Slot<T>>,
+        now: DateTime<Utc>,
+        fetch: Fetch,
+    ) -> Result<(Snapshot<T>, Freshness), Fault>
+    where
+        Fetch: FnOnce(Option<Arc<T>>) -> Fetched,
+        Fetched: Future<Output = Result<T, Fault>>,
+    {
+        let (previous, epoch) = slot.previous();
+        settle(&self.slots, key, slot, fetch(previous), epoch, now).await
     }
 
     fn slot(&self, key: K, now: DateTime<Utc>) -> Arc<Slot<T>> {
@@ -129,12 +152,12 @@ where
         fetch: Fetch,
     ) -> Result<(Snapshot<T>, Freshness), Fault>
     where
-        Fetch: FnOnce(Option<Arc<T>>) -> Fetched + Send + 'static,
+        Fetch: FnOnce(Option<Arc<T>>) -> Fetched,
         Fetched: Future<Output = Result<T, Fault>> + Send + 'static,
     {
         self.sweep(now);
         let slot = self.slot(key.clone(), now);
-        let decide = || slot.decide(refresh, now, self.ttl, self.floor);
+        let decide = || slot.decide(refresh, now, self.ttl, self.floor, Expiry::Revalidate);
         let flight = match decide() {
             Decision::Revalidate(snapshot, freshness) => match slot.try_flight() {
                 Some(flight) => flight,
@@ -147,7 +170,7 @@ where
         match decide() {
             Decision::Revalidate(snapshot, freshness) => {
                 let (previous, epoch) = slot.previous();
-                let fetched = fetch(previous);
+                let fetched = guarded(fetch(previous));
                 let slots = Arc::clone(&self.slots);
                 tokio::spawn(async move {
                     let _flight = flight;
@@ -155,14 +178,40 @@ where
                 });
                 Ok((snapshot, freshness))
             }
-            Decision::Fetch => {
-                let (previous, epoch) = slot.previous();
-                settle(&self.slots, &key, &slot, fetch(previous), epoch, now).await
-            }
+            Decision::Fetch => self.fetched(&key, &slot, now, fetch).await,
             Decision::Serve(snapshot, freshness) => Ok((snapshot, freshness)),
             Decision::Refuse(fault) => Err(fault),
         }
     }
+}
+
+async fn guarded<T>(fetched: impl Future<Output = Result<T, Fault>>) -> Result<T, Fault> {
+    let bounded = tokio::time::timeout(REFRESH_DEADLINE, AssertUnwindSafe(fetched).catch_unwind());
+    match bounded.await {
+        Ok(Ok(fetched)) => fetched,
+        Ok(Err(panic)) => {
+            tracing::error!(
+                panic = panicked(panic.as_ref()),
+                "a background GitHub refresh panicked"
+            );
+            Err(Fault::upstream(REQUEST_FAILED))
+        }
+        Err(_) => {
+            tracing::warn!(
+                deadline = ?REFRESH_DEADLINE,
+                "a background GitHub refresh ran past its deadline"
+            );
+            Err(Fault::upstream(REQUEST_FAILED))
+        }
+    }
+}
+
+fn panicked(panic: &(dyn Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or(UNKNOWN_PANIC)
 }
 
 async fn settle<K, T, Fetched>(

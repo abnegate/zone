@@ -11,6 +11,10 @@ pub struct Listing {
 }
 
 impl Listing {
+    pub fn holds(&self, release_id: u64) -> bool {
+        self.releases.iter().any(|release| release.id == release_id)
+    }
+
     pub fn since(&self, since: DateTime<Utc>) -> Self {
         Self {
             releases: self

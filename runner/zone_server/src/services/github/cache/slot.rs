@@ -13,6 +13,7 @@ use super::super::freshness::Freshness;
 use super::super::snapshot::Snapshot;
 use super::decision::Decision;
 use super::entry::Entry;
+use super::expiry::Expiry;
 
 pub(super) struct Slot<T> {
     flight: Arc<tokio::sync::Mutex<()>>,
@@ -43,8 +44,9 @@ impl<T> Slot<T> {
         now: DateTime<Utc>,
         ttl: Duration,
         floor: Duration,
+        expiry: Expiry,
     ) -> Decision<T> {
-        self.entry().decide(refresh, now, ttl, floor)
+        self.entry().decide(refresh, now, ttl, floor, expiry)
     }
 
     pub(super) fn previous(&self) -> (Option<Arc<T>>, u64) {

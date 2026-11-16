@@ -403,25 +403,23 @@ async fn read<'a>(
     &'a ConnectedSource,
     Result<(Snapshot<Listing>, Freshness), Fault>,
 ) {
-    let fetching = {
-        let (state, source) = (state.clone(), source.clone());
-        move |previous| fetch(state, source, previous, now)
-    };
     let read = state
         .github_snapshots()
         .pull_requests
-        .serve(source.source.id, refresh, now, fetching)
+        .serve(source.source.id, refresh, now, |previous| {
+            let (state, source) = (state.clone(), source.clone());
+            async move { fetch(&state, &source, previous, now).await }
+        })
         .await;
     (source, read)
 }
 
 async fn fetch(
-    state: AppState,
-    source: ConnectedSource,
+    state: &AppState,
+    source: &ConnectedSource,
     previous: Option<Arc<Listing>>,
     now: DateTime<Utc>,
 ) -> Result<Listing, Fault> {
-    let (state, source) = (&state, &source);
     let limit = state.config().github.open_pull_request_limit;
     let repository = &Repository::of(source, &state.config().github_web_url);
     let permits = &state.github_snapshots().throttle.credential(&source.source);

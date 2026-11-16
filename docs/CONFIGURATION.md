@@ -2338,15 +2338,15 @@ Publication, pull-request sync, conflict repair, auto-project reviews and merges
 
 ### GitHub pages
 
-The console's **Pull Requests** and **Releases** pages read every active GitHub source in the workspace with that source's own credential. What GitHub said about each source is kept in the server's memory and shown again until it expires, so a page left open does not spend the credential's rate limit on every poll. **Refresh** asks GitHub again unless the source was read in the last 10 seconds. When GitHub cannot be reached, the page keeps showing what it last read and says the source is stale; when the credential's rate limit is exhausted, the source is not asked again for 5 minutes. A pipeline is read again after 15 seconds, and a source's tags and default branch after 5 minutes. A merge or a new release forgets what was read about its source. All settings are optional.
+The console's **Pull Requests** and **Releases** pages read every active GitHub source in the workspace with that source's own credential. What GitHub said about each source is kept in the server's memory and shown again until it expires, so a page left open does not spend the credential's rate limit on every poll. Once it expires it is still shown, marked as being read again, while GitHub is asked in the background, for up to 10 minutes past its expiry; after that, the page waits for GitHub. **Refresh** asks GitHub again unless the source was read in the last 10 seconds. When GitHub cannot be reached, the page keeps showing what it last read and says the source is stale; when the credential's rate limit is exhausted, the source is not asked again for 5 minutes. A pipeline is read again after 15 seconds, and a source's tags and default branch after 5 minutes. A merge or a new release forgets what was read about its source. All settings are optional.
 
 ### `ZONE_GITHUB_PULL_REQUEST_TTL_SECONDS`
 - **Default**: `45` (10–3600)
-- **Description**: How long a source's open pull requests are shown before GitHub is asked again.
+- **Description**: How long a source's open pull requests are shown before GitHub is asked again. Past it, they are still shown while GitHub is asked in the background, for up to 10 minutes more.
 
 ### `ZONE_GITHUB_RELEASE_TTL_SECONDS`
 - **Default**: `120` (10–3600)
-- **Description**: How long a source's recent releases are shown before GitHub is asked again.
+- **Description**: How long a source's recent releases are shown before GitHub is asked again. Past it, they are still shown while GitHub is asked in the background, for up to 10 minutes more.
 
 ### `ZONE_GITHUB_RELEASE_WINDOW_DAYS`
 - **Default**: `7` (1–90)
