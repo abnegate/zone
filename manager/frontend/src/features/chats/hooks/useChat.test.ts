@@ -1418,6 +1418,40 @@ describe('useChat', () => {
     await waitFor(() => expect(result.current.streaming).toBe(false));
   });
 
+  it('ends a turn the agent policy denied and keeps the denial code with its message', async () => {
+    const denied =
+      "Your organization's policy doesn't allow this model in this workspace. Choose an allowed model.";
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(lastSocket).not.toBeNull());
+    await act(async () => {
+      await result.current.sendMessage({ content: 'Use the big model' });
+    });
+
+    lastSocket?.emit({ type: 'denied', message: denied, code: 'policy_model_denied' });
+
+    await waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(result.current.error).toBe(denied);
+    expect(result.current.denial).toBe('policy_model_denied');
+
+    lastSocket?.emit({ type: 'error', message: 'Rate limit exceeded' });
+    await waitFor(() => expect(result.current.error).toBe('Rate limit exceeded'));
+    expect(result.current.denial).toBeNull();
+  });
+
+  it('shows a denial with a code it does not know as a plain error', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(lastSocket).not.toBeNull());
+
+    lastSocket?.emit({ type: 'denied', message: 'Denied for a new reason.', code: 'policy_new' });
+
+    await waitFor(() => expect(result.current.error).toBe('Denied for a new reason.'));
+    expect(result.current.denial).toBeNull();
+  });
+
   it('frees the composer after a reminder turn when the typed send had already failed', async () => {
     mockGetChat.mockResolvedValue(mockChat);
     const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });

@@ -55,6 +55,18 @@ export const LAPSED_ORGANIZATION: OrganizationPolicyResponse = {
   updated_at: UPDATED_AT,
 };
 
+export const COMMUNITY_WORKSPACE: WorkspacePolicyResponse = {
+  entitled: false,
+  enforced: false,
+  edition: Edition.Community,
+  status: LicenseStatus.Community,
+  editable: false,
+  organization: OPEN_RULES,
+  workspace: OPEN_RULES,
+  effective: OPEN_RULES,
+  updated_at: null,
+};
+
 export const ACTIVE_WORKSPACE_INHERITED: WorkspacePolicyResponse = {
   entitled: true,
   enforced: true,

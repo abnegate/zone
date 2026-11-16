@@ -151,6 +151,10 @@ export function denialMessage(code: PolicyDenialCode, subject?: string): string 
   return DENIALS[code](subject);
 }
 
+export function denialReason(denial: string, subject?: string): string {
+  return isDenialCode(denial) ? denialMessage(denial, subject) : denial;
+}
+
 export function refusalMessage(code: PolicyAdminCode): string {
   return REFUSALS[code];
 }

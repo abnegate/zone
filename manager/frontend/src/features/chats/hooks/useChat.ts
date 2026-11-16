@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
+import { isDenialCode, type PolicyDenialCode } from '../../enterprise';
 import {
   ContextUsageSchema,
   HandoverSchema,
@@ -256,7 +257,13 @@ type ServerMessage =
   | { type: 'cancelled'; message_id: string | null }
   | { type: 'queue'; messages: QueuedMessage[]; held: boolean; started?: QueuedMessage }
   | { type: 'error'; message: string }
+  | { type: 'denied'; message: string; code: string }
   | { type: 'status'; message: string };
+
+interface Denied {
+  code: PolicyDenialCode;
+  message: string;
+}
 
 export function useChat(
   chatId: string | null,
@@ -268,6 +275,7 @@ export function useChat(
   );
   const [loading, setLoading] = useState(Boolean(chatId) && chat === null);
   const [error, setError] = useState<string | null>(null);
+  const [denied, setDenied] = useState<Denied | null>(null);
   const [streaming, setStreaming] = useState(false);
   // When the turn being written started, read back from the cache on every
   // selection: a chat swapped away from and returned to is still running the
@@ -847,6 +855,20 @@ export function useChat(
     let overflowed = false;
     const loaded = () => loadedChat.current === chatId;
 
+    const fail = (message: string): void => {
+      settleStoppedAssistant(assistantId);
+      if (assistantId !== null) completed.add(assistantId);
+      assistantId = null;
+      automatedTurn = false;
+      contextEpoch.current += 1;
+      setStatus(null);
+      setError(message);
+      activeGenerationRef.current = false;
+      sendInFlightRef.current = false;
+      setStreaming(false);
+      ended();
+    };
+
     const apply = (payload: ServerMessage) => {
       if (payload.type !== 'chunk') {
         flushChunksNow();
@@ -1132,17 +1154,13 @@ export function useChat(
           break;
         }
         case 'error':
-          settleStoppedAssistant(assistantId);
-          if (assistantId !== null) completed.add(assistantId);
-          assistantId = null;
-          automatedTurn = false;
-          contextEpoch.current += 1;
-          setStatus(null);
-          setError(payload.message);
-          activeGenerationRef.current = false;
-          sendInFlightRef.current = false;
-          setStreaming(false);
-          ended();
+          fail(payload.message);
+          break;
+        case 'denied':
+          setDenied(
+            isDenialCode(payload.code) ? { code: payload.code, message: payload.message } : null
+          );
+          fail(payload.message);
           break;
         default:
           break;
@@ -1601,6 +1619,7 @@ export function useChat(
     previewing,
     loading,
     error,
+    denial: denied !== null && denied.message === error ? denied.code : null,
     streaming,
     status,
     generationStarted,

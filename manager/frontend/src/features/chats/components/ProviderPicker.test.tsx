@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { chooseSelect, openSelect } from '../../../test/select';
+import { chooseSelect, openSelect, optionDescription } from '../../../test/select';
 import type {
   ChatProviderOffer,
   ChatProviderSelection,
@@ -107,6 +107,25 @@ describe('ProviderPicker', () => {
     renderPicker({ providers: [selfHosted, codex] });
 
     expect(optionNames('AI provider')).toEqual(['Default (Self-Hosted)', 'Self-Hosted', 'Codex']);
+  });
+
+  it('disables a provider the agent policy denies and says why', () => {
+    const { onChoose } = renderPicker({
+      providers: [selfHosted, { ...codex, usable: false, denial: 'policy_agent_denied' }],
+    });
+
+    openSelect('AI provider');
+    const denied = screen.getByRole('option', { name: 'Codex' });
+    expect(denied).toHaveAttribute('data-disabled');
+    expect(optionDescription(denied)).toBe(
+      "Your organization's policy doesn't allow Codex in this workspace."
+    );
+    expect(screen.getByRole('option', { name: 'Self-Hosted' })).not.toHaveAttribute(
+      'data-disabled'
+    );
+    fireEvent.click(denied);
+
+    expect(onChoose).not.toHaveBeenCalled();
   });
 
   it('chooses a provider with Automatic', () => {

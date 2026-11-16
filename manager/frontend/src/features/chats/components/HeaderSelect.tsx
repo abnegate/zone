@@ -53,7 +53,12 @@ export function HeaderSelect({
       </SelectTrigger>
       <SelectContent>
         {options.map((option) => (
-          <SelectItem key={option.value} value={option.value}>
+          <SelectItem
+            key={option.value}
+            value={option.value}
+            disabled={option.disabled}
+            description={option.description}
+          >
             {option.label}
           </SelectItem>
         ))}

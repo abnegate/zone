@@ -32,6 +32,7 @@ export interface ChatProviderOffer {
   label: string;
   usable: boolean;
   reason?: string | null;
+  denial?: string | null;
   models: ChatProviderModel[];
   efforts: ReasoningEffort[];
   requires_model: boolean;

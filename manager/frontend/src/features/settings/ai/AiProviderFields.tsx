@@ -1,5 +1,6 @@
-import { Select } from '@zone/ui';
+import { Select, type SelectOption } from '@zone/ui';
 import type { ReactNode } from 'react';
+import { denialMessage, type PolicyRules, providerDenial } from '../../enterprise';
 import type { AiProvider, CommonAiSettings, OrganizationKeys } from '../workspace/types';
 import {
   awsRegions,
@@ -21,6 +22,7 @@ interface AiProviderFieldsProps {
   onChange: <K extends keyof ProviderCredentials>(key: K, value: ProviderCredentials[K]) => void;
   saved?: CommonAiSettings | null;
   organizationKeys?: OrganizationKeys;
+  policy?: PolicyRules | null;
 }
 
 const MASK = '••••••••';
@@ -159,6 +161,22 @@ function EndpointHints({
   );
 }
 
+function deniedBy(policy: PolicyRules | null, provider: AiProvider): string | null {
+  const denial = policy === null ? null : providerDenial(policy, provider);
+  return denial === null ? null : denialMessage(denial, providerLabelOf(provider));
+}
+
+function providerLabelOf(provider: AiProvider): string {
+  return providerOptions.find((option) => option.value === provider)?.label ?? provider;
+}
+
+function policyProviderOptions(policy: PolicyRules | null): SelectOption[] {
+  return providerOptions.map((option) => {
+    const denial = deniedBy(policy, option.value);
+    return denial === null ? option : { ...option, disabled: true, description: denial };
+  });
+}
+
 export function AiProviderFields({
   level,
   provider,
@@ -168,7 +186,9 @@ export function AiProviderFields({
   onChange,
   saved = null,
   organizationKeys,
+  policy = null,
 }: AiProviderFieldsProps) {
+  const denial = deniedBy(policy, provider);
   const rekey = needsKeyAgain(provider, credentials, configured, saved);
   const hints = (
     <EndpointHints
@@ -188,8 +208,13 @@ export function AiProviderFields({
           id="ai-provider"
           value={provider}
           onValueChange={(next) => onProviderChange(next as AiProvider)}
-          options={providerOptions}
+          options={policyProviderOptions(policy)}
         />
+        {denial !== null && (
+          <div className="alert alert-warning" role="status" data-testid="ai-provider-denial">
+            {denial}
+          </div>
+        )}
       </Field>
 
       {provider === 'self_hosted' && (
