@@ -236,7 +236,7 @@ impl Hub {
             "user": {"login": pull.author},
             "commits": 1,
             "mergeable": pull.mergeable_state != DIRTY,
-            "mergeable_state": pull.mergeable_state,
+            "mergeable_state": if pull.draft { "draft" } else { pull.mergeable_state },
         })
     }
 
@@ -2365,14 +2365,10 @@ async fn evidence_read_in_batches_says_what_each_pull_request_needs() {
     );
     assert_eq!(row(2)["readiness"], json!("in_progress"));
     assert_eq!(row(2)["author"], json!(PERSON));
-    assert!(codes(4).contains(&"draft".to_string()), "{:?}", codes(4));
-    assert_eq!(row(4)["mergeable"], json!("blocked"));
-    assert!(codes(5).contains(&"draft".to_string()), "{:?}", codes(5));
-    assert!(
-        codes(5).contains(&"merge_conflict".to_string()),
-        "{:?}",
-        codes(5)
-    );
+    for draft in [4, 5] {
+        assert_eq!(codes(draft), ["draft"], "#{draft}");
+        assert_eq!(row(draft)["mergeable"], json!("draft"), "#{draft}");
+    }
     assert!(
         codes(6).contains(&"mergeability_unverified".to_string()),
         "{:?}",

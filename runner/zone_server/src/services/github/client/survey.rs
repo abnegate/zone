@@ -1,5 +1,6 @@
 use abnegate_vcs::HeadChecks;
 use abnegate_vcs::ListedPullRequest;
+use abnegate_vcs::MergeableState;
 use abnegate_vcs::PullRequestEvidence;
 use abnegate_vcs::ReviewThreadCount;
 use tokio::sync::Semaphore;
@@ -15,6 +16,7 @@ use crate::services::github::evidence::Gathered;
 use crate::services::github::fault::Fault;
 use crate::services::github::readiness::CheckEvidence;
 use crate::services::github::readiness::CommitSha;
+use crate::services::github::readiness::Mergeability;
 use crate::services::github::throttle::admitted;
 
 impl Github {
@@ -71,7 +73,7 @@ impl Github {
             Gathered {
                 draft: pull_request.draft,
                 head: listed,
-                mergeable: mergeability(mergeable_state),
+                mergeable: drafted(pull_request.draft, mergeable_state),
                 threads: thread_evidence(threads),
                 comments: comment_evidence(comments.items, comments.complete),
                 checks,
@@ -116,6 +118,15 @@ pub(crate) fn sufficient(row: &ListedPullRequest, evidence: &PullRequestEvidence
                 .head
                 .as_ref()
                 .is_some_and(|head| whole(head, listed.as_ref())))
+}
+
+/// GitHub's REST API sums a draft up as `draft`, while GraphQL gives it the
+/// state it would merge in; a draft is read as REST reads it.
+fn drafted(draft: bool, state: MergeableState) -> Mergeability {
+    match draft {
+        true => Mergeability::Draft,
+        false => mergeability(state),
+    }
 }
 
 fn agreed(row: &ListedPullRequest, read: &ListedPullRequest) -> Option<CommitSha> {

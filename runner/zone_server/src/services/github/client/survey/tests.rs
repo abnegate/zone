@@ -21,6 +21,7 @@ use crate::services::github::evidence::Depth;
 use crate::services::github::pull_requests::PullRequest;
 use crate::services::github::pull_requests::Repository;
 use crate::services::github::readiness::BlockerCode;
+use crate::services::github::readiness::Mergeability;
 use crate::services::github::testing::BLOB;
 use crate::services::github::testing::COMMIT;
 use crate::services::github::testing::mocked;
@@ -351,7 +352,10 @@ impl Fixture {
     async fn serve(&self, server: &MockServer) {
         let mut detail = pull_detail(COMMIT);
         detail["draft"] = json!(self.draft);
-        detail["mergeable_state"] = json!(self.mergeable);
+        detail["mergeable_state"] = json!(match self.draft {
+            true => "draft",
+            false => self.mergeable,
+        });
         answer(server, &format!("pulls/{NUMBER}"), None, detail, None).await;
         self.serve_threads(server, None).await;
         self.serve_comments(server).await;
@@ -803,6 +807,7 @@ async fn a_pull_request_the_batch_reads_as_a_draft_is_one_though_listed_ready() 
     let fixture = ready();
     let mut detail = pull_detail(COMMIT);
     detail["draft"] = json!(true);
+    detail["mergeable_state"] = json!("draft");
     let rest = reassessed_reading(&fixture, detail).await;
     let silent = silent().await;
     let github = mocked(&silent);
@@ -824,6 +829,40 @@ async fn a_pull_request_the_batch_reads_as_a_draft_is_one_though_listed_ready() 
         batched.blockers
     );
     silent.verify().await;
+}
+
+#[tokio::test]
+async fn a_draft_the_batch_reads_a_merge_state_for_is_blocked_only_as_a_draft() {
+    for (name, state) in [
+        ("blocked", MergeableState::Blocked),
+        ("dirty", MergeableState::Dirty),
+        ("behind", MergeableState::Behind),
+        ("unknown", MergeableState::Unknown),
+    ] {
+        let silent = silent().await;
+        let github = mocked(&silent);
+        let fixture = Fixture {
+            draft: true,
+            ..ready()
+        };
+        let parts = Parts {
+            mergeable: state,
+            ..fixture.parts()
+        };
+
+        let batched = listed(&github, &closed(), &fixture.row(&github), parts)
+            .await
+            .unwrap_or_else(|fault| panic!("{name}: {fault}"));
+
+        assert_eq!(batched.mergeable, Mergeability::Draft, "{name}");
+        let codes: Vec<BlockerCode> = batched
+            .blockers
+            .iter()
+            .map(|blocker| blocker.code)
+            .collect();
+        assert_eq!(codes, [BlockerCode::Draft], "{name}");
+        silent.verify().await;
+    }
 }
 
 #[tokio::test]
