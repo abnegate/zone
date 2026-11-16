@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_offline_chat_neither_changes_nor_diffs_a_pull_request() {
+    async fn an_offline_chat_neither_changes_diffs_nor_merges_a_pull_request() {
         let connected = Connected::new().await;
         connected.reads_only(None).await;
         let offline = connected.chat_pull_request(true, OFFLINE).await;
@@ -278,6 +278,17 @@ mod tests {
         assert!(
             matches!(&diffed, Err(ServerError::Conflict(message)) if message == CHAT_OFFLINE),
             "{diffed:?}"
+        );
+
+        let merged = merge(
+            State(connected.state.clone()),
+            reader(&connected),
+            Path((offline.chat_id, offline.id)),
+        )
+        .await;
+        assert!(
+            matches!(&merged, Err(ServerError::Conflict(message)) if message == CHAT_OFFLINE),
+            "{merged:?}"
         );
 
         connected.github.verify().await;
