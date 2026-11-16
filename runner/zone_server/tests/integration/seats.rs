@@ -112,7 +112,7 @@ impl Fixture {
     }
 
     async fn backdate(&self, account: &Account, to: DateTime<Utc>) {
-        sqlx::query("UPDATE users SET last_login_at = ($1::timestamptz)::timestamp WHERE id = $2")
+        sqlx::query("UPDATE users SET last_login_at = ($1 AT TIME ZONE 'UTC') WHERE id = $2")
             .bind(to)
             .bind(account.id)
             .execute(self.pool())
@@ -124,6 +124,28 @@ impl Fixture {
             .execute(self.pool())
             .await
             .unwrap();
+    }
+
+    async fn memberships(&self, account: &Account) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM organization_members WHERE user_id = $1 AND is_active",
+        )
+        .bind(account.id)
+        .fetch_one(self.pool())
+        .await
+        .unwrap()
+    }
+
+    async fn set_organizations_active(&self, account: &Account, active: Option<bool>) {
+        sqlx::query(
+            "UPDATE organizations SET is_active = $1
+             WHERE id IN (SELECT organization_id FROM organization_members WHERE user_id = $2)",
+        )
+        .bind(active)
+        .bind(account.id)
+        .execute(self.pool())
+        .await
+        .unwrap();
     }
 
     async fn used(&self, now: DateTime<Utc>) -> u32 {
@@ -191,7 +213,7 @@ async fn a_login_this_month_counts_without_a_recent_session() {
         .backdate(&account, period_start(now) - TimeDelta::seconds(1))
         .await;
 
-    sqlx::query("UPDATE users SET last_login_at = ($1::timestamptz)::timestamp WHERE id = $2")
+    sqlx::query("UPDATE users SET last_login_at = ($1 AT TIME ZONE 'UTC') WHERE id = $2")
         .bind(period_start(now))
         .bind(account.id)
         .execute(fixture.pool())
@@ -253,6 +275,51 @@ async fn a_user_with_no_active_membership_takes_no_seat() {
         .await
         .unwrap();
 
+    assert_eq!(fixture.used(Utc::now()).await, 1);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_member_of_two_organizations_takes_one_seat() {
+    let fixture = Fixture::new().await;
+    let first = fixture.sign_in().await;
+    let second = fixture.sign_in().await;
+    let shared = fixture.organization(&second).await;
+    fixture.join(shared, &first).await;
+
+    assert!(fixture.memberships(&first).await >= 2);
+    assert_eq!(fixture.used(Utc::now()).await, 2);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_user_with_no_recorded_activity_flag_takes_a_seat() {
+    let fixture = Fixture::new().await;
+    let accounts = fixture.members(2).await;
+
+    sqlx::query("UPDATE users SET is_active = NULL WHERE id = $1")
+        .bind(accounts[1].id)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+
+    assert_eq!(fixture.used(Utc::now()).await, 2);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn members_only_of_deactivated_organizations_take_no_seat() {
+    let fixture = Fixture::new().await;
+    let active = fixture.sign_in().await;
+    let deactivated = fixture.sign_in().await;
+
+    fixture
+        .set_organizations_active(&deactivated, Some(false))
+        .await;
+
+    assert!(fixture.memberships(&deactivated).await >= 1);
+    assert_eq!(fixture.used(Utc::now()).await, 1);
+    fixture.set_organizations_active(&active, None).await;
     assert_eq!(fixture.used(Utc::now()).await, 1);
     fixture.cleanup().await;
 }

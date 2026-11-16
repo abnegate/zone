@@ -1,5 +1,3 @@
-//! Seat usage: the people who used this server since a moment
-
 use chrono::{DateTime, Utc};
 use sqlx::{Executor, Postgres};
 
@@ -14,9 +12,12 @@ where
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM users u
          WHERE u.is_active IS NOT FALSE
-           AND EXISTS (SELECT 1 FROM organization_members m WHERE m.user_id = u.id AND m.is_active)
-           AND (u.last_login_at::timestamptz >= $1
-                OR EXISTS (SELECT 1 FROM sessions s WHERE s.user_id = u.id AND s.last_active_at >= $1))",
+           AND EXISTS (
+               SELECT 1 FROM organization_members m
+               JOIN organizations o ON o.id = m.organization_id
+               WHERE m.user_id = u.id AND m.is_active AND o.is_active IS NOT FALSE)
+           AND (u.last_login_at >= ($1 AT TIME ZONE 'UTC')
+                OR u.id IN (SELECT s.user_id FROM sessions s WHERE s.last_active_at >= $1))",
     )
     .bind(since)
     .fetch_one(executor)
