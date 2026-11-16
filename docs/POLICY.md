@@ -125,6 +125,11 @@ route with no prefix, or a prefix that isn't in the table, counts as `other`.
 So does Google AI Studio (`gemini/`): only `vertex_ai` routes count as Vertex
 AI.
 
+Only the prefix counts, not where the route sends traffic. An `ollama_chat` or
+`hosted_vllm` route whose `api_base` names a server on another network still
+counts as `local`. Whoever edits LiteLLM's `config.yaml` decides what `local`
+means, so keep the `api_base` of those routes on hosts you run.
+
 Each provider in AI settings is checked this way:
 
 | Provider in AI settings | Checked against |
@@ -366,8 +371,9 @@ The ceiling also governs the tools coding agents ship with:
   `WebSearch` count as Outward, and every other built-in tool as Host.
 - **An agent that doesn't ask Zone before using its own tools,** such as Codex,
   or Claude Code on a turn without Zone's tools, has its own tools withheld
-  under any ceiling, as if **Zone tools only** were on. It keeps Zone's tools,
-  which go through the ceiling as usual.
+  under any ceiling, as if **Zone tools only** were on. This holds for every
+  agent a turn runs on, including one it hands over to partway through. The
+  agent keeps Zone's tools, which go through the ceiling as usual.
 
 ### Unattended runs
 
@@ -383,7 +389,8 @@ and Zone records `agent_policy.tool_denied` with the tool's name.
 **Settings → Organization → MCP servers**, and the instance's own servers. A
 name is 1 to 32 letters, digits, `-` and `_`; anything else is refused with
 `policy_mcp_server_invalid`. Servers not on the list are left out of every
-chat and task run, whether they belong to the organization or the instance.
+chat and task run, whether they belong to the organization or the instance,
+for the whole of each turn, including the rounds after a `wait_for` settles.
 
 A workspace's own **On** and **Off** settings for organization servers still
 apply on top of the policy.
