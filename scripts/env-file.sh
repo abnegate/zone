@@ -15,13 +15,72 @@ read_env_value() {
             escapes["v"] = "\v"
             escapes["\\"] = "\\"
             escapes["\""] = "\""
-            escapes["$"] = "$"
+            escapes["$"] = "$$"
         }
         function assign(value) {
-            if (key == name) {
-                found = value
-                matched = 1
+            values[key] = value
+            defined[key] = 1
+        }
+        function lookup(variable) {
+            if (variable in ENVIRON) {
+                found = 1
+                return ENVIRON[variable]
             }
+            found = (variable in defined)
+            return found ? values[variable] : ""
+        }
+        function closing(text, start,    position, depth, character) {
+            depth = 1
+            for (position = start; position <= length(text); position++) {
+                character = substr(text, position, 1)
+                if (character == "$" && substr(text, position + 1, 1) ~ /[${]/) {
+                    if (substr(text, position + 1, 1) == "{") depth++
+                    position++
+                } else if (character == "}" && --depth == 0) {
+                    return position
+                }
+            }
+            return 0
+        }
+        function substitute(expression,    variable, value, set, operator, word) {
+            if (!match(expression, /^[A-Za-z_][A-Za-z0-9_]*/)) return ""
+            variable = substr(expression, 1, RLENGTH)
+            operator = substr(expression, RLENGTH + 1)
+            value = lookup(variable)
+            set = found
+            if (substr(operator, 1, 1) == ":") {
+                set = set && value != ""
+                operator = substr(operator, 2)
+            }
+            word = substr(operator, 2)
+            operator = substr(operator, 1, 1)
+            if (operator == "-") return set ? value : interpolate(word)
+            if (operator == "+") return set ? interpolate(word) : ""
+            return value
+        }
+        function interpolate(text,    result, position, character, following, end) {
+            result = ""
+            for (position = 1; position <= length(text); position++) {
+                character = substr(text, position, 1)
+                following = substr(text, position + 1, 1)
+                if (character != "$") {
+                    result = result character
+                } else if (following == "$") {
+                    result = result "$"
+                    position++
+                } else if (following == "{") {
+                    end = closing(text, position + 2)
+                    if (!end) return result substr(text, position)
+                    result = result substitute(substr(text, position + 2, end - position - 2))
+                    position = end
+                } else if (match(substr(text, position + 1), /^[A-Za-z_][A-Za-z0-9_]*/)) {
+                    result = result lookup(substr(text, position + 1, RLENGTH))
+                    position += RLENGTH
+                } else {
+                    result = result "$"
+                }
+            }
+            return result
         }
         function unescape(character) {
             if (quote == "\"" && character in escapes) return escapes[character]
@@ -35,7 +94,7 @@ read_env_value() {
                     position++
                     buffer = buffer unescape(substr(segment, position, 1))
                 } else if (character == quote) {
-                    assign(buffer)
+                    assign(quote == "\"" ? interpolate(buffer) : buffer)
                     quote = ""
                     return
                 } else {
@@ -69,8 +128,8 @@ read_env_value() {
             comment = index(value, " #")
             if (comment) value = substr(value, 1, comment - 1)
             sub(/[[:space:]]+$/, "", value)
-            assign(value)
+            assign(interpolate(value))
         }
-        END { if (matched) print found }
+        END { if (name in defined) print values[name] }
     ' "$2"
 }
