@@ -70,7 +70,7 @@
     "check": "biome check src",
     "check:fix": "biome check --write src",
     "pretypecheck": "bun run build:ui",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p e2e",
     "lighthouse": "lhci autorun",
     "audit": "bun audit --ignore GHSA-gcqx-w48m-w2h4"
   }
