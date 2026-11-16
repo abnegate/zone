@@ -134,6 +134,19 @@ fn whole(head: &HeadChecks, listed: Option<&CommitSha>) -> bool {
         && head.workflow_runs.complete
         && head.check_runs.complete
         && head.statuses.complete
+        && own(head)
+}
+
+fn own(head: &HeadChecks) -> bool {
+    head.workflow_runs
+        .items
+        .iter()
+        .all(|run| run.head_sha == head.sha)
+        && head
+            .check_runs
+            .items
+            .iter()
+            .all(|check| check.head_sha.as_ref() == Some(&head.sha))
 }
 
 #[cfg(test)]

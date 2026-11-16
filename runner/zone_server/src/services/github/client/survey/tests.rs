@@ -825,3 +825,58 @@ async fn a_pull_request_the_batch_reads_as_a_draft_is_one_though_listed_ready() 
     );
     silent.verify().await;
 }
+
+#[tokio::test]
+async fn checks_the_batch_read_on_another_commit_are_read_again_for_the_head() {
+    let fixture = ready();
+    let rest = reassessed(&fixture).await;
+    let elsewhere = || Revision::parse(BLOB).unwrap();
+    for (name, workflows, checks) in [
+        (
+            "a check run",
+            fixture.workflows.clone(),
+            vec![check(21, "test", "completed", Some("success")).with_head_sha(elsewhere())],
+        ),
+        (
+            "a workflow run",
+            vec![
+                WorkflowRun::new(
+                    identifier(11),
+                    identifier(1),
+                    ".github/workflows/ci.yml",
+                    "pull_request",
+                    elsewhere(),
+                    "2026-09-05T00:00:00Z",
+                    "2026-09-05T00:05:00Z",
+                    format!("{WEB}/actions/runs/11"),
+                    SOURCE,
+                )
+                .with_status("completed")
+                .with_conclusion("success"),
+            ],
+            fixture.checks.clone(),
+        ),
+    ] {
+        let server = silent().await;
+        fixture.serve_checks(&server, Some(1)).await;
+        let github = mocked(&server);
+        let permits = Semaphore::new(1);
+        let parts = Parts {
+            head: Some(HeadChecks::new(
+                commit(),
+                Collected::new(workflows, true),
+                Collected::new(checks, true),
+                Collected::new(fixture.statuses.clone(), true),
+            )),
+            ..fixture.parts()
+        };
+
+        let batched = listed(&github, &permits, &fixture.row(&github), parts)
+            .await
+            .unwrap_or_else(|fault| panic!("{name}: {fault}"));
+
+        assert_eq!(batched, rest, "{name}");
+        assert_eq!(permits.available_permits(), 1, "{name}");
+        server.verify().await;
+    }
+}
