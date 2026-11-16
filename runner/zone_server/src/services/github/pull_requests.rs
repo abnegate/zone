@@ -416,15 +416,6 @@ async fn read<'a>(
     (source, read)
 }
 
-/// A source's open pull requests, each assessed again unless the verdict
-/// `previous` holds on it is still current.
-///
-/// They are listed through GraphQL, and the evidence on those not current
-/// is read [`BATCH`] at a time. GitHub Enterprise Server releases whose
-/// GraphQL schema lacks a field either read asks for answer with an error
-/// short of a halt: a listing GitHub refuses so is read through REST in
-/// full, and the pull requests of a batch it refuses, or that it could not
-/// answer for, are each read through REST.
 async fn fetch(
     state: &AppState,
     source: &ConnectedSource,

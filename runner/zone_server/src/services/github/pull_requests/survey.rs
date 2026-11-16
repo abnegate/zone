@@ -44,7 +44,7 @@ impl<'a> Survey<'a> {
                     "Listing open pull requests through REST after GitHub refused the GraphQL listing"
                 );
                 let (rows, complete) = self.github.open_pulls(limit).await?;
-                self.rested(rows, complete).await
+                self.through_rest(rows, complete).await
             }
         }
     }
@@ -79,23 +79,27 @@ impl<'a> Survey<'a> {
                     Some(_) => None,
                     None => read.next().flatten(),
                 };
-                self.assessed(row, kept, evidence)
+                self.verdict(row, kept, evidence)
             })
             .collect();
         self.gathered(surveys, &rows, complete).await
     }
 
-    async fn rested(&self, rows: Vec<ListedPullRequest>, complete: bool) -> Result<Listing, Fault> {
+    async fn through_rest(
+        &self,
+        rows: Vec<ListedPullRequest>,
+        complete: bool,
+    ) -> Result<Listing, Fault> {
         let plan = refresh_plan(self.previous, &rows, self.now);
         let surveys: Vec<_> = rows
             .iter()
             .zip(plan)
-            .map(|(row, kept)| self.assessed(row, kept, None))
+            .map(|(row, kept)| self.verdict(row, kept, None))
             .collect();
         self.gathered(surveys, &rows, complete).await
     }
 
-    async fn assessed(
+    async fn verdict(
         &self,
         row: &ListedPullRequest,
         kept: Option<&'a PullRequest>,

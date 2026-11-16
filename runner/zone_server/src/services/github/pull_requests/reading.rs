@@ -285,8 +285,6 @@ pub(super) fn budgeted(files: &[ChangedFile], budget: usize) -> Vec<Entry<'_>> {
         .collect()
 }
 
-/// How many open pull requests to ask GitHub for when `remaining` are
-/// wanted: at least one and at most a page.
 fn page_size(remaining: usize) -> NonZeroU8 {
     let size = remaining.clamp(1, usize::from(PER_PAGE.get()));
     u8::try_from(size)
@@ -295,8 +293,6 @@ fn page_size(remaining: usize) -> NonZeroU8 {
         .unwrap_or(PER_PAGE)
 }
 
-/// Whether `read` is the pull request `row` lists, in the repository it is
-/// listed in.
 fn answers(read: &PullRequestEvidence, row: &ListedPullRequest) -> bool {
     read.pull_request.node_id == row.node_id && read.pull_request.reference == row.reference
 }

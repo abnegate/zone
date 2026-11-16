@@ -1,4 +1,5 @@
 mod review;
+mod rows;
 mod survey;
 
 use abnegate_secret::SecretValue;
@@ -59,6 +60,7 @@ use crate::services::prioritisation::Prioritiser;
 use crate::services::prioritisation::pull_request;
 use crate::utils::text::truncate;
 use review::Review;
+pub(crate) use rows::Rows;
 
 const API_VERSION: &str = "2026-03-10";
 pub(crate) const PER_PAGE: NonZeroU8 = NonZeroU8::new(100).expect("a page holds rows");
@@ -126,8 +128,6 @@ pub(crate) const TOO_MANY_REQUESTS: u16 = 429;
 const SEPARATOR: char = '/';
 const RUNS_PATH: &str = "actions/runs";
 const JOB_PATH: &str = "job";
-
-pub(crate) type Rows = (Vec<WorkflowRun>, Vec<CheckRun>, Vec<CommitStatus>, bool);
 
 /// Compiling the path vocabulary is the expensive part, so the prioritiser
 /// behind a blast radius is built once and shared by every assessment.
@@ -281,8 +281,11 @@ impl Github {
         reference: Option<&str>,
     ) -> Result<(String, String, &'static str), String> {
         let (reference, sha) = self.resolve(reference).await?;
-        let (workflows, checks, statuses, complete) = self.ci_rows(&sha).await?;
-        let state = assessed(&conclusions(&workflows, &checks, &statuses), complete);
+        let rows = self.ci_rows(&sha).await?;
+        let state = outcome(
+            &conclusions(&rows.workflows, &rows.checks, &rows.statuses),
+            rows.complete,
+        );
         Ok((reference, sha, state))
     }
 
@@ -306,27 +309,20 @@ impl Github {
     }
 
     async fn check_evidence(&self, sha: &str) -> Result<(CheckEvidence, Vec<CheckDetail>), Fault> {
-        let (workflows, checks, statuses, complete) = self.ci_rows(sha).await?;
-        Ok(self.checked(&workflows, &checks, &statuses, complete))
+        Ok(self.checked(&self.ci_rows(sha).await?))
     }
 
-    /// What a commit's vetted CI rows add up to, and each of them named.
-    fn checked(
-        &self,
-        workflows: &[WorkflowRun],
-        checks: &[CheckRun],
-        statuses: &[CommitStatus],
-        complete: bool,
-    ) -> (CheckEvidence, Vec<CheckDetail>) {
+    fn checked(&self, rows: &Rows) -> (CheckEvidence, Vec<CheckDetail>) {
         let evidence = CheckEvidence {
-            complete,
-            ..tally(conclusions(workflows, checks, statuses).into_iter())
+            complete: rows.complete,
+            ..tally(conclusions(&rows.workflows, &rows.checks, &rows.statuses).into_iter())
         };
-        let details = workflows
+        let details = rows
+            .workflows
             .iter()
             .map(workflow_detail)
-            .chain(checks.iter().map(|check| self.check_run_detail(check)))
-            .chain(statuses.iter().map(status_detail))
+            .chain(rows.checks.iter().map(|check| self.check_run_detail(check)))
+            .chain(rows.statuses.iter().map(status_detail))
             .collect();
         (evidence, details)
     }
@@ -708,7 +704,12 @@ pub(crate) fn vetted(
         return Err(Fault::upstream(FOREIGN_CHECKS));
     }
     let complete = checks.complete && statuses.complete;
-    Ok((workflows, checks.items, statuses.items, complete))
+    Ok(Rows {
+        workflows,
+        checks: checks.items,
+        statuses: statuses.items,
+        complete,
+    })
 }
 
 fn workflow_detail(run: &WorkflowRun) -> CheckDetail {
@@ -915,7 +916,7 @@ pub(crate) fn conclusions<'a>(
 
 /// A read that did not reach every check can still prove a failure, never a
 /// pass or a settled non-pass.
-pub(crate) fn assessed(conclusions: &[&str], complete: bool) -> &'static str {
+pub(crate) fn outcome(conclusions: &[&str], complete: bool) -> &'static str {
     match assessment(conclusions) {
         FAILURE_ASSESSMENT => FAILURE_ASSESSMENT,
         _ if !complete => PENDING_ASSESSMENT,

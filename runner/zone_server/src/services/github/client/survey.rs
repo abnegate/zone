@@ -61,9 +61,7 @@ impl Github {
                     statuses,
                     ..
                 } = head;
-                let (workflows, checks, statuses, complete) =
-                    vetted(&sha, workflow_runs, check_runs, statuses)?;
-                Some(self.checked(&workflows, &checks, &statuses, complete))
+                Some(self.checked(&vetted(&sha, workflow_runs, check_runs, statuses)?))
             }
             _ => None,
         };
@@ -75,7 +73,7 @@ impl Github {
         };
         let (threads, (checks, details)) = tokio::try_join!(
             self.counted(row, threads),
-            self.headed(listed.as_ref(), batched),
+            self.inspected(listed.as_ref(), batched),
         )?;
         Ok(self.appraise(
             row,
@@ -106,7 +104,7 @@ impl Github {
             .map_err(thread_described)
     }
 
-    async fn headed(
+    async fn inspected(
         &self,
         listed: Option<&CommitSha>,
         batched: Option<(CheckEvidence, Vec<CheckDetail>)>,
@@ -119,8 +117,6 @@ impl Github {
     }
 }
 
-/// Whether `head` holds every check on the listed head commit, so nothing
-/// about it needs reading again.
 fn whole(head: &HeadChecks, listed: Option<&CommitSha>) -> bool {
     listed.is_some_and(|listed| CommitSha::parse(head.sha.as_str()).as_ref() == Some(listed))
         && head.workflow_runs.complete
