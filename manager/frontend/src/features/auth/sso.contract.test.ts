@@ -1,6 +1,7 @@
 /**
  * The sign-in pages and the server agree on single sign-on only by convention: the public structs
- * and the callback path live in `runner/zone_server/src/routes/sso/sign_in.rs`, the codes in
+ * live in `runner/zone_server/src/routes/sso/sign_in.rs`, the callback path in
+ * `runner/zone_server/src/services/sso/console.rs`, the codes in
  * `runner/zone_enterprise/src/sso/error.rs` and `runner/zone_server/src/auth/account.rs`. A field,
  * code or path changed on one side alone hides every sign-in button, sends people back to a page
  * that doesn't exist, or shows a refusal the console can't explain.
@@ -29,6 +30,7 @@ const RUNNER = join(FRONTEND, '../../runner');
 const SERVER = join(RUNNER, 'zone_server/src');
 const ENTERPRISE = join(RUNNER, 'zone_enterprise/src');
 const SIGN_IN_RS = join(SERVER, 'routes/sso/sign_in.rs');
+const CONSOLE_RS = join(SERVER, 'services/sso/console.rs');
 const ROUTES_RS = join(SERVER, 'routes/mod.rs');
 const ACCOUNT_RS = join(SERVER, 'auth/account.rs');
 const DEVICE_RS = join(SERVER, 'auth/device.rs');
@@ -122,7 +124,7 @@ describe('the public single sign-on routes read and send what the server declare
   test('the callback page sits where identity providers send people back', () => {
     const route = CALLBACK_ROUTE.exec(read(APP_TSX))?.[1];
 
-    expect(route).toBe(code(SIGN_IN_RS, 'CALLBACK_PATH'));
+    expect(route).toBe(code(CONSOLE_RS, 'CALLBACK_PATH'));
   });
 
   test('the callback carries the device and time-zone headers the server reads', () => {
