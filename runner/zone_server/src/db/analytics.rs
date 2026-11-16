@@ -36,22 +36,20 @@ pub use run_row::RunRow;
 pub use shipped_task_row::ShippedTaskRow;
 pub use task_activity_row::TaskActivityRow;
 
-/// The run statuses that have not reached an outcome yet.
 const UNFINISHED: [&str; 2] = ["running", "waiting"];
 
-/// The source a task answers to: its own, or else the source of the first of
-/// its projects that has one, as `get_task_sources` resolves it. A source that
-/// belongs to another workspace attributes nothing here.
 macro_rules! task_source {
     () => {
         r#"
         LEFT JOIN LATERAL (
-            SELECT project.source_id
+            SELECT candidate.id AS source_id
             FROM task_projects membership
             JOIN projects project ON project.id = membership.project_id
+            JOIN sources candidate
+                ON candidate.id = project.source_id
+               AND candidate.workspace_id = task.workspace_id
             WHERE task.source_id IS NULL
               AND membership.task_id = task.id
-              AND project.source_id IS NOT NULL
             ORDER BY project.id
             LIMIT 1
         ) project ON TRUE
@@ -62,9 +60,6 @@ macro_rules! task_source {
     };
 }
 
-/// A read-only transaction whose every query sees the same snapshot, so the
-/// numbers an overview assembles from several reads cannot disagree with one
-/// another, and the reads queue on one connection instead of taking several.
 pub async fn snapshot(pool: &PgPool) -> DbResult<Transaction<'static, Postgres>> {
     let mut transaction = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -140,18 +135,12 @@ where
     .await
 }
 
-/// The workspace's runs that stopped inside `[start, end)`, newest first, with
-/// the source each run's task answers to and the model the run used. A task
-/// without a source, or whose source was deleted or belongs elsewhere, reads
-/// back with every source column null.
-///
 /// Newest first because `limit` is a cap: over it, the oldest rows are the
 /// ones dropped. Every period summarised from these rows ends at `now`, so
 /// dropping the oldest costs the longest period some of its early history,
-/// while dropping the newest -- what ascending order did -- empties the day
-/// and week windows entirely on exactly the busiest workspaces. Nothing
-/// downstream reads these in order; each consumer filters or weights by
-/// `finished_at`.
+/// while dropping the newest empties the day and week windows entirely on
+/// exactly the busiest workspaces. Nothing downstream reads these in order;
+/// each consumer filters or weights by `finished_at`.
 pub async fn attributed_runs<'e, E>(
     executor: E,
     workspace_id: Uuid,
@@ -162,7 +151,7 @@ pub async fn attributed_runs<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
-    let rows = sqlx::query_as(concat!(
+    let query = sqlx::query_as(concat!(
         r#"
         SELECT
             run.id AS run_id,
@@ -192,17 +181,10 @@ where
     .bind(workspace_id)
     .bind(UNFINISHED.as_slice())
     .bind(start)
-    .bind(end)
-    .bind(Capped::<AttributedRunRow>::reading(limit))
-    .fetch_all(executor)
-    .await?;
-    Ok(Capped::new(rows, limit))
+    .bind(end);
+    Capped::fetch(query, limit, executor).await
 }
 
-/// Every task whose pull request was opened inside `[start, end)`, newest
-/// first and at most `limit` of them, with the source the task answers to and
-/// the reception recorded on the newest run that opened the same pull request.
-///
 /// A run that recorded the pull request as a bare URL predates reception
 /// tracking, so it contributes no timing, review or quality.
 pub async fn pull_requests<'e, E>(
@@ -215,7 +197,7 @@ pub async fn pull_requests<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
-    let rows = sqlx::query_as(concat!(
+    let query = sqlx::query_as(concat!(
         r#"
         SELECT
             task.id AS task_id,
@@ -257,11 +239,8 @@ where
     ))
     .bind(workspace_id)
     .bind(start)
-    .bind(end)
-    .bind(Capped::<PullRequestRow>::reading(limit))
-    .fetch_all(executor)
-    .await?;
-    Ok(Capped::new(rows, limit))
+    .bind(end);
+    Capped::fetch(query, limit, executor).await
 }
 
 /// How many of the workspace's tasks stand in each status right now.

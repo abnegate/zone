@@ -9,9 +9,6 @@ use crate::db::analytics::{AttributedRunRow, PullRequestRow};
 use crate::workers::analytics::{AgentRun, outcomes};
 use crate::workers::learning::attempt::OutcomeStatistics;
 
-/// How the runs on one source's tasks went, and how many of its pull requests
-/// merged. Runs and pull requests on a task with no source, or whose source
-/// was deleted or belongs elsewhere, share the one breakdown without a source.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceBreakdown {
     pub source_id: Option<Uuid>,
@@ -22,10 +19,6 @@ pub struct SourceBreakdown {
 }
 
 impl SourceBreakdown {
-    /// One breakdown per source, busiest first, so every run and every merged
-    /// pull request lands in exactly one. A source whose pull requests merged
-    /// with none of its runs in the window still gets a breakdown, with no
-    /// outcomes.
     pub fn group<'a>(
         runs: impl IntoIterator<Item = (&'a AgentRun, &'a AttributedRunRow)>,
         pull_requests: &[PullRequestRow],

@@ -2,7 +2,6 @@ const OPEN: &str = "open";
 const MERGED: &str = "merged";
 const CLOSED: &str = "closed";
 
-/// Where a task's pull request stands, as `tasks.pr_status` records it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Status {
     Open,
@@ -38,6 +37,16 @@ mod tests {
         for status in [Status::Open, Status::Merged, Status::Closed] {
             assert_eq!(Status::parse(status.as_str()), Some(status));
         }
+    }
+
+    #[test]
+    fn every_status_writes_the_string_already_stored() {
+        assert_eq!(
+            [Status::Open, Status::Merged, Status::Closed].map(Status::as_str),
+            ["open", "merged", "closed"],
+            "these strings are stored in tasks.pr_status and read by the console, so renaming \
+             one orphans every row and every console build that already holds it"
+        );
     }
 
     #[test]

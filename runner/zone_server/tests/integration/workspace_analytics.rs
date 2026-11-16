@@ -1112,6 +1112,71 @@ async fn a_task_answers_to_its_projects_source_and_never_to_another_workspaces()
 }
 
 #[tokio::test]
+async fn a_project_with_another_workspaces_source_does_not_hide_the_next_project() {
+    let board = Board::new().await;
+    let seeder = board.seeder();
+    let alpha = seeder.source("Alpha").await;
+    let (_, sibling) = owned_workspace(&board.client).await;
+    let elsewhere = Seeder {
+        pool: board.pool(),
+        workspace: sibling,
+        now: seeder.now,
+    };
+    let foreign = elsewhere.source("Foreign").await;
+
+    let mut ids = [Uuid::new_v4(), Uuid::new_v4()];
+    ids.sort();
+    let [lower, higher] = ids;
+    for (id, workspace, source) in [
+        (lower, sibling, foreign.id),
+        (higher, board.workspace, alpha.id),
+    ] {
+        sqlx::query(
+            "INSERT INTO projects (id, workspace_id, source_id, name) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(workspace)
+        .bind(source)
+        .bind(format!("project {id}"))
+        .execute(board.pool())
+        .await
+        .expect("project is created");
+    }
+    let task = seeder.task(None, IN_PROGRESS, MEMBER).await;
+    seeder.join(task, lower).await;
+    seeder.join(task, higher).await;
+    seeder.completed(task, Duration::hours(1)).await;
+    seeder
+        .pull_request(
+            task,
+            MERGED_PULL_REQUEST,
+            MERGED,
+            seeder.ago(Duration::days(1)),
+        )
+        .await;
+
+    let body = board.overview("").await;
+    let sources = &body["sources"];
+    let alpha_id = alpha.id.to_string();
+    let attributed = bucket(sources, "source_id", Some(alpha_id.as_str()));
+    assert_eq!(
+        count(&attributed["outcomes"]["total"]),
+        1,
+        "the run answers to the first project whose source is in this workspace: {body}"
+    );
+    assert_eq!(
+        count(&attributed["merged_pull_requests"]),
+        1,
+        "the pull request answers to the same source: {body}"
+    );
+    assert_eq!(
+        sources.as_array().map(Vec::len),
+        Some(1),
+        "nothing is left without a source: {body}"
+    );
+}
+
+#[tokio::test]
 async fn every_merged_pull_request_lands_in_a_source_even_one_without_runs() {
     let board = Board::new().await;
     let seeder = board.seeder();

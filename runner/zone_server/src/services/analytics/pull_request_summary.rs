@@ -21,12 +21,6 @@ pub struct PullRequestSummary {
 }
 
 impl PullRequestSummary {
-    /// Count what became of `rows`, timing and reviewing each through the
-    /// learning loop's own readers so this summary and the quality score it
-    /// draws agree on every pull request.
-    ///
-    /// A merge that reads as finishing before it began is clock skew, not a
-    /// fast merge, so it is left out of the median rather than pulling it down.
     pub fn new(rows: &[PullRequestRow]) -> Self {
         let merged = rows.iter().filter(|row| Self::is_merged(row)).count();
         let closed = rows

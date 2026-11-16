@@ -72,14 +72,10 @@ pub fn reception(artifacts: Option<&Value>, opened_at: Option<NaiveDateTime>) ->
     }
 }
 
-/// The rounds of review a pull request needed, when its reception recorded a
-/// count that fits; [`reception`] reads a missing one as none.
 pub fn review_cycles(artifacts: Option<&Value>) -> Option<u32> {
     count(section(artifacts, PULL_REQUEST_KEY), REVIEW_CYCLES_KEY)
 }
 
-/// The approvals a pull request received, when its reception recorded a count
-/// that fits; [`reception`] reads a missing one as none.
 pub fn approvals(artifacts: Option<&Value>) -> Option<u32> {
     count(section(artifacts, PULL_REQUEST_KEY), APPROVALS_KEY)
 }

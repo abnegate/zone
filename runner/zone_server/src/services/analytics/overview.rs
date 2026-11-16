@@ -4,12 +4,6 @@ use super::{EvaluationSummary, ModelBreakdown, PullRequestSummary, SourceBreakdo
 use crate::workers::analytics::{AgentAnalytics, TimePeriod, TimeWindow};
 
 /// Everything a workspace's analytics page shows for one period.
-///
-/// `truncated` says a cap was passed: either `runs`, `sources` and `models`
-/// describe only the newest runs in the window, with `runs.series` starting
-/// at the oldest of them and `runs.trend` claiming no change, or
-/// `pull_requests` and each source's merged count describe only the newest
-/// pull requests opened in it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Overview {
     pub period: TimePeriod,

@@ -5,8 +5,6 @@ use sqlx::Row;
 use sqlx::postgres::PgRow;
 use uuid::Uuid;
 
-/// One task's pull request, with the reception its newest run recorded.
-///
 /// `artifacts` carries only that run's `pr` section, so the learning loop's own
 /// readers can interpret it; it is absent when no run recorded a reception.
 #[derive(Debug, Clone, PartialEq)]

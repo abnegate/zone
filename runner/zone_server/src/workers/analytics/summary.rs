@@ -202,11 +202,6 @@ impl AgentAnalytics {
         self.outcomes.total == 0
     }
 
-    /// These analytics when the runs were loaded only back to `oldest`, short
-    /// of the window's start. The buckets that end by then saw none of their
-    /// runs loaded, so they are dropped rather than drawn as quiet, and the
-    /// halves the trend compares are no longer like for like, so it claims
-    /// no change.
     pub fn measured_from(mut self, oldest: NaiveDateTime) -> Self {
         self.series.retain(|point| point.window.end > oldest);
         self.trend = Trend::steady();
@@ -251,14 +246,11 @@ pub fn summarize(
     }
 }
 
-/// How the runs went, without the series and trend [`summarize`] adds, for a
-/// caller that only needs the outcomes of runs it has already windowed.
 pub fn outcomes(runs: &[&AgentRun], now: NaiveDateTime) -> OutcomeStatistics {
     let attempts: Vec<ClassifiedAttempt> = runs.iter().map(|run| run.as_attempt()).collect();
     summarize_outcomes(&attempts, now)
 }
 
-/// How long the successful runs among `runs` took to finish.
 pub fn completion_times(runs: &[&AgentRun]) -> CompletionTimes {
     let mut durations: Vec<f64> = runs
         .iter()
