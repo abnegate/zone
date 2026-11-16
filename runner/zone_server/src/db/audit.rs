@@ -59,6 +59,7 @@ pub mod actions {
     pub const USER_UPDATED: &str = "user.updated";
     pub const USER_DELETED: &str = "user.deleted";
     pub const USER_SSO_SIGNED_IN: &str = "user.sso_signed_in";
+    pub const USER_SSO_LINKED: &str = "user.sso_linked";
     pub const USER_BREAK_GLASS_SIGNED_IN: &str = "user.break_glass_signed_in";
 
     pub const MEMBER_ADDED: &str = "member.added";

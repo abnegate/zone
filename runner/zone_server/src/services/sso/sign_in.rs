@@ -68,6 +68,16 @@ pub async fn complete(
         .await?;
 
     let settlement = settle(state, attempt.provider_id, &provider, &identity).await?;
+    if settlement.linked {
+        record(
+            state,
+            settlement.user,
+            &identity.email,
+            actions::USER_SSO_LINKED,
+            settlement.linkage(attempt.provider_id, &identity.subject),
+        )
+        .await;
+    }
     if let Err(error) = users::update_last_login(state.db(), settlement.user).await {
         tracing::warn!(user_id = %settlement.user, %error, "Failed to update last login");
     }

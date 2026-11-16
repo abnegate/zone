@@ -383,7 +383,10 @@ and takes the account over:
 - It marks the email as verified.
 - It revokes all of the account's sessions and refresh tokens, and refuses
   any password sign-in that was still in progress with the old password.
-- It records `reclaimed: true` in the audit log.
+- It records `reclaimed: true` in a `user.sso_linked` audit entry. Zone
+  writes that entry as soon as the account is taken over, even if the
+  sign-in itself is then refused, for example because the device is
+  waiting for approval.
 
 This stops someone from registering a colleague's address before SSO is set
 up and then keeping access to that account. To use a password again
@@ -503,6 +506,7 @@ log. None of them ever contains a client secret.
 | `sso_provider.updated` | A provider is edited | The changed settings, before and after, plus `client_secret_changed: true` when the secret was replaced, and `identities_cleared` (the number of accounts unlinked) when the issuer or client ID changed |
 | `sso_provider.deleted` | A provider is deleted | The provider's settings |
 | `sso_enforcement.updated` | Enforcement is turned on or off | `required`, before and after |
+| `user.sso_linked` | An identity is linked to an existing account, whether or not the sign-in then gets a session | `provider_id`, `subject`, `reclaimed` |
 | `user.sso_signed_in` | Someone signs in with SSO | `provider_id`, `subject`, `provisioned`, `linked`, `reclaimed` |
 | `user.break_glass_signed_in` | A server admin signs in with a password while SSO is required | None |
 

@@ -18,6 +18,7 @@ use zone_enterprise::sso::{
 use zone_enterprise::{Tier, period_start};
 use zone_server::auth::hash_password;
 use zone_server::db::audit::{actions, resources};
+use zone_server::db::devices::{self, Mode};
 use zone_server::db::{refresh_tokens, seats, sessions, users};
 use zone_server::services::sso::console::CALLBACK_PATH;
 use zone_server::utils::crypto::hash_token;
@@ -33,6 +34,7 @@ const ACCOUNT_DISABLED: &str = "account_disabled";
 const DEVICE_BLOCKED: &str = "device_blocked";
 const UNREACHABLE_ISSUER: &str = "http://127.0.0.1:9";
 const TIME_ZONE: &str = "Europe/London";
+const DEVICE_PENDING: &str = "device_pending";
 const LOCK_WAIT: Duration = Duration::from_secs(30);
 const LOCK_POLL: Duration = Duration::from_millis(20);
 
@@ -634,6 +636,60 @@ async fn an_unverified_squatter_loses_the_account_to_the_person_who_proves_the_e
             "linked": true,
             "reclaimed": true,
         }))
+    );
+    let linked = server.fixture.audits(actions::USER_SSO_LINKED).await;
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].actor_id, Some(owner.user));
+    assert_eq!(linked[0].resource_id, Some(owner.user));
+    assert_eq!(
+        linked[0].new_values,
+        Some(json!({
+            "provider_id": server.provider,
+            "subject": testing::SUBJECT,
+            "reclaimed": true,
+        }))
+    );
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_reclaim_is_audited_even_when_the_device_waits_for_approval() {
+    let server = Server::new().await;
+    let registered = server.fixture.register_as(testing::EMAIL).await;
+    registered.assert_status(StatusCode::CREATED);
+    let squatter = session(&registered);
+    devices::set_policy(server.fixture.pool(), Mode::Allowed)
+        .await
+        .unwrap();
+
+    refused(
+        &server.sign_in_from(Some(Uuid::new_v4()), unchanged).await,
+        StatusCode::FORBIDDEN,
+        DEVICE_PENDING,
+    );
+
+    assert_eq!(server.user(squatter.user).await, (true, false, true));
+    assert_eq!(server.live_sessions(squatter.user).await, 0);
+    let linked = server.fixture.audits(actions::USER_SSO_LINKED).await;
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].actor_id, Some(squatter.user));
+    assert_eq!(linked[0].organization_id, None);
+    assert_eq!(linked[0].resource_type, resources::USER);
+    assert_eq!(linked[0].resource_id, Some(squatter.user));
+    assert_eq!(
+        linked[0].new_values,
+        Some(json!({
+            "provider_id": server.provider,
+            "subject": testing::SUBJECT,
+            "reclaimed": true,
+        }))
+    );
+    assert!(
+        server
+            .fixture
+            .audits(actions::USER_SSO_SIGNED_IN)
+            .await
+            .is_empty()
     );
     server.cleanup().await;
 }
