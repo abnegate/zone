@@ -35,6 +35,7 @@ use super::evidence::Assessed;
 use super::evidence::CheckDetail;
 use super::evidence::CheckKind;
 use super::evidence::Depth;
+use super::evidence::Gathered;
 use super::fault::Fault;
 use super::link::absolute;
 use super::readiness;
@@ -124,6 +125,8 @@ pub(crate) const TOO_MANY_REQUESTS: u16 = 429;
 const SEPARATOR: char = '/';
 const RUNS_PATH: &str = "actions/runs";
 const JOB_PATH: &str = "job";
+
+pub(crate) type Rows = (Vec<WorkflowRun>, Vec<CheckRun>, Vec<CommitStatus>, bool);
 
 /// Compiling the path vocabulary is the expensive part, so the prioritiser
 /// behind a blast radius is built once and shared by every assessment.
@@ -282,10 +285,7 @@ impl Github {
         Ok((reference, sha, state))
     }
 
-    pub(crate) async fn ci_rows(
-        &self,
-        sha: &str,
-    ) -> Result<(Vec<WorkflowRun>, Vec<CheckRun>, Vec<CommitStatus>, bool), Fault> {
+    pub(crate) async fn ci_rows(&self, sha: &str) -> Result<Rows, Fault> {
         let commit = revision(sha)?;
         let filter = WorkflowRunFilter::new().with_head_sha(commit.clone());
         let (workflows, checks, statuses) = tokio::join!(
@@ -296,44 +296,30 @@ impl Github {
             self.service
                 .collect_statuses(&self.repository, &self.token, &commit),
         );
-        let workflows = workflows.map_err(ci_described)?;
-        if !workflows.complete {
-            return Err(Fault::upstream(PARTIAL_WORKFLOW_RUNS));
-        }
-        let checks = checks.map_err(ci_described)?;
-        let statuses = statuses.map_err(ci_described)?;
-        if statuses
-            .items
-            .iter()
-            .any(|status| status.context.is_empty())
-        {
-            return Err(Fault::upstream(UNIDENTIFIED_CI));
-        }
-        let mut identities = std::collections::HashSet::new();
-        let workflows: Vec<WorkflowRun> = workflows
-            .items
-            .into_iter()
-            .filter(|run| {
-                identities.insert((run.workflow_id, run.event.clone(), run.head_branch.clone()))
-            })
-            .collect();
-        if workflows.iter().any(|run| run.head_sha != commit)
-            || checks
-                .items
-                .iter()
-                .any(|check| check.head_sha.as_ref() != Some(&commit))
-        {
-            return Err(Fault::upstream(FOREIGN_CHECKS));
-        }
-        let complete = checks.complete && statuses.complete;
-        Ok((workflows, checks.items, statuses.items, complete))
+        vetted(
+            &commit,
+            workflows.map_err(ci_described)?,
+            checks.map_err(ci_described)?,
+            statuses.map_err(ci_described)?,
+        )
     }
 
     async fn check_evidence(&self, sha: &str) -> Result<(CheckEvidence, Vec<CheckDetail>), Fault> {
         let (workflows, checks, statuses, complete) = self.ci_rows(sha).await?;
+        Ok(self.checked(&workflows, &checks, &statuses, complete))
+    }
+
+    /// What a commit's vetted CI rows add up to, and each of them named.
+    fn checked(
+        &self,
+        workflows: &[WorkflowRun],
+        checks: &[CheckRun],
+        statuses: &[CommitStatus],
+        complete: bool,
+    ) -> (CheckEvidence, Vec<CheckDetail>) {
         let evidence = CheckEvidence {
             complete,
-            ..tally(conclusions(&workflows, &checks, &statuses).into_iter())
+            ..tally(conclusions(workflows, checks, statuses).into_iter())
         };
         let details = workflows
             .iter()
@@ -341,7 +327,7 @@ impl Github {
             .chain(checks.iter().map(|check| self.check_run_detail(check)))
             .chain(statuses.iter().map(status_detail))
             .collect();
-        Ok((evidence, details))
+        (evidence, details)
     }
 
     fn check_run_detail(&self, check: &CheckRun) -> CheckDetail {
@@ -416,27 +402,46 @@ impl Github {
             Depth::Full => self.changed_paths(&row.reference).await,
             Depth::Listing => Vec::new(),
         };
-        let comments = review.comments.comments.clone();
-        Ok(Assessed {
+        Ok(self.appraise(
+            row,
+            Gathered {
+                draft: review.draft,
+                head,
+                mergeable: mergeability(detail.mergeable_state),
+                threads: review.threads,
+                comments: review.comments,
+                checks,
+                details,
+                paths,
+            },
+        ))
+    }
+
+    /// The readiness of the pull request `row` lists, judged from evidence
+    /// however it was gathered, so a listing read in one batch and a pull
+    /// request read on its own reach the same verdict on the same evidence.
+    pub(crate) fn appraise(&self, row: &ListedPullRequest, gathered: Gathered) -> Assessed {
+        let comments = gathered.comments.comments.clone();
+        Assessed {
             assessment: readiness::assess(
                 PullEvidence {
                     number: row.reference.number().get(),
                     title: truncate(&row.title, PULL_TITLE_CHARS),
                     url: row.url.clone(),
                     updated_at: row.updated_at.clone().unwrap_or_default(),
-                    draft: row.draft || review.draft,
-                    head,
-                    mergeable: mergeability(detail.mergeable_state),
-                    threads: review.threads,
-                    comments: review.comments,
-                    checks,
+                    draft: row.draft || gathered.draft,
+                    head: gathered.head,
+                    mergeable: gathered.mergeable,
+                    threads: gathered.threads,
+                    comments: gathered.comments,
+                    checks: gathered.checks,
                 },
                 &self.signals,
             ),
-            risk: pull_request::risk(&PRIORITISER, &paths),
-            checks: details,
+            risk: pull_request::risk(&PRIORITISER, &gathered.paths),
+            checks: gathered.details,
             comments,
-        })
+        }
     }
 
     /// The repository-relative paths a pull request touches.
@@ -664,6 +669,45 @@ impl Github {
         }
         Ok(run_id)
     }
+}
+
+/// A commit's CI rows, checked to be identified and of `commit`, with a
+/// workflow that ran more than once for one event and branch kept once, as
+/// GitHub lists the newest first, and whether that is every row.
+pub(crate) fn vetted(
+    commit: &Revision,
+    workflows: Collected<WorkflowRun>,
+    checks: Collected<CheckRun>,
+    statuses: Collected<CommitStatus>,
+) -> Result<Rows, Fault> {
+    if !workflows.complete {
+        return Err(Fault::upstream(PARTIAL_WORKFLOW_RUNS));
+    }
+    if statuses
+        .items
+        .iter()
+        .any(|status| status.context.is_empty())
+    {
+        return Err(Fault::upstream(UNIDENTIFIED_CI));
+    }
+    let mut identities = std::collections::HashSet::new();
+    let workflows: Vec<WorkflowRun> = workflows
+        .items
+        .into_iter()
+        .filter(|run| {
+            identities.insert((run.workflow_id, run.event.clone(), run.head_branch.clone()))
+        })
+        .collect();
+    if workflows.iter().any(|run| &run.head_sha != commit)
+        || checks
+            .items
+            .iter()
+            .any(|check| check.head_sha.as_ref() != Some(commit))
+    {
+        return Err(Fault::upstream(FOREIGN_CHECKS));
+    }
+    let complete = checks.complete && statuses.complete;
+    Ok((workflows, checks.items, statuses.items, complete))
 }
 
 fn workflow_detail(run: &WorkflowRun) -> CheckDetail {
