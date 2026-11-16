@@ -1,19 +1,15 @@
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { beforeAll, describe, expect, it } from 'bun:test';
+import { pinTimeZone } from '../../../test/timeZone';
 
 const WEST_OF_UTC = 'America/Los_Angeles';
-const zone = process.env.TZ;
 
 let RunSeriesAxis: typeof import('./RunSeriesAxis').RunSeriesAxis;
 let TickRank: typeof import('./RunSeriesAxis').TickRank;
 
-beforeAll(async () => {
-  process.env.TZ = WEST_OF_UTC;
-  ({ RunSeriesAxis, TickRank } = await import('./RunSeriesAxis'));
-});
+pinTimeZone(WEST_OF_UTC);
 
-afterAll(() => {
-  if (zone === undefined) delete process.env.TZ;
-  else process.env.TZ = zone;
+beforeAll(async () => {
+  ({ RunSeriesAxis, TickRank } = await import('./RunSeriesAxis'));
 });
 
 const MIDNIGHT = { start: '2026-11-16T00:00:00', end: '2026-11-17T00:00:00' };

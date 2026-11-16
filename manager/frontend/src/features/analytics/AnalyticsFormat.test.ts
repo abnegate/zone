@@ -1,18 +1,15 @@
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { beforeAll, describe, expect, it } from 'bun:test';
+import { pinTimeZone } from '../../test/timeZone';
 
 const LOCAL_ZONE = 'America/Los_Angeles';
-const previousZone = process.env.TZ;
 
 let AnalyticsFormat: typeof import('./AnalyticsFormat').AnalyticsFormat;
 let NOT_MEASURED: string;
 
-beforeAll(async () => {
-  process.env.TZ = LOCAL_ZONE;
-  ({ AnalyticsFormat, NOT_MEASURED } = await import('./AnalyticsFormat'));
-});
+pinTimeZone(LOCAL_ZONE);
 
-afterAll(() => {
-  process.env.TZ = previousZone;
+beforeAll(async () => {
+  ({ AnalyticsFormat, NOT_MEASURED } = await import('./AnalyticsFormat'));
 });
 
 describe('AnalyticsFormat', () => {
