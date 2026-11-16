@@ -23,10 +23,8 @@ const SERVER = join(RUNNER, 'zone_server/src');
 const ENTERPRISE = join(RUNNER, 'zone_enterprise/src');
 const ROUTE = join(SERVER, 'routes/license.rs');
 const COMMON = join(SERVER, 'routes/common.rs');
-const SERVICE = join(SERVER, 'services/license.rs');
+const SERVICE = join(SERVER, 'services/license/error.rs');
 const ERRORS = join(ENTERPRISE, 'error.rs');
-
-const KEYRING_ONLY = ['license_key_invalid'];
 
 const CODE = /pub const [A-Z_]+: &str = "([^"]+)";/g;
 const OPTION = /^pub\s+([a-z_][a-z_0-9]*)\s*:\s*Option</;
@@ -70,10 +68,6 @@ function zodNullable(schema: Shaped): string[] {
 
 function codes(path: string): string[] {
   return [...read(path).matchAll(CODE)].map((match) => match[1]);
-}
-
-function pastedKeyCodes(): string[] {
-  return codes(ERRORS).filter((code) => !KEYRING_ONLY.includes(code));
 }
 
 describe('the license reads as the server serialises it', () => {
@@ -127,11 +121,11 @@ describe('the license vocabularies match the server', () => {
     const service = codes(SERVICE);
 
     expect(service).toHaveLength(1);
-    expect(sorted(LICENSE_REFUSAL_CODES)).toEqual(sorted([...pastedKeyCodes(), ...service]));
+    expect(sorted(LICENSE_REFUSAL_CODES)).toEqual(sorted([...codes(ERRORS), ...service]));
     expect(LICENSE_REFUSAL_CODES).toHaveLength(5);
   });
 
   test('a stored key that stops verifying carries one of the verifier codes', () => {
-    expect(sorted(UNVERIFIED_CODES)).toEqual(sorted(pastedKeyCodes()));
+    expect(sorted(UNVERIFIED_CODES)).toEqual(sorted(codes(ERRORS)));
   });
 });
