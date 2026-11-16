@@ -139,19 +139,17 @@ impl Fixture {
 
     /// Registers someone with `role` in the organization and a member's seat in its workspace.
     async fn member(&self, role: OrgRole) -> Account {
+        self.seated(role, WorkspaceRole::Member).await
+    }
+
+    async fn seated(&self, role: OrgRole, seat: WorkspaceRole) -> Account {
         let account = register(&self.client).await;
         organization_members::add_member(self.pool(), self.organization, account.id, role, None)
             .await
             .unwrap();
-        workspace_members::add_member(
-            self.pool(),
-            self.workspace,
-            account.id,
-            WorkspaceRole::Member,
-            None,
-        )
-        .await
-        .unwrap();
+        workspace_members::add_member(self.pool(), self.workspace, account.id, seat, None)
+            .await
+            .unwrap();
         account
     }
 
@@ -312,11 +310,15 @@ impl Fixture {
     }
 
     async fn update_task(&self, task: &str, model: &str) -> TestResponse {
+        self.update_task_as(task, model, self.token()).await
+    }
+
+    async fn update_task_as(&self, task: &str, model: &str, token: &str) -> TestResponse {
         self.client
             .put_json_auth(
                 &format!("/api/tasks/{task}"),
                 &json!({ "model_name": model }),
-                self.token(),
+                token,
             )
             .await
     }
@@ -340,8 +342,12 @@ impl Fixture {
     }
 
     async fn run(&self, task: &str) -> TestResponse {
+        self.run_as(task, self.token()).await
+    }
+
+    async fn run_as(&self, task: &str, token: &str) -> TestResponse {
         self.client
-            .post_json_auth(&format!("/api/tasks/{task}/runs"), &json!({}), self.token())
+            .post_json_auth(&format!("/api/tasks/{task}/runs"), &json!({}), token)
             .await
     }
 
@@ -702,6 +708,47 @@ async fn a_task_on_a_denied_model_keeps_its_model_and_starts_no_run() {
         assert_eq!(audit.resource_type, TASK);
         assert_eq!(audit.resource_id, Some(task_id));
     }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_viewer_is_refused_a_task_change_or_run_before_the_policy_is_asked() {
+    let fixture = Fixture::new().await;
+    fixture.license(Tier::Team).await;
+    fixture.save_openai().await;
+    fixture.restrict(json!({ "models": [FAST] })).await;
+    let task = fixture.task().await;
+    fixture.store_task_model(&task, Some(REASONING)).await;
+    let viewer = fixture.seated(OrgRole::Member, WorkspaceRole::Viewer).await;
+
+    for (response, what) in [
+        (
+            fixture
+                .update_task_as(&task, REASONING, &viewer.token)
+                .await,
+            "a viewer giving a task a denied model",
+        ),
+        (
+            fixture.run_as(&task, &viewer.token).await,
+            "a viewer running a task on a denied model",
+        ),
+    ] {
+        assert_eq!(
+            response.status,
+            StatusCode::NOT_FOUND,
+            "{what}: {}",
+            response.text()
+        );
+        assert_eq!(
+            response.json_value().get("code"),
+            None,
+            "{what} carries no policy code: {}",
+            response.text()
+        );
+    }
+    assert_eq!(fixture.runs(&task).await, 0);
+    let audits = fixture.audits().await;
+    assert!(audits.is_empty(), "nothing is audited: {audits:?}");
     fixture.cleanup().await;
 }
 
