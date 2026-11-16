@@ -1,5 +1,5 @@
 [test]
-preload = ["./src/happyDomSetup.ts", "./src/setupTests.ts"]
+preload = ["./src/localeSetup.ts", "./src/happyDomSetup.ts", "./src/setupTests.ts"]
 exclude = ["e2e/**", "**/e2e/**"]
 coverageReporter = ["text", "lcov"]
 maxConcurrency = 1
