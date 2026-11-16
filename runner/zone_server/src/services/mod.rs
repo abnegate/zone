@@ -34,6 +34,7 @@ pub mod route;
 pub mod runner;
 pub mod schedule;
 pub mod search;
+pub mod sso;
 pub mod stages;
 pub mod task_progress;
 pub mod time_zone;
