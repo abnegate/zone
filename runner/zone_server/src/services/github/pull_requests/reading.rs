@@ -1,18 +1,26 @@
+use std::collections::HashSet;
+use std::num::NonZeroU8;
 use std::num::NonZeroU32;
 use std::num::NonZeroU64;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use abnegate_vcs::ChangedFile;
 use abnegate_vcs::Collected;
 use abnegate_vcs::CommitSha as Revision;
+use abnegate_vcs::EvidenceSlot;
 use abnegate_vcs::Excerpt;
 use abnegate_vcs::ListedPullRequest;
 use abnegate_vcs::PullRequestCommit;
 use abnegate_vcs::PullRequestError;
+use abnegate_vcs::PullRequestEvidence;
 use abnegate_vcs::PullRequestReference;
+use abnegate_vcs::RepositoryId;
 use abnegate_vcs::ReviewThreadRecord;
 use abnegate_vcs::StateFilter;
 use chrono::DateTime;
 use chrono::Utc;
+use tokio::sync::Semaphore;
 
 use super::Commit;
 use super::DIFF_BUDGET;
@@ -28,8 +36,12 @@ use crate::services::github::diff::Diff;
 use crate::services::github::diff::Entry;
 use crate::services::github::fault::Fault;
 use crate::services::github::link::absolute;
+use crate::services::github::throttle::admitted;
 
 pub(super) const NOT_ACCEPTABLE: u16 = 406;
+pub(super) const MOVED_REPOSITORY: &str =
+    "GitHub listed open pull requests of another repository part way through.";
+pub(super) const STALLED_CURSOR: &str = "GitHub said more open pull requests follow a page that listed none it had not, or pointed back to a page already read.";
 
 impl Github {
     pub(crate) async fn open_pulls(
@@ -38,6 +50,7 @@ impl Github {
     ) -> Result<(Vec<ListedPullRequest>, bool), Fault> {
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
         let mut pulls = Vec::new();
+        let mut numbers = HashSet::new();
         let mut page = NonZeroU32::MIN;
         loop {
             let listed = self
@@ -50,7 +63,12 @@ impl Github {
                     PER_PAGE,
                 )
                 .await?;
-            pulls.extend(listed.items);
+            pulls.extend(
+                listed
+                    .items
+                    .into_iter()
+                    .filter(|row| numbers.insert(row.reference.number())),
+            );
             match listed.next {
                 Some(next) if pulls.len() < limit => page = next,
                 next => {
@@ -60,6 +78,146 @@ impl Github {
                 }
             }
         }
+    }
+
+    /// Up to `limit` of the repository's open pull requests, the most
+    /// recently updated first, read through GraphQL a page at a time under
+    /// one of `permits` each, with the repository's node id and whether that
+    /// was every open pull request.
+    pub(crate) async fn open_pull_requests(
+        &self,
+        permits: &Semaphore,
+        limit: u32,
+    ) -> Result<(RepositoryId, Vec<ListedPullRequest>, bool), Fault> {
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        let mut pulls: Vec<ListedPullRequest> = Vec::new();
+        let mut listed = HashSet::new();
+        let mut repository: Option<RepositoryId> = None;
+        let mut after: Option<String> = None;
+        let mut cursors = HashSet::new();
+        loop {
+            let page = {
+                let _permit = admitted(permits).await?;
+                self.bounded(self.service().list_open_pull_requests(
+                    self.repository(),
+                    self.token(),
+                    page_size(limit.saturating_sub(pulls.len())),
+                    after.as_deref(),
+                ))
+                .await??
+            };
+            let identified = repository.get_or_insert_with(|| page.repository_id.clone());
+            if *identified != page.repository_id {
+                return Err(Fault::upstream(MOVED_REPOSITORY));
+            }
+            let read = pulls.len();
+            pulls.extend(
+                page.items
+                    .into_iter()
+                    .filter(|row| listed.insert(row.node_id.clone())),
+            );
+            match page.next {
+                Some(next) if pulls.len() == read || cursors.contains(&next) => {
+                    return Err(Fault::upstream(STALLED_CURSOR));
+                }
+                Some(next) if pulls.len() < limit => {
+                    cursors.insert(next.clone());
+                    after = Some(next);
+                }
+                next => {
+                    let complete = next.is_none() && pulls.len() <= limit;
+                    pulls.truncate(limit);
+                    return Ok((page.repository_id, pulls, complete));
+                }
+            }
+        }
+    }
+
+    /// The permit is let go before any row is assessed, because assessing one
+    /// takes a permit of its own. Only a failure every later batch would meet
+    /// too sets `stop`; a slow batch leaves it alone, so only its own rows
+    /// fall back to REST.
+    pub(crate) async fn evidence(
+        &self,
+        permits: &Semaphore,
+        repository: &RepositoryId,
+        rows: &[&ListedPullRequest],
+        stop: &AtomicBool,
+    ) -> Result<Vec<Option<PullRequestEvidence>>, Fault> {
+        let unread = || rows.iter().map(|_| None).collect();
+        let identifiers: Vec<&str> = rows.iter().map(|row| row.node_id.as_str()).collect();
+        let read = {
+            let _permit = admitted(permits).await?;
+            if stop.load(Ordering::Acquire) {
+                return Ok(unread());
+            }
+            self.limited(self.service().fetch_pull_request_evidence(
+                self.repository(),
+                self.token(),
+                repository,
+                &identifiers,
+            ))
+            .await
+        };
+        let slots = match read {
+            Ok(Ok(slots)) => slots,
+            Ok(Err(error)) => {
+                let doomed = matches!(
+                    error,
+                    PullRequestError::Forbidden | PullRequestError::GitHubApi(_)
+                );
+                let fault = Fault::from(error);
+                if fault.halts() {
+                    return Err(fault);
+                }
+                if doomed {
+                    stop.store(true, Ordering::Release);
+                }
+                tracing::warn!(
+                    repository = %self.repository(),
+                    %fault,
+                    "Reading pull requests through REST after GitHub refused their batch"
+                );
+                return Ok(unread());
+            }
+            Err(fault) => {
+                tracing::warn!(
+                    repository = %self.repository(),
+                    %fault,
+                    "Reading pull requests through REST after GitHub took too long over their batch"
+                );
+                return Ok(unread());
+            }
+        };
+        if !slots.is_empty()
+            && slots
+                .iter()
+                .all(|slot| matches!(slot, EvidenceSlot::Unanswered))
+        {
+            stop.store(true, Ordering::Release);
+        }
+        Ok(self.vouched(slots, rows))
+    }
+
+    fn vouched(
+        &self,
+        slots: Vec<EvidenceSlot>,
+        rows: &[&ListedPullRequest],
+    ) -> Vec<Option<PullRequestEvidence>> {
+        if slots.len() != rows.len() {
+            tracing::warn!(
+                repository = %self.repository(),
+                asked = rows.len(),
+                answered = slots.len(),
+                "GitHub answered for a different number of pull requests than asked"
+            );
+            return rows.iter().map(|_| None).collect();
+        }
+        slots
+            .into_iter()
+            .zip(rows)
+            .map(|(slot, row)| slot.into_evidence().filter(|read| answers(read, row)))
+            .collect()
     }
 
     pub(crate) async fn pull_commits(
@@ -194,6 +352,18 @@ pub(super) fn budgeted(files: &[ChangedFile], budget: usize) -> Vec<Entry<'_>> {
             }
         })
         .collect()
+}
+
+fn page_size(remaining: usize) -> NonZeroU8 {
+    let size = remaining.clamp(1, usize::from(PER_PAGE.get()));
+    u8::try_from(size)
+        .ok()
+        .and_then(NonZeroU8::new)
+        .unwrap_or(PER_PAGE)
+}
+
+fn answers(read: &PullRequestEvidence, row: &ListedPullRequest) -> bool {
+    read.pull_request.node_id == row.node_id && read.pull_request.reference == row.reference
 }
 
 fn budget() -> usize {

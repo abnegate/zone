@@ -8,6 +8,7 @@ use crate::common::create_test_router;
 use crate::common::create_test_state;
 use crate::common::eventually::eventually;
 use crate::common::github_app;
+use crate::common::logs::capturing;
 use crate::common::test_email;
 use crate::common::test_password;
 
@@ -28,8 +29,10 @@ use tokio::time::Instant;
 use uuid::Uuid;
 use wiremock::Mock;
 use wiremock::MockServer;
+use wiremock::Request;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::body_partial_json;
+use wiremock::matchers::body_string_contains;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
@@ -59,6 +62,19 @@ const MERGE_COMMIT: &str = "6666666666666666666666666666666666666666";
 const CLEAN: &str = "clean";
 const DIRTY: &str = "dirty";
 const BLOCKED: &str = "blocked";
+const UNKNOWN: &str = "unknown";
+const PERSON: &str = "octocat";
+const RENOVATE: &str = "renovate[bot]";
+const BOT_SUFFIX: &str = "[bot]";
+const REPOSITORY_ID: &str = "R_acme_widgets";
+const ELSEWHERE: &str = "R_elsewhere";
+const OPEN_PAGE: u64 = 50;
+const LISTING_LOGS: &str = "zone_server::services::github=info";
+const EVIDENCE_BATCH: usize = 10;
+const EXPECTED: &str = "expected";
+const LISTING: &str = "states:OPEN";
+const IDS: &str = "\"ids\"";
+const NUMBER: &str = "\"number\"";
 const JOB: u64 = 71;
 const RUN: u64 = 99;
 const BYTES: &str = "bytes";
@@ -80,6 +96,12 @@ struct Pull {
     conclusion: Option<&'static str>,
     mergeable_state: &'static str,
     threads: Vec<Value>,
+    draft: bool,
+    author: &'static str,
+    comments: u64,
+    statuses: Vec<(&'static str, &'static str)>,
+    overflowing: bool,
+    updated_at: String,
 }
 
 impl Pull {
@@ -102,7 +124,17 @@ impl Pull {
             conclusion,
             mergeable_state: CLEAN,
             threads: Vec::new(),
+            draft: false,
+            author: PERSON,
+            comments: 1,
+            statuses: Vec::new(),
+            overflowing: false,
+            updated_at: format!("2026-11-14T{:02}:00:00Z", number % 24),
         }
+    }
+
+    fn numbered(number: u64) -> Self {
+        Self::of(number, format!("a{number:039x}"), Some("success"))
     }
 
     fn conflicted() -> Self {
@@ -117,6 +149,26 @@ impl Pull {
             mergeable_state: BLOCKED,
             ..Self::ready()
         }
+    }
+
+    fn id(&self) -> String {
+        format!("PR_{}", self.number)
+    }
+
+    /// The author as GitHub's GraphQL API names them: an App by its bare
+    /// login, where REST spells it with `[bot]` after.
+    fn actor(&self) -> Value {
+        match self.author.strip_suffix(BOT_SUFFIX) {
+            Some(login) => json!({"__typename": "Bot", "login": login}),
+            None => json!({"__typename": "User", "login": self.author}),
+        }
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "**Confidence Score:** 5/5\n_Last reviewed commit: {}_",
+            self.head
+        )
     }
 }
 
@@ -177,23 +229,204 @@ impl Hub {
             "html_url": self.web(&format!("pull/{}", pull.number)),
             "state": "open",
             "title": format!("Change {}", pull.number),
-            "draft": false,
-            "updated_at": format!("2026-11-14T0{}:00:00Z", pull.number),
+            "draft": pull.draft,
+            "updated_at": pull.updated_at,
             "head": {"ref": format!("feature-{}", pull.number), "sha": pull.head},
             "base": {"ref": "main", "sha": BASE_HEAD},
-            "user": {"login": "octocat"},
+            "user": {"login": pull.author},
             "commits": 1,
             "mergeable": pull.mergeable_state != DIRTY,
-            "mergeable_state": pull.mergeable_state,
+            "mergeable_state": if pull.draft { "draft" } else { pull.mergeable_state },
         })
     }
 
+    /// Every way GitHub lists `pulls`: a page of them and their evidence
+    /// through GraphQL, and the REST reads a listing falls back on, a detail
+    /// reads and a merge checks.
     async fn list(&self, pulls: &[Pull]) {
+        self.rest_list(pulls).await;
+        self.open(pulls).await;
+        self.evidence(pulls).await;
+    }
+
+    async fn rest_list(&self, pulls: &[Pull]) {
         let rows: Vec<Value> = pulls.iter().map(|pull| self.row(pull)).collect();
         self.answer("pulls", json!(rows)).await;
         for pull in pulls {
             self.pull(pull).await;
         }
+    }
+
+    fn open_row(&self, pull: &Pull) -> Value {
+        json!({
+            "id": pull.id(),
+            "number": pull.number,
+            "title": format!("Change {}", pull.number),
+            "url": self.web(&format!("pull/{}", pull.number)),
+            "state": "OPEN",
+            "isDraft": pull.draft,
+            "updatedAt": pull.updated_at,
+            "headRefName": format!("feature-{}", pull.number),
+            "headRefOid": pull.head,
+            "baseRefName": "main",
+            "author": pull.actor(),
+        })
+    }
+
+    /// What GitHub's GraphQL API reads of `pull` in one evidence request:
+    /// what its REST reads hold, and a status context still expected that
+    /// REST never lists.
+    fn node(&self, pull: &Pull) -> Value {
+        let mut node = self.open_row(pull);
+        let threads: Vec<Value> = pull
+            .threads
+            .iter()
+            .map(|thread| json!({"isResolved": thread["isResolved"]}))
+            .collect();
+        let contexts: Vec<Value> = pull
+            .statuses
+            .iter()
+            .map(|(context, state)| {
+                json!({
+                    "context": context,
+                    "state": state.to_ascii_uppercase(),
+                    "description": null,
+                    "targetUrl": format!("https://ci.example.com/{context}"),
+                    "createdAt": "2026-11-14T00:20:00Z",
+                })
+            })
+            .collect();
+        let job = 70 + pull.number;
+        let job_url = self.web(&format!("actions/runs/{RUN}/job/{job}"));
+        let evidence = json!({
+            "repository": {"id": REPOSITORY_ID},
+            "mergeStateStatus": pull.mergeable_state.to_ascii_uppercase(),
+            "reviewThreads": {"pageInfo": {"hasNextPage": false}, "nodes": threads},
+            "comments": {"totalCount": pull.comments, "nodes": [{
+                "fullDatabaseId": (900 + pull.number).to_string(),
+                "body": pull.summary(),
+                "url": self.web(&format!("pull/{}#issuecomment-{}", pull.number, 900 + pull.number)),
+                "createdAt": "2026-11-14T00:30:00Z",
+                "author": {"__typename": "Bot", "login": "greptile-apps"},
+            }]},
+            "commits": {"nodes": [{"commit": {
+                "oid": pull.head,
+                "status": {"contexts": contexts},
+                "checkSuites": {"pageInfo": {"hasNextPage": false}, "nodes": [{
+                    "app": {"slug": "ci"},
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "createdAt": "2026-11-14T00:09:00Z",
+                    "branch": {"name": format!("feature-{}", pull.number)},
+                    "repository": {"id": REPOSITORY_ID},
+                    "workflowRun": null,
+                    "checkRuns": {
+                        "pageInfo": {"hasNextPage": pull.overflowing},
+                        "nodes": [{
+                            "databaseId": job,
+                            "name": "test",
+                            "status": match pull.conclusion {
+                                Some(_) => "COMPLETED",
+                                None => "IN_PROGRESS",
+                            },
+                            "conclusion": pull.conclusion.map(str::to_ascii_uppercase),
+                            "url": job_url,
+                            "detailsUrl": job_url,
+                            "startedAt": "2026-11-14T00:10:00Z",
+                            "completedAt": null,
+                        }],
+                    },
+                }]},
+            }}]},
+        });
+        for (field, value) in evidence.as_object().unwrap() {
+            node[field] = value.clone();
+        }
+        node
+    }
+
+    /// The page of open pull requests GitHub's GraphQL API lists.
+    async fn open(&self, pulls: &[Pull]) {
+        self.open_page(OPEN_PAGE, pulls, None).await;
+    }
+
+    async fn open_page(&self, first: u64, pulls: &[Pull], next: Option<&str>) {
+        let rows: Vec<Value> = pulls.iter().map(|pull| self.open_row(pull)).collect();
+        Mock::given(method("POST"))
+            .and(path(self.graphql))
+            .and(body_string_contains(LISTING))
+            .and(body_partial_json(json!({"variables": {
+                "owner": OWNER, "name": REPOSITORY, "first": first,
+            }})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "repository": {
+                    "id": REPOSITORY_ID,
+                    "pullRequests": {
+                        "pageInfo": {"hasNextPage": next.is_some(), "endCursor": next},
+                        "nodes": rows,
+                    },
+                },
+            }})))
+            .mount(&self.server)
+            .await;
+    }
+
+    /// The evidence GitHub's GraphQL API reads on each of `pulls` it is
+    /// asked for, and nothing for any other.
+    async fn evidence(&self, pulls: &[Pull]) {
+        let nodes: Vec<(String, Value)> = pulls
+            .iter()
+            .map(|pull| (pull.id(), self.node(pull)))
+            .collect();
+        self.evidence_answering(move |id| {
+            nodes
+                .iter()
+                .find(|(known, _)| known == id)
+                .map_or(Value::Null, |(_, node)| node.clone())
+        })
+        .await;
+    }
+
+    async fn evidence_answering(&self, answer: impl Fn(&str) -> Value + Send + Sync + 'static) {
+        Mock::given(method("POST"))
+            .and(path(self.graphql))
+            .and(body_string_contains(IDS))
+            .respond_with(move |request: &Request| {
+                let nodes: Vec<Value> = asked_ids(request).iter().map(|id| answer(id)).collect();
+                ResponseTemplate::new(200).set_body_json(json!({"data": {"nodes": nodes}}))
+            })
+            .mount(&self.server)
+            .await;
+    }
+
+    async fn graphql_requests(&self, variable: &str) -> Vec<Request> {
+        self.server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path() == self.graphql)
+            .filter(|request| String::from_utf8_lossy(&request.body).contains(variable))
+            .collect()
+    }
+
+    async fn opens(&self) -> usize {
+        self.graphql_requests(LISTING).await.len()
+    }
+
+    async fn batches(&self) -> Vec<Vec<String>> {
+        let mut batches: Vec<Vec<String>> = self
+            .graphql_requests(IDS)
+            .await
+            .iter()
+            .map(asked_ids)
+            .collect();
+        batches.sort();
+        batches
+    }
+
+    async fn thread_counts(&self) -> usize {
+        self.graphql_requests(NUMBER).await.len()
     }
 
     async fn pull(&self, pull: &Pull) {
@@ -203,7 +436,7 @@ impl Hub {
             &format!("issues/{}/comments", pull.number),
             json!([{
                 "id": 900 + pull.number,
-                "body": format!("**Confidence Score:** 5/5\n_Last reviewed commit: {}_", pull.head),
+                "body": pull.summary(),
                 "html_url": self.web(&format!("pull/{}#issuecomment-{}", pull.number, 900 + pull.number)),
                 "created_at": "2026-11-14T00:30:00Z",
                 "user": {"login": "greptile-apps[bot]"},
@@ -254,9 +487,23 @@ impl Hub {
             json!({"total_count": 1, "check_runs": [run]}),
         )
         .await;
+        let statuses: Vec<Value> = pull
+            .statuses
+            .iter()
+            .filter(|(_, state)| *state != EXPECTED)
+            .map(|(context, state)| {
+                json!({
+                    "context": context,
+                    "state": state,
+                    "description": null,
+                    "target_url": format!("https://ci.example.com/{context}"),
+                    "created_at": "2026-11-14T00:20:00Z",
+                })
+            })
+            .collect();
         self.answer(
             &format!("commits/{}/status", pull.head),
-            json!({"statuses": [], "total_count": 0}),
+            json!({"statuses": statuses, "total_count": statuses.len()}),
         )
         .await;
     }
@@ -437,6 +684,11 @@ async fn member(client: &TestClient) -> (String, Uuid, Uuid) {
     (token, workspace, user)
 }
 
+fn asked_ids(request: &Request) -> Vec<String> {
+    let sent: Value = serde_json::from_slice(&request.body).unwrap();
+    serde_json::from_value(sent["variables"]["ids"].clone()).unwrap_or_default()
+}
+
 fn numbers(listing: &Value) -> Vec<(u64, String, u64)> {
     listing["pull_requests"]
         .as_array()
@@ -540,7 +792,7 @@ async fn a_refresh_inside_the_floor_is_served_what_was_already_read() {
     assert_eq!(floored["sources"][0]["freshness"], json!("floored"));
     assert_eq!(cached["sources"][0]["freshness"], json!("cached"));
     assert_eq!(numbers(&cached), numbers(&first));
-    assert_eq!(board.hub.requests_to("/repos/acme/widgets/pulls").await, 1);
+    assert_eq!(board.hub.opens().await, 1);
 }
 
 #[tokio::test]
@@ -554,6 +806,11 @@ async fn a_source_github_stops_answering_is_served_stale_with_why() {
         .pull_requests
         .invalidate(&board.source);
     board.hub.server.reset().await;
+    Mock::given(method("POST"))
+        .and(path(GRAPHQL))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&board.hub.server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/repos/acme/widgets/pulls"))
         .respond_with(ResponseTemplate::new(500))
@@ -576,6 +833,11 @@ async fn a_source_github_stops_answering_is_served_stale_with_why() {
 #[tokio::test]
 async fn a_source_never_read_is_partial_and_names_why() {
     let board = Board::new(Hub::hosted().await).await;
+    Mock::given(method("POST"))
+        .and(path(GRAPHQL))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&board.hub.server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/repos/acme/widgets/pulls"))
         .respond_with(ResponseTemplate::new(503))
@@ -1152,7 +1414,7 @@ async fn a_ready_pull_request_merges_is_audited_and_its_source_read_again() {
 
     let again = board.listed("").await;
     assert_eq!(again["sources"][0]["freshness"], json!("refreshed"));
-    assert_eq!(board.hub.requests_to("/repos/acme/widgets/pulls").await, 2);
+    assert_eq!(board.hub.opens().await, 2);
 }
 
 #[tokio::test]
@@ -1406,15 +1668,16 @@ async fn an_enterprise_server_is_read_under_its_api_and_graphql_paths() {
         listing["sources"][0]["repository_url"],
         json!(format!("{}/acme/widgets", board.hub.server.uri()))
     );
+    assert_eq!(board.hub.opens().await, 1);
+    assert_eq!(board.hub.batches().await, [vec!["PR_1".to_string()]]);
+    assert_eq!(board.hub.requests_to(GRAPHQL).await, 0);
     assert_eq!(
         board
             .hub
             .requests_to("/api/v3/repos/acme/widgets/pulls")
             .await,
-        1
+        0
     );
-    assert!(board.hub.requests_to(ENTERPRISE_GRAPHQL).await > 0);
-    assert_eq!(board.hub.requests_to(GRAPHQL).await, 0);
     assert_eq!(board.hub.requests_to("/repos/acme/widgets/pulls").await, 0);
     assert_eq!(
         listing["pull_requests"][0]["check_details"][0]["id"],
@@ -1671,35 +1934,57 @@ async fn a_merge_whose_caller_hangs_up_still_finishes_and_is_audited() {
 }
 
 #[tokio::test]
-async fn an_explicit_refresh_reassesses_only_what_changed() {
+async fn an_explicit_refresh_reads_only_changed_pull_requests_again() {
     let board = Board::new(Hub::hosted().await).await;
-    board.hub.list(&[Pull::ready()]).await;
+    board.hub.list(&[Pull::ready(), Pull::failed()]).await;
     board.listed("").await;
     board
         .state
         .github_snapshots()
         .pull_requests
         .invalidate(&board.source);
+    board.hub.server.reset().await;
+    let changed = Pull {
+        updated_at: "2026-11-14T09:30:00Z".to_string(),
+        ..Pull::failed()
+    };
+    board.hub.list(&[Pull::ready(), changed]).await;
 
     let refreshed = board.listed("?refresh=1").await;
 
     assert_eq!(refreshed["sources"][0]["freshness"], json!("refreshed"));
-    assert_eq!(numbers(&refreshed), [(1, "ready".to_string(), 1)]);
-    assert_eq!(board.hub.requests_to("/repos/acme/widgets/pulls").await, 2);
+    assert_eq!(
+        numbers(&refreshed),
+        [(1, "ready".to_string(), 1), (3, "not_ready".to_string(), 2)]
+    );
+    assert_eq!(board.hub.opens().await, 1);
+    assert_eq!(
+        board.hub.batches().await,
+        [vec!["PR_3".to_string()]],
+        "a settled, unchanged pull request is not read again"
+    );
+    assert_eq!(board.hub.requests_to("/repos/acme/widgets/pulls").await, 0);
     assert_eq!(
         board.hub.requests_to("/repos/acme/widgets/pulls/1").await,
-        1,
-        "a settled, unchanged pull request is not assessed again"
+        0
+    );
+    assert_eq!(
+        board.hub.requests_to("/repos/acme/widgets/pulls/3").await,
+        0
     );
 }
 
 #[tokio::test]
-async fn a_rate_limited_assessment_stops_the_source_and_backs_off() {
+async fn a_rate_limited_listing_stops_the_source_and_backs_off() {
     let board = Board::new(Hub::hosted().await).await;
     board.hub.list(&[Pull::ready(), Pull::running()]).await;
-    Mock::given(method("GET"))
-        .and(path("/repos/acme/widgets/pulls/1"))
-        .respond_with(ResponseTemplate::new(429).set_body_json(json!({"message": "slow down"})))
+    Mock::given(method("POST"))
+        .and(path(GRAPHQL))
+        .and(body_string_contains(LISTING))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": null,
+            "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}],
+        })))
         .with_priority(1)
         .mount(&board.hub.server)
         .await;
@@ -1714,12 +1999,52 @@ async fn a_rate_limited_assessment_stops_the_source_and_backs_off() {
             .is_some_and(|warning| warning.contains("429")),
         "{limited}"
     );
-    let asked = board.hub.requests_to("/repos/acme/widgets/pulls").await;
+    assert_eq!(board.hub.opens().await, 1);
+    assert_eq!(board.hub.requests_to("/repos/acme/widgets/pulls").await, 0);
 
     let held = board.listed("?refresh=1").await;
     assert_eq!(held["sources"][0]["freshness"], json!("stale"));
     assert_eq!(
-        board.hub.requests_to("/repos/acme/widgets/pulls").await,
+        board.hub.opens().await,
+        1,
+        "GitHub is not asked again while the rate limit backs off"
+    );
+}
+
+#[tokio::test]
+async fn a_rate_limited_assessment_stops_the_source_and_backs_off() {
+    let board = Board::new(Hub::hosted().await).await;
+    let overflowing = Pull {
+        overflowing: true,
+        ..Pull::ready()
+    };
+    board.hub.list(&[overflowing, Pull::running()]).await;
+    Mock::given(method("GET"))
+        .and(path(
+            board
+                .hub
+                .endpoint(&format!("commits/{READY_HEAD}/check-runs")),
+        ))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({"message": "slow down"})))
+        .with_priority(1)
+        .mount(&board.hub.server)
+        .await;
+
+    let limited = board.listed("").await;
+
+    assert_eq!(limited["pull_requests"], json!([]), "{limited}");
+    assert!(
+        limited["sources"][0]["warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("429")),
+        "{limited}"
+    );
+    let asked = board.hub.server.received_requests().await.unwrap().len();
+
+    let held = board.listed("?refresh=1").await;
+    assert_eq!(held["sources"][0]["freshness"], json!("stale"));
+    assert_eq!(
+        board.hub.server.received_requests().await.unwrap().len(),
         asked,
         "GitHub is not asked again while the rate limit backs off"
     );
@@ -1847,25 +2172,31 @@ async fn an_expired_listing_is_served_at_once_and_read_again_behind_it() {
     assert_eq!(numbers(&again), numbers(&first));
     let hub = &board.hub;
     assert!(
-        eventually(move || async move { hub.requests_to("/repos/acme/widgets/pulls").await == 2 })
-            .await,
+        eventually(move || async move { hub.opens().await == 2 }).await,
         "the expired listing is read again behind the one served"
     );
 }
 
 #[tokio::test]
-async fn a_source_assesses_as_many_pull_requests_at_once_as_its_credential_allows() {
+async fn overflowing_checks_are_read_again_for_every_pull_request_at_once() {
     let board = Board::new(Hub::hosted().await).await;
     let pulls: Vec<Pull> = (1..=CREDENTIAL_PERMITS as u64)
-        .map(|number| Pull::of(number, format!("a{number:039x}"), Some("success")))
+        .map(|number| Pull {
+            overflowing: true,
+            ..Pull::numbered(number)
+        })
         .collect();
     board.hub.list(&pulls).await;
     for pull in &pulls {
         Mock::given(method("GET"))
-            .and(path(board.hub.endpoint(&format!("pulls/{}", pull.number))))
+            .and(path(
+                board
+                    .hub
+                    .endpoint(&format!("commits/{}/check-runs", pull.head)),
+            ))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_json(board.hub.row(pull))
+                    .set_body_json(json!({"total_count": 0, "check_runs": []}))
                     .set_delay(ASSESSMENT_DELAY),
             )
             .with_priority(1)
@@ -1882,18 +2213,476 @@ async fn a_source_assesses_as_many_pull_requests_at_once_as_its_credential_allow
         assert_eq!(
             board
                 .hub
-                .requests_to(&format!("/repos/acme/widgets/pulls/{}", pull.number))
+                .requests_to(&format!(
+                    "/repos/acme/widgets/commits/{}/check-runs",
+                    pull.head
+                ))
                 .await,
             1,
-            "each assessment reads its pull request once"
+            "each overflowing head is read again once"
         );
     }
+    assert_eq!(
+        board.hub.requests_to("/repos/acme/widgets/pulls/1").await,
+        0
+    );
     assert!(
         elapsed >= ASSESSMENT_DELAY,
-        "every assessment waited on GitHub: {elapsed:?}"
+        "every follow-up waited on GitHub: {elapsed:?}"
     );
     assert!(
         elapsed < ASSESSMENT_BUDGET,
-        "every pull request is assessed at once: {elapsed:?}"
+        "every follow-up is read at once: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_cold_listing_is_one_graphql_page_and_a_batch_of_evidence_per_ten_pull_requests() {
+    let board = Board::new(Hub::hosted().await).await;
+    let pulls: Vec<Pull> = (1..=23).map(Pull::numbered).collect();
+    board.hub.list(&pulls).await;
+
+    let listing = board.listed("").await;
+
+    assert_eq!(numbers(&listing).len(), 23, "{listing}");
+    assert_eq!(listing["partial"], json!(false));
+    assert_eq!(listing["counts"]["ready"], json!(23), "{listing}");
+    assert_eq!(board.hub.opens().await, 1);
+    let sizes: Vec<usize> = board.hub.batches().await.iter().map(Vec::len).collect();
+    assert_eq!(sizes.len(), 23usize.div_ceil(EVIDENCE_BATCH), "{sizes:?}");
+    assert_eq!(sizes.iter().sum::<usize>(), 23);
+    assert_eq!(board.hub.thread_counts().await, 0);
+    let received = board.hub.server.received_requests().await.unwrap();
+    assert_eq!(
+        received.len(),
+        1 + 23usize.div_ceil(EVIDENCE_BATCH),
+        "{:?}",
+        received
+            .iter()
+            .map(|request| request.url.path().to_string())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        received
+            .iter()
+            .all(|request| !request.url.path().starts_with("/repos/")),
+        "nothing is read through REST"
+    );
+}
+
+#[tokio::test]
+async fn evidence_read_in_batches_says_what_each_pull_request_needs() {
+    let board = Board::new(Hub::hosted().await).await;
+    board
+        .hub
+        .list(&[
+            Pull {
+                author: RENOVATE,
+                statuses: vec![("deploy", "success"), ("required", EXPECTED)],
+                ..Pull::ready()
+            },
+            Pull::running(),
+            Pull {
+                draft: true,
+                mergeable_state: BLOCKED,
+                ..Pull::numbered(4)
+            },
+            Pull {
+                draft: true,
+                mergeable_state: DIRTY,
+                ..Pull::numbered(5)
+            },
+            Pull {
+                mergeable_state: UNKNOWN,
+                ..Pull::numbered(6)
+            },
+            Pull {
+                threads: vec![
+                    json!({"id": "PRRT_open", "isResolved": false}),
+                    json!({"id": "PRRT_done", "isResolved": true}),
+                ],
+                ..Pull::numbered(7)
+            },
+            Pull {
+                comments: 101,
+                ..Pull::numbered(8)
+            },
+        ])
+        .await;
+
+    let listing = board.listed("").await;
+
+    let row = |number: u64| {
+        listing["pull_requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["number"] == json!(number))
+            .unwrap_or_else(|| panic!("#{number} is listed: {listing}"))
+            .clone()
+    };
+    let codes = |number: u64| -> Vec<String> {
+        row(number)["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|blocker| blocker["code"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        listing["counts"],
+        json!({"ready": 1, "in_progress": 1, "not_ready": 5, "total": 7}),
+        "{listing}"
+    );
+    let ready = row(1);
+    assert_eq!(ready["readiness"], json!("ready"));
+    assert_eq!(ready["author"], json!(RENOVATE));
+    assert_eq!(
+        ready["checks"]["counts"]["total"],
+        json!(2),
+        "a status context still expected is not a check: {ready}"
+    );
+    assert_eq!(
+        ready["check_details"],
+        json!([
+            {
+                "kind": "check_run",
+                "id": 71,
+                "name": "test",
+                "state": "success",
+                "url": board.hub.web(&format!("actions/runs/{RUN}/job/71")),
+                "updated_at": "2026-11-14T00:10:00Z",
+            },
+            {
+                "kind": "status",
+                "id": null,
+                "name": "deploy",
+                "state": "success",
+                "url": "https://ci.example.com/deploy",
+                "updated_at": "2026-11-14T00:20:00Z",
+            },
+        ])
+    );
+    assert_eq!(row(2)["readiness"], json!("in_progress"));
+    assert_eq!(row(2)["author"], json!(PERSON));
+    for draft in [4, 5] {
+        assert_eq!(codes(draft), ["draft"], "#{draft}");
+        assert_eq!(row(draft)["mergeable"], json!("draft"), "#{draft}");
+    }
+    assert!(
+        codes(6).contains(&"mergeability_unverified".to_string()),
+        "{:?}",
+        codes(6)
+    );
+    assert_eq!(row(7)["unresolved_threads"], json!(1));
+    assert!(
+        codes(7).contains(&"unresolved_threads".to_string()),
+        "{:?}",
+        codes(7)
+    );
+    assert_eq!(row(8)["comments_complete"], json!(false));
+    assert!(
+        codes(8).contains(&"comments_incomplete".to_string()),
+        "{:?}",
+        codes(8)
+    );
+    assert_eq!(board.hub.thread_counts().await, 0);
+    assert!(
+        board
+            .hub
+            .server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| !request.url.path().starts_with("/repos/")),
+        "nothing is read through REST"
+    );
+}
+
+/// The pull requests of `listing` as the console reads them, but for when
+/// each was assessed and where its stand-in GitHub was served.
+fn verdicts(listing: &Value, hub: &Hub) -> Value {
+    let mut rows = listing["pull_requests"].clone();
+    for row in rows.as_array_mut().unwrap() {
+        let row = row.as_object_mut().unwrap();
+        row.remove("assessed_at");
+        row.remove("source_id");
+    }
+    serde_json::from_str(&rows.to_string().replace(&hub.server.uri(), "{origin}")).unwrap()
+}
+
+fn assortment() -> Vec<Pull> {
+    vec![
+        Pull {
+            author: RENOVATE,
+            statuses: vec![("deploy", "success"), ("required", EXPECTED)],
+            ..Pull::ready()
+        },
+        Pull::running(),
+        Pull::failed(),
+        Pull {
+            draft: true,
+            mergeable_state: BLOCKED,
+            ..Pull::numbered(4)
+        },
+        Pull {
+            mergeable_state: DIRTY,
+            ..Pull::numbered(5)
+        },
+        Pull {
+            threads: vec![json!({"id": "PRRT_open", "isResolved": false})],
+            ..Pull::numbered(6)
+        },
+    ]
+}
+
+#[tokio::test]
+async fn a_server_without_the_graphql_listing_is_read_through_rest_to_the_same_verdicts() {
+    let batched = Board::new(Hub::hosted().await).await;
+    batched.hub.list(&assortment()).await;
+    let enterprise = Board::new(Hub::enterprise().await).await;
+    enterprise.hub.list(&assortment()).await;
+    Mock::given(method("POST"))
+        .and(path(ENTERPRISE_GRAPHQL))
+        .and(body_string_contains(LISTING))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": null,
+            "errors": [{
+                "message": "Field 'isDraft' doesn't exist on type 'PullRequest'",
+                "extensions": {"code": "undefinedField"},
+            }],
+        })))
+        .with_priority(1)
+        .mount(&enterprise.hub.server)
+        .await;
+
+    let read = batched.listed("").await;
+    let rest = enterprise.listed("").await;
+
+    assert_eq!(rest["partial"], json!(false), "{rest}");
+    assert_eq!(read["partial"], json!(false), "{read}");
+    assert_eq!(
+        verdicts(&read, &batched.hub),
+        verdicts(&rest, &enterprise.hub)
+    );
+    assert_eq!(enterprise.hub.opens().await, 1);
+    assert!(enterprise.hub.batches().await.is_empty());
+    assert_eq!(
+        enterprise
+            .hub
+            .requests_to("/api/v3/repos/acme/widgets/pulls")
+            .await,
+        1
+    );
+    assert_eq!(
+        batched.hub.requests_to("/repos/acme/widgets/pulls").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_pull_request_the_batch_could_not_vouch_for_is_read_through_rest_alone() {
+    let board = Board::new(Hub::hosted().await).await;
+    let pulls = [Pull::ready(), Pull::numbered(2), Pull::numbered(3)];
+    board.hub.rest_list(&pulls).await;
+    board.hub.open(&pulls).await;
+    let mut foreign = board.hub.node(&pulls[2]);
+    foreign["repository"]["id"] = json!(ELSEWHERE);
+    foreign["mergeStateStatus"] = json!("DIRTY");
+    let nodes = [board.hub.node(&pulls[0]), Value::Null, foreign];
+    board
+        .hub
+        .evidence_answering(move |id| match id {
+            "PR_1" => nodes[0].clone(),
+            "PR_2" => nodes[1].clone(),
+            _ => nodes[2].clone(),
+        })
+        .await;
+
+    let listing = board.listed("").await;
+
+    assert_eq!(listing["partial"], json!(false), "{listing}");
+    assert_eq!(listing["counts"]["ready"], json!(3), "{listing}");
+    assert!(
+        listing["pull_requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["mergeable"] == json!("clean")),
+        "nothing read in another repository is trusted: {listing}"
+    );
+    for (number, reads) in [(1, 0), (2, 1), (3, 1)] {
+        assert_eq!(
+            board
+                .hub
+                .requests_to(&format!("/repos/acme/widgets/pulls/{number}"))
+                .await,
+            reads,
+            "#{number}"
+        );
+    }
+    assert_eq!(board.hub.requests_to("/repos/acme/widgets/pulls").await, 0);
+}
+
+#[tokio::test]
+async fn a_batch_github_forbids_is_read_through_rest() {
+    let board = Board::new(Hub::hosted().await).await;
+    let pulls = [Pull::ready(), Pull::failed()];
+    board.hub.list(&pulls).await;
+    Mock::given(method("POST"))
+        .and(path(GRAPHQL))
+        .and(body_string_contains(IDS))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"nodes": [null, null]},
+            "errors": [{
+                "type": "FORBIDDEN",
+                "path": ["nodes", 0, "commits"],
+                "message": "Resource not accessible by integration",
+            }],
+        })))
+        .with_priority(1)
+        .mount(&board.hub.server)
+        .await;
+
+    let listing = board.listed("").await;
+
+    assert_eq!(listing["partial"], json!(false), "{listing}");
+    assert_eq!(
+        numbers(&listing),
+        [(1, "ready".to_string(), 1), (3, "not_ready".to_string(), 2)]
+    );
+    assert_eq!(board.hub.batches().await.len(), 1);
+    assert_eq!(
+        board.hub.requests_to("/repos/acme/widgets/pulls/1").await,
+        1
+    );
+    assert_eq!(
+        board.hub.requests_to("/repos/acme/widgets/pulls/3").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn overflowing_checks_are_read_again_for_that_pull_requests_head_only() {
+    let board = Board::new(Hub::hosted().await).await;
+    let overflowing = Pull {
+        overflowing: true,
+        ..Pull::ready()
+    };
+    board
+        .hub
+        .list(&[overflowing, Pull::running(), Pull::failed()])
+        .await;
+
+    let listing = board.listed("").await;
+
+    assert_eq!(listing["partial"], json!(false), "{listing}");
+    assert_eq!(numbers(&listing).len(), 3);
+    for (head, reads) in [(READY_HEAD, 1), (RUNNING_HEAD, 0), (FAILED_HEAD, 0)] {
+        assert_eq!(
+            board
+                .hub
+                .requests_to(&format!("/repos/acme/widgets/commits/{head}/check-runs"))
+                .await,
+            reads,
+            "{head}"
+        );
+        assert_eq!(
+            board
+                .hub
+                .requests_to(&format!("/repos/acme/widgets/commits/{head}/status"))
+                .await,
+            reads,
+            "{head}"
+        );
+    }
+    assert_eq!(
+        board
+            .hub
+            .requests_to("/repos/acme/widgets/actions/runs")
+            .await,
+        1
+    );
+    assert_eq!(
+        board.hub.requests_to("/repos/acme/widgets/pulls/1").await,
+        0
+    );
+    assert_eq!(board.hub.thread_counts().await, 0);
+}
+
+#[tokio::test]
+async fn a_listing_past_its_limit_keeps_the_most_recently_updated_pull_requests() {
+    let hub = Hub::hosted().await;
+    let mut config = hub.config();
+    config.github.open_pull_request_limit = 2;
+    let board = Board::configured(hub, config).await;
+    let newest = [
+        Pull {
+            updated_at: "2026-11-14T09:00:00Z".to_string(),
+            ..Pull::numbered(5)
+        },
+        Pull {
+            updated_at: "2026-11-14T08:00:00Z".to_string(),
+            ..Pull::numbered(4)
+        },
+    ];
+    board.hub.open_page(2, &newest, Some("Y3Vyc29y")).await;
+    board.hub.evidence(&newest).await;
+
+    let listing = board.listed("").await;
+
+    assert_eq!(
+        numbers(&listing),
+        [(5, "ready".to_string(), 1), (4, "ready".to_string(), 2)]
+    );
+    assert_eq!(listing["partial"], json!(true));
+    assert_eq!(board.hub.opens().await, 1);
+    assert_eq!(board.hub.requests_to("/repos/acme/widgets/pulls").await, 0);
+}
+
+/// Runs on the current thread so every log line the listing writes reaches
+/// the subscriber set as this thread's default.
+#[tokio::test(flavor = "current_thread")]
+async fn a_listing_logs_where_each_of_its_verdicts_came_from() {
+    let (captured, _capturing) = capturing(LISTING_LOGS);
+    let board = Board::new(Hub::hosted().await).await;
+    let pulls = [
+        Pull::ready(),
+        Pull {
+            overflowing: true,
+            ..Pull::numbered(2)
+        },
+        Pull::numbered(3),
+    ];
+    board.hub.rest_list(&pulls).await;
+    board.hub.open(&pulls).await;
+    let nodes = [board.hub.node(&pulls[0]), board.hub.node(&pulls[1])];
+    board
+        .hub
+        .evidence_answering(move |id| match id {
+            "PR_1" => nodes[0].clone(),
+            "PR_2" => nodes[1].clone(),
+            _ => Value::Null,
+        })
+        .await;
+
+    let listing = board.listed("").await;
+    board
+        .state
+        .github_snapshots()
+        .pull_requests
+        .invalidate(&board.source);
+    board.listed("?refresh=1").await;
+
+    assert_eq!(listing["counts"]["total"], json!(3), "{listing}");
+    let logged = captured.text();
+    assert!(
+        logged.contains("repository=acme/widgets kept=0 batched=1 followed=1 rested=1"),
+        "{logged}"
+    );
+    assert!(
+        logged.contains("repository=acme/widgets kept=3 batched=0 followed=0 rested=0"),
+        "{logged}"
     );
 }

@@ -1,4 +1,7 @@
+mod guard;
 mod review;
+mod rows;
+mod survey;
 
 use abnegate_secret::SecretValue;
 use abnegate_vcs::BranchName;
@@ -35,6 +38,7 @@ use super::evidence::Assessed;
 use super::evidence::CheckDetail;
 use super::evidence::CheckKind;
 use super::evidence::Depth;
+use super::evidence::Gathered;
 use super::fault::Fault;
 use super::link::absolute;
 use super::readiness;
@@ -56,7 +60,10 @@ use crate::services::prioritisation::Configuration as Prioritisation;
 use crate::services::prioritisation::Prioritiser;
 use crate::services::prioritisation::pull_request;
 use crate::utils::text::truncate;
+pub(crate) use guard::Guard;
 use review::Review;
+pub(crate) use rows::Rows;
+pub(crate) use survey::sufficient;
 
 const API_VERSION: &str = "2026-03-10";
 pub(crate) const PER_PAGE: NonZeroU8 = NonZeroU8::new(100).expect("a page holds rows");
@@ -138,6 +145,7 @@ pub(crate) struct Github {
     signals: ReviewSignals,
     configuration: Configuration,
     origin: String,
+    guard: Option<Guard>,
 }
 
 impl Github {
@@ -215,7 +223,46 @@ impl Github {
             signals,
             configuration,
             origin: origin.trim_end_matches(SEPARATOR).to_string(),
+            guard: None,
         })
+    }
+
+    pub(crate) fn guarded(self, guard: Guard) -> Self {
+        Self {
+            guard: Some(guard),
+            ..self
+        }
+    }
+
+    pub(crate) async fn bounded<T>(&self, read: impl Future<Output = T>) -> Result<T, Fault> {
+        match &self.guard {
+            Some(guard) => guard.bounded(read).await,
+            None => Ok(read.await),
+        }
+    }
+
+    pub(crate) async fn limited<T>(&self, read: impl Future<Output = T>) -> Result<T, Fault> {
+        match &self.guard {
+            Some(guard) => guard.limited(read).await,
+            None => Ok(read.await),
+        }
+    }
+
+    pub(crate) async fn thread_counts(
+        &self,
+        reference: &PullRequestReference,
+        partial: ReviewThreadCount,
+    ) -> Result<ReviewThreadCount, Fault> {
+        match self
+            .bounded(
+                self.service
+                    .fetch_review_thread_counts(reference, &self.token),
+            )
+            .await
+        {
+            Ok(counted) => counted.map_err(thread_described),
+            Err(_) => Ok(partial),
+        }
     }
 
     pub(crate) fn reference(&self, number: u64) -> Result<PullRequestReference, String> {
@@ -277,15 +324,15 @@ impl Github {
         reference: Option<&str>,
     ) -> Result<(String, String, &'static str), String> {
         let (reference, sha) = self.resolve(reference).await?;
-        let (workflows, checks, statuses, complete) = self.ci_rows(&sha).await?;
-        let state = assessed(&conclusions(&workflows, &checks, &statuses), complete);
+        let rows = self.ci_rows(&sha).await?;
+        let state = outcome(
+            &conclusions(&rows.workflows, &rows.checks, &rows.statuses),
+            rows.complete,
+        );
         Ok((reference, sha, state))
     }
 
-    pub(crate) async fn ci_rows(
-        &self,
-        sha: &str,
-    ) -> Result<(Vec<WorkflowRun>, Vec<CheckRun>, Vec<CommitStatus>, bool), Fault> {
+    pub(crate) async fn ci_rows(&self, sha: &str) -> Result<Rows, Fault> {
         let commit = revision(sha)?;
         let filter = WorkflowRunFilter::new().with_head_sha(commit.clone());
         let (workflows, checks, statuses) = tokio::join!(
@@ -296,52 +343,32 @@ impl Github {
             self.service
                 .collect_statuses(&self.repository, &self.token, &commit),
         );
-        let workflows = workflows.map_err(ci_described)?;
-        if !workflows.complete {
-            return Err(Fault::upstream(PARTIAL_WORKFLOW_RUNS));
-        }
-        let checks = checks.map_err(ci_described)?;
-        let statuses = statuses.map_err(ci_described)?;
-        if statuses
-            .items
-            .iter()
-            .any(|status| status.context.is_empty())
-        {
-            return Err(Fault::upstream(UNIDENTIFIED_CI));
-        }
-        let mut identities = std::collections::HashSet::new();
-        let workflows: Vec<WorkflowRun> = workflows
-            .items
-            .into_iter()
-            .filter(|run| {
-                identities.insert((run.workflow_id, run.event.clone(), run.head_branch.clone()))
-            })
-            .collect();
-        if workflows.iter().any(|run| run.head_sha != commit)
-            || checks
-                .items
-                .iter()
-                .any(|check| check.head_sha.as_ref() != Some(&commit))
-        {
-            return Err(Fault::upstream(FOREIGN_CHECKS));
-        }
-        let complete = checks.complete && statuses.complete;
-        Ok((workflows, checks.items, statuses.items, complete))
+        let workflows = entire(workflows.map_err(ci_described)?)?;
+        vetted(
+            &commit,
+            workflows,
+            checks.map_err(ci_described)?,
+            statuses.map_err(ci_described)?,
+        )
     }
 
     async fn check_evidence(&self, sha: &str) -> Result<(CheckEvidence, Vec<CheckDetail>), Fault> {
-        let (workflows, checks, statuses, complete) = self.ci_rows(sha).await?;
+        Ok(self.checked(&self.ci_rows(sha).await?))
+    }
+
+    fn checked(&self, rows: &Rows) -> (CheckEvidence, Vec<CheckDetail>) {
         let evidence = CheckEvidence {
-            complete,
-            ..tally(conclusions(&workflows, &checks, &statuses).into_iter())
+            complete: rows.complete,
+            ..tally(conclusions(&rows.workflows, &rows.checks, &rows.statuses).into_iter())
         };
-        let details = workflows
+        let details = rows
+            .workflows
             .iter()
             .map(workflow_detail)
-            .chain(checks.iter().map(|check| self.check_run_detail(check)))
-            .chain(statuses.iter().map(status_detail))
+            .chain(rows.checks.iter().map(|check| self.check_run_detail(check)))
+            .chain(rows.statuses.iter().map(status_detail))
             .collect();
-        Ok((evidence, details))
+        (evidence, details)
     }
 
     fn check_run_detail(&self, check: &CheckRun) -> CheckDetail {
@@ -416,27 +443,45 @@ impl Github {
             Depth::Full => self.changed_paths(&row.reference).await,
             Depth::Listing => Vec::new(),
         };
-        let comments = review.comments.comments.clone();
-        Ok(Assessed {
+        Ok(self.appraise(
+            row,
+            Gathered {
+                draft: review.draft,
+                head,
+                mergeable: mergeability(detail.mergeable_state),
+                threads: review.threads,
+                comments: review.comments,
+                checks,
+                details,
+                paths,
+            },
+        ))
+    }
+
+    /// Shared by batched and single reads so both reach the same verdict on
+    /// the same evidence.
+    pub(crate) fn appraise(&self, row: &ListedPullRequest, gathered: Gathered) -> Assessed {
+        let comments = gathered.comments.comments.clone();
+        Assessed {
             assessment: readiness::assess(
                 PullEvidence {
                     number: row.reference.number().get(),
                     title: truncate(&row.title, PULL_TITLE_CHARS),
                     url: row.url.clone(),
                     updated_at: row.updated_at.clone().unwrap_or_default(),
-                    draft: row.draft || review.draft,
-                    head,
-                    mergeable: mergeability(detail.mergeable_state),
-                    threads: review.threads,
-                    comments: review.comments,
-                    checks,
+                    draft: row.draft || gathered.draft,
+                    head: gathered.head,
+                    mergeable: gathered.mergeable,
+                    threads: gathered.threads,
+                    comments: gathered.comments,
+                    checks: gathered.checks,
                 },
                 &self.signals,
             ),
-            risk: pull_request::risk(&PRIORITISER, &paths),
-            checks: details,
+            risk: pull_request::risk(&PRIORITISER, &gathered.paths),
+            checks: gathered.details,
             comments,
-        })
+        }
     }
 
     /// The repository-relative paths a pull request touches.
@@ -500,10 +545,8 @@ impl Github {
         let threads = match threads {
             Some(collected) => recorded_evidence(collected),
             None => thread_evidence(
-                self.service
-                    .fetch_review_thread_counts(&reference, &self.token)
-                    .await
-                    .map_err(thread_described)?,
+                self.thread_counts(&reference, ReviewThreadCount::new(0, 0, false))
+                    .await?,
             ),
         };
         Ok(Review {
@@ -663,6 +706,54 @@ impl Github {
             return Err(FOREIGN_JOB.to_string());
         }
         Ok(run_id)
+    }
+}
+
+/// GitHub lists workflow runs newest first, so the run kept for each
+/// workflow, event and branch is its latest.
+pub(crate) fn vetted(
+    commit: &Revision,
+    workflows: Collected<WorkflowRun>,
+    checks: Collected<CheckRun>,
+    statuses: Collected<CommitStatus>,
+) -> Result<Rows, Fault> {
+    let workflows = entire(workflows)?;
+    if statuses
+        .items
+        .iter()
+        .any(|status| status.context.is_empty())
+    {
+        return Err(Fault::upstream(UNIDENTIFIED_CI));
+    }
+    let mut identities = std::collections::HashSet::new();
+    let workflows: Vec<WorkflowRun> = workflows
+        .items
+        .into_iter()
+        .filter(|run| {
+            identities.insert((run.workflow_id, run.event.clone(), run.head_branch.clone()))
+        })
+        .collect();
+    if workflows.iter().any(|run| &run.head_sha != commit)
+        || checks
+            .items
+            .iter()
+            .any(|check| check.head_sha.as_ref() != Some(commit))
+    {
+        return Err(Fault::upstream(FOREIGN_CHECKS));
+    }
+    let complete = checks.complete && statuses.complete;
+    Ok(Rows {
+        workflows,
+        checks: checks.items,
+        statuses: statuses.items,
+        complete,
+    })
+}
+
+fn entire(workflows: Collected<WorkflowRun>) -> Result<Collected<WorkflowRun>, Fault> {
+    match workflows.complete {
+        true => Ok(workflows),
+        false => Err(Fault::upstream(PARTIAL_WORKFLOW_RUNS)),
     }
 }
 
@@ -870,7 +961,7 @@ pub(crate) fn conclusions<'a>(
 
 /// A read that did not reach every check can still prove a failure, never a
 /// pass or a settled non-pass.
-pub(crate) fn assessed(conclusions: &[&str], complete: bool) -> &'static str {
+pub(crate) fn outcome(conclusions: &[&str], complete: bool) -> &'static str {
     match assessment(conclusions) {
         FAILURE_ASSESSMENT => FAILURE_ASSESSMENT,
         _ if !complete => PENDING_ASSESSMENT,
