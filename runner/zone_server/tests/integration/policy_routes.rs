@@ -20,6 +20,7 @@ use crate::common::sso::{grace, lapsed};
 
 const PREFIX: &str = "policy_routes";
 const LICENSE_REQUIRED: &str = "license_required";
+const UNVERIFIABLE: &str = "not a license key";
 const WAITING: &str = "SELECT count(*) FROM pg_locks \
      WHERE NOT granted AND relation = $1::regclass \
      AND database = (SELECT oid FROM pg_database WHERE datname = current_database())";
@@ -444,6 +445,32 @@ async fn a_lapsed_license_keeps_enforcing_and_refuses_changes() {
         StatusCode::FORBIDDEN,
         LICENSE_REQUIRED,
     );
+    refused(
+        &fixture
+            .update_workspace(&fixture.owner.token, &json!({ "agents": [] }))
+            .await,
+        StatusCode::FORBIDDEN,
+        LICENSE_REQUIRED,
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_stored_key_that_fails_verification_shows_the_policy_enforced_and_uneditable() {
+    let fixture = Fixture::new(PREFIX).await;
+    fixture.store_license(UNVERIFIABLE).await;
+
+    for response in [
+        fixture.organization_policy(&fixture.owner.token).await,
+        fixture.workspace_policy(&fixture.owner.token).await,
+    ] {
+        response.assert_status(StatusCode::OK);
+        let body = response.json_value();
+        assert_eq!(body["edition"], "community");
+        assert_eq!(body["entitled"], false);
+        assert_eq!(body["enforced"], true);
+        assert_eq!(body["editable"], false);
+    }
     refused(
         &fixture
             .update_workspace(&fixture.owner.token, &json!({ "agents": [] }))

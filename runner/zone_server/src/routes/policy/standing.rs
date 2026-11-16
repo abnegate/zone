@@ -1,9 +1,11 @@
 use chrono::{DateTime, Utc};
-use zone_enterprise::{Edition, Feature, License, Status, status};
+use zone_enterprise::{Edition, Feature, Status, status};
 
 use super::access::Access;
 use super::refusal::Refusal;
 use crate::auth::entitlement::Unentitled;
+use crate::services::license::Stored;
+use crate::services::policy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Standing {
@@ -14,10 +16,11 @@ pub struct Standing {
 }
 
 impl Standing {
-    pub fn of(license: Option<&License>, now: DateTime<Utc>) -> Self {
+    pub fn of(stored: &Stored, now: DateTime<Utc>) -> Self {
+        let license = stored.license();
         Self {
             entitled: Feature::Policy.entitled(license, now),
-            enforced: Feature::Policy.enforced(license),
+            enforced: policy::enforces(stored),
             edition: Edition::from(license),
             status: status(license, now),
         }

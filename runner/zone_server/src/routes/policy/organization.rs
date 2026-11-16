@@ -86,7 +86,7 @@ async fn read(
     let access = access::organization(&mut transaction, organization, user).await?;
     let stored = policies::organization(&mut *transaction, organization).await?;
     transaction.commit().await?;
-    let standing = Standing::of(state.settled_license().await?.as_ref(), Utc::now());
+    let standing = Standing::of(&state.stored_license().await?, Utc::now());
     let policy = rules(stored.as_ref())?;
     Ok(OrganizationResponse::new(
         standing,
@@ -106,11 +106,11 @@ async fn write(
     let Ok(Path(organization)) = path else {
         return Err(Refusal::Missing(MISSING));
     };
-    let license = state.settled_license().await;
+    let license = state.stored_license().await;
     let mut transaction = state.db().begin().await?;
     let access = access::organization(&mut transaction, organization, user).await?;
     access.write(FORBIDDEN)?;
-    let standing = Standing::of(license?.as_ref(), Utc::now());
+    let standing = Standing::of(&license?, Utc::now());
     standing.require()?;
     let Json(patch) = body.map_err(Refusal::Body)?;
     let current = policies::lock_organization(&mut transaction, organization).await?;
