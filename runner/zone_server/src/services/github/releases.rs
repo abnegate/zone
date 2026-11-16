@@ -250,7 +250,8 @@ async fn listed(
 ) -> Result<bool, Fault> {
     let (snapshot, freshness) = listing(state, source, false, now).await?;
     let held = snapshot.value.holds(release_id);
-    if held || freshness != Freshness::Revalidating {
+    let behind = matches!(freshness, Freshness::Revalidating | Freshness::Stale);
+    if held || !behind {
         return Ok(held);
     }
     let (snapshot, _) = listing(state, source, true, now).await?;

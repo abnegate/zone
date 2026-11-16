@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-use tokio::time::Instant;
-
 pub const EVENTUAL_WAIT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -10,12 +8,10 @@ where
     Check: FnMut() -> Checked,
     Checked: Future<Output = bool>,
 {
-    let deadline = Instant::now() + EVENTUAL_WAIT;
-    while Instant::now() < deadline {
-        if settled().await {
-            return true;
+    let polled = async {
+        while !settled().await {
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    settled().await
+    };
+    tokio::time::timeout(EVENTUAL_WAIT, polled).await.is_ok()
 }

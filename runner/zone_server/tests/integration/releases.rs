@@ -17,6 +17,8 @@ use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_server::db::sources;
 use zone_server::db::workspace_members::{self, WorkspaceRole};
+use zone_server::services::github::fault::Fault;
+use zone_server::services::github::freshness::Freshness;
 use zone_server::services::github::releases::Listing;
 use zone_server::services::github::releases::SourceOptions;
 use zone_server::services::github::snapshots::OPTIONS_TTL;
@@ -40,6 +42,7 @@ const CREATED_FILTER: &str = "created";
 const FRESH: &str = "v1.5.0";
 const FRESH_ID: u64 = 92;
 const SEEDED_TAG: &str = "v0.0.1";
+const UNREACHABLE: &str = "a GitHub that cannot be reached";
 const EXPIRY_MARGIN: Duration = Duration::from_secs(1);
 const NOTES: &str = "## What's Changed\n\
     * Add widgets by @octo in https://github.com/acme/widgets/pull/12\n\
@@ -770,6 +773,50 @@ async fn a_pipeline_for_a_release_newer_than_an_expired_listing_reads_the_listin
             .len(),
         1,
         "the listing is read once before the release is called missing"
+    );
+}
+
+#[tokio::test]
+async fn a_pipeline_for_a_release_newer_than_a_listing_whose_read_again_failed_waits_for_the_next()
+{
+    let releases = Releases::new().await;
+    let expired = Utc::now()
+        - Interval::from_std(releases.state.config().github.release_ttl + EXPIRY_MARGIN)
+            .expect("a ttl in range");
+    let cache = &releases.state.github_snapshots().releases;
+    cache
+        .read(releases.source, false, expired, |_| async {
+            Ok(Listing::default())
+        })
+        .await
+        .expect("an expired listing without the release");
+    let (_, freshness) = cache
+        .read(releases.source, true, Utc::now(), |_| async {
+            Err(Fault::upstream(UNREACHABLE))
+        })
+        .await
+        .expect("the failed read again serves the expired listing");
+    assert_eq!(freshness, Freshness::Stale);
+    let published = release(PUBLISHED_ID, LATEST, Some(&ago(0)), false, NOTES);
+    releases
+        .answer_json("GET", "/releases", 200, json!([published.clone()]))
+        .await;
+    releases
+        .answer_json("GET", &format!("/releases/{PUBLISHED_ID}"), 200, published)
+        .await;
+    releases.runs(vec![run(501, LATEST, "success")]).await;
+
+    let (status, body) = releases.get(&releases.pipeline(PUBLISHED_ID)).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["pipeline"]["release"]["id"], PUBLISHED_ID);
+    assert_eq!(
+        releases
+            .sent("GET", &format!("{REPOSITORY}/releases"))
+            .await
+            .len(),
+        1,
+        "the stale listing is read again once before the release is called missing"
     );
 }
 
