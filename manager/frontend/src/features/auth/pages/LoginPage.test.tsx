@@ -468,13 +468,16 @@ describe('LoginPage', () => {
       expect(screen.queryByText('Password sign-in is for server admins.')).toBeNull();
     });
 
-    it('hides the forgot-password and register links when single sign-on is required', async () => {
+    it('keeps the forgot-password link for admins and hides register when single sign-on is required', async () => {
       mockListProviders.mockResolvedValue(SSO_REQUIRED);
       renderLoginPage();
 
       expect(await screen.findByText('Password sign-in is for server admins.')).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Sign in with Okta' })).toBeInTheDocument();
-      expect(screen.queryByRole('link', { name: /forgot password/i })).toBeNull();
+      expect(screen.getByRole('link', { name: 'Server admin? Forgot password?' })).toHaveAttribute(
+        'href',
+        '/forgot-password'
+      );
       expect(screen.queryByRole('link', { name: /create one/i })).toBeNull();
       expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
     });

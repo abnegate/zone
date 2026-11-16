@@ -42,6 +42,10 @@ function fromLocation(state: unknown): PathLike | null {
   return from;
 }
 
+export const FORGOT_PASSWORD = 'Forgot password?';
+
+export const ADMIN_FORGOT_PASSWORD = 'Server admin? Forgot password?';
+
 export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -85,8 +89,8 @@ export default function LoginPage() {
       await login(values);
       navigate(next, { replace: true });
       void notify('success', 'Successfully logged in');
-    } catch (err) {
-      const message = messageOf(err, 'Login failed');
+    } catch (error) {
+      const message = messageOf(error, 'Login failed');
       void notify('error', message);
       setRootError(message);
     } finally {
@@ -146,11 +150,9 @@ export default function LoginPage() {
             name="password"
           />
 
-          {!required && (
-            <div className="auth-form-links">
-              <Link to="/forgot-password">Forgot password?</Link>
-            </div>
-          )}
+          <div className="auth-form-links">
+            <Link to="/forgot-password">{required ? ADMIN_FORGOT_PASSWORD : FORGOT_PASSWORD}</Link>
+          </div>
 
           {rootError && (
             <div className="auth-error" role="alert">

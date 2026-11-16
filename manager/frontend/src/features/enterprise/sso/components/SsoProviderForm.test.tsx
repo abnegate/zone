@@ -182,6 +182,7 @@ describe('SsoProviderForm', () => {
       expect(screen.getByText(VERIFIED_EMAIL_DESCRIPTION)).toBeInTheDocument();
       expect(VERIFIED_EMAIL_DESCRIPTION).toContain('Microsoft Entra ID');
       expect(VERIFIED_EMAIL_DESCRIPTION).toContain('allowed domains');
+      expect(VERIFIED_EMAIL_DESCRIPTION).toContain('never joins an existing Zone account');
     });
   });
 

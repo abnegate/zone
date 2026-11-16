@@ -74,8 +74,8 @@ export function SsoEnforcement({ settings, editable }: SsoEnforcementProps) {
           <div className="sso-dialog">
             <p>
               Everyone except server admins must sign in with an identity provider. Password
-              sign-in, registration and password reset stop working for them. People already signed
-              in stay signed in until their session ends.
+              sign-in, registration and password reset stop working for them, and anyone signed in
+              with a password is signed out the next time their session refreshes.
             </p>
             {failure && (
               <div className="modal-error" role="alert">

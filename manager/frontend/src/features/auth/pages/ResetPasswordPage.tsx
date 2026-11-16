@@ -60,8 +60,8 @@ export default function ResetPasswordPage() {
       setSuccess(true);
       setPassword('');
       setConfirmPassword('');
-    } catch (err) {
-      setError(messageOf(err, 'Failed to reset password'));
+    } catch (error) {
+      setError(messageOf(error, 'Failed to reset password'));
     } finally {
       setLoading(false);
     }

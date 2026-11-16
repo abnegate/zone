@@ -28,7 +28,7 @@ export const DOMAINS_HINT = 'Only people with an email on these domains can sign
 export const VERIFIED_EMAIL_LABEL = 'Require verified email';
 
 export const VERIFIED_EMAIL_DESCRIPTION =
-  'Only accept emails your identity provider marks as verified. Turn this off for Microsoft Entra ID, which does not send that claim, and set allowed domains instead.';
+  "Only accept emails your identity provider marks as verified. Turn this off for Microsoft Entra ID, which does not send that claim, and set allowed domains instead. While it's off, a sign-in never joins an existing Zone account by email, so it can't take one over.";
 
 export const ENABLED_LABEL = 'Enabled';
 
