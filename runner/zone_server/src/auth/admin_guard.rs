@@ -8,6 +8,8 @@ use axum::{
     extract::{FromRef, FromRequestParts},
     http::{StatusCode, request::Parts},
 };
+use sqlx::PgPool;
+use uuid::Uuid;
 
 use super::middleware::{AuthError, AuthUser};
 use crate::db::users::{self, UserRow};
@@ -41,27 +43,28 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let AuthUser(claims) = AuthUser::from_request_parts(parts, state).await?;
         let id = claims.user_id().map_err(|_| refused())?;
-        let app_state = AppState::from_ref(state);
-        let user = users::get_user_by_id(app_state.db(), id)
-            .await
-            .map_err(|error| {
-                tracing::error!(%error, user_id = %id, "Failed to load the user for a server admin check");
-                AuthError {
-                    status: StatusCode::INTERNAL_SERVER_ERROR,
-                    message: UNCHECKED.to_string(),
-                }
-            })?
-            .filter(permits)
-            .ok_or_else(refused)?;
-        Ok(Self(user))
+        admin(AppState::from_ref(state).db(), id).await.map(Self)
     }
+}
+
+async fn admin(pool: &PgPool, id: Uuid) -> Result<UserRow, AuthError> {
+    users::get_user_by_id(pool, id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, user_id = %id, "Failed to load the user for a server admin check");
+            AuthError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: UNCHECKED.to_string(),
+            }
+        })?
+        .filter(permits)
+        .ok_or_else(refused)
 }
 
 #[cfg(test)]
 mod tests {
-    use uuid::Uuid;
-
     use super::*;
+    use crate::state::unreachable_pool;
 
     fn user(is_admin: Option<bool>, is_active: Option<bool>) -> UserRow {
         UserRow {
@@ -103,5 +106,14 @@ mod tests {
         let error = refused();
         assert_eq!(error.status, StatusCode::FORBIDDEN);
         assert_eq!(error.message, REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn a_database_failure_is_a_server_error_rather_than_a_refusal() {
+        let error = admin(&unreachable_pool(), Uuid::new_v4())
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.message, UNCHECKED);
     }
 }
