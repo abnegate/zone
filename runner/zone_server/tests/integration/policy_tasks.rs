@@ -319,7 +319,7 @@ async fn a_run_on_a_model_the_policy_admits_runs() {
 }
 
 #[tokio::test]
-async fn a_title_whose_model_the_policy_denies_comes_from_one_it_admits() {
+async fn a_title_whose_fast_model_the_policy_denies_falls_back_to_one_it_admits() {
     let fixture = Fixture::new(SELF_HOSTED).await;
     fixture.license(&active(Tier::Team)).await;
     fixture.restrict(json!({"models": ["qwen*"]})).await;
@@ -344,7 +344,7 @@ async fn a_title_whose_model_the_policy_denies_comes_from_one_it_admits() {
 }
 
 #[tokio::test]
-async fn a_title_no_model_may_generate_is_skipped_and_audited_without_a_completion() {
+async fn a_title_whose_fast_model_and_fallbacks_the_policy_denies_is_skipped_and_audited() {
     let fixture = Fixture::new(SELF_HOSTED).await;
     fixture.license(&active(Tier::Team)).await;
     fixture.restrict(json!({"models": ["mistral*"]})).await;
