@@ -29,6 +29,7 @@ use crate::services::github::throttle::CREDENTIAL_PERMITS;
 type Verdict = (Origin, Result<PullRequest, Fault>);
 
 const LATE: &str = "GitHub was not read in time to assess this pull request again.";
+const LATE_LISTING: &str = "GitHub did not list this repository's open pull requests in time.";
 
 /// One read of a source's open pull requests, against the listing read
 /// before it.
@@ -74,7 +75,7 @@ impl<'a> Survey<'a> {
             self.github.open_pull_requests(self.permits, limit),
         )
         .await
-        .map_err(|_| Fault::upstream(LATE))?;
+        .map_err(|_| Fault::upstream(LATE_LISTING))?;
         match opened {
             Ok((repository, rows, complete)) => self.batched(&repository, rows, complete).await,
             Err(fault) if fault.halts() => Err(fault),
@@ -86,7 +87,7 @@ impl<'a> Survey<'a> {
                 );
                 let (rows, complete) = timeout_at(self.deadline, self.github.open_pulls(limit))
                     .await
-                    .map_err(|_| Fault::upstream(LATE))??;
+                    .map_err(|_| Fault::upstream(LATE_LISTING))??;
                 self.through_rest(rows, complete).await
             }
         }

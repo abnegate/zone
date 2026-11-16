@@ -1373,3 +1373,53 @@ async fn a_thread_count_github_halts_on_halts_the_listing_under_the_guard() {
         server.verify().await;
     }
 }
+
+#[tokio::test]
+async fn a_listing_github_does_not_finish_by_the_deadline_fails_as_a_late_listing() {
+    let slow = |template: ResponseTemplate| template.set_delay(SLOW);
+    for (name, graphql, rest) in [
+        (
+            "through GraphQL",
+            slow(
+                ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {
+                    "id": REPOSITORY_ID,
+                    "pullRequests": {
+                        "pageInfo": {"hasNextPage": false, "endCursor": null},
+                        "nodes": [open_row(1, UPDATED_AT)],
+                    },
+                }}})),
+            ),
+            None,
+        ),
+        (
+            "through REST",
+            ResponseTemplate::new(404),
+            Some(slow(ResponseTemplate::new(200).set_body_json(json!([])))),
+        ),
+    ] {
+        let server = silent().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains(LISTING))
+            .respond_with(graphql)
+            .expect(1)
+            .mount(&server)
+            .await;
+        if let Some(rest) = rest {
+            Mock::given(method("GET"))
+                .and(path(format!("/repos/{OWNER}/{NAME}/pulls")))
+                .respond_with(rest)
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let permits = Semaphore::new(CREDENTIAL_PERMITS);
+        let started = Instant::now();
+
+        let listing = surveyed_by(&server, &permits, None, LIMIT, GRAPHQL_LIMIT, HURRIED).await;
+
+        assert!(started.elapsed() < SLOW, "{name}: {:?}", started.elapsed());
+        assert_eq!(listing, Err(Fault::upstream(LATE_LISTING)), "{name}");
+        server.verify().await;
+    }
+}
