@@ -5,9 +5,7 @@ import {
 } from '../features/auth/schemas';
 import {
   AuditLogsResponseSchema,
-  LimitsResponseSchema,
   OrganizationSchema,
-  UsageResponseSchema,
 } from '../features/settings/organization/schemas';
 import { getErrors, isValid } from './index';
 import {
@@ -245,28 +243,6 @@ describe('Auth Validation Schemas', () => {
       expect(parsed.logs[0].new_values).toEqual({ role: 'admin' });
       expect(parsed.logs[1].old_values).toBeNull();
       expect(parsed.logs[1].actor_email).toBeNull();
-    });
-
-    it('flattens the metered usage and reads negative limits as unlimited', () => {
-      const usage = UsageResponseSchema.parse({
-        current_period_start: '2026-09-01T00:00:00Z',
-        current_period_end: '2026-10-01T00:00:00Z',
-        usage: { chat_messages: 12, members: 2, workspaces: 1 },
-      });
-      expect(usage).toEqual({
-        members: 2,
-        workspaces: 1,
-        chat_messages: 12,
-        period_start: '2026-09-01T00:00:00Z',
-        period_end: '2026-10-01T00:00:00Z',
-      });
-
-      const limits = LimitsResponseSchema.parse({
-        max_workspaces: -1,
-        max_members: 3,
-        max_chats_per_month: 100,
-      });
-      expect(limits).toEqual({ max_members: 3, max_workspaces: null, max_chats_per_month: 100 });
     });
   });
 });

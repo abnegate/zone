@@ -1,6 +1,6 @@
 //! `cross_tenant_authorization` covers tasks, task runs, AI settings and
 //! branding. These are the id-addressed routes it does not: chats and their
-//! messages, sources, knowledge, audit logs, billing, and session revocation.
+//! messages, sources, knowledge, audit logs, and session revocation.
 //! Each one takes a resource id straight from the request, so each one is
 //! driven here with a stranger's id to pin that the binding holds.
 
@@ -341,7 +341,7 @@ async fn a_stranger_cannot_delete_another_tenants_knowledge() {
 }
 
 #[tokio::test]
-async fn a_stranger_cannot_read_another_tenants_audit_log_or_billing() {
+async fn a_stranger_cannot_read_another_tenants_audit_log() {
     let client = TestClient::with_db().await;
     let victim = tenant(&client).await;
     let attacker = tenant(&client).await;
@@ -377,33 +377,6 @@ async fn a_stranger_cannot_read_another_tenants_audit_log_or_billing() {
                     &format!(
                         "/api/organizations/{victim_org}/audit-logs/export?start_date=2000-01-01T00:00:00Z&end_date=2100-01-01T00:00:00Z"
                     ),
-                    &attacker.token,
-                )
-                .await,
-        ),
-        (
-            "read the subscription",
-            client
-                .get_auth(
-                    &format!("/api/organizations/{victim_org}/subscription"),
-                    &attacker.token,
-                )
-                .await,
-        ),
-        (
-            "read the usage",
-            client
-                .get_auth(
-                    &format!("/api/organizations/{victim_org}/usage"),
-                    &attacker.token,
-                )
-                .await,
-        ),
-        (
-            "read the limits",
-            client
-                .get_auth(
-                    &format!("/api/organizations/{victim_org}/limits"),
                     &attacker.token,
                 )
                 .await,

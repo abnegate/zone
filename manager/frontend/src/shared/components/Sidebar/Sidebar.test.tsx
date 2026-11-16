@@ -384,7 +384,7 @@ describe('Sidebar', () => {
       expect(screen.queryByRole('link', { name: 'Workspace' })).not.toBeInTheDocument();
     });
 
-    it.each(['/settings/workspace/ai', '/settings/organization/billing'])(
+    it.each(['/settings/workspace/ai', '/settings/organization/audit'])(
       'marks Settings active at %s',
       (pathname) => {
         currentPathname = pathname;

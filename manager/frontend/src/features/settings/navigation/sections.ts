@@ -23,7 +23,6 @@ export const SettingsSection = {
   Sources: 'sources',
   Members: 'members',
   Devices: 'devices',
-  Billing: 'billing',
   Audit: 'audit',
   GitHub: 'github',
   Mcp: 'mcp',
@@ -138,12 +137,6 @@ export const SECTIONS: readonly SectionDefinition[] = [
     group: SettingsGroup.Organization,
     section: SettingsSection.Devices,
     label: 'Devices',
-    visible: administersOrganization,
-  },
-  {
-    group: SettingsGroup.Organization,
-    section: SettingsSection.Billing,
-    label: 'Billing',
     visible: administersOrganization,
   },
   {

@@ -2,8 +2,7 @@
 //! live pass of 2026-09-20: an invitation names its workspace and inviter, a
 //! removed member can be invited again, members are listed by email, every
 //! organization and workspace carries the caller's role, organization AI settings are read
-//! by administrators only, changes are audited, and every organization has a
-//! subscription to show.
+//! by administrators only, and changes are audited.
 
 use axum::http::StatusCode;
 use chrono::{Duration, Utc};
@@ -11,7 +10,6 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::common::{TestClient, test_email, test_password};
-use zone_server::db::organization_members::{self, OrgRole};
 
 struct Account {
     token: String,
@@ -374,71 +372,4 @@ async fn a_role_change_is_written_to_the_audit_log() {
             .any(|log| log["action"] == json!("member.added")),
         "seating the member was not audited: {body}"
     );
-}
-
-#[tokio::test]
-async fn every_organization_has_a_subscription_to_show() {
-    let client = TestClient::with_db().await;
-    let owner = register(&client).await;
-    let org = organization(&client, &owner).await;
-
-    let response = client
-        .get_auth(
-            &format!("/api/organizations/{org}/subscription"),
-            &owner.token,
-        )
-        .await;
-    response.assert_status(StatusCode::OK);
-    let body = response.json_value();
-    assert_eq!(body["subscription"]["plan_name"], json!("Free"), "{body}");
-    assert_eq!(body["subscription"]["status"], json!("active"), "{body}");
-
-    let legacy: Uuid =
-        sqlx::query_scalar("INSERT INTO organizations (name, slug) VALUES ($1, $2) RETURNING id")
-            .bind("Legacy Org")
-            .bind(format!("legacy-{}", Uuid::new_v4()))
-            .fetch_one(client.state().db())
-            .await
-            .unwrap();
-    organization_members::add_member(
-        client.state().db(),
-        legacy,
-        owner.user,
-        OrgRole::Owner,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let response = client
-        .get_auth(
-            &format!("/api/organizations/{legacy}/subscription"),
-            &owner.token,
-        )
-        .await;
-    assert_eq!(
-        response.status,
-        StatusCode::OK,
-        "an organization without a subscription row shows nothing: {}",
-        response.text()
-    );
-    assert_eq!(
-        response.json_value()["subscription"]["plan_name"],
-        json!("Free")
-    );
-
-    let usage = client
-        .get_auth(&format!("/api/organizations/{legacy}/usage"), &owner.token)
-        .await;
-    usage.assert_status(StatusCode::OK);
-    let usage = usage.json_value();
-    assert_eq!(usage["usage"]["members"], json!(1), "{usage}");
-    assert_eq!(usage["usage"]["workspaces"], json!(0), "{usage}");
-    assert_eq!(usage["usage"]["chat_messages"], json!(0), "{usage}");
-
-    let limits = client
-        .get_auth(&format!("/api/organizations/{legacy}/limits"), &owner.token)
-        .await;
-    limits.assert_status(StatusCode::OK);
-    assert_eq!(limits.json_value()["max_members"], json!(3));
 }

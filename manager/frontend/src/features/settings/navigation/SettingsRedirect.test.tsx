@@ -116,12 +116,12 @@ describe('SettingsRedirect', () => {
         { path: '/org-settings', element: <SettingsRedirect from={LegacySettings.Organization} /> },
         { path: '*', element: <LocationProbe /> },
       ],
-      { initialEntries: ['/', '/org-settings?tab=billing'], initialIndex: 1 }
+      { initialEntries: ['/', '/org-settings?tab=audit'], initialIndex: 1 }
     );
 
     render(<RouterProvider router={router} />);
 
-    expect(router.state.location.pathname).toBe('/settings/organization/billing');
+    expect(router.state.location.pathname).toBe('/settings/organization/audit');
     expect(router.state.historyAction).toBe(NavigationType.Replace);
   });
 });

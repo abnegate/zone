@@ -73,52 +73,27 @@ async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
   });
   await routeApi(
     page,
-    /\/organizations\/[^/]+\/(subscription|usage|limits|audit-logs|invitations)(?:\?|$)/,
+    /\/organizations\/[^/]+\/(audit-logs|invitations)(?:\?|$)/,
     async (route) => {
       const path = new URL(route.request().url()).pathname;
-      const body = path.endsWith('/subscription')
+      const body = path.endsWith('/audit-logs')
         ? {
-            subscription: {
-              id: 'subscription-1',
-              organization_id: 'org-1',
-              plan_id: 'pro',
-              plan_name: 'Pro',
-              status: 'active',
-              current_period_start: timestamp,
-              current_period_end: '2026-10-05T00:00:00Z',
-              cancel_at_period_end: false,
-            },
+            logs: [
+              {
+                id: 'log-1',
+                organization_id: 'org-1',
+                actor_id: 'user-1',
+                actor_email: 'admin@example.com',
+                action: 'create',
+                resource_type: 'project',
+                resource_id: 'project-1',
+                metadata: { name: 'Zone Platform' },
+                created_at: timestamp,
+              },
+            ],
+            total: 1,
           }
-        : path.endsWith('/usage')
-          ? {
-              current_period_start: timestamp,
-              current_period_end: '2026-10-05T00:00:00Z',
-              usage: { members: 3, workspaces: 1, chat_messages: 1200 },
-            }
-          : path.endsWith('/limits')
-            ? {
-                max_members: 10,
-                max_workspaces: 5,
-                max_chats_per_month: 10000,
-              }
-            : path.endsWith('/audit-logs')
-              ? {
-                  logs: [
-                    {
-                      id: 'log-1',
-                      organization_id: 'org-1',
-                      actor_id: 'user-1',
-                      actor_email: 'admin@example.com',
-                      action: 'create',
-                      resource_type: 'project',
-                      resource_id: 'project-1',
-                      metadata: { name: 'Zone Platform' },
-                      created_at: timestamp,
-                    },
-                  ],
-                  total: 1,
-                }
-              : { invitations: [] };
+        : { invitations: [] };
       await route.fulfill({ json: body });
     },
   );
@@ -324,7 +299,7 @@ for (const scenario of scenarios) {
     ).toBeVisible();
     await expect.poll(() => shell(page)).toEqual(expectedShell(scenario.width));
     await capture(page, information, 'organization-ai-defaults');
-    for (const section of ['Members', 'Devices', 'Billing', 'Audit log']) {
+    for (const section of ['Members', 'Devices', 'Audit log']) {
       await openSection(page, scenario.width, 'Organization', section);
       await capture(
         page,
