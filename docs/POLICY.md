@@ -296,6 +296,12 @@ Entries match the name Zone asks for, not where it runs:
 Combine `models` with `providers` when both matter: `models` alone can't tell
 two routes with the same name apart.
 
+**Automatic** asks a coding agent for no particular model, so the agent runs
+its own default. Zone sends it only while every layer that sets `models`
+lists the literal entry `auto`. A wildcard such as `*` or `a*` never allows
+it; otherwise Zone picks the first of the agent's models the policy allows,
+and refuses the turn when there's none.
+
 Choosing a denied model is refused in AI settings, when changing a chat's
 model, for a task's or an auto-project planner's model, and when a turn or
 task run starts. Model lists in the console show denied models disabled, with
@@ -310,9 +316,9 @@ Auto-project reviews and pull request repairs fail with the denial instead.
 
 ### What a policy can't govern
 
-- **An agent's own choice.** When Zone asks Claude Code or Codex for no
-  particular model, as with **Automatic**, the agent uses its own default,
-  which Zone doesn't see.
+- **An agent's own choice.** When the policy lists `auto` and Zone asks
+  Claude Code or Codex for no particular model, the agent uses its own
+  default, which Zone doesn't see.
 - **Subagents.** An agent can start subagents on models of its own choosing,
   inside its own process.
 

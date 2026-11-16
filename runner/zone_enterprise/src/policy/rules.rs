@@ -546,6 +546,22 @@ mod tests {
     }
 
     #[test]
+    fn auto_is_within_only_an_organization_that_names_it() {
+        let models = |models: &[&str]| Rules {
+            models: Some(models.iter().map(|&model| model.to_owned()).collect()),
+            ..Rules::default()
+        };
+        assert_eq!(
+            models(&["auto"]).within(&models(&["*"]), &[Field::Models]),
+            Err(Error::Wider(Field::Models))
+        );
+        assert_eq!(
+            models(&["auto"]).within(&models(&["auto", "claude-*"]), &[Field::Models]),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn checks_only_the_listed_fields() {
         let workspace = Rules {
             providers: Some(vec![Provider::OpenAI]),
