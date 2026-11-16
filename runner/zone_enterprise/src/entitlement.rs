@@ -9,18 +9,22 @@ pub const LICENSE_REQUIRED: &str = "license_required";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Feature {
     Sso,
+    Policy,
 }
 
 impl Feature {
     pub fn editions(self) -> &'static [Edition] {
         match self {
-            Self::Sso => &[Edition::Team, Edition::Enterprise],
+            Self::Sso | Self::Policy => &[Edition::Team, Edition::Enterprise],
         }
     }
 
-    pub fn entitled(self, license: Option<&License>, now: DateTime<Utc>) -> bool {
+    pub fn enforced(self, license: Option<&License>) -> bool {
         self.editions().contains(&Edition::from(license))
-            && matches!(status(license, now), Status::Active | Status::Grace)
+    }
+
+    pub fn entitled(self, license: Option<&License>, now: DateTime<Utc>) -> bool {
+        self.enforced(license) && matches!(status(license, now), Status::Active | Status::Grace)
     }
 }
 
@@ -77,6 +81,51 @@ mod tests {
             Feature::Sso.editions(),
             [Edition::Team, Edition::Enterprise]
         );
+    }
+
+    #[test]
+    fn agent_policy_needs_team_or_enterprise() {
+        assert_eq!(
+            Feature::Policy.editions(),
+            [Edition::Team, Edition::Enterprise]
+        );
+    }
+
+    #[test]
+    fn agent_policy_is_editable_only_while_active_or_in_grace() {
+        for tier in [Tier::Team, Tier::Enterprise] {
+            let license = license(tier);
+            for (now, expected) in moments(&license) {
+                assert_eq!(
+                    Feature::Policy.entitled(Some(&license), now),
+                    matches!(expected, Status::Active | Status::Grace),
+                    "{tier:?} while {expected:?}"
+                );
+            }
+        }
+        for (now, _) in moments(&license(Tier::Team)) {
+            assert!(!Feature::Policy.entitled(None, now), "community at {now}");
+        }
+    }
+
+    #[test]
+    fn agent_policy_is_enforced_whatever_the_status() {
+        for tier in [Tier::Team, Tier::Enterprise] {
+            let license = license(tier);
+            for (now, status) in moments(&license) {
+                assert_eq!(license.status(now), status);
+                assert!(
+                    Feature::Policy.enforced(Some(&license)),
+                    "{tier:?} while {status:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn community_enforces_nothing() {
+        assert!(!Feature::Policy.enforced(None));
+        assert!(!Feature::Sso.enforced(None));
     }
 
     #[test]
