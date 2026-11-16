@@ -77,7 +77,7 @@ export function usePullRequests(): PullRequests {
       return pullRequestsApi.list(workspaceId, false, signal);
     },
     enabled: !!workspaceId,
-    refetchInterval: (query) => pollAfter(query.state.data?.sources, LIST_POLL_MS),
+    refetchInterval: (query) => pollAfter(query.state, LIST_POLL_MS),
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     retry: retryPolled,

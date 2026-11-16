@@ -292,6 +292,30 @@ describe('useReleases', () => {
     expect(mockList).toHaveBeenCalledTimes(3);
   });
 
+  it('reads the list at the usual pace once a read fails after a source was read again', async () => {
+    await fakeTimers();
+    const revalidating: ReleasesResponse = {
+      ...current,
+      sources: [{ ...wireSourceStatus, freshness: 'revalidating' }],
+    };
+    mockList
+      .mockResolvedValueOnce(revalidating)
+      .mockRejectedValue(new ApiError('Not found', HttpStatus.NotFound));
+    renderHook(() => useReleases(), { wrapper: provider(client) });
+    await advance(0);
+    expect(mockList).toHaveBeenCalledTimes(1);
+
+    await advance(REVALIDATION_REFETCH_MS);
+    expect(mockList).toHaveBeenCalledTimes(2);
+
+    await advance(REVALIDATION_REFETCH_MS);
+    expect(mockList).toHaveBeenCalledTimes(2);
+    await advance(RELEASES_POLL_MS - REVALIDATION_REFETCH_MS * 2);
+    expect(mockList).toHaveBeenCalledTimes(2);
+    await advance(REVALIDATION_REFETCH_MS);
+    expect(mockList).toHaveBeenCalledTimes(3);
+  });
+
   it('stops reading while the page is hidden', async () => {
     await fakeTimers();
     mockList.mockResolvedValue(current);

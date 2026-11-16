@@ -62,7 +62,7 @@ export function useReleases(days?: number): Releases {
       return read(workspaceId, false, signal);
     },
     enabled: !!workspaceId,
-    refetchInterval: (query) => pollAfter(query.state.data?.sources, RELEASES_POLL_MS),
+    refetchInterval: (query) => pollAfter(query.state, RELEASES_POLL_MS),
     refetchIntervalInBackground: false,
     retry: retryPolled,
     retryDelay,
