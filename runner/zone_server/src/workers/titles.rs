@@ -7,6 +7,8 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::db::{DbResult, chats, tasks};
+use crate::services::policy::Subject;
+use crate::services::policy::background::{self, Background};
 use crate::services::route::Route;
 use crate::services::stages;
 use crate::state::AppState;
@@ -85,17 +87,28 @@ async fn summarize(state: &AppState, message: &chats::MessageRow) -> Option<Stri
     }
     let chat = chats::get_chat(state.db(), message.chat_id).await.ok()??;
     let route = Route::for_chat(state, &chat).await;
+    let requested = route.requested(&chat.model_name);
+    let background = Background {
+        workspace: chat.workspace_id,
+        subject: Subject::Chat(chat.id),
+        actor: None,
+    };
     if let Err(unusable) = route.endpoint() {
         tracing::warn!(chat_id = %chat.id, %unusable, "Titling the chat without a model");
+        if let Some(denial) = unusable.denial() {
+            background.refused(state, denial, Some(&requested)).await;
+        }
         return None;
     }
-    let requested = route.requested(&chat.model_name);
     let title = generate(
         state,
         route,
         &requested,
-        CHAT_INSTRUCTIONS,
-        &message.content,
+        background,
+        Prompt {
+            instructions: CHAT_INSTRUCTIONS,
+            content: &message.content,
+        },
     )
     .await?;
     Some(sentence_case(&title, &message.content))
@@ -106,39 +119,71 @@ async fn summarize_task(state: &AppState, task: &tasks::TaskRow) -> Option<Strin
         return None;
     }
     let route = Route::for_workspace(state, task.workspace_id).await;
+    let requested = task.model_name.as_deref().unwrap_or(stages::AUTO);
+    let background = Background {
+        workspace: Some(task.workspace_id),
+        subject: Subject::Task(task.id),
+        actor: task.created_by,
+    };
     if let Err(unusable) = route.endpoint() {
         tracing::warn!(task_id = %task.id, %unusable, "Titling the task without a model");
+        if let Some(denial) = unusable.denial() {
+            background.refused(state, denial, Some(requested)).await;
+        }
         return None;
     }
-    let requested = task.model_name.as_deref().unwrap_or(stages::AUTO);
     generate(
         state,
         route,
         requested,
-        TASK_INSTRUCTIONS,
-        &task.description,
+        background,
+        Prompt {
+            instructions: TASK_INSTRUCTIONS,
+            content: &task.description,
+        },
     )
     .await
 }
 
+/// What a title is generated from: the instructions it follows and the text it summarizes.
+struct Prompt<'a> {
+    instructions: &'a str,
+    content: &'a str,
+}
+
+/// A title for `prompt` from the first model the policy `route` runs under admits, preferring
+/// the stage's own, then the Fast, Reasoning and `requested` models. None when no model can or
+/// may title it, which `background` audits when the policy is why.
 async fn generate(
     state: &AppState,
     route: Route,
     requested: &str,
-    instructions: &str,
-    content: &str,
+    background: Background,
+    prompt: Prompt<'_>,
 ) -> Option<String> {
     let preferences = route.preferences(&state.config().comfyui.classifier_model);
-    let backend = route.backend(state).await.ok()?;
-    let endpoint = route.into_endpoint().ok()?;
+    let backend = match route.backend(state).await {
+        Ok(backend) => backend,
+        Err(error) => {
+            if let Some(denial) = error.denial() {
+                background.refused(state, denial, Some(requested)).await;
+            }
+            return None;
+        }
+    };
+    let endpoint = route.endpoint().ok()?;
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)
         .await;
-    let model = stages::summary_model(&preferences, &catalog, requested)?;
+    let configured = stages::summary_model(&preferences, &catalog, requested)?;
+    let candidates = background::candidates(&configured, &preferences, &catalog, requested);
+    let model = background
+        .model(state, &route, &backend, &candidates)
+        .await?;
     let client = endpoint.llm(model, TEMPERATURE, MAX_TOKENS, backend);
     let messages = [
-        Message::system(instructions),
-        Message::user(content.to_string()),
+        Message::system(prompt.instructions),
+        Message::user(prompt.content.to_string()),
     ];
     let response = client.chat(&messages, None).await.ok()?;
     normalize(response.choices.first()?.message.content.as_deref()?)

@@ -8,8 +8,10 @@ use abnegate_notify::Fanout;
 use abnegate_notify::Notification;
 use abnegate_notify::Notifier;
 use uuid::Uuid;
+use zone_enterprise::policy::Denial;
 
 use crate::config::AutoProjectConfig;
+use crate::db::audit::actions;
 use crate::db::auto_projects::{
     self, Claim, Kind, ProjectAutomation, ProjectTask, SettledRun, Stage, TaskAutomation,
     WriteResult,
@@ -17,6 +19,8 @@ use crate::db::auto_projects::{
 use crate::db::chats::{self, ChatPurpose};
 use crate::db::tasks::{self, Unattended};
 use crate::db::workspace_members;
+use crate::services::policy::{self, Denied, Subject};
+use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::notify::{self, ChatNotifier};
 
@@ -29,6 +33,8 @@ pub enum Admission {
     Active,
     Withheld,
     Lost,
+    /// The workspace's agent policy refuses the run, so none was started.
+    Denied,
 }
 
 /// What the driver has to hand a pipeline step.
@@ -147,8 +153,12 @@ impl Drive<'_> {
     }
 
     /// Start a run of a task, as the person automation runs as. A task a
-    /// person paused or cancelled since the pass began is parked instead.
+    /// person paused or cancelled since the pass began is parked instead, and
+    /// one the workspace's agent policy refuses is never started.
     pub async fn admit(&self, task_id: Uuid, reason: Option<&str>) -> Result<Admission, String> {
+        if self.refused(task_id).await? {
+            return Ok(Admission::Denied);
+        }
         match tasks::create_unattended_task_run(self.state.db(), task_id, self.actor, self.claim())
             .await
         {
@@ -193,6 +203,40 @@ impl Drive<'_> {
             }
             Err(error) => Err(format!("could not admit a run for task {task_id}: {error}")),
         }
+    }
+
+    /// Whether the workspace's agent policy refuses a run of `task_id`, on the
+    /// route its runs take or the model it names, which is audited. A refusal
+    /// only a policy change lifts pauses the project with its reason; a policy
+    /// that could not be read leaves the task for a later pass.
+    async fn refused(&self, task_id: Uuid) -> Result<bool, String> {
+        let Some(task) = tasks::get_task(self.state.db(), task_id)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(false);
+        };
+        let route = Route::for_workspace(self.state, self.workspace_id).await;
+        let Err(denial) = route.precheck(self.state, task.model_name.as_deref()).await else {
+            return Ok(false);
+        };
+        policy::record(
+            self.state,
+            actions::AGENT_POLICY_TURN_DENIED,
+            &Denied {
+                workspace: self.workspace_id,
+                organization: route.organization(),
+                actor: Some(self.actor),
+                subject: Subject::Task(task_id),
+                denial,
+                detail: task.model_name.as_deref(),
+            },
+        )
+        .await;
+        if denial != Denial::Unreadable {
+            self.pause_project(&denial.to_string()).await;
+        }
+        Ok(true)
     }
 
     /// Add a task the driver decided the project needs.

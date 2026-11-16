@@ -1,3 +1,5 @@
+use zone_enterprise::policy::Denial;
+
 use crate::services::backend;
 
 /// Why a run cannot start, or an attempt cannot run, on what its route chose.
@@ -12,4 +14,19 @@ pub(super) enum Unprepared {
     /// No model the backend can run is left to run it on.
     #[error("{0}")]
     Model(String),
+    /// The agent policy the route runs under refuses `model` on the backend chosen.
+    #[error("{denial}")]
+    Denied { denial: Denial, model: String },
+}
+
+impl Unprepared {
+    /// The agent policy's denial that leaves the run unprepared, and the model it refused when
+    /// it judged one.
+    pub(super) fn denial(&self) -> Option<(Denial, Option<&str>)> {
+        match self {
+            Self::Denied { denial, model } => Some((*denial, Some(model))),
+            Self::Backend(error) => error.denial().map(|denial| (denial, None)),
+            Self::Refused(_) | Self::Model(_) => None,
+        }
+    }
 }
