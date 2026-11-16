@@ -36,7 +36,8 @@ function day(offset: number, total: number, failed: number, cancelled: number): 
 export const wireOverview = {
   period: 'week',
   window: WINDOW,
-  truncated: false,
+  measured_from: null,
+  truncated: { runs: false, pull_requests: false },
   runs: {
     period: 'week',
     window: WINDOW,

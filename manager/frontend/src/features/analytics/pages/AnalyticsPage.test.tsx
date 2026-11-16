@@ -169,7 +169,7 @@ describe('AnalyticsPage', () => {
       expect(region(name)).toBeDefined();
     }
     expect(within(region('Sources')).getByText('No source')).toBeDefined();
-    expect(screen.queryByText(page.TRUNCATED)).toBeNull();
+    expect(screen.queryByRole('status')).toBeNull();
   });
 
   it('never mentions cost', () => {
@@ -179,11 +179,31 @@ describe('AnalyticsPage', () => {
     expect(container.textContent?.toLowerCase()).not.toMatch(/cost|spend|\$/);
   });
 
-  it('warns when the window held more runs than were read', () => {
-    state = { ...IDLE, overview: overview({ truncated: true }) };
+  it('says what span the runs cover when they were capped', () => {
+    state = {
+      ...IDLE,
+      overview: overview({
+        truncated: { runs: true, pull_requests: false },
+        measured_from: '2026-11-13T00:00:00',
+      }),
+    };
     renderPage();
 
-    expect(screen.getByRole('status').textContent).toBe(page.TRUNCATED);
+    expect(screen.getByRole('status').textContent).toBe(
+      'Showing the newest 10,000 runs, since Nov 13.'
+    );
+  });
+
+  it('says the pull request figures were capped apart from the runs', () => {
+    state = {
+      ...IDLE,
+      overview: overview({ truncated: { runs: false, pull_requests: true } }),
+    };
+    renderPage();
+
+    expect(screen.getByRole('status').textContent).toBe(
+      'Pull request figures cover the newest 10,000 pull requests in this period.'
+    );
   });
 
   it('draws a truncated window from the runs it read, with no trend', () => {
@@ -191,7 +211,8 @@ describe('AnalyticsPage', () => {
     state = {
       ...IDLE,
       overview: overview({
-        truncated: true,
+        truncated: { runs: true, pull_requests: false },
+        measured_from: full.runs.series[4].window.start,
         runs: {
           ...full.runs,
           series: full.runs.series.slice(4),
@@ -206,7 +227,9 @@ describe('AnalyticsPage', () => {
     };
     const { container } = renderPage();
 
-    expect(screen.getByRole('status').textContent).toBe(page.TRUNCATED);
+    expect(screen.getByRole('status').textContent).toBe(
+      'Showing the newest 10,000 runs, since Nov 13.'
+    );
     expect(container.querySelectorAll('.analytics-chart-bar')).toHaveLength(3);
     expect(screen.getByText(NO_TREND)).toBeDefined();
   });

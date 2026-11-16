@@ -906,7 +906,8 @@ function analyticsOverview(shape: {
   return {
     period: 'week',
     window: analyticsWeek,
-    truncated: false,
+    measured_from: null,
+    truncated: { runs: false, pull_requests: false },
     runs: {
       period: 'week',
       window: analyticsWeek,

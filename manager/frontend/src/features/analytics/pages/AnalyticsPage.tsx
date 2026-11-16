@@ -12,6 +12,7 @@ import {
   SectionCard,
   SourceLeaderboard,
   TaskSummaryCard,
+  TruncationNotice,
 } from '../components';
 import { useAnalytics } from '../hooks';
 import { isPeriod, PERIOD_PARAM, PERIODS, periodLabel, periodOf } from '../period';
@@ -25,8 +26,6 @@ export const NO_WORKSPACE_TITLE = 'No workspace selected';
 export const NO_WORKSPACE_DESCRIPTION = 'Choose a workspace to see its analytics.';
 export const FAILED_TITLE = 'Analytics could not be loaded';
 export const RETRY = 'Try again';
-export const TRUNCATED =
-  'This window held more runs than could be read at once, so these numbers cover the most recent ones.';
 export const NO_RUNS_DESCRIPTION = 'Runs show up here once agents finish work in this workspace.';
 
 export function noRunsTitle(period: TimePeriod): string {
@@ -112,11 +111,7 @@ export default function AnalyticsPage() {
             {error}
           </div>
         )}
-        {overview.truncated && (
-          <p className="analytics-notice" role="status">
-            {TRUNCATED}
-          </p>
-        )}
+        <TruncationNotice overview={overview} />
         <RunTiles overview={overview} />
         <div className="analytics-grid">
           {renderRuns(overview)}
