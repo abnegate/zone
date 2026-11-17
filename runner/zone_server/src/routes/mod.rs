@@ -270,6 +270,16 @@ pub fn create_router(state: AppState) -> Router {
             patch(sso::providers::update).delete(sso::providers::delete),
         )
         .route("/api/sso/enforcement", put(sso::enforcement::put))
+        .route(
+            "/api/audit-destinations",
+            get(audit::destinations::server_list).post(audit::destinations::server_create),
+        )
+        .route(
+            "/api/audit-destinations/{destination_id}",
+            get(audit::destinations::server_get)
+                .patch(audit::destinations::server_update)
+                .delete(audit::destinations::server_delete),
+        )
         .route("/api/host-mounts", get(host_mounts::instance))
         .route(
             "/api/workspaces/{workspace_id}/host-directories",
@@ -613,6 +623,16 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/organizations/{org_id}/audit-logs/{log_id}",
             get(audit::get_audit_log),
+        )
+        .route(
+            "/api/organizations/{org_id}/audit-destinations",
+            get(audit::destinations::list).post(audit::destinations::create),
+        )
+        .route(
+            "/api/organizations/{org_id}/audit-destinations/{destination_id}",
+            get(audit::destinations::get)
+                .patch(audit::destinations::update)
+                .delete(audit::destinations::delete),
         )
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
 

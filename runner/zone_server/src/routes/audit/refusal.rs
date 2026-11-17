@@ -4,12 +4,16 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use crate::auth::entitlement::Unentitled;
+use crate::db::audit::destinations::DestinationError;
 use crate::error::ServerError;
 use crate::routes::common::ErrorResponse;
+use crate::services::audit::destinations;
 
 pub const BODY_INVALID: &str = "audit_body_invalid";
 
 const FAILED: &str = "Could not load or save the audit settings";
+const SECRETS_FAILED: &str = "Could not seal or open the audit destination's secrets";
+const UNREADABLE: &str = "Could not read a stored audit destination";
 const UNAUTHENTICATED: &str = "Invalid user ID in token";
 
 #[derive(Debug)]
@@ -47,6 +51,34 @@ impl From<Unentitled> for Refusal {
 impl From<sqlx::Error> for Refusal {
     fn from(error: sqlx::Error) -> Self {
         Self::Database(error)
+    }
+}
+
+impl From<zone_enterprise::audit::Error> for Refusal {
+    fn from(error: zone_enterprise::audit::Error) -> Self {
+        Self::rejected(error.status(), error.to_string(), error.code())
+    }
+}
+
+impl From<destinations::Error> for Refusal {
+    fn from(error: destinations::Error) -> Self {
+        match error {
+            destinations::Error::Refused(error) => error.into(),
+            destinations::Error::Storage(DestinationError::Database(error)) => {
+                Self::Database(error)
+            }
+            destinations::Error::Storage(DestinationError::Duplicate) => {
+                zone_enterprise::audit::Error::DestinationDuplicate.into()
+            }
+            destinations::Error::Storage(error) => {
+                tracing::error!(%error, "Failed to seal or open an audit destination's secrets");
+                Self::Internal(SECRETS_FAILED)
+            }
+            error @ destinations::Error::Unreadable(_) => {
+                tracing::error!(%error, "Failed to read an audit destination");
+                Self::Internal(UNREADABLE)
+            }
+        }
     }
 }
 
@@ -172,6 +204,50 @@ mod tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let text = body(response).await.to_string();
         assert!(!text.contains("pool"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_enterprise_refusal_keeps_its_status_and_contract_code() {
+        let missing =
+            Refusal::from(zone_enterprise::audit::Error::DestinationNotFound).into_response();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            body(missing).await["code"],
+            zone_enterprise::audit::DESTINATION_NOT_FOUND
+        );
+        let duplicate =
+            Refusal::from(destinations::Error::from(DestinationError::Duplicate)).into_response();
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body(duplicate).await["code"],
+            zone_enterprise::audit::DESTINATION_DUPLICATE
+        );
+        let invalid = Refusal::from(zone_enterprise::audit::Error::UrlInvalid(
+            zone_enterprise::audit::UrlReason::Metadata,
+        ))
+        .into_response();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        let invalid = body(invalid).await;
+        assert_eq!(invalid["code"], zone_enterprise::audit::URL_INVALID);
+        assert_eq!(
+            invalid["error"],
+            "The URL must not point at a link-local or cloud metadata address."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_destination_that_cannot_be_read_or_unsealed_is_an_internal_error() {
+        let unreadable =
+            Refusal::from(destinations::Error::Unreadable(uuid::Uuid::nil())).into_response();
+        assert_eq!(unreadable.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body(unreadable).await["error"], UNREADABLE);
+        let unsealable = Refusal::from(destinations::Error::from(DestinationError::Unopenable(
+            uuid::Uuid::nil(),
+            abnegate_secret::Error::Decryption,
+        )))
+        .into_response();
+        assert_eq!(unsealable.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body(unsealable).await["error"], SECRETS_FAILED);
     }
 
     #[tokio::test]
