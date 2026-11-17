@@ -255,6 +255,7 @@ async fn main() {
     // router tests cover. A second CORS layer here answered every preflight
     // twice and under a different policy, and its wildcard header list could
     // not be combined with credentials at all.
+    let background = state.background().clone();
     let app = routes::create_router(state);
 
     // Start server
@@ -266,7 +267,11 @@ async fn main() {
 
     let listener = TcpListener::bind(addr).await.expect("Failed to bind");
 
-    let result = axum::serve(listener, app).await;
+    let result = tokio::select! {
+        result = axum::serve(listener, app) => Some(result),
+        () = shutdown_requested() => None,
+    };
+    drain(&background, BACKGROUND_DRAIN).await;
     recovery.abort();
     let _ = recovery.await;
     training.abort();
@@ -275,7 +280,30 @@ async fn main() {
         callback.abort();
         let _ = callback.await;
     }
-    result.expect("Server error");
+    if let Some(result) = result {
+        result.expect("Server error");
+    }
+}
+
+/// Resolves on SIGTERM or ctrl-c. Open sockets are not waited for, since a
+/// long-lived one would hold a deploy until it was killed.
+async fn shutdown_requested() {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("Could not listen for SIGTERM");
+    tokio::select! {
+        _ = terminate.recv() => tracing::info!("Stopping on SIGTERM"),
+        result = tokio::signal::ctrl_c() => {
+            result.expect("Could not listen for ctrl-c");
+            tracing::info!("Stopping on ctrl-c");
+        }
+    }
+}
+
+async fn drain(tasks: &tokio_util::task::TaskTracker, within: std::time::Duration) {
+    tasks.close();
+    if tokio::time::timeout(within, tasks.wait()).await.is_err() {
+        tracing::warn!("Background writes were still running when the drain ended");
+    }
 }
 
 /// An embedding width for the startup log; a width of 0 is one the service
@@ -300,6 +328,7 @@ const FLAG_PREFIX: &str = "--";
 const UNKNOWN_ARGUMENTS: &str = "Unknown server arguments";
 const SEALING_CONNECTIONS: u32 = 2;
 const FAILURE: i32 = 1;
+const BACKGROUND_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
 const SUCCESS: i32 = 0;
 const DIMENSION_LEARNED_ON_FIRST_EMBED: &str = "learned on the first embed";
 
@@ -432,7 +461,34 @@ mod tests {
     use super::DIMENSION_LEARNED_ON_FIRST_EMBED;
     use super::Mode;
     use super::dimension_label;
+    use super::drain;
     use super::mode;
+
+    #[tokio::test]
+    async fn the_drain_waits_for_a_write_that_is_still_running() {
+        let tasks = tokio_util::task::TaskTracker::new();
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = finished.clone();
+        tasks.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        drain(&tasks, std::time::Duration::from_secs(5)).await;
+
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn the_drain_gives_up_on_a_write_that_never_ends() {
+        let tasks = tokio_util::task::TaskTracker::new();
+        tasks.spawn(std::future::pending::<()>());
+
+        let started = std::time::Instant::now();
+        drain(&tasks, std::time::Duration::from_millis(100)).await;
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
 
     fn arguments(arguments: &[&str]) -> Vec<String> {
         arguments

@@ -15,10 +15,16 @@ export interface Automation {
 const BELL = 'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0';
 const BOLT = 'M13 2 3 14h9l-1 8 10-12h-9l1-8z';
 const WRENCH = 'M14.7 6.3a4 4 0 0 1-5 5L5 16v3h3l4.7-4.7a4 4 0 0 0 5-5l-2.4 2.4-2.1-2.1Z';
+const TICK = 'M9 11l3 3L22 4M21 12a9 9 0 1 1-6.2-8.6';
 
 function reminderDetail(metadata: MessageMetadata): string | undefined {
   const id = metadata.reminder_id;
   return typeof id === 'string' && id.trim() ? `Reminder ${id.trim()}.` : undefined;
+}
+
+function taskRunDetail(metadata: MessageMetadata): string | undefined {
+  const status = metadata.status;
+  return typeof status === 'string' && status.trim() ? `Run ${status.trim()}.` : undefined;
 }
 
 const AUTOMATION_KINDS: ReadonlyMap<string, AutomationKind> = new Map([
@@ -45,6 +51,15 @@ const AUTOMATION_KINDS: ReadonlyMap<string, AutomationKind> = new Map([
       label: 'Auto-fix',
       description: 'Written by auto-fix as it worked on a pull request of this chat.',
       icon: WRENCH,
+    },
+  ],
+  [
+    'task_run',
+    {
+      label: 'Task run',
+      description: 'Written when a task this chat started finished, not typed in this chat.',
+      icon: TICK,
+      describe: taskRunDetail,
     },
   ],
 ]);

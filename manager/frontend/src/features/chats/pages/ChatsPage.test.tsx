@@ -45,6 +45,7 @@ const mockGetChatSources = mock();
 const mockGetChatPullRequests = mock();
 const mockGetChatIndicators = mock();
 const mockGetChatTasks = mock();
+const mockGetChatTokenTotals = mock();
 const mockGetChatSubagents = mock();
 const mockSetChatSources = mock();
 const mockGetChatProviders = mock();
@@ -94,6 +95,7 @@ mock.module('../../../api/chats', () => ({
     getChatPullRequests: mockGetChatPullRequests,
     getChatIndicators: mockGetChatIndicators,
     getChatTasks: mockGetChatTasks,
+    getChatTokenTotals: mockGetChatTokenTotals,
     getChatSubagents: mockGetChatSubagents,
     setChatSources: mockSetChatSources,
     getChatProviders: mockGetChatProviders,
@@ -492,6 +494,26 @@ describe('ChatsPage', () => {
     mockGetChatIndicators.mockResolvedValue([]);
     mockGetChatTasks.mockReset();
     mockGetChatTasks.mockResolvedValue([]);
+    mockGetChatTokenTotals.mockReset();
+    mockGetChatTokenTotals.mockResolvedValue({
+      turns: 0,
+      reported_turns: 0,
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+      rounds: 0,
+      tool_calls: 0,
+      peak_context_tokens: 0,
+      instructions_tokens: 0,
+      conversation_tokens: 0,
+      tools_tokens: 0,
+      results_tokens: 0,
+      summary_tokens: 0,
+      attachments_tokens: 0,
+      overhead_tokens: 0,
+      first_at: null,
+      last_at: null,
+    });
     mockGetChatSubagents.mockReset();
     mockGetChatSubagents.mockResolvedValue({ subagents: [], complete: true });
     mockGetChatProviders.mockReset();
