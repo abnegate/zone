@@ -122,7 +122,7 @@ pub async fn create(
         state.master_key(),
         &NewDestination {
             scope,
-            kind: settings.kind().as_str().to_owned(),
+            kind: settings.kind(),
             name,
             enabled: draft.enabled,
             settings: settings.stored(),
