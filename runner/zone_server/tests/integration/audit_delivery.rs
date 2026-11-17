@@ -277,7 +277,10 @@ impl Engine {
 
     async fn hung(&self) -> impl Future<Output = usize> + '_ {
         self.receiver.hang.store(true, Ordering::SeqCst);
-        let mut stale = Box::pin(self.drain());
+        let mut stale = Box::pin(self.drain_with(Cadence {
+            concurrency: 1,
+            ..CADENCE
+        }));
         tokio::select! {
             _ = &mut stale => panic!("a hung send never finishes its drain"),
             () = self.receiver.hung.notified() => {}
