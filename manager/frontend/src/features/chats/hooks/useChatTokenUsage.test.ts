@@ -1,4 +1,14 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  jest,
+  mock,
+} from 'bun:test';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { TokenTotals } from '../types';
 
@@ -10,9 +20,10 @@ mock.module('../../../api/chats', () => ({
 
 let useChatTokenUsage: typeof import('./useChatTokenUsage').useChatTokenUsage;
 let RECORDING_SETTLE_DELAY: number;
+let LATE_RECORDING_DELAY: number;
 
 beforeAll(async () => {
-  ({ useChatTokenUsage } = await import('./useChatTokenUsage'));
+  ({ useChatTokenUsage, LATE_RECORDING_DELAY } = await import('./useChatTokenUsage'));
   ({ RECORDING_SETTLE_DELAY } = await import('./useChatPullRequests'));
 });
 
@@ -137,5 +148,103 @@ describe('useChatTokenUsage', () => {
       timeout: RECORDING_SETTLE_DELAY + 2_000,
     });
     expect(result.current?.total_tokens).toBe(30_000);
+  });
+
+  describe('with the clock under test control', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    async function advance(milliseconds: number): Promise<void> {
+      await act(async () => {
+        jest.advanceTimersByTime(milliseconds);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    }
+
+    function readsOf(chatId: string): number {
+      return mockGetChatTokenTotals.mock.calls.filter(([read]) => read === chatId).length;
+    }
+
+    it('reads once more later, so a slow write still shows', async () => {
+      mockGetChatTokenTotals.mockResolvedValue(totals(30_000));
+      const { result, rerender } = renderHook(
+        ({ streaming }) => useChatTokenUsage('chat-1', streaming),
+        { initialProps: { streaming: true } }
+      );
+      await advance(0);
+      rerender({ streaming: false });
+
+      await advance(RECORDING_SETTLE_DELAY);
+      expect(readsOf('chat-1')).toBe(2);
+      expect(result.current?.total_tokens).toBe(30_000);
+
+      mockGetChatTokenTotals.mockResolvedValue(totals(45_000));
+      await advance(LATE_RECORDING_DELAY - RECORDING_SETTLE_DELAY);
+
+      expect(readsOf('chat-1')).toBe(3);
+      expect(result.current?.total_tokens).toBe(45_000);
+      await advance(LATE_RECORDING_DELAY);
+      expect(readsOf('chat-1')).toBe(3);
+    });
+
+    it('stamps the end of a stream on the chat that was streaming, not the one opened next', async () => {
+      mockGetChatTokenTotals.mockResolvedValue(totals(30_000));
+      const { rerender } = renderHook(
+        ({ chatId, streaming }) => useChatTokenUsage(chatId, streaming),
+        { initialProps: { chatId: 'chat-1', streaming: true } }
+      );
+      await advance(0);
+
+      rerender({ chatId: 'chat-2', streaming: false });
+      await advance(0);
+      await advance(LATE_RECORDING_DELAY * 2);
+      expect(readsOf('chat-2')).toBe(1);
+    });
+
+    it('reads the chat that was streaming when it is reopened before its write has landed', async () => {
+      mockGetChatTokenTotals.mockResolvedValue(totals(30_000));
+      const { rerender } = renderHook(
+        ({ chatId, streaming }) => useChatTokenUsage(chatId, streaming),
+        { initialProps: { chatId: 'chat-1', streaming: true } }
+      );
+      await advance(0);
+
+      rerender({ chatId: 'chat-2', streaming: false });
+      await advance(1_000);
+      rerender({ chatId: 'chat-1', streaming: false });
+      await advance(0);
+      expect(readsOf('chat-1')).toBe(2);
+
+      await advance(RECORDING_SETTLE_DELAY - 1_000);
+      expect(readsOf('chat-1')).toBe(3);
+      expect(readsOf('chat-2')).toBe(1);
+    });
+
+    it('does not keep reading a chat whose reads have all been made', async () => {
+      mockGetChatTokenTotals.mockResolvedValue(totals(30_000));
+      const { rerender } = renderHook(
+        ({ chatId, streaming }) => useChatTokenUsage(chatId, streaming),
+        { initialProps: { chatId: 'chat-1', streaming: true } }
+      );
+      await advance(0);
+      rerender({ chatId: 'chat-1', streaming: false });
+      await advance(LATE_RECORDING_DELAY);
+      expect(readsOf('chat-1')).toBe(3);
+
+      rerender({ chatId: 'chat-2', streaming: false });
+      await advance(0);
+      rerender({ chatId: 'chat-1', streaming: false });
+      await advance(0);
+      expect(readsOf('chat-1')).toBe(4);
+
+      await advance(LATE_RECORDING_DELAY * 2);
+      expect(readsOf('chat-1')).toBe(4);
+    });
   });
 });

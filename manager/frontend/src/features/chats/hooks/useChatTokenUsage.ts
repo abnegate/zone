@@ -10,17 +10,23 @@ interface Reading {
 
 const NOTHING_READ: Reading = { chatId: null, totals: null };
 
+export const LATE_RECORDING_DELAY = 10_000;
+
+const RECORDING_READS = [RECORDING_SETTLE_DELAY, LATE_RECORDING_DELAY];
+const LAST_READ = Math.max(...RECORDING_READS);
+
 /**
- * What the chat has spent, read once per chat and again when a turn finishes.
- * A turn's spend is stored just after its stream ends, so the read waits for
- * that to land, even when the chat is left and reopened meanwhile. A failed
- * read keeps the last totals.
+ * What the chat has spent, read once per chat and again after each turn
+ * finishes. A turn's spend is stored just after its stream ends, so it is read
+ * once the write has had time to land and once more later for a slow one, even
+ * when the chat is left and reopened meanwhile. A failed read keeps the last
+ * totals.
  */
 export function useChatTokenUsage(chatId: string | null, streaming: boolean): TokenTotals | null {
   const [reading, setReading] = useState<Reading>(NOTHING_READ);
   const read = useRef(0);
-  const wasStreaming = useRef(streaming);
-  const settling = useRef(new Map<string, number>());
+  const streamingChat = useRef<string | null>(streaming ? chatId : null);
+  const endings = useRef(new Map<string, number>());
 
   const refresh = useCallback(async () => {
     const attempt = ++read.current;
@@ -43,22 +49,20 @@ export function useChatTokenUsage(chatId: string | null, streaming: boolean): To
   }, [refresh]);
 
   useEffect(() => {
-    const ended = wasStreaming.current && !streaming;
-    wasStreaming.current = streaming;
-    if (!chatId) return;
-    if (ended) settling.current.set(chatId, Date.now() + RECORDING_SETTLE_DELAY);
-    const deadline = settling.current.get(chatId);
-    if (deadline === undefined) return;
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      settling.current.delete(chatId);
-      return;
+    const now = Date.now();
+    const streamed = streamingChat.current;
+    streamingChat.current = streaming ? chatId : null;
+    if (streamed && (!streaming || streamed !== chatId)) endings.current.set(streamed, now);
+    for (const [ended, at] of endings.current) {
+      if (now - at >= LAST_READ) endings.current.delete(ended);
     }
-    const settled = setTimeout(() => {
-      settling.current.delete(chatId);
-      void refresh();
-    }, remaining);
-    return () => clearTimeout(settled);
+
+    const ended = chatId ? endings.current.get(chatId) : undefined;
+    if (ended === undefined) return;
+    const timers = RECORDING_READS.map((delay) => ended + delay - now)
+      .filter((remaining) => remaining > 0)
+      .map((remaining) => setTimeout(() => void refresh(), remaining));
+    return () => timers.forEach(clearTimeout);
   }, [chatId, streaming, refresh]);
 
   return reading.chatId === chatId ? reading.totals : null;
