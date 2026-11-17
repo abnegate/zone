@@ -3,6 +3,9 @@
 //! Provides endpoints for viewing and exporting audit logs.
 //! Only organization admins can access audit logs.
 
+pub mod access;
+pub mod refusal;
+
 use axum::{
     Json,
     extract::{Path, Query, State},
