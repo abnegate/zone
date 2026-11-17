@@ -393,7 +393,22 @@ pub async fn rebase(pool: &PgPool) -> DbResult<bool> {
     if !detected(pool).await? {
         return Ok(false);
     }
-    let mut lock = Lock::acquire(pool, REBASE_LOCK).await?;
+    locked(Lock::acquire(pool, REBASE_LOCK).await?).await
+}
+
+/// Like [`rebase`], but never waits for [`REBASE_LOCK`]: None while another session holds it,
+/// for a rebase or a retention batch in flight.
+pub async fn try_rebase(pool: &PgPool) -> DbResult<Option<bool>> {
+    if !detected(pool).await? {
+        return Ok(Some(false));
+    }
+    let Some(lock) = Lock::attempt(pool, REBASE_LOCK).await? else {
+        return Ok(None);
+    };
+    locked(lock).await.map(Some)
+}
+
+async fn locked(mut lock: Lock) -> DbResult<bool> {
     let outcome = retried(lock.connection()).await;
     let released = lock.release().await;
     let rebased = outcome?;

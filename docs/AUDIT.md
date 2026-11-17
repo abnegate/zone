@@ -707,6 +707,7 @@ Refusals are `{"error": "…", "code": "…"}`.
 | `audit_retention_invalid` | 400 | `days` isn't a whole number from 1 to 2147483647. |
 | `audit_export_format_invalid` | 400 | `format` isn't `ndjson` or `csv`. |
 | `audit_export_range_invalid` | 400 | A date is missing or unreadable, or the start is after the end. |
+| `audit_rebasing` | 503 | Adding a destination found positions left by a [logical restore](#logical-restores) while a rebase or a retention batch was running. Try again once it finishes. |
 
 ## Upgrading
 
@@ -747,6 +748,10 @@ restored event is, or the sequence lags (below), it counts every event with a
 transaction ID below the counter as new instead, which re-sends restored
 events that were already delivered. The rebase also drops stored batches and
 leases, so a send in flight when it ran can't move a destination's place.
+
+Adding a destination also rebases first, but never waits: when it finds
+positions to rebase while a rebase or a retention batch is running, it's
+refused with `503 audit_rebasing`. Add it again once that finishes.
 
 **A rebase can deliver events twice.** Undelivered events are always sent;
 some delivered ones are sent again. An S3 batch can land under a new key, so
