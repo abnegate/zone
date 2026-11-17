@@ -346,7 +346,12 @@ its own.
 Every 5 seconds, each Zone server process looks for destinations with events
 to send, up to 8 at a time. A destination is leased in the database for 2
 minutes while one process sends to it, so several Zone servers on one database
-share the work without sending to one destination twice at once.
+share the work without sending to one destination twice at once. Each lease
+has its own token, so a send that outlives its lease can't record a result
+once the destination is claimed again, even by the same process. After each
+batch a destination goes behind every other one waiting, so one long backlog
+doesn't hold up the rest. Retry and wait times are kept on the database's
+clock, so a Zone server whose clock is off doesn't retry early.
 
 | Kind | Batch |
 |---|---|
@@ -362,9 +367,9 @@ enabling it again, drops the stored batch and retries at once.
 A failed batch is retried after 5 seconds, then 10, 20 and so on, doubling up
 to 15 minutes, each delay shortened at random by up to a quarter. A
 `Retry-After` from a webhook or S3 store lengthens the wait, up to 15 minutes.
-Zone retries forever and never skips an event. A send still running when the
-2-minute lease runs out is abandoned as `timeout`; one cut short by a restart
-is sent again once its lease expires.
+Zone retries forever and never skips an event. A send still running 5 seconds
+before its 2-minute lease runs out is abandoned as `timeout`; one cut short by
+a restart is sent again once its lease expires.
 
 ### Health
 
@@ -391,7 +396,7 @@ say whether it still applies.
 | Code | Meaning |
 |---|---|
 | `connect` | Zone couldn't resolve the host, connect, or finish sending. |
-| `timeout` | No answer in time: 30 seconds for a webhook or S3 request, 10 seconds for each syslog step, or the 2-minute lease ran out. |
+| `timeout` | No answer in time: 30 seconds for a webhook or S3 request, 10 seconds for each syslog step, or the send ran into the end of its 2-minute lease. |
 | `tls` | The TLS handshake failed, for example on an untrusted certificate, a name mismatch or a refused client certificate. |
 | `status` | A webhook or S3 store answered with a status outside `2xx`, such as `HTTP 403`. |
 | `target` | The host resolves only to link-local or cloud metadata addresses. |

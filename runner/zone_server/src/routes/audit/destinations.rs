@@ -114,10 +114,7 @@ impl DeliveryResponse {
             next_attempt_at: proceeding.then_some(delivery.next_attempt_at),
             last_success_at: delivery.last_success_at,
             last_failure_at: delivery.last_failure_at,
-            last_error_code: delivery
-                .last_error_code
-                .as_deref()
-                .and_then(FailureCode::parse),
+            last_error_code: delivery.last_error_code,
             last_error: delivery.last_error.clone(),
             delivered_count: delivery.delivered_count,
         }
@@ -577,7 +574,7 @@ mod tests {
                 lease_expires_at: None,
                 last_success_at: Some(at),
                 last_failure_at: None,
-                last_error_code: (attempts > 0).then(|| "status".to_owned()),
+                last_error_code: (attempts > 0).then_some(FailureCode::Status),
                 last_error: (attempts > 0).then(|| "HTTP 503".to_owned()),
                 delivered_count: 7,
             },
@@ -631,13 +628,6 @@ mod tests {
         let healthy = DeliveryResponse::new(&view(true, 0), None);
         assert_eq!(healthy.health, Health::Healthy);
         assert!(healthy.next_attempt_at.is_some());
-    }
-
-    #[test]
-    fn an_unknown_stored_failure_code_is_not_sent() {
-        let mut stored = view(true, 1);
-        stored.delivery.last_error_code = Some("gone".into());
-        assert_eq!(DeliveryResponse::new(&stored, None).last_error_code, None);
     }
 
     #[test]

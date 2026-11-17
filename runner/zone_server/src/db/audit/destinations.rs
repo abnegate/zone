@@ -109,7 +109,7 @@ pub async fn create(
          SELECT * FROM destination"
     )))
     .bind(new.scope.organization_id())
-    .bind(&new.kind)
+    .bind(new.kind.as_str())
     .bind(&new.name)
     .bind(new.enabled)
     .bind(&new.settings)

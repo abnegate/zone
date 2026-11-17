@@ -5,7 +5,9 @@ use chrono::{DateTime, TimeDelta, Utc};
 use sqlx::PgPool;
 use tokio::task::JoinSet;
 use uuid::Uuid;
-use zone_server::db::audit::deliveries::{self, Delivery, Holding};
+use zone_enterprise::audit::FailureCode;
+use zone_server::db::audit::deliveries::{self, Delivery, Holding, Lease, Resume};
+use zone_server::db::audit::events;
 use zone_server::db::audit::position::Position;
 use zone_server::db::audit::scope::Scope;
 
@@ -116,6 +118,17 @@ impl Fixture {
         .unwrap();
     }
 
+    async fn claim(&self) -> Option<Lease> {
+        deliveries::claim(self.pool(), LEASE).await.unwrap()
+    }
+
+    async fn clock(&self) -> DateTime<Utc> {
+        sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(self.pool())
+            .await
+            .unwrap()
+    }
+
     async fn delivery(&self, id: Uuid) -> Delivery {
         deliveries::get(self.pool(), id)
             .await
@@ -130,6 +143,10 @@ impl Fixture {
 
 fn later(seconds: i64) -> DateTime<Utc> {
     DateTime::from_timestamp(Utc::now().timestamp() + seconds, 0).unwrap()
+}
+
+fn shifted(at: DateTime<Utc>, delay: Duration) -> DateTime<Utc> {
+    at + TimeDelta::from_std(delay).unwrap()
 }
 
 fn position(transaction_id: i64, sequence: i64) -> Position {
@@ -156,18 +173,13 @@ async fn concurrent_claims_never_share_a_destination() {
     let mut contenders = JoinSet::new();
     for _ in 0..CONTENDERS {
         let pool = fixture.pool().clone();
-        let owner = Uuid::new_v4();
-        contenders.spawn(async move {
-            let claimed = deliveries::claim(&pool, owner, LEASE).await.unwrap();
-            (owner, claimed)
-        });
+        contenders.spawn(async move { deliveries::claim(&pool, LEASE).await.unwrap() });
     }
     let mut claimed = Vec::new();
     while let Some(result) = contenders.join_next().await {
-        let (owner, delivery) = result.unwrap();
-        if let Some(delivery) = delivery {
-            assert_eq!(delivery.lease_owner, Some(owner));
-            claimed.push((owner, delivery.destination_id));
+        if let Some(lease) = result.unwrap() {
+            assert_eq!(lease.delivery.lease_owner, Some(lease.token));
+            claimed.push((lease.token, lease.delivery.destination_id));
         }
     }
 
@@ -178,15 +190,17 @@ async fn concurrent_claims_never_share_a_destination() {
         "two claims took one destination"
     );
     assert_eq!(distinct, created, "every destination was claimed once");
-    for (owner, id) in &claimed {
+    let tokens: BTreeSet<Uuid> = claimed.iter().map(|(token, _)| *token).collect();
+    assert_eq!(tokens.len(), claimed.len(), "every claim has its own token");
+    for (token, id) in &claimed {
         let delivery = fixture.delivery(*id).await;
-        assert_eq!(delivery.lease_owner, Some(*owner));
-        assert!(delivery.lease_expires_at.unwrap() > Utc::now() + TimeDelta::seconds(60));
+        assert_eq!(delivery.lease_owner, Some(*token));
+        assert!(
+            delivery.lease_expires_at.unwrap() > fixture.clock().await + TimeDelta::seconds(60)
+        );
     }
     assert_eq!(
-        deliveries::claim(fixture.pool(), Uuid::new_v4(), LEASE)
-            .await
-            .unwrap(),
+        fixture.claim().await,
         None,
         "a leased delivery is not claimed again"
     );
@@ -194,55 +208,131 @@ async fn concurrent_claims_never_share_a_destination() {
 }
 
 #[tokio::test]
-async fn an_expired_lease_can_be_claimed_again() {
+async fn a_reclaim_by_the_same_caller_refuses_every_write_under_the_stale_token() {
     let fixture = Fixture::new().await;
     let id = fixture.destination(Scope::Server, true, ORIGIN).await;
     settle(fixture.pool()).await;
-    let first = Uuid::new_v4();
-    let second = Uuid::new_v4();
 
-    let claimed = deliveries::claim(fixture.pool(), first, LEASE)
-        .await
-        .unwrap()
-        .expect("the due delivery is claimed");
-    assert_eq!(claimed.destination_id, id);
-    assert_eq!(
-        deliveries::claim(fixture.pool(), second, LEASE)
-            .await
-            .unwrap(),
-        None
-    );
+    let stale = fixture.claim().await.expect("the due delivery is claimed");
+    assert_eq!(stale.delivery.destination_id, id);
+    assert_eq!(fixture.claim().await, None);
 
     fixture.expire(id).await;
-    let reclaimed = deliveries::claim(fixture.pool(), second, LEASE)
+    let reclaimed = fixture
+        .claim()
         .await
-        .unwrap()
         .expect("a lapsed lease is claimed again");
-    assert_eq!(reclaimed.destination_id, id);
-    assert_eq!(reclaimed.lease_owner, Some(second));
+    assert_eq!(reclaimed.delivery.destination_id, id);
+    assert_ne!(
+        reclaimed.token, stale.token,
+        "a reclaim takes a fresh token"
+    );
+    assert_eq!(reclaimed.delivery.lease_owner, Some(reclaimed.token));
+    let held = fixture.delivery(id).await;
+
     assert!(
-        !deliveries::advance(fixture.pool(), id, first, position(9, 9), 1)
+        !deliveries::pin(fixture.pool(), id, stale.token, position(9, 9))
             .await
             .unwrap(),
-        "the first owner lost its lease"
+        "the stale task can't pin"
     );
-    assert_eq!(fixture.delivery(id).await.delivered, ORIGIN);
+    assert!(
+        !deliveries::advance(fixture.pool(), id, stale.token, position(9, 9), 1)
+            .await
+            .unwrap(),
+        "the stale task can't advance"
+    );
+    assert_eq!(
+        deliveries::fail(
+            fixture.pool(),
+            id,
+            stale.token,
+            FailureCode::Timeout,
+            "abandoned",
+            Duration::from_secs(60)
+        )
+        .await
+        .unwrap(),
+        None,
+        "the stale task can't fail"
+    );
+    assert!(
+        !deliveries::release(
+            fixture.pool(),
+            id,
+            stale.token,
+            Resume::After(Duration::from_secs(60))
+        )
+        .await
+        .unwrap(),
+        "the stale task can't release"
+    );
+    assert_eq!(
+        fixture.delivery(id).await,
+        held,
+        "the live lease is untouched"
+    );
+    assert!(
+        deliveries::advance(fixture.pool(), id, reclaimed.token, position(9, 9), 1)
+            .await
+            .unwrap()
+    );
+    assert_eq!(fixture.delivery(id).await.delivered, position(9, 9));
     fixture.cleanup().await;
 }
 
 #[tokio::test]
-async fn only_the_lease_owner_pins_advances_fails_or_releases() {
+async fn a_lease_dropped_by_a_rebase_refuses_the_stale_token_after_a_new_claim() {
     let fixture = Fixture::new().await;
     let id = fixture.destination(Scope::Server, true, ORIGIN).await;
     settle(fixture.pool()).await;
-    let owner = Uuid::new_v4();
+    let stale = fixture.claim().await.expect("the due delivery is claimed");
+    sqlx::query("UPDATE audit_deliveries SET transaction_id = $2 WHERE destination_id = $1")
+        .bind(id)
+        .bind(i64::from(i32::MAX))
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+
+    assert!(
+        events::rebase(fixture.pool()).await.unwrap(),
+        "the restore is rebased"
+    );
+    let rebased = fixture.delivery(id).await;
+    assert_eq!(rebased.lease_owner, None, "the rebase drops the lease");
+    let reclaimed = fixture
+        .claim()
+        .await
+        .expect("the rebased delivery is claimed");
+
+    assert!(
+        !deliveries::advance(
+            fixture.pool(),
+            id,
+            stale.token,
+            position(i64::from(i32::MAX), 1),
+            1
+        )
+        .await
+        .unwrap(),
+        "a pre-rebase advance is refused"
+    );
+    let delivery = fixture.delivery(id).await;
+    assert_eq!(delivery.delivered, rebased.delivered);
+    assert_eq!(delivery.lease_owner, Some(reclaimed.token));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn only_the_lease_holder_pins_advances_fails_or_releases() {
+    let fixture = Fixture::new().await;
+    let id = fixture.destination(Scope::Server, true, ORIGIN).await;
+    settle(fixture.pool()).await;
     let stranger = Uuid::new_v4();
     let through = position(7, 42);
+    let retry = Duration::from_secs(300);
 
-    deliveries::claim(fixture.pool(), owner, LEASE)
-        .await
-        .unwrap()
-        .expect("the due delivery is claimed");
+    let lease = fixture.claim().await.expect("the due delivery is claimed");
     let before = fixture.delivery(id).await;
     assert!(
         !deliveries::pin(fixture.pool(), id, stranger, through)
@@ -254,69 +344,80 @@ async fn only_the_lease_owner_pins_advances_fails_or_releases() {
             .await
             .unwrap()
     );
-    assert!(
-        !deliveries::fail(
+    assert_eq!(
+        deliveries::fail(
             fixture.pool(),
             id,
             stranger,
-            "status",
+            FailureCode::Status,
             "HTTP 503",
-            later(60)
+            retry
         )
         .await
-        .unwrap()
+        .unwrap(),
+        None
     );
     assert!(
-        !deliveries::release(fixture.pool(), id, stranger, later(60))
+        !deliveries::release(fixture.pool(), id, stranger, Resume::After(retry))
             .await
             .unwrap()
     );
     assert_eq!(fixture.delivery(id).await, before, "a stranger changed it");
 
     assert!(
-        deliveries::pin(fixture.pool(), id, owner, through)
+        deliveries::pin(fixture.pool(), id, lease.token, through)
             .await
             .unwrap()
     );
     assert_eq!(fixture.delivery(id).await.batch, Some(through));
 
-    let retry_at = later(300);
+    let earliest = shifted(fixture.clock().await, retry);
+    let retry_at = deliveries::fail(
+        fixture.pool(),
+        id,
+        lease.token,
+        FailureCode::Status,
+        "HTTP 503",
+        retry,
+    )
+    .await
+    .unwrap()
+    .expect("the holder records its failure");
+    let latest = shifted(fixture.clock().await, retry);
     assert!(
-        deliveries::fail(fixture.pool(), id, owner, "status", "HTTP 503", retry_at)
-            .await
-            .unwrap()
+        retry_at >= earliest && retry_at <= latest,
+        "the retry is due {retry:?} after the failure on the database's clock, not {retry_at}"
     );
     let failed = fixture.delivery(id).await;
     assert_eq!(failed.attempts, 1);
     assert_eq!(failed.batch, Some(through), "the pin survives a failure");
     assert_eq!(failed.delivered, ORIGIN);
     assert_eq!(failed.next_attempt_at, retry_at);
-    assert_eq!(failed.last_error_code.as_deref(), Some("status"));
+    assert_eq!(failed.last_error_code, Some(FailureCode::Status));
     assert_eq!(failed.last_error.as_deref(), Some("HTTP 503"));
     assert!(failed.last_failure_at.is_some());
     assert_eq!(failed.lease_owner, None);
     assert_eq!(failed.lease_expires_at, None);
     assert!(
-        !deliveries::advance(fixture.pool(), id, owner, through, 3)
+        !deliveries::advance(fixture.pool(), id, lease.token, through, 3)
             .await
             .unwrap(),
         "a failure returns the lease"
     );
     assert_eq!(
-        deliveries::claim(fixture.pool(), owner, LEASE)
-            .await
-            .unwrap(),
+        fixture.claim().await,
         None,
         "a failed delivery waits for its retry"
     );
 
     fixture.due(id).await;
-    deliveries::claim(fixture.pool(), owner, LEASE)
+    let retried = fixture
+        .claim()
         .await
-        .unwrap()
         .expect("the retry is claimed once due");
+    let claimed = fixture.clock().await;
     assert!(
-        deliveries::advance(fixture.pool(), id, owner, through, 3)
+        deliveries::advance(fixture.pool(), id, retried.token, through, 3)
             .await
             .unwrap()
     );
@@ -328,11 +429,57 @@ async fn only_the_lease_owner_pins_advances_fails_or_releases() {
     assert!(advanced.last_success_at.is_some());
     assert_eq!(advanced.lease_owner, None);
     assert_eq!(advanced.lease_expires_at, None);
+    assert!(
+        advanced.next_attempt_at >= claimed && advanced.next_attempt_at <= fixture.clock().await,
+        "an advanced delivery is due again from the moment it advanced"
+    );
     assert_eq!(
-        advanced.last_error_code.as_deref(),
-        Some("status"),
+        advanced.last_error_code,
+        Some(FailureCode::Status),
         "the last error stays on record"
     );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_advance_queues_the_delivery_behind_every_other_due_one() {
+    let fixture = Fixture::new().await;
+    let first = fixture.destination(Scope::Server, true, ORIGIN).await;
+    let second = fixture.destination(Scope::Server, true, ORIGIN).await;
+    sqlx::query(
+        "UPDATE audit_deliveries SET next_attempt_at = now() - interval '1 hour' \
+         WHERE destination_id = $1",
+    )
+    .bind(first)
+    .execute(fixture.pool())
+    .await
+    .unwrap();
+    fixture.due(second).await;
+    settle(fixture.pool()).await;
+
+    let lease = fixture
+        .claim()
+        .await
+        .expect("the earliest due delivery is claimed");
+    assert_eq!(lease.delivery.destination_id, first);
+    assert!(
+        deliveries::advance(fixture.pool(), first, lease.token, position(1, 1), 1)
+            .await
+            .unwrap()
+    );
+    let next = fixture
+        .claim()
+        .await
+        .expect("another due delivery is claimed");
+    assert_eq!(
+        next.delivery.destination_id, second,
+        "the advanced delivery waits its turn"
+    );
+    let after = fixture
+        .claim()
+        .await
+        .expect("the advanced delivery is still due");
+    assert_eq!(after.delivery.destination_id, first);
     fixture.cleanup().await;
 }
 
@@ -341,15 +488,11 @@ async fn a_release_returns_the_lease_until_the_next_attempt() {
     let fixture = Fixture::new().await;
     let id = fixture.destination(Scope::Server, true, ORIGIN).await;
     settle(fixture.pool()).await;
-    let owner = Uuid::new_v4();
-    deliveries::claim(fixture.pool(), owner, LEASE)
-        .await
-        .unwrap()
-        .expect("the due delivery is claimed");
+    let lease = fixture.claim().await.expect("the due delivery is claimed");
 
     let next = later(60);
     assert!(
-        deliveries::release(fixture.pool(), id, owner, next)
+        deliveries::release(fixture.pool(), id, lease.token, Resume::At(next))
             .await
             .unwrap()
     );
@@ -357,11 +500,48 @@ async fn a_release_returns_the_lease_until_the_next_attempt() {
     assert_eq!(released.next_attempt_at, next);
     assert_eq!(released.lease_owner, None);
     assert_eq!(released.attempts, 0);
-    assert_eq!(
-        deliveries::claim(fixture.pool(), owner, LEASE)
+    assert_eq!(fixture.claim().await, None);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_release_after_a_delay_is_timed_on_the_database_clock() {
+    let fixture = Fixture::new().await;
+    let id = fixture.destination(Scope::Server, true, ORIGIN).await;
+    settle(fixture.pool()).await;
+    let delay = Duration::from_millis(5_250);
+    let lease = fixture.claim().await.expect("the due delivery is claimed");
+
+    let earliest = shifted(fixture.clock().await, delay);
+    assert!(
+        deliveries::release(fixture.pool(), id, lease.token, Resume::After(delay))
             .await
-            .unwrap(),
-        None
+            .unwrap()
+    );
+    let latest = shifted(fixture.clock().await, delay);
+    let released = fixture.delivery(id).await;
+    assert!(
+        released.next_attempt_at >= earliest && released.next_attempt_at <= latest,
+        "due between {earliest} and {latest}, not {}",
+        released.next_attempt_at
+    );
+    assert_eq!(fixture.claim().await, None, "not due before its delay");
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_claim_reports_the_database_clock() {
+    let fixture = Fixture::new().await;
+    fixture.destination(Scope::Server, true, ORIGIN).await;
+    settle(fixture.pool()).await;
+    let before = fixture.clock().await;
+    let lease = fixture.claim().await.expect("the due delivery is claimed");
+    let after = fixture.clock().await;
+    assert!(lease.claimed_at >= before && lease.claimed_at <= after);
+    assert_eq!(
+        lease.delivery.lease_expires_at,
+        Some(shifted(lease.claimed_at, LEASE)),
+        "the lease runs from the claim"
     );
     fixture.cleanup().await;
 }
@@ -381,12 +561,7 @@ async fn claims_skip_disabled_destinations_and_deliveries_not_yet_due() {
     .unwrap();
     settle(fixture.pool()).await;
 
-    assert_eq!(
-        deliveries::claim(fixture.pool(), Uuid::new_v4(), LEASE)
-            .await
-            .unwrap(),
-        None
-    );
+    assert_eq!(fixture.claim().await, None);
     fixture.cleanup().await;
 }
 
@@ -395,29 +570,29 @@ async fn a_reset_drops_the_pin_and_failures_and_makes_the_delivery_due() {
     let fixture = Fixture::new().await;
     let id = fixture.destination(Scope::Server, true, ORIGIN).await;
     settle(fixture.pool()).await;
-    let owner = Uuid::new_v4();
-    deliveries::claim(fixture.pool(), owner, LEASE)
-        .await
-        .unwrap()
-        .expect("the due delivery is claimed");
-    deliveries::pin(fixture.pool(), id, owner, position(3, 3))
+    let lease = fixture.claim().await.expect("the due delivery is claimed");
+    deliveries::pin(fixture.pool(), id, lease.token, position(3, 3))
         .await
         .unwrap();
-    deliveries::fail(fixture.pool(), id, owner, "connect", "refused", later(3600))
-        .await
-        .unwrap();
+    deliveries::fail(
+        fixture.pool(),
+        id,
+        lease.token,
+        FailureCode::Connect,
+        "refused",
+        Duration::from_secs(3600),
+    )
+    .await
+    .unwrap();
 
     deliveries::reset(fixture.pool(), id).await.unwrap();
     let reset = fixture.delivery(id).await;
     assert_eq!(reset.batch, None);
     assert_eq!(reset.attempts, 0);
     assert_eq!(reset.delivered, ORIGIN);
-    assert!(reset.next_attempt_at <= Utc::now());
+    assert!(reset.next_attempt_at <= fixture.clock().await);
     assert!(
-        deliveries::claim(fixture.pool(), owner, LEASE)
-            .await
-            .unwrap()
-            .is_some(),
+        fixture.claim().await.is_some(),
         "a reset delivery is due at once"
     );
     fixture.cleanup().await;

@@ -5,6 +5,7 @@ use abnegate_secret::{MasterKey, SecretValue};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
+use zone_enterprise::audit::Kind;
 use zone_server::db::audit::destinations::{
     self, DUPLICATE_KEY, DestinationChanges, DestinationError, DestinationRecord, NewDestination,
 };
@@ -20,7 +21,6 @@ const SECRETS: &str = "{\"signing_secret\":\"whsec-original\"}";
 const ROTATED_SECRETS: &str = "{\"signing_secret\":\"whsec-rotated\"}";
 const NAME: &str = "Splunk";
 const OTHER_NAME: &str = "Datadog";
-const WEBHOOK: &str = "webhook";
 const URL: &str = "https://siem.example.com/hook";
 const LAN_URL: &str = "http://10.0.0.5/hook";
 const CHECK_VIOLATION: &str = "23514";
@@ -66,7 +66,7 @@ impl Fixture {
     fn new_destination(&self, scope: Scope, name: &str) -> NewDestination {
         NewDestination {
             scope,
-            kind: WEBHOOK.into(),
+            kind: Kind::Webhook,
             name: name.into(),
             enabled: true,
             settings: settings(URL),
@@ -191,7 +191,7 @@ async fn secrets_are_stored_as_an_envelope_that_opens_only_under_the_key() {
     assert!(!format!("{:?}", fixture.new_destination(scope, NAME)).contains("whsec-original"));
 
     assert_eq!(created.scope(), scope);
-    assert_eq!(created.kind, WEBHOOK);
+    assert_eq!(created.kind, Kind::Webhook.as_str());
     assert_eq!(created.name, NAME);
     assert!(created.enabled);
     assert_eq!(created.settings, settings(URL));
@@ -506,22 +506,24 @@ async fn a_rolled_back_create_leaves_nothing() {
 async fn the_table_refuses_an_unknown_kind() {
     let fixture = Fixture::new().await;
     let scope = fixture.organization().await;
-    let new = NewDestination {
-        kind: "kafka".into(),
-        ..fixture.new_destination(scope, NAME)
-    };
 
-    match fixture.attempt(&new).await {
-        Err(DestinationError::Database(error)) => assert_eq!(
-            error
-                .as_database_error()
-                .and_then(|database| database.code())
-                .as_deref(),
-            Some(CHECK_VIOLATION),
-            "{error}"
-        ),
-        result => panic!("an unknown kind is refused: {result:?}"),
-    }
-    assert_eq!(fixture.count("audit_deliveries").await, 0);
+    let error = sqlx::query(
+        "INSERT INTO audit_destinations (organization_id, kind, name, enabled, settings, secrets) \
+         VALUES ($1, 'kafka', $2, true, '{}'::jsonb, 'sealed')",
+    )
+    .bind(scope.organization_id())
+    .bind(NAME)
+    .execute(fixture.pool())
+    .await
+    .expect_err("an unknown kind is refused");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .as_deref(),
+        Some(CHECK_VIOLATION),
+        "{error}"
+    );
+    assert_eq!(fixture.count("audit_destinations").await, 0);
     fixture.cleanup().await;
 }
