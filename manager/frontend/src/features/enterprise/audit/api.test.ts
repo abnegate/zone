@@ -15,6 +15,7 @@ import {
   SERVER_EXPORT_FILENAME,
   WAITING_RETENTION,
 } from './fixtures';
+import { DOWNLOAD_INTERRUPTED } from './labels';
 import { AuditCode, AuditKind, ExportFormat } from './schemas';
 import { organizationScope, SERVER_SCOPE } from './scope';
 
@@ -269,6 +270,26 @@ describe('auditApi.download', () => {
     const error = await failure(auditApi.download(ORGANIZATION_SCOPE, EXPORT_QUERY));
 
     expect((error as AuditRefusal).code).toBe(AuditCode.LicenseRequired);
+  });
+
+  it('says the download stopped part way when the connection drops mid-stream', async () => {
+    respondWith(
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"id":"1"}\n'));
+              controller.error(new TypeError('network error'));
+            },
+          }),
+          { headers: { 'Content-Type': 'application/x-ndjson' } }
+        )
+    );
+
+    const error = await failure(auditApi.download(ORGANIZATION_SCOPE, EXPORT_QUERY));
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).message).toBe(DOWNLOAD_INTERRUPTED);
   });
 
   it('reports a refused audit row as a plain failure without a body', async () => {

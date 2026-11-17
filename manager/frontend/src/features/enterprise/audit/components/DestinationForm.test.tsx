@@ -9,6 +9,7 @@ import {
   ADD_DESTINATION_LABEL,
   BUCKET_LABEL,
   CANCEL_LABEL,
+  CERTIFICATES_REMOVED,
   CLIENT_PAIR_REQUIRED,
   EDIT_DESTINATION_TITLE,
   ENDPOINT_LABEL,
@@ -179,6 +180,7 @@ describe('DestinationForm', () => {
       expect(screen.getByLabelText(PORT_LABEL)).toHaveValue('514');
       expect(screen.getByText(UNENCRYPTED_UDP_WARNING)).toBeInTheDocument();
       expect(screen.queryByLabelText('CA certificate')).not.toBeInTheDocument();
+      expect(screen.queryByText(CERTIFICATES_REMOVED)).not.toBeInTheDocument();
     });
 
     it('asks for the client certificate and key together', () => {
@@ -280,10 +282,15 @@ describe('DestinationForm', () => {
       );
     });
 
-    it('drops saved certificates when syslog moves to UDP', async () => {
+    it('drops saved certificates when syslog moves to UDP, and says so first', async () => {
       updateDestination.mockResolvedValue(PAUSED_SYSLOG);
       renderForm(PAUSED_SYSLOG);
 
+      expect(screen.queryByText(CERTIFICATES_REMOVED)).not.toBeInTheDocument();
+      chooseSelect(PROTOCOL_LABEL, 'UDP');
+      expect(screen.getByText(CERTIFICATES_REMOVED)).toBeInTheDocument();
+      chooseSelect(PROTOCOL_LABEL, 'TCP with TLS');
+      expect(screen.queryByText(CERTIFICATES_REMOVED)).not.toBeInTheDocument();
       chooseSelect(PROTOCOL_LABEL, 'UDP');
       submit(SAVE_DESTINATION_LABEL);
 

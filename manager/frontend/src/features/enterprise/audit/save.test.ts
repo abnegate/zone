@@ -27,6 +27,10 @@ const creating = spyOn(document, 'createElement').mockImplementation(((tag: stri
   return element;
 }) as typeof document.createElement);
 
+function nextTask(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 afterEach(() => {
   created.mockClear();
   revoked.mockClear();
@@ -41,7 +45,7 @@ afterAll(() => {
 });
 
 describe('saveDownload', () => {
-  it('clicks a link to the blob under the filename while it is in the page, then cleans up', () => {
+  it('clicks a link to the blob under the filename while it is in the page, then cleans up', async () => {
     const blob = new Blob(['{}\n']);
 
     saveDownload({ blob, filename: FILENAME });
@@ -52,16 +56,26 @@ describe('saveDownload', () => {
     expect(links[0].download).toBe(FILENAME);
     expect(links[0].getAttribute('href')).toBe(URL_OF_BLOB);
     expect(links[0].isConnected).toBe(false);
+    await nextTask();
     expect(revoked).toHaveBeenCalledWith(URL_OF_BLOB);
   });
 
-  it('revokes the blob and removes the link even when the click throws', () => {
+  it('keeps the blob alive until the browser has started the download', async () => {
+    saveDownload({ blob: new Blob(['{}\n']), filename: FILENAME });
+
+    expect(revoked).not.toHaveBeenCalled();
+    await nextTask();
+    expect(revoked).toHaveBeenCalledTimes(1);
+  });
+
+  it('revokes the blob and removes the link even when the click throws', async () => {
     click.mockImplementation(() => {
       throw new Error('blocked');
     });
 
     expect(() => saveDownload({ blob: new Blob([]), filename: 'a.csv' })).toThrow('blocked');
-    expect(revoked).toHaveBeenCalledWith(URL_OF_BLOB);
     expect(links[0].isConnected).toBe(false);
+    await nextTask();
+    expect(revoked).toHaveBeenCalledWith(URL_OF_BLOB);
   });
 });

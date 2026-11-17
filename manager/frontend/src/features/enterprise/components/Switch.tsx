@@ -1,9 +1,11 @@
 import { type KeyboardEvent, useId } from 'react';
+import './Switch.css';
 
 const ACTIVATION_KEYS: ReadonlySet<string> = new Set([' ', 'Enter']);
 
 interface SwitchProps {
   label: string;
+  ariaLabel?: string;
   description?: string;
   hint?: string;
   checked: boolean;
@@ -13,6 +15,7 @@ interface SwitchProps {
 
 export function Switch({
   label,
+  ariaLabel,
   description,
   hint,
   checked,
@@ -42,32 +45,33 @@ export function Switch({
   };
 
   return (
-    <div className="sso-switch">
+    <div className="enterprise-switch">
       <button
         id={controlId}
         type="button"
         role="switch"
-        className="sso-switch-control"
+        className="enterprise-switch-control"
         aria-checked={checked}
-        aria-labelledby={labelId}
+        aria-label={ariaLabel}
+        aria-labelledby={ariaLabel ? undefined : labelId}
         aria-describedby={describedBy || undefined}
         disabled={disabled}
         onClick={toggle}
         onKeyDown={press}
       >
-        <span className="sso-switch-thumb" aria-hidden="true" />
+        <span className="enterprise-switch-thumb" aria-hidden="true" />
       </button>
-      <div className="sso-switch-text">
-        <label id={labelId} htmlFor={controlId} className="sso-switch-label">
+      <div className="enterprise-switch-text">
+        <label id={labelId} htmlFor={controlId} className="enterprise-switch-label">
           {label}
         </label>
         {description && (
-          <p id={descriptionId} className="sso-switch-description">
+          <p id={descriptionId} className="enterprise-switch-description">
             {description}
           </p>
         )}
         {hint && (
-          <p id={hintId} className="sso-switch-description">
+          <p id={hintId} className="enterprise-switch-description">
             {hint}
           </p>
         )}

@@ -1,10 +1,33 @@
 import { absoluteTime } from '../../../shared/utils/time';
+import { LicenseStatus } from '../schemas';
 import { Tone } from '../status';
 import {
+  BACKLOG_WAITING,
+  DAY_PLURAL,
+  DAY_SINGULAR,
+  DELETE_CONFIRMATION,
+  DELETED_COUNT,
+  DOWNLOAD_READ_ONLY,
   EDITION_NOTICE,
+  ENABLED_DESTINATION_LABEL,
+  ENTERPRISE_NOTICE,
+  EVENT_PLURAL,
+  EVENT_SINGULAR,
+  EXPIRED_COUNT,
+  HELD_COUNT,
   KEPT_FOREVER,
   LAPSED_NOTICE,
+  LAPSED_TEAM_NOTICE,
+  READ_ONLY_EDITION,
+  READ_ONLY_LAPSED,
+  READ_ONLY_UNLICENSED,
+  READ_ONLY_UNVERIFIED,
+  RETENTION_PERIOD,
+  RETENTION_PERIOD_SAVED,
+  STALLED_NOTICE,
   TEST_DELIVERED,
+  TEST_DESTINATION_LABEL,
+  TEST_NOT_DELIVERED,
   UNENCRYPTED_ENDPOINT_WARNING,
   UNENCRYPTED_HTTP_WARNING,
   UNENCRYPTED_UDP_WARNING,
@@ -57,6 +80,26 @@ export const DestinationField = {
 } as const;
 
 export type DestinationField = (typeof DestinationField)[keyof typeof DestinationField];
+
+export const LicensedFeature = {
+  Export: 'export',
+  Streaming: 'streaming',
+  Retention: 'retention',
+} as const;
+
+export type LicensedFeature = (typeof LicensedFeature)[keyof typeof LicensedFeature];
+
+export const NoticeTone = {
+  Upgrade: 'upgrade',
+  Warning: 'warning',
+} as const;
+
+export type NoticeTone = (typeof NoticeTone)[keyof typeof NoticeTone];
+
+export interface Notice {
+  tone: NoticeTone;
+  message: string;
+}
 
 const REFUSALS: Readonly<Record<AuditCodeValue, string>> = {
   [AuditCode.LicenseRequired]:
@@ -127,6 +170,18 @@ const PAUSES: Readonly<Record<StreamingPauseValue, string>> = {
   [StreamingPause.Lapsed]: LAPSED_NOTICE,
   [StreamingPause.Unverified]: UNVERIFIED_NOTICE,
 };
+
+const READ_ONLY: Readonly<Record<StreamingPauseValue, string>> = {
+  [StreamingPause.Unlicensed]: READ_ONLY_UNLICENSED,
+  [StreamingPause.Edition]: READ_ONLY_EDITION,
+  [StreamingPause.Lapsed]: READ_ONLY_LAPSED,
+  [StreamingPause.Unverified]: READ_ONLY_UNVERIFIED,
+};
+
+const UPGRADES: ReadonlySet<StreamingPauseValue> = new Set([
+  StreamingPause.Unlicensed,
+  StreamingPause.Edition,
+]);
 
 const WAITS: Readonly<Record<RetentionWaitValue, string>> = {
   [RetentionWait.Backlog]: 'Still delivering events from before the cutoff.',
@@ -207,10 +262,24 @@ const FACILITY_NAMES = [
 
 const PLAIN_HTTP = /^\s*http:/i;
 
+const SLOT = '{}';
+
 const ADMIN_CODES: ReadonlySet<string> = new Set(Object.keys(REFUSALS));
 
-function plural(count: number, noun: string): string {
-  return `${count.toLocaleString()} ${noun}${count === 1 ? '' : 's'}`;
+function fill(template: string, value: string): string {
+  return template.replace(SLOT, () => value);
+}
+
+function counted(count: number, singular: string, plural: string): string {
+  return `${count.toLocaleString()} ${count === 1 ? singular : plural}`;
+}
+
+function events(count: number): string {
+  return counted(count, EVENT_SINGULAR, EVENT_PLURAL);
+}
+
+function days(count: number): string {
+  return counted(count, DAY_SINGULAR, DAY_PLURAL);
 }
 
 export function isAuditCode(code: string): code is AuditCodeValue {
@@ -255,15 +324,51 @@ export function testResultMessage(result: TestResponse): string {
   if (result.delivered) {
     return TEST_DELIVERED;
   }
-  return `The test event wasn't delivered. ${failureText(result.error_code, result.error)}`.trim();
+  return fill(TEST_NOT_DELIVERED, failureText(result.error_code, result.error)).trim();
+}
+
+export function testLabel(name: string): string {
+  return fill(TEST_DESTINATION_LABEL, name);
+}
+
+export function enabledLabel(name: string): string {
+  return fill(ENABLED_DESTINATION_LABEL, name);
 }
 
 export function pauseMessage(pause: StreamingPauseValue): string {
   return PAUSES[pause];
 }
 
-export function standingNotice(standing: Standing): string | null {
-  return standing.pause === null ? null : pauseMessage(standing.pause);
+function noticeMessage(standing: Standing, pause: StreamingPauseValue): string {
+  if (pause !== StreamingPause.Edition) {
+    return pauseMessage(pause);
+  }
+  if (standing.status === LicenseStatus.Lapsed) {
+    return LAPSED_TEAM_NOTICE;
+  }
+  return standing.export ? EDITION_NOTICE : ENTERPRISE_NOTICE;
+}
+
+export function standingNotice(standing: Standing): Notice | null {
+  const { pause } = standing;
+  if (pause === null) {
+    return null;
+  }
+  const upgrade = UPGRADES.has(pause) && standing.status !== LicenseStatus.Lapsed;
+  return {
+    tone: upgrade ? NoticeTone.Upgrade : NoticeTone.Warning,
+    message: noticeMessage(standing, pause),
+  };
+}
+
+export function readOnlyMessage(standing: Standing, feature: LicensedFeature): string | null {
+  if (standing[feature]) {
+    return null;
+  }
+  if (feature === LicensedFeature.Export) {
+    return DOWNLOAD_READ_ONLY;
+  }
+  return READ_ONLY[standing.pause ?? StreamingPause.Lapsed];
 }
 
 export function waitMessage(wait: RetentionWaitValue): string {
@@ -304,7 +409,7 @@ export function facilityLabel(facility: number): string {
 }
 
 export function stalledMessage(stalledSince: string): string {
-  return `Delivery is waiting behind a database transaction that has been open since ${absoluteTime(stalledSince)}. Events written after it are sent once it finishes; nothing is lost.`;
+  return fill(STALLED_NOTICE, absoluteTime(stalledSince));
 }
 
 export function unencryptedWarning(settings: SettingsRequest): string | null {
@@ -319,27 +424,31 @@ export function unencryptedWarning(settings: SettingsRequest): string | null {
 }
 
 export function backlogText(backlog: number): string {
-  return backlog === 0 ? UP_TO_DATE : `${plural(backlog, 'event')} waiting`;
+  return backlog === 0 ? UP_TO_DATE : fill(BACKLOG_WAITING, events(backlog));
 }
 
-export function retentionText(days: number | null): string {
-  return days === null
-    ? KEPT_FOREVER
-    : `Events older than ${plural(days, 'day')} are deleted once every enabled destination has delivered them.`;
+export function retentionText(period: number | null): string {
+  return period === null ? KEPT_FOREVER : fill(RETENTION_PERIOD, days(period));
+}
+
+export function retentionSummary(period: number | null, applies: boolean): string {
+  return applies || period === null
+    ? retentionText(period)
+    : fill(RETENTION_PERIOD_SAVED, days(period));
 }
 
 export function expiredText(expired: number): string {
-  return `${plural(expired, 'event')} past the retention period`;
+  return fill(EXPIRED_COUNT, events(expired));
 }
 
 export function heldText(held: number): string {
-  return `${plural(held, 'event')} kept until delivered`;
+  return fill(HELD_COUNT, events(held));
 }
 
 export function deletedText(deleted: number): string {
-  return `${plural(deleted, 'event')} deleted`;
+  return fill(DELETED_COUNT, events(deleted));
 }
 
 export function deleteMessage(name: string): string {
-  return `Delete ${name}? Zone stops sending audit events to it and forgets its secrets. Events it hasn't received are no longer held back from retention.`;
+  return fill(DELETE_CONFIRMATION, name);
 }

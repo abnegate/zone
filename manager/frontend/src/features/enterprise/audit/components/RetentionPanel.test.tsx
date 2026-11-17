@@ -5,9 +5,11 @@ import { MemoryRouter } from 'react-router-dom';
 import { AuditRefusal } from '../AuditRefusal';
 import {
   COMMUNITY_RETENTION,
+  COMMUNITY_SAVED_RETENTION,
   ENTERPRISE_RETENTION,
   FOREVER_RETENTION,
   LAPSED_RETENTION,
+  LAPSED_TEAM_RETENTION,
   ORGANIZATION_SCOPE,
   TEAM_RETENTION,
   WAITING_RETENTION,
@@ -17,13 +19,21 @@ import {
   KEEP_FOREVER_LABEL,
   KEPT_FOREVER,
   NOT_SWEPT,
-  READ_ONLY_NOTICE,
+  READ_ONLY_EDITION,
+  READ_ONLY_LAPSED,
+  READ_ONLY_UNLICENSED,
   RETENTION_DAYS_LABEL,
   RETENTION_NOT_APPLIED,
   RETENTION_SAVED,
   SAVE_RETENTION_LABEL,
 } from '../labels';
-import { deletedText, refusalMessage, retentionText, waitMessage } from '../messages';
+import {
+  deletedText,
+  refusalMessage,
+  retentionSummary,
+  retentionText,
+  waitMessage,
+} from '../messages';
 import { AuditCode, RetentionWait } from '../schemas';
 import type { RetentionResponse } from '../types';
 
@@ -157,9 +167,21 @@ describe('RetentionPanel', () => {
   it('shows Community that retention needs a license and nothing to change', () => {
     renderPanel(COMMUNITY_RETENTION);
 
+    expect(screen.getAllByText(/kept forever/)).toHaveLength(1);
+    expect(screen.getByText(KEPT_FOREVER)).toBeInTheDocument();
     expect(screen.getByText(RETENTION_NOT_APPLIED)).toBeInTheDocument();
-    expect(screen.getByText(READ_ONLY_NOTICE)).toBeInTheDocument();
+    expect(screen.getByText(READ_ONLY_UNLICENSED)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: SAVE_RETENTION_LABEL })).toBeNull();
+  });
+
+  it('says a period saved before the license was removed resumes once one is installed', () => {
+    renderPanel(COMMUNITY_SAVED_RETENTION);
+
+    expect(screen.getByText(retentionSummary(90, false))).toBeInTheDocument();
+    expect(screen.queryByText(retentionText(90))).toBeNull();
+    expect(screen.queryByText(RETENTION_NOT_APPLIED)).toBeNull();
+    expect(screen.queryByText(CUTOFF_LABEL)).toBeNull();
+    expect(screen.getByText(READ_ONLY_UNLICENSED)).toBeInTheDocument();
   });
 
   it('keeps applying a lapsed period read-only', () => {
@@ -167,15 +189,19 @@ describe('RetentionPanel', () => {
 
     expect(screen.getByText(retentionText(90))).toBeInTheDocument();
     expect(screen.queryByText(RETENTION_NOT_APPLIED)).toBeNull();
-    expect(screen.getByText(waitMessage(RetentionWait.Paused))).toBeInTheDocument();
-    expect(screen.getByText(READ_ONLY_NOTICE)).toBeInTheDocument();
+    expect(screen.getAllByText(waitMessage(RetentionWait.Paused))).toHaveLength(2);
+    expect(screen.getByText(READ_ONLY_LAPSED)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: SAVE_RETENTION_LABEL })).toBeNull();
   });
 
-  it('leaves Team without a way to change the period', () => {
-    renderPanel(TEAM_RETENTION);
+  it('leaves Team without a way to change the period and says it needs Enterprise', () => {
+    for (const retention of [TEAM_RETENTION, LAPSED_TEAM_RETENTION]) {
+      const { unmount } = renderPanel(retention);
 
-    expect(screen.getByText(KEPT_FOREVER)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: SAVE_RETENTION_LABEL })).toBeNull();
+      expect(screen.getByText(KEPT_FOREVER)).toBeInTheDocument();
+      expect(screen.getByText(READ_ONLY_EDITION)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: SAVE_RETENTION_LABEL })).toBeNull();
+      unmount();
+    }
   });
 });

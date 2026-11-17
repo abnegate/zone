@@ -138,6 +138,17 @@ export function draftSecrets(draft: DestinationDraft): readonly SecretNameValue[
   return KIND_SECRETS[draft.kind];
 }
 
+export function removesCertificates(
+  draft: DestinationDraft,
+  saved: readonly SecretNameValue[]
+): boolean {
+  return (
+    draft.kind === AuditKind.Syslog &&
+    !certificatesAllowed(draft) &&
+    saved.some((name) => CERTIFICATES.includes(name))
+  );
+}
+
 export function clearable(name: SecretNameValue): boolean {
   return CERTIFICATES.includes(name);
 }

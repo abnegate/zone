@@ -1,7 +1,7 @@
 import { Badge, type BadgeProps, Button } from '@zone/ui';
 import { useState } from 'react';
 import { absoluteTime, relativeTime } from '../../../../shared/utils/time';
-import { Switch } from '../../sso/components/Switch';
+import { Switch } from '../../components/Switch';
 import { Tone } from '../../status';
 import { useTestAuditDestination, useUpdateAuditDestination } from '../hooks';
 import {
@@ -26,12 +26,14 @@ import {
 import {
   backlogText,
   deliveryError,
+  enabledLabel,
   healthLabel,
   healthTone,
   kindLabel,
   protocolLabel,
   refusalMessage,
   stalledMessage,
+  testLabel,
   testResultMessage,
   unencryptedWarning,
 } from '../messages';
@@ -184,6 +186,7 @@ function DestinationRow({
       <div className="audit-destination-controls">
         <Switch
           label={ENABLED_LABEL}
+          ariaLabel={enabledLabel(destination.name)}
           checked={destination.enabled}
           disabled={toggling || (!streaming && !destination.enabled)}
           onChange={onToggle}
@@ -191,7 +194,14 @@ function DestinationRow({
         <div className="audit-destination-actions">
           {streaming && (
             <>
-              <Button type="button" variant="ghost" size="sm" loading={testing} onClick={onTest}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                loading={testing}
+                aria-label={testLabel(destination.name)}
+                onClick={onTest}
+              >
                 {TEST_LABEL}
               </Button>
               <Button

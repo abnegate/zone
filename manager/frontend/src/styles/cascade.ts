@@ -23,6 +23,7 @@ import '../features/models/components/TrainPanel.css';
 import '../features/models/pages/ModelsPage.css';
 import '../features/settings/server/components/ConnectDevicesSection.css';
 import '../features/enterprise/components/LicenseSection.css';
+import '../features/enterprise/components/Switch.css';
 import '../features/enterprise/sso/components/SsoSection.css';
 import '../features/enterprise/policy/components/PolicySection.css';
 import '../features/enterprise/audit/components/AuditExportSection.css';

@@ -9,12 +9,11 @@ import {
   DOWNLOADED_LABEL,
   END_DATE_LABEL,
   FORMAT_LABEL,
-  READ_ONLY_NOTICE,
   START_DATE_LABEL,
 } from '../labels';
-import { formatLabel, refusalMessage } from '../messages';
+import { formatLabel, LicensedFeature, readOnlyMessage, refusalMessage } from '../messages';
 import { AuditCode, EXPORT_FORMATS, ExportFormat } from '../schemas';
-import type { AuditScope, ExportFormat as ExportFormatValue } from '../types';
+import type { AuditScope, ExportFormat as ExportFormatValue, Standing } from '../types';
 
 const DEFAULT_RANGE_DAYS = 30;
 
@@ -33,11 +32,13 @@ function isoDate(time: number): string {
 
 interface ExportPanelProps {
   scope: AuditScope;
-  entitled: boolean;
+  standing: Standing;
 }
 
-export function ExportPanel({ scope, entitled }: ExportPanelProps) {
+export function ExportPanel({ scope, standing }: ExportPanelProps) {
   const base = useId();
+  const startId = `${base}-start`;
+  const entitled = standing.export;
   const { download, pending, refusal, error, reset } = useAuditExport(scope);
   const [start, setStart] = useState(() =>
     isoDate(Date.now() - DEFAULT_RANGE_DAYS * DAY_MILLISECONDS)
@@ -78,7 +79,7 @@ export function ExportPanel({ scope, entitled }: ExportPanelProps) {
       <form className="audit-export-form" onSubmit={submit} noValidate>
         <fieldset className="audit-export-fields" disabled={locked}>
           <Input
-            id={`${base}-start`}
+            id={startId}
             label={START_DATE_LABEL}
             type="date"
             value={start}
@@ -97,6 +98,8 @@ export function ExportPanel({ scope, entitled }: ExportPanelProps) {
             value={end}
             min={start || undefined}
             disabled={locked}
+            aria-invalid={rangeError !== undefined}
+            aria-describedby={rangeError ? `${startId}-error` : undefined}
             onChange={(event) => {
               setEnd(event.target.value);
               touch();
@@ -130,7 +133,9 @@ export function ExportPanel({ scope, entitled }: ExportPanelProps) {
           </Button>
         </div>
       </form>
-      <p className="audit-hint">{entitled ? DOWNLOAD_MEMORY_NOTE : READ_ONLY_NOTICE}</p>
+      <p className="audit-hint">
+        {readOnlyMessage(standing, LicensedFeature.Export) ?? DOWNLOAD_MEMORY_NOTE}
+      </p>
     </div>
   );
 }

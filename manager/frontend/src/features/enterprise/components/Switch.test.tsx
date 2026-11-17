@@ -75,6 +75,16 @@ describe('Switch', () => {
     expect(control()).toHaveAttribute('aria-checked', 'false');
   });
 
+  it('takes a fuller accessible name when the visible label alone is ambiguous', () => {
+    render(<Switch label="Enabled" ariaLabel="Enabled for Graylog" checked onChange={mock()} />);
+
+    expect(screen.getByRole('switch', { name: 'Enabled for Graylog' })).toHaveAttribute(
+      'aria-checked',
+      'true'
+    );
+    expect(screen.queryByRole('switch', { name: 'Enabled' })).toBeNull();
+  });
+
   it('does not change while disabled', () => {
     const change = mock();
     render(<Switch label="Enabled" checked={false} disabled onChange={change} />);

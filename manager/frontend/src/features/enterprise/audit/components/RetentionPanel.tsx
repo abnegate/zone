@@ -10,7 +10,6 @@ import {
   KEEP_FOREVER_LABEL,
   LAST_SWEEP_LABEL,
   NOT_SWEPT,
-  READ_ONLY_NOTICE,
   RETENTION_DAYS_HINT,
   RETENTION_DAYS_LABEL,
   RETENTION_DESCRIPTION,
@@ -19,7 +18,14 @@ import {
   RETENTION_TITLE,
   SAVE_RETENTION_LABEL,
 } from '../labels';
-import { deletedText, refusalMessage, retentionText, waitMessage } from '../messages';
+import {
+  deletedText,
+  LicensedFeature,
+  readOnlyMessage,
+  refusalMessage,
+  retentionSummary,
+  waitMessage,
+} from '../messages';
 import { AuditCode, RETENTION_DAYS_MAXIMUM, RETENTION_DAYS_MINIMUM } from '../schemas';
 import type { AuditScope, RetentionResponse } from '../types';
 import { AuditUpgradeNotice } from './AuditUpgradeNotice';
@@ -129,6 +135,7 @@ interface RetentionPanelProps {
 export function RetentionPanel({ scope, retention }: RetentionPanelProps) {
   const { standing, days, cutoff, holders } = retention;
   const applied = standing.applies && days !== null;
+  const readOnly = readOnlyMessage(standing, LicensedFeature.Retention);
 
   return (
     <div className="settings-card audit-card audit-retention">
@@ -136,8 +143,8 @@ export function RetentionPanel({ scope, retention }: RetentionPanelProps) {
         <h3 className="audit-card-title">{RETENTION_TITLE}</h3>
         <p className="audit-hint">{RETENTION_DESCRIPTION}</p>
       </div>
-      <p className="audit-summary">{retentionText(days)}</p>
-      {!standing.applies && <p className="audit-hint">{RETENTION_NOT_APPLIED}</p>}
+      <p className="audit-summary">{retentionSummary(days, standing.applies)}</p>
+      {!standing.applies && days === null && <p className="audit-hint">{RETENTION_NOT_APPLIED}</p>}
       {applied && (
         <dl className="audit-stats">
           {cutoff && (
@@ -186,10 +193,10 @@ export function RetentionPanel({ scope, retention }: RetentionPanelProps) {
           </ul>
         </div>
       )}
-      {standing.retention ? (
+      {readOnly === null ? (
         <RetentionForm scope={scope} days={days} />
       ) : (
-        <p className="audit-hint">{READ_ONLY_NOTICE}</p>
+        <p className="audit-hint">{readOnly}</p>
       )}
     </div>
   );

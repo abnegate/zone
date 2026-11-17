@@ -7,6 +7,7 @@ import {
   draftSecrets,
   emptyDraft,
   generateSecret,
+  removesCertificates,
   updateRequest,
   withProtocol,
 } from './draft';
@@ -145,6 +146,17 @@ describe('updateRequest', () => {
       secrets: { ca_certificate: '' },
     });
     expect(UpdateDestinationRequestSchema.parse(request)).toEqual(request);
+  });
+});
+
+describe('removesCertificates', () => {
+  it('warns only when saved certificates would go with a move to UDP', () => {
+    const tls = draftOf(PAUSED_SYSLOG);
+    const udp = withProtocol(tls, SyslogProtocol.Udp);
+    expect(removesCertificates(udp, PAUSED_SYSLOG.secrets)).toBe(true);
+    expect(removesCertificates(tls, PAUSED_SYSLOG.secrets)).toBe(false);
+    expect(removesCertificates(udp, [])).toBe(false);
+    expect(removesCertificates(draftOf(FAILING_WEBHOOK), FAILING_WEBHOOK.secrets)).toBe(false);
   });
 });
 

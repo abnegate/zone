@@ -3,6 +3,7 @@ import { API_BASE, client } from '../../../api/client';
 import { parse } from '../../../validation';
 import { AuditRefusal } from './AuditRefusal';
 import { dispositionFilename, exportFilename } from './filename';
+import { DOWNLOAD_INTERRUPTED } from './labels';
 import {
   AuditRefusalSchema,
   AuditScopeKind,
@@ -70,6 +71,14 @@ async function send(url: string, init: RequestInit, action: string): Promise<Res
 
 function body(value: unknown): string {
   return JSON.stringify(value);
+}
+
+async function file(response: Response): Promise<Blob> {
+  try {
+    return await response.blob();
+  } catch {
+    throw new ApiError(DOWNLOAD_INTERRUPTED, response.status);
+  }
 }
 
 export const auditApi = {
@@ -163,7 +172,7 @@ export const auditApi = {
       'Failed to download the audit log'
     );
     return {
-      blob: await response.blob(),
+      blob: await file(response),
       filename: dispositionFilename(
         response.headers.get(CONTENT_DISPOSITION),
         exportFilename(scope, validated)
