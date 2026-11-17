@@ -97,6 +97,31 @@ describe('useChatTokenUsage', () => {
     expect(mockGetChatTokenTotals).toHaveBeenCalledTimes(2);
   });
 
+  it('reads a chat reopened before its last turn was recorded once that turn lands', async () => {
+    let ended = Number.POSITIVE_INFINITY;
+    mockGetChatTokenTotals.mockImplementation(async (chatId: string) => {
+      if (chatId === 'chat-2') return totals(90_000);
+      const recorded = Date.now() - ended >= RECORDING_SETTLE_DELAY / 2;
+      return totals(recorded ? 45_000 : 30_000);
+    });
+    const { result, rerender } = renderHook(
+      ({ chatId, streaming }) => useChatTokenUsage(chatId, streaming),
+      { initialProps: { chatId: 'chat-1', streaming: true } }
+    );
+    await waitFor(() => expect(result.current?.total_tokens).toBe(30_000));
+
+    ended = Date.now();
+    rerender({ chatId: 'chat-1', streaming: false });
+    rerender({ chatId: 'chat-2', streaming: false });
+    await waitFor(() => expect(result.current?.total_tokens).toBe(90_000));
+    rerender({ chatId: 'chat-1', streaming: false });
+    await waitFor(() => expect(result.current?.total_tokens).toBe(30_000));
+
+    await waitFor(() => expect(result.current?.total_tokens).toBe(45_000), {
+      timeout: RECORDING_SETTLE_DELAY + 2_000,
+    });
+  });
+
   it('keeps the last totals when a read fails', async () => {
     mockGetChatTokenTotals.mockResolvedValue(totals(30_000));
     const { result, rerender } = renderHook(
