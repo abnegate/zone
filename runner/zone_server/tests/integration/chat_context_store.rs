@@ -750,13 +750,10 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
         let row = chats::update_chat(
             &pool,
             chat,
-            None,
-            Some(enabled),
-            None,
-            None,
-            None,
-            None,
-            None,
+            chats::ChatChange {
+                agent_enabled: Some(enabled),
+                ..chats::ChatChange::default()
+            },
         )
         .await
         .unwrap()

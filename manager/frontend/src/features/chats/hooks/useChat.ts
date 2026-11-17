@@ -1575,6 +1575,12 @@ export function useChat(
   const setContextTokens = (tokens: number): Promise<void> =>
     updateAgentSettings({ context_tokens: tokens });
 
+  const setOffline = (offline: boolean): Promise<void> => updateAgentSettings({ offline });
+
+  /** `null` takes the chat out of whichever project it is in. */
+  const setProject = (projectId: string | null): Promise<void> =>
+    updateAgentSettings(projectId ? { project_id: projectId } : { clear_project: true });
+
   const setCharacter = (character: ChatCharacter): Promise<void> =>
     updateAgentSettings({ character });
 
@@ -1618,6 +1624,8 @@ export function useChat(
     setReasoningEffort,
     setModelName,
     setContextTokens,
+    setOffline,
+    setProject,
     setCharacter,
     clearCharacter,
     deleteMessage,

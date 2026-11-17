@@ -2321,13 +2321,10 @@ mod tests {
         let chat = chats::update_chat(
             &pool,
             created.id,
-            None,
-            None,
-            None,
-            None,
-            Some(ReasoningEffort::Max),
-            None,
-            None,
+            chats::ChatChange {
+                reasoning_effort: Some(ReasoningEffort::Max),
+                ..chats::ChatChange::default()
+            },
         )
         .await
         .expect("the chat's effort to be saved")

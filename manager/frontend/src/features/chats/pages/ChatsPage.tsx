@@ -1,14 +1,4 @@
-import {
-  Button,
-  Checkbox,
-  EmptyState,
-  Input,
-  Modal,
-  Select,
-  Tabs,
-  TabsList,
-  TabsTrigger,
-} from '@zone/ui';
+import { Button, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { isProtectedArtifactUrl } from '../../../api/protectedImages';
@@ -81,7 +71,6 @@ import {
   AUTO_EFFORT,
   AUTO_MODEL,
   arrangeChats,
-  asksModelName,
   attachmentId,
   attachmentMetadata,
   audioAttachments,
@@ -97,9 +86,6 @@ import {
   chatShowsReasoning,
   chatSources,
   contextTokenOptions,
-  DEFAULT_NEW_CHAT,
-  DEFAULT_PROVIDER,
-  defaultContextTokens,
   effectiveOffer,
   effortsFor,
   findInstalledModel,
@@ -116,12 +102,9 @@ import {
   isWaiting,
   keepEffort,
   listSort,
-  MODEL_NAME_PLACEHOLDER,
-  MODEL_PLACEHOLDER,
   matchesFilter,
   modelLabel,
-  modelSelectOptions,
-  type NewChatSettings,
+  newChatRequest,
   newChatSettings,
   observationKey,
   offersAgent,
@@ -129,7 +112,6 @@ import {
   offersContextOn,
   parseCharacterFile,
   parseCharacterText,
-  providerChoices,
   readAttachment,
   readChatFilter,
   readChatGroupBy,
@@ -151,7 +133,6 @@ import './ChatsPage.css';
 
 const UNTITLED_CHAT_TITLE = 'Untitled chat';
 const NO_PROJECT = 'none';
-const NEW_CHAT_MODEL_REQUIRED = 'Choose a model for this provider.';
 const PROVIDER_EFFORT_RESET_FAILED =
   'AI provider changed, but its reasoning effort could not be reset';
 const MODEL_EFFORT_RESET_FAILED = 'Model changed, but its reasoning effort could not be reset';
@@ -167,7 +148,7 @@ const failure = (prefix: string, error: unknown): string =>
 export default function ChatsPage() {
   const { isAuthenticated, user } = useAuth();
   const { currentWorkspace } = useWorkspace();
-  const { models, error: modelsError } = useModels(currentWorkspace?.id);
+  const { models } = useModels(currentWorkspace?.id);
   const {
     providers: workspaceProviders,
     error: workspaceProvidersError,
@@ -178,16 +159,7 @@ export default function ChatsPage() {
   const [showArchived, setShowArchived] = useState(false);
   const [selectedChatId, setSelectedChatId] = useState<string | null>(() => searchParams.get('id'));
   const linkedMessageId = searchParams.get('message');
-  const [showNewChatModal, setShowNewChatModal] = useState(false);
-  const [newChatProvider, setNewChatProvider] = useState(DEFAULT_PROVIDER);
-  const [newChatModel, setNewChatModel] = useState(AUTO_MODEL);
-  const [newChatAgent, setNewChatAgent] = useState(false);
-  const [newChatAutoApprove, setNewChatAutoApprove] = useState(false);
-  const [newChatReasoning, setNewChatReasoning] = useState<ReasoningEffort>(AUTO_EFFORT);
-  const [newChatProject, setNewChatProject] = useState(NO_PROJECT);
-  const [newChatOffline, setNewChatOffline] = useState(false);
-  const [newChatContext, setNewChatContext] = useState(String(defaultContextTokens()));
-  const [newChatEdited, setNewChatEdited] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
@@ -281,6 +253,8 @@ export default function ChatsPage() {
     setReasoningEffort: setReasoningEffortFn,
     setModelName: setModelNameFn,
     setContextTokens: setContextTokensFn,
+    setOffline: setOfflineFn,
+    setProject: setProjectFn,
     setCharacter: setCharacterFn,
     clearCharacter: clearCharacterFn,
     refresh: refreshChat,
@@ -462,44 +436,7 @@ export default function ChatsPage() {
   const chatReasoningOptions = providerDriven
     ? reasoningOptions(chatEfforts)
     : REASONING_EFFORT_OPTIONS;
-  const chosenOfferFor = (provider: string): ChatProviderOffer | null =>
-    workspaceProviders?.providers.find((offer) => offer.provider === provider) ?? null;
-  const newChatOfferFor = (provider: string): ChatProviderOffer | null => {
-    const fallback = workspaceProviders?.default;
-    return chosenOfferFor(provider) ?? (fallback && isAgentOffer(fallback) ? fallback : null);
-  };
-  const chosenNewOffer = chosenOfferFor(newChatProvider);
-  const newChatOffer = newChatOfferFor(newChatProvider);
-  const newChatEfforts = newChatOffer ? effortsFor(newChatOffer, newChatModel) : null;
-  const newChatEffort = newChatEfforts
-    ? keepEffort(newChatReasoning, newChatEfforts)
-    : newChatReasoning;
-  const selectedNewModel = findInstalledModel(models, newChatModel);
-  const autoNewChat = newChatModel === AUTO_MODEL;
-  const newChatNamesModel = newChatOffer !== null && asksModelName(newChatOffer);
-  const newChatNeedsModel = Boolean(newChatOffer?.requires_model) && !newChatModel.trim();
-  const newChatShowsAgent = (offer: ChatProviderOffer | null, model: string): boolean =>
-    offersAgentOn(
-      offer,
-      offer === null || offer.provider === workspaceProviders?.default.provider ? models : null,
-      model
-    );
-  const showNewChatAgent = newChatShowsAgent(newChatOffer, newChatModel);
-  const showNewChatReasoning = newChatEfforts
-    ? newChatEfforts.length > 0
-    : autoNewChat
-      ? models.some((model) => chatShowsReasoning({}, model))
-      : selectedNewModel
-        ? chatShowsReasoning({}, selectedNewModel)
-        : false;
   const workspaceProvider = workspaceProviders?.default.provider ?? null;
-  const showNewChatContext = offersContextOn(
-    chosenNewOffer?.provider ?? workspaceProvider,
-    workspaceProvider,
-    models,
-    newChatModel
-  );
-  const newChatNative = selectedNewModel?.details?.context_length;
   const chatDefaultProvider = chatProviders?.default.provider ?? workspaceProvider;
   const chatRunsOn = chatProviders
     ? (chatProviders.selected ?? chatProviders.default).provider
@@ -518,6 +455,22 @@ export default function ChatsPage() {
   const autoApproved = Boolean(displayedChat?.auto_approve);
   const sandboxed = displayedChat?.agent_sandboxed !== false;
   const offline = Boolean(displayedChat?.offline);
+  // A planner or updates chat is its project's own, so its project is not the
+  // reader's to change.
+  const projectChat =
+    displayedChat?.purpose === 'project_planner' || displayedChat?.purpose === 'project_updates';
+  const projectOptions = useMemo(
+    () => [
+      { value: NO_PROJECT, label: 'No project' },
+      ...projects.map((project) => ({ value: project.id, label: project.name })),
+    ],
+    [projects]
+  );
+  const offlineEnforced = workspaceProviders?.offline_enforced !== false;
+  const offlineTitle = [
+    offline ? `Offline. ${OFFLINE_HELP}` : 'Online. Switch on to keep this chat off every network.',
+    ...(offlineEnforced ? [] : [OFFLINE_UNENFORCED]),
+  ].join(' ');
   const cliStale = Boolean(providersError) || changingProvider || (streaming && providersLoading);
   const cli = cliStale && chatProviders?.cli === false ? undefined : chatProviders?.cli;
   const showSandbox = Boolean(
@@ -626,86 +579,12 @@ export default function ChatsPage() {
     setSearchParams(next, { replace: true });
   };
 
-  const applyNewChat = (settings: NewChatSettings) => {
-    setNewChatProvider(settings.provider);
-    setNewChatModel(settings.model);
-    setNewChatAgent(settings.agent);
-    setNewChatAutoApprove(false);
-    setNewChatReasoning(settings.reasoning);
-    setNewChatOffline(settings.offline);
-    setNewChatContext(settings.context);
-  };
-
-  const resetNewChat = () => {
-    setNewChatEdited(false);
-    applyNewChat(DEFAULT_NEW_CHAT);
-    setNewChatProject(NO_PROJECT);
-  };
-
-  const editNewChat = () => {
-    setNewChatEdited(true);
-  };
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: an open, untouched new chat follows the workspace's recent chat as it loads
-  useEffect(() => {
-    if (!showNewChatModal || newChatEdited) return;
-    applyNewChat(newChatSettings(workspaceProviders, models));
-  }, [showNewChatModal, newChatEdited, workspaceProviders, models]);
-
-  const workspaceId = currentWorkspace?.id ?? null;
-  const [newChatWorkspace, setNewChatWorkspace] = useState(workspaceId);
-  if (newChatWorkspace !== workspaceId) {
-    setNewChatWorkspace(workspaceId);
-    resetNewChat();
-  }
-
-  const openNewChat = () => {
-    resetNewChat();
-    setOperationError(null);
-    setShowNewChatModal(true);
-    void refreshWorkspaceProviders();
-  };
-
-  const keepNewChatAgent = (offer: ChatProviderOffer | null, model: string) => {
-    if (newChatShowsAgent(offer, model)) return;
-    setNewChatAgent(false);
-    setNewChatAutoApprove(false);
-  };
-
-  const handleNewChatProvider = (provider: string) => {
-    editNewChat();
-    const offer = newChatOfferFor(provider);
-    const model = offer?.requires_model ? '' : AUTO_MODEL;
-    keepNewChatAgent(offer, model);
-    setNewChatProvider(provider);
-    setNewChatModel(model);
-    setNewChatReasoning(
-      keepEffort(
-        newChatEffort,
-        offer ? effortsFor(offer, model) : REASONING_EFFORT_OPTIONS.map((option) => option.value)
-      )
-    );
-    setNewChatContext(String(defaultContextTokens()));
-  };
-
-  const handleNewChatModel = (name: string) => {
-    editNewChat();
-    setNewChatModel(name);
-    keepNewChatAgent(newChatOffer, name);
-    const installed = findInstalledModel(models, name);
-    setNewChatContext(String(defaultContextTokens(installed?.details?.context_length)));
-    if (newChatOffer) {
-      setNewChatReasoning(keepEffort(newChatEffort, effortsFor(newChatOffer, name)));
-      return;
-    }
-    const automatic = name === AUTO_MODEL;
-    if (!automatic && !chatShowsReasoning({}, installed)) {
-      setNewChatReasoning(AUTO_EFFORT);
-    }
-  };
-
-  const handleCreateChat = async (event: FormEvent) => {
-    event.preventDefault();
+  // No dialog: `+` repeats the chat created last, so the providers are read
+  // afresh first rather than the click going on whatever was loaded on mount.
+  // A chat is created on the settings the workspace offers now, and the
+  // reader changes anything they want from the chat's own header.
+  const handleNewChat = async () => {
+    if (creating) return;
     if (!isAuthenticated) {
       setOperationError('You must be logged in to create a chat');
       return;
@@ -714,38 +593,19 @@ export default function ChatsPage() {
       setOperationError('No workspace selected. Please select or create a workspace first.');
       return;
     }
-    if (newChatNeedsModel) {
-      setOperationError(NEW_CHAT_MODEL_REQUIRED);
-      return;
-    }
-    const modelName = newChatModel.trim() || AUTO_MODEL;
-    const agentEnabled = showNewChatAgent && newChatAgent;
+    const workspaceId = currentWorkspace.id;
     setOperationError(null);
+    setCreating(true);
     try {
-      const chat = await createChat({
-        workspace_id: currentWorkspace.id,
-        title: modelName === AUTO_MODEL ? 'New chat' : `Chat with ${modelName}`,
-        automatic_title: true,
-        model_name: chosenNewOffer ? AUTO_MODEL : modelName,
-        ...(chosenNewOffer
-          ? {
-              provider: chosenNewOffer.provider,
-              provider_model: modelName === AUTO_MODEL ? null : modelName,
-            }
-          : {}),
-        agent_enabled: agentEnabled,
-        auto_approve: agentEnabled && newChatAutoApprove,
-        reasoning_effort:
-          showNewChatReasoning && newChatEffort !== AUTO_EFFORT ? newChatEffort : undefined,
-        ...(newChatProject !== NO_PROJECT ? { project_id: newChatProject } : {}),
-        ...(newChatOffline ? { offline: true } : {}),
-        ...(showNewChatContext ? { context_tokens: Number(newChatContext) } : {}),
-      });
-      setShowNewChatModal(false);
-      resetNewChat();
+      const providers = (await refreshWorkspaceProviders()) ?? workspaceProviders;
+      const chat = await createChat(
+        newChatRequest(workspaceId, newChatSettings(providers, models), providers, models)
+      );
       selectChat(chat.id);
     } catch (error) {
       setOperationError(error instanceof Error ? error.message : 'Failed to create chat');
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -765,6 +625,37 @@ export default function ChatsPage() {
       await setAgentEnabledFn(!displayedChat.agent_enabled);
     } catch (error) {
       reportForChat(chatId, error instanceof Error ? error.message : 'Failed to change agent mode');
+    }
+  };
+
+  const handleToggleOffline = async () => {
+    if (!isAuthenticated || !displayedChat) return;
+    const chatId = displayedChat.id;
+    setChatOperationError(null);
+    try {
+      await setOfflineFn(!displayedChat.offline);
+    } catch (error) {
+      reportForChat(
+        chatId,
+        error instanceof Error ? error.message : 'Failed to change offline mode'
+      );
+    }
+  };
+
+  // The list groups and labels chats by project, so it is re-read rather than
+  // left showing the chat under the project it has just left.
+  const handleProject = async (value: string) => {
+    if (!isAuthenticated || !displayedChat) return;
+    const chatId = displayedChat.id;
+    setChatOperationError(null);
+    try {
+      await setProjectFn(value === NO_PROJECT ? null : value);
+      await refreshChats();
+    } catch (error) {
+      reportForChat(
+        chatId,
+        error instanceof Error ? error.message : 'Failed to change the project'
+      );
     }
   };
 
@@ -1240,8 +1131,11 @@ export default function ChatsPage() {
             type="button"
             className="btn-icon"
             aria-label="New chat"
-            title="New chat"
-            onClick={openNewChat}
+            title="New chat on the settings the last one was created with"
+            onClick={() => {
+              void handleNewChat();
+            }}
+            disabled={creating}
           >
             <PlusIcon />
           </button>
@@ -1328,9 +1222,15 @@ export default function ChatsPage() {
           </div>
         )}
 
-        {operationError && !showNewChatModal && (
+        {operationError && (
           <div className="chats-error" role="alert">
             {operationError}
+          </div>
+        )}
+
+        {workspaceProvidersError && (
+          <div className="chats-notice" role="status" data-testid="new-chat-providers-error">
+            A new chat starts from the default settings: {workspaceProvidersError}
           </div>
         )}
 
@@ -1397,7 +1297,18 @@ export default function ChatsPage() {
                 ? 'Your archived conversations will appear here'
                 : 'Start a new conversation to get started'
             }
-            action={!showArchived ? <Button onClick={openNewChat}>New chat</Button> : undefined}
+            action={
+              !showArchived ? (
+                <Button
+                  disabled={creating}
+                  onClick={() => {
+                    void handleNewChat();
+                  }}
+                >
+                  New chat
+                </Button>
+              ) : undefined
+            }
           />
         ) : (
           <div className="chats-list">
@@ -1489,18 +1400,33 @@ export default function ChatsPage() {
                     )}
                   </span>
                 )}
-                {displayedChat.project_id &&
-                  displayedChat.purpose !== 'project_planner' &&
-                  displayedChat.purpose !== 'project_updates' && (
-                    <span className="chat-purpose" data-testid="chat-project">
-                      <Link to={`/projects?id=${displayedChat.project_id}`}>
-                        {projectNames[displayedChat.project_id] ?? 'Open project'}
+                {!projectChat && projects.length > 0 && (
+                  <span className="chat-project" data-testid="chat-project">
+                    <HeaderSelect
+                      key={`project-${displayedChat.id}`}
+                      className="chat-project-select"
+                      label="Project"
+                      ariaLabel="Project"
+                      testId="chat-project-select"
+                      title={
+                        displayedChat.project_id
+                          ? `This chat is in ${projectNames[displayedChat.project_id] ?? 'a project'}. Choose another to move it, or No project to take it out.`
+                          : 'Choose a project to group this chat with.'
+                      }
+                      value={displayedChat.project_id ?? NO_PROJECT}
+                      options={projectOptions}
+                      onValueChange={(value) => {
+                        void handleProject(value);
+                      }}
+                    />
+                    {displayedChat.project_id && (
+                      <Link
+                        className="chat-project-open"
+                        to={`/projects?id=${displayedChat.project_id}`}
+                      >
+                        Open
                       </Link>
-                    </span>
-                  )}
-                {displayedChat.offline && (
-                  <span className="chat-purpose" data-testid="chat-offline">
-                    Offline
+                    )}
                   </span>
                 )}
               </div>
@@ -1599,6 +1525,31 @@ export default function ChatsPage() {
                     />
                   )}
                 </HeaderPopover>
+                <button
+                  type="button"
+                  className="agent-toggle"
+                  onClick={() => {
+                    void handleToggleOffline();
+                  }}
+                  aria-pressed={offline}
+                  title={offlineTitle}
+                  data-testid="chat-offline"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    width="14"
+                    height="14"
+                    aria-hidden="true"
+                  >
+                    <path d="M2 8.8a15 15 0 0 1 20 0M5.5 12.5a10 10 0 0 1 13 0M9 16.2a5 5 0 0 1 6 0" />
+                    <circle cx="12" cy="20" r="0.8" fill="currentColor" />
+                    {offline && <path d="M3 3l18 18" />}
+                  </svg>
+                  Offline
+                </button>
                 {showCharacter && (
                   <button
                     type="button"
@@ -2168,7 +2119,13 @@ export default function ChatsPage() {
               title="Select a chat to start"
               description="Choose an existing conversation or create a new one"
               action={
-                <Button variant="primary" onClick={openNewChat}>
+                <Button
+                  variant="primary"
+                  disabled={creating}
+                  onClick={() => {
+                    void handleNewChat();
+                  }}
+                >
                   New chat
                 </Button>
               }
@@ -2176,159 +2133,6 @@ export default function ChatsPage() {
           </div>
         )}
       </div>
-
-      {/* New Chat Modal */}
-      <Modal isOpen={showNewChatModal} onClose={() => setShowNewChatModal(false)} title="New Chat">
-        <form className="ui-form" onSubmit={handleCreateChat}>
-          {operationError && <div className="modal-error">{operationError}</div>}
-          {workspaceProvidersError && (
-            <div className="modal-error" role="alert" data-testid="new-chat-providers-error">
-              {workspaceProvidersError}
-            </div>
-          )}
-          {workspaceProviders && (
-            <Select
-              label="Provider"
-              value={chosenNewOffer ? newChatProvider : DEFAULT_PROVIDER}
-              onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
-                handleNewChatProvider(event.target.value);
-              }}
-              helpText="Default follows the workspace AI settings."
-              options={providerChoices(workspaceProviders.default, workspaceProviders.providers)}
-            />
-          )}
-          {newChatOffer && newChatNamesModel ? (
-            <Input
-              label="Model name"
-              value={newChatModel}
-              onChange={(event: React.ChangeEvent<HTMLInputElement>) => {
-                handleNewChatModel(event.target.value);
-              }}
-              placeholder={MODEL_NAME_PLACEHOLDER}
-              helpText={`AI Settings save no model for ${newChatOffer.label}, so name one it serves.`}
-              spellCheck={false}
-              autoComplete="off"
-            />
-          ) : (
-            <Select
-              label="Select Model"
-              value={newChatModel}
-              onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
-                handleNewChatModel(event.target.value);
-              }}
-              placeholder={MODEL_PLACEHOLDER}
-              helpText={
-                !newChatOffer
-                  ? 'Automatic picks a chat, image, video or audio model from the message.'
-                  : newChatOffer.requires_model
-                    ? `${newChatOffer.label} needs a model chosen for this chat.`
-                    : `Choose Automatic to let ${newChatOffer.label} pick its own model.`
-              }
-              error={newChatOffer ? undefined : (modelsError ?? undefined)}
-              options={
-                newChatOffer
-                  ? modelSelectOptions(newChatOffer, newChatModel)
-                  : [
-                      { value: AUTO_MODEL, label: 'Automatic' },
-                      ...models
-                        .filter((model) => model.completion !== false)
-                        .map((model) => ({ value: model.name, label: model.name })),
-                    ]
-              }
-            />
-          )}
-          {projects.length > 0 && (
-            <Select
-              label="Project"
-              value={newChatProject}
-              onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
-                setNewChatProject(event.target.value);
-              }}
-              helpText="Optional. Group this chat with a project."
-              options={[
-                { value: NO_PROJECT, label: 'No project' },
-                ...projects.map((project) => ({ value: project.id, label: project.name })),
-              ]}
-            />
-          )}
-          {showNewChatContext && (
-            <Select
-              label="Context"
-              value={newChatContext}
-              onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
-                editNewChat();
-                setNewChatContext(event.target.value);
-              }}
-              helpText={
-                newChatNative
-                  ? `Larger windows use more RAM. This model supports up to ${contextTokenOptions(newChatNative).at(-1)?.label ?? 'its native size'}.`
-                  : 'Larger windows use more RAM on this machine.'
-              }
-              options={contextTokenOptions(newChatNative)}
-            />
-          )}
-          <Checkbox
-            label="Offline"
-            helpText={
-              workspaceProviders?.offline_enforced === false
-                ? `${OFFLINE_HELP} ${OFFLINE_UNENFORCED}`
-                : OFFLINE_HELP
-            }
-            checked={newChatOffline}
-            onCheckedChange={(checked) => {
-              editNewChat();
-              setNewChatOffline(checked);
-            }}
-          />
-          {showNewChatAgent && (
-            <Checkbox
-              label="Agent mode"
-              helpText="Search workspace content, use connected GitHub data and run tools when asked. Needs a tool-calling model."
-              checked={newChatAgent}
-              onCheckedChange={(checked) => {
-                editNewChat();
-                setNewChatAgent(checked);
-                if (!checked) setNewChatAutoApprove(false);
-              }}
-            />
-          )}
-          {showNewChatAgent && newChatAgent && (
-            <Checkbox
-              label="Auto-approve writes and commands"
-              helpText="Skip the confirmation prompt for write_file, apply_patch, run_command and run_shell. You can change this later on the chat."
-              checked={newChatAutoApprove}
-              onCheckedChange={(checked) => {
-                editNewChat();
-                setNewChatAutoApprove(checked);
-              }}
-            />
-          )}
-          {showNewChatReasoning && (
-            <Select
-              label="Reasoning"
-              value={newChatEffort}
-              onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
-                editNewChat();
-                setNewChatReasoning(event.target.value as ReasoningEffort);
-              }}
-              helpText={
-                newChatOffer && isAgentOffer(newChatOffer)
-                  ? `Auto lets ${newChatOffer.label} choose how hard to think.`
-                  : 'Auto chooses low, medium, or high from the request. Off skips thinking.'
-              }
-              options={newChatEfforts ? reasoningOptions(newChatEfforts) : REASONING_EFFORT_OPTIONS}
-            />
-          )}
-          <div className="modal-actions">
-            <Button variant="secondary" onClick={() => setShowNewChatModal(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" variant="primary" disabled={newChatNeedsModel}>
-              Create Chat
-            </Button>
-          </div>
-        </form>
-      </Modal>
 
       <Modal
         isOpen={renameId !== null}

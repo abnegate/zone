@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import type { ChatProviderOffer, RecentChat, WorkspaceChatProviders } from '../provider';
-import { DEFAULT_NEW_CHAT, newChatSettings } from './newChatSettings';
+import { DEFAULT_NEW_CHAT, newChatRequest, newChatSettings } from './newChatSettings';
 
 const offer = (overrides: Partial<ChatProviderOffer> = {}): ChatProviderOffer => ({
   provider: 'self_hosted',
@@ -158,5 +158,94 @@ describe('newChatSettings', () => {
   it('starts from the default context when the recent chat named none', () => {
     const latest = recent({ model_name: 'llama3.2', context_tokens: null });
     expect(newChatSettings(providers(latest), [llama]).context).toBe('32768');
+  });
+});
+
+describe('newChatRequest', () => {
+  const requestFor = (latest: RecentChat | null, installed = [llama], fallback = selfHosted) => {
+    const listed = providers(latest, fallback);
+    return newChatRequest('ws-1', newChatSettings(listed, installed), listed, installed);
+  };
+
+  it('names the workspace, an automatic title and no auto-approval', () => {
+    expect(requestFor(null)).toEqual({
+      workspace_id: 'ws-1',
+      title: 'New chat',
+      automatic_title: true,
+      model_name: 'auto',
+      agent_enabled: false,
+      auto_approve: false,
+    });
+  });
+
+  it('sends a chosen provider and its model, titled after the model', () => {
+    const latest = recent({ provider: 'codex', provider_model: 'gpt-6-sol' });
+
+    expect(requestFor(latest, [])).toMatchObject({
+      provider: 'codex',
+      provider_model: 'gpt-6-sol',
+      model_name: 'auto',
+      title: 'Chat with gpt-6-sol',
+      offline: true,
+    });
+  });
+
+  it('sends a chosen provider that picks its own model as no model', () => {
+    expect(requestFor(recent({ provider: 'codex' }), [])).toMatchObject({
+      provider: 'codex',
+      provider_model: null,
+      model_name: 'auto',
+      title: 'New chat',
+    });
+  });
+
+  it('never carries auto-approval, which belongs to whoever approved it', () => {
+    const latest = recent({ model_name: 'llama3.2', agent_enabled: true });
+    expect(requestFor(latest)).toMatchObject({ agent_enabled: true, auto_approve: false });
+  });
+
+  it('leaves offline out of an online chat rather than sending false', () => {
+    const latest = recent({ model_name: 'llama3.2', offline: false });
+    expect(requestFor(latest)).not.toHaveProperty('offline');
+  });
+
+  it('sends the context window of a local model and none of a provider', () => {
+    const local = recent({ model_name: 'llama3.2', context_tokens: 65_536 });
+    expect(requestFor(local)).toMatchObject({
+      model_name: 'llama3.2:latest',
+      context_tokens: 65_536,
+    });
+
+    const chosen = recent({
+      provider: 'codex',
+      provider_model: 'gpt-6-sol',
+      context_tokens: 65_536,
+    });
+    expect(requestFor(chosen, [])).not.toHaveProperty('context_tokens');
+  });
+
+  it('sends an effort the provider offers and nothing when it is Auto', () => {
+    const kept = recent({
+      provider: 'codex',
+      provider_model: 'gpt-6-sol',
+      reasoning_effort: 'low',
+    });
+    expect(requestFor(kept, [])).toMatchObject({ reasoning_effort: 'low' });
+
+    const dropped = recent({
+      provider: 'codex',
+      provider_model: 'gpt-6-sol',
+      reasoning_effort: 'medium',
+    });
+    expect(requestFor(dropped, [])).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('drops agent mode for a model the instance says cannot call tools', () => {
+    const toolless = { name: 'gemma3', completion: true, tools: false };
+    const latest = recent({ model_name: 'gemma3', agent_enabled: true });
+    expect(requestFor(latest, [llama, toolless])).toMatchObject({
+      model_name: 'gemma3',
+      agent_enabled: false,
+    });
   });
 });

@@ -19,21 +19,24 @@ export function useWorkspaceChatProviders(workspaceId: string | null) {
   const [error, setError] = useState<string | null>(null);
   const request = useRef(0);
 
-  const load = useCallback(async (id: string | null): Promise<void> => {
+  /** The providers read, or null when there were none to read or the read failed. */
+  const load = useCallback(async (id: string | null): Promise<WorkspaceChatProviders | null> => {
     const current = ++request.current;
     setError(null);
     if (!id) {
       setLoaded(null);
       setLoading(false);
-      return;
+      return null;
     }
     setLoading(true);
     try {
       const providers = await chatsApi.getWorkspaceChatProviders(id);
       if (current === request.current) setLoaded({ workspaceId: id, providers });
+      return providers;
     } catch (error) {
-      if (current !== request.current) return;
+      if (current !== request.current) return null;
       setError(error instanceof Error ? error.message : LOAD_FAILED);
+      return null;
     } finally {
       if (current === request.current) setLoading(false);
     }
@@ -46,7 +49,10 @@ export function useWorkspaceChatProviders(workspaceId: string | null) {
 
   const providers = loaded?.workspaceId === workspaceId ? loaded.providers : null;
 
-  const refresh = useCallback((): Promise<void> => load(workspaceId), [workspaceId, load]);
+  const refresh = useCallback(
+    (): Promise<WorkspaceChatProviders | null> => load(workspaceId),
+    [workspaceId, load]
+  );
 
   return { providers, loading, error, refresh };
 }

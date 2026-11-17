@@ -496,12 +496,19 @@ pub struct UpdateChatRequest {
     agent_enabled: Option<bool>,
     agent_sandboxed: Option<bool>,
     auto_approve: Option<bool>,
+    offline: Option<bool>,
     reasoning_effort: Option<abnegate_llm::ReasoningEffort>,
     context_tokens: Option<i64>,
     #[serde(default)]
     character: Option<ChatCharacter>,
     #[serde(default)]
     clear_character: bool,
+    /// The project to move the chat into. Taking it out of the one it is in is
+    /// `clear_project`, since an absent id is a field left alone.
+    #[serde(default)]
+    project_id: Option<Uuid>,
+    #[serde(default)]
+    clear_project: bool,
 }
 
 /// Create message request
@@ -629,17 +636,13 @@ pub async fn create(
             Ok(None) => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse::new("Project not found in this workspace")),
+                    Json(ErrorResponse::new(PROJECT_NOT_IN_WORKSPACE)),
                 )
                     .into_response();
             }
             Err(e) => {
                 tracing::error!("Database error: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
+                return internal_error();
             }
         }
     }
@@ -753,16 +756,31 @@ pub async fn update(
     {
         return refusal;
     }
+    let project = match project_change(req.project_id, req.clear_project) {
+        Ok(project) => project,
+        Err(message) => {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response();
+        }
+    };
+    if project != chats::ProjectChange::Keep
+        && let Some(refusal) = project_refusal(&state, &chat, project).await
+    {
+        return refusal;
+    }
     match chats::update_chat(
         state.db(),
         id,
-        title,
-        req.agent_enabled,
-        req.agent_sandboxed,
-        req.auto_approve,
-        req.reasoning_effort,
-        context_tokens,
-        model,
+        chats::ChatChange {
+            title,
+            agent_enabled: req.agent_enabled,
+            agent_sandboxed: req.agent_sandboxed,
+            auto_approve: req.auto_approve,
+            offline: req.offline,
+            reasoning_effort: req.reasoning_effort,
+            context_tokens,
+            model_name: model,
+            project,
+        },
     )
     .await
     {
@@ -855,6 +873,68 @@ fn unsupported() -> axum::response::Response {
     (
         StatusCode::BAD_REQUEST,
         Json(ErrorResponse::new(crate::services::model::UNSUPPORTED)),
+    )
+        .into_response()
+}
+
+const PROJECT_NOT_IN_WORKSPACE: &str = "Project not found in this workspace";
+const PROJECT_BOTH_WAYS: &str = "Name a project to move the chat to, or clear it, not both";
+const PROJECT_CHAT_IS_BOUND: &str = "A project's own planner or updates chat stays in its project";
+
+/// Which way an update moves the chat between projects, or why the two fields
+/// contradict each other.
+fn project_change(
+    project_id: Option<Uuid>,
+    clear: bool,
+) -> Result<chats::ProjectChange, &'static str> {
+    match (project_id, clear) {
+        (Some(_), true) => Err(PROJECT_BOTH_WAYS),
+        (Some(project), false) => Ok(chats::ProjectChange::Join(project)),
+        (None, true) => Ok(chats::ProjectChange::Leave),
+        (None, false) => Ok(chats::ProjectChange::Keep),
+    }
+}
+
+/// Why `chat` can't be moved as `project` says: it is a project's own planner
+/// or updates chat, or the project named is not one of its workspace's.
+async fn project_refusal(
+    state: &AppState,
+    chat: &chats::ChatRow,
+    project: chats::ProjectChange,
+) -> Option<axum::response::Response> {
+    let bad_request = |message: &'static str| {
+        Some((StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response())
+    };
+    match chats::link(state.db(), chat.id).await {
+        Ok(Some(link)) if link.purpose != chats::ChatPurpose::Assistant => {
+            return bad_request(PROJECT_CHAT_IS_BOUND);
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::error!(chat = %chat.id, %error, "Could not read the chat's purpose");
+            return Some(internal_error());
+        }
+    }
+    let chats::ProjectChange::Join(project) = project else {
+        return None;
+    };
+    let Some(workspace) = chat.workspace_id else {
+        return bad_request(PROJECT_NOT_IN_WORKSPACE);
+    };
+    match projects::get_project_in_workspace(state.db(), project, workspace).await {
+        Ok(Some(_)) => None,
+        Ok(None) => bad_request(PROJECT_NOT_IN_WORKSPACE),
+        Err(error) => {
+            tracing::error!(%project, %error, "Could not read the project a chat would join");
+            Some(internal_error())
+        }
+    }
+}
+
+fn internal_error() -> axum::response::Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse::new("Internal server error")),
     )
         .into_response()
 }

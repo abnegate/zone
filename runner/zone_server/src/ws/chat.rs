@@ -5455,13 +5455,10 @@ mod tests {
             chats::update_chat(
                 &organization.pool,
                 organization.chat,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(WINDOW),
-                None,
+                chats::ChatChange {
+                    context_tokens: Some(WINDOW),
+                    ..chats::ChatChange::default()
+                },
             )
             .await
             .expect("the chat's context window");

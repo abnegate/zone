@@ -1173,7 +1173,16 @@ describe('ChatsPage', () => {
       });
     });
 
-    it('opens new chat modal from start new chat button', async () => {
+    it('creates a chat from the start new chat button without a dialog', async () => {
+      mockCreateChat.mockResolvedValueOnce({
+        id: 'chat-fresh',
+        title: 'New chat',
+        model_name: 'auto',
+        archived: false,
+        agent_enabled: false,
+        created_at: '2024-01-05T00:00:00Z',
+        updated_at: '2024-01-05T00:00:00Z',
+      });
       renderChatsPage();
 
       await waitFor(() => {
@@ -1182,187 +1191,12 @@ describe('ChatsPage', () => {
 
       fireEvent.click(newChatButtons()[1]);
 
-      expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
+      await waitFor(() => expect(mockClient.createChat).toHaveBeenCalled());
+      expect(screen.queryByRole('heading', { name: 'New Chat' })).not.toBeInTheDocument();
     });
   });
 
-  describe('new chat modal', () => {
-    it('opens new chat modal', async () => {
-      renderChatsPage();
-
-      await waitFor(() => {
-        expect(newChatButtons()[0]).toBeInTheDocument();
-      });
-
-      fireEvent.click(newChatButtons()[0]);
-
-      expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
-      expect(screen.getByLabelText('Select Model')).toBeInTheDocument();
-      expect(screen.getByLabelText('Project')).toBeInTheDocument();
-      fireEvent.keyDown(screen.getByLabelText('Select Model'), { key: 'ArrowDown' });
-      expect(screen.getByRole('option', { name: 'llama2' })).toBeInTheDocument();
-      expect(screen.getByRole('option', { name: 'mistral' })).toBeInTheDocument();
-      expect(screen.queryByRole('option', { name: 'vectors' })).not.toBeInTheDocument();
-    });
-
-    it('offers only the models the current workspace can run', async () => {
-      listedModels = [
-        { name: 'gpt-4o-mini', size: 0, modified_at: '2026-01-01T00:00:00Z' },
-        { name: 'o3', size: 0, modified_at: '2026-01-01T00:00:00Z' },
-      ];
-      renderChatsPage();
-
-      await waitFor(() => {
-        expect(newChatButtons()[0]).toBeInTheDocument();
-      });
-      fireEvent.click(newChatButtons()[0]);
-      fireEvent.keyDown(screen.getByLabelText('Select Model'), { key: 'ArrowDown' });
-
-      expect(modelWorkspaces).toContain('ws-1');
-      expect(modelWorkspaces).not.toContain(undefined);
-      expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
-        'Automatic',
-        'gpt-4o-mini',
-        'o3',
-      ]);
-    });
-
-    it('offers Agent mode for a saved model whose tool calling is unknown', async () => {
-      listedModels = [
-        { name: 'gpt-4o-mini', size: 0, modified_at: '2026-01-01T00:00:00Z' },
-        { name: 'o3', size: 0, modified_at: '2026-01-01T00:00:00Z' },
-      ];
-      renderChatsPage();
-
-      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
-      expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
-
-      fireEvent.keyDown(screen.getByLabelText('Select Model'), { key: 'ArrowDown' });
-      fireEvent.click(screen.getByRole('option', { name: 'gpt-4o-mini' }));
-
-      await waitFor(() => {
-        expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
-      });
-    });
-
-    it('closes new chat modal on cancel', async () => {
-      renderChatsPage();
-
-      await waitFor(() => {
-        expect(newChatButtons()[0]).toBeInTheDocument();
-      });
-
-      fireEvent.click(newChatButtons()[0]);
-      expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
-
-      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-
-      await waitFor(() => {
-        expect(screen.queryByRole('heading', { name: 'New Chat' })).not.toBeInTheDocument();
-      });
-    });
-
-    it('closes modal on backdrop click', async () => {
-      renderChatsPage();
-
-      await waitFor(() => {
-        expect(newChatButtons()[0]).toBeInTheDocument();
-      });
-
-      fireEvent.click(newChatButtons()[0]);
-
-      await waitFor(() => {
-        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
-      });
-
-      // Click the overlay (backdrop) - try multiple events to trigger Radix UI's handler
-      const overlay = document.querySelector('.ui-dialog-overlay');
-      fireEvent.pointerDown(overlay!, { isPrimary: true, pointerType: 'mouse' });
-      fireEvent.pointerUp(overlay!, { isPrimary: true, pointerType: 'mouse' });
-      fireEvent.mouseDown(overlay!);
-      fireEvent.mouseUp(overlay!);
-      fireEvent.click(overlay!);
-
-      await waitFor(() => {
-        expect(screen.queryByRole('heading', { name: 'New Chat' })).not.toBeInTheDocument();
-      });
-    });
-
-    it('closes modal on escape key', async () => {
-      renderChatsPage();
-
-      await waitFor(() => {
-        expect(newChatButtons()[0]).toBeInTheDocument();
-      });
-
-      fireEvent.click(newChatButtons()[0]);
-
-      // Press Escape to close
-      fireEvent.keyDown(document, { key: 'Escape' });
-
-      await waitFor(() => {
-        expect(screen.queryByRole('heading', { name: 'New Chat' })).not.toBeInTheDocument();
-      });
-    });
-
-    it('creates chat when form is submitted', async () => {
-      const newChat: Chat = {
-        id: 'new-chat',
-        title: 'Chat with llama2',
-        model_name: 'llama2',
-        updated_at: '2024-01-05T00:00:00Z',
-        archived: false,
-        agent_enabled: false,
-        created_at: '2024-01-05T00:00:00Z',
-      };
-      mockClient.createChat.mockResolvedValueOnce(newChat);
-      mockClient.getChat.mockResolvedValueOnce({ ...newChat, messages: [] });
-
-      renderChatsPage();
-
-      await waitFor(() => {
-        expect(newChatButtons()[0]).toBeInTheDocument();
-      });
-
-      fireEvent.click(newChatButtons()[0]);
-
-      await waitFor(() => {
-        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
-      });
-
-      // Open the select dropdown by clicking the trigger
-      const selectTrigger = screen.getByLabelText('Select Model');
-      fireEvent.mouseDown(selectTrigger);
-      fireEvent.mouseUp(selectTrigger);
-      fireEvent.click(selectTrigger);
-
-      // Wait for options to appear and click the llama2 option
-      await waitFor(() => {
-        expect(screen.getByRole('option', { name: 'llama2' })).toBeInTheDocument();
-      });
-
-      const option = screen.getByRole('option', { name: 'llama2' });
-      fireEvent.mouseDown(option);
-      fireEvent.mouseUp(option);
-      fireEvent.click(option);
-
-      // Now submit the form
-      const createButton = screen.getByRole('button', { name: 'Create Chat' });
-      fireEvent.click(createButton);
-
-      await waitFor(() => {
-        expect(mockClient.createChat).toHaveBeenCalledWith({
-          workspace_id: 'ws-1',
-          title: 'Chat with llama2',
-          automatic_title: true,
-          model_name: 'llama2',
-          agent_enabled: false,
-          auto_approve: false,
-          context_tokens: 32768,
-        });
-      });
-    });
-
+  describe('new chat', () => {
     it('creates a chat with automatic routing by default', async () => {
       mockCreateChat.mockResolvedValueOnce({
         id: 'chat-auto',
@@ -1380,7 +1214,6 @@ describe('ChatsPage', () => {
       });
 
       fireEvent.click(newChatButtons()[0]);
-      fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
 
       await waitFor(() => {
         expect(mockClient.createChat).toHaveBeenCalledWith(
@@ -1390,154 +1223,108 @@ describe('ChatsPage', () => {
             automatic_title: true,
           })
         );
-        expect(mockClient.createChat.mock.calls[0][0].project_id).toBeUndefined();
       });
+      expect(mockClient.createChat.mock.calls[0][0].project_id).toBeUndefined();
+      expect(mockClient.createChat.mock.calls[0][0].offline).toBeUndefined();
+      expect(mockClient.createChat.mock.calls[0][0].context_tokens).toBeUndefined();
+      expect(screen.queryByRole('heading', { name: 'New Chat' })).not.toBeInTheDocument();
     });
 
-    it('creates an offline chat when Offline is checked', async () => {
-      mockCreateChat.mockResolvedValueOnce({
-        id: 'chat-offline',
+    it('opens the chat it created', async () => {
+      const created = {
+        id: 'chat-fresh',
         title: 'New chat',
         model_name: 'auto',
         archived: false,
         agent_enabled: false,
-        created_at: '2024-01-01T00:00:00Z',
-        updated_at: '2024-01-01T00:00:00Z',
+        created_at: '2024-01-05T00:00:00Z',
+        updated_at: '2024-01-05T00:00:00Z',
+      };
+      mockCreateChat.mockResolvedValueOnce(created);
+      mockClient.getChat.mockResolvedValue({ ...created, messages: [] });
+      renderChatsPage();
+
+      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
+
+      await waitFor(() => expect(mockClient.getChat).toHaveBeenCalledWith('chat-fresh'));
+      expect(await screen.findByText('No messages yet')).toBeInTheDocument();
+    });
+
+    it('repeats the settings of the chat created last, read afresh on the click', async () => {
+      mockGetWorkspaceChatProviders.mockResolvedValue({
+        default: selfHostedOffer,
+        providers: [selfHostedOffer],
+        recent: {
+          model_name: 'llama3.1',
+          provider: null,
+          provider_model: null,
+          reasoning_effort: 'auto',
+          agent_enabled: true,
+          offline: true,
+          context_tokens: 8192,
+        },
+      });
+      mockCreateChat.mockResolvedValueOnce({
+        id: 'chat-repeat',
+        title: 'Chat with llama3.1',
+        model_name: 'llama3.1',
+        archived: false,
+        agent_enabled: true,
         offline: true,
+        created_at: '2024-01-05T00:00:00Z',
+        updated_at: '2024-01-05T00:00:00Z',
       });
       renderChatsPage();
+
       fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
-      await waitFor(() => {
-        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
-      });
-      expect(screen.getByLabelText('Offline')).toBeInTheDocument();
-      fireEvent.click(screen.getByLabelText('Offline'));
-      fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
+
       await waitFor(() => {
         expect(mockClient.createChat).toHaveBeenCalledWith(
-          expect.objectContaining({ offline: true })
+          expect.objectContaining({
+            model_name: 'llama3.1',
+            title: 'Chat with llama3.1',
+            agent_enabled: true,
+            offline: true,
+            context_tokens: 8192,
+          })
         );
       });
+      expect(
+        mockGetWorkspaceChatProviders.mock.calls.length,
+        'the settings are read again when + is clicked, not just on mount'
+      ).toBeGreaterThan(1);
     });
 
-    it('omits offline when creating a chat without checking Offline', async () => {
+    it('never carries auto-approval into the chat it creates', async () => {
+      mockGetWorkspaceChatProviders.mockResolvedValue({
+        default: selfHostedOffer,
+        providers: [selfHostedOffer],
+        recent: {
+          model_name: 'llama3.1',
+          provider: null,
+          provider_model: null,
+          reasoning_effort: 'auto',
+          agent_enabled: true,
+          offline: false,
+          context_tokens: null,
+        },
+      });
       mockCreateChat.mockResolvedValueOnce({
-        id: 'chat-auto',
-        workspace_id: 'ws-1',
-        title: 'New chat',
-        model_name: 'auto',
+        id: 'chat-repeat',
+        title: 'Chat with llama3.1',
+        model_name: 'llama3.1',
         archived: false,
-        created_at: '2024-01-01T00:00:00Z',
-        updated_at: '2024-01-01T00:00:00Z',
+        agent_enabled: true,
+        created_at: '2024-01-05T00:00:00Z',
+        updated_at: '2024-01-05T00:00:00Z',
       });
       renderChatsPage();
-      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
-      fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
-      await waitFor(() => {
-        expect(mockClient.createChat.mock.calls[0][0].offline).toBeUndefined();
-        expect(mockClient.createChat.mock.calls[0][0].context_tokens).toBeUndefined();
-      });
-    });
 
-    it('hides context size until a local model is selected', async () => {
-      renderChatsPage();
       fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
-      await waitFor(() => {
-        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
-      });
-      expect(screen.queryByLabelText('Context')).not.toBeInTheDocument();
 
-      const selectTrigger = screen.getByLabelText('Select Model');
-      fireEvent.mouseDown(selectTrigger);
-      fireEvent.mouseUp(selectTrigger);
-      fireEvent.click(selectTrigger);
-      await waitFor(() => {
-        expect(screen.getByRole('option', { name: 'llama2' })).toBeInTheDocument();
-      });
-      fireEvent.click(screen.getByRole('option', { name: 'llama2' }));
-      expect(screen.getByLabelText('Context')).toBeInTheDocument();
-    });
-
-    it('hides context size for a cloud model', async () => {
-      listedModels = [{ name: 'gpt-4o-mini', size: 0, modified_at: '2026-01-01T00:00:00Z' }];
-      renderChatsPage();
-      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
-      await waitFor(() => {
-        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
-      });
-      const selectTrigger = screen.getByLabelText('Select Model');
-      fireEvent.mouseDown(selectTrigger);
-      fireEvent.mouseUp(selectTrigger);
-      fireEvent.click(selectTrigger);
-      await waitFor(() => {
-        expect(screen.getByRole('option', { name: 'gpt-4o-mini' })).toBeInTheDocument();
-      });
-      fireEvent.click(screen.getByRole('option', { name: 'gpt-4o-mini' }));
-      expect(screen.queryByLabelText('Context')).not.toBeInTheDocument();
-    });
-
-    it('sends a smaller chosen window for a local chat', async () => {
-      mockCreateChat.mockResolvedValueOnce({
-        id: 'chat-8k',
-        title: 'Chat with llama2',
-        model_name: 'llama2',
-        archived: false,
-        agent_enabled: false,
-        created_at: '2024-01-01T00:00:00Z',
-        updated_at: '2024-01-01T00:00:00Z',
-        context_tokens: 8192,
-      });
-      renderChatsPage();
-      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
-      await waitFor(() => {
-        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
-      });
-      const modelTrigger = screen.getByLabelText('Select Model');
-      fireEvent.mouseDown(modelTrigger);
-      fireEvent.mouseUp(modelTrigger);
-      fireEvent.click(modelTrigger);
-      await waitFor(() => {
-        expect(screen.getByRole('option', { name: 'llama2' })).toBeInTheDocument();
-      });
-      fireEvent.click(screen.getByRole('option', { name: 'llama2' }));
-      const contextTrigger = screen.getByLabelText('Context');
-      fireEvent.mouseDown(contextTrigger);
-      fireEvent.mouseUp(contextTrigger);
-      fireEvent.click(contextTrigger);
-      fireEvent.click(await screen.findByRole('option', { name: '8K tokens' }));
-      fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
       await waitFor(() => {
         expect(mockClient.createChat).toHaveBeenCalledWith(
-          expect.objectContaining({ model_name: 'llama2', context_tokens: 8192 })
-        );
-      });
-    });
-
-    it('offers a project when creating a chat and sends the chosen id', async () => {
-      mockCreateChat.mockResolvedValueOnce({
-        id: 'chat-alpha',
-        title: 'New chat',
-        model_name: 'auto',
-        archived: false,
-        agent_enabled: false,
-        created_at: '2024-01-01T00:00:00Z',
-        updated_at: '2024-01-01T00:00:00Z',
-        project_id: 'proj-alpha',
-      });
-      renderChatsPage();
-      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
-      await waitFor(() => {
-        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
-      });
-      const projectTrigger = screen.getByLabelText('Project');
-      fireEvent.mouseDown(projectTrigger);
-      fireEvent.mouseUp(projectTrigger);
-      fireEvent.click(projectTrigger);
-      fireEvent.click(await screen.findByRole('option', { name: 'Alpha' }));
-      fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
-      await waitFor(() => {
-        expect(mockClient.createChat).toHaveBeenCalledWith(
-          expect.objectContaining({ project_id: 'proj-alpha' })
+          expect.objectContaining({ agent_enabled: true, auto_approve: false })
         );
       });
     });
@@ -1637,14 +1424,60 @@ describe('ChatsPage', () => {
       ).toBeNull();
     });
 
-    it('names Offline on a chat created that way', async () => {
+    it('shows an offline chat as offline and an online one as not', async () => {
       mockGetChat.mockResolvedValue({
         ...mockChatWithMessages,
         offline: true,
       });
       renderChatsPage();
       fireEvent.click(await screen.findByText('Chat 1'));
-      expect(await screen.findByTestId('chat-offline')).toHaveTextContent('Offline');
+      const toggle = await screen.findByTestId('chat-offline');
+      expect(toggle).toHaveTextContent('Offline');
+      expect(toggle).toHaveAttribute('aria-pressed', 'true');
+
+      mockGetChat.mockResolvedValue(mockChatWithMessages);
+      fireEvent.click(screen.getByRole('button', { name: 'Back to chats' }));
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-offline')).toHaveAttribute('aria-pressed', 'false')
+      );
+    });
+
+    it('takes the open chat offline from the header and brings it back', async () => {
+      mockGetChat.mockResolvedValue(mockChatWithMessages);
+      mockUpdateChat.mockResolvedValue({ ...mockChatWithMessages, offline: true });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      fireEvent.click(await screen.findByTestId('chat-offline'));
+
+      await waitFor(() =>
+        expect(mockUpdateChat).toHaveBeenCalledWith(mockChatWithMessages.id, { offline: true })
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-offline')).toHaveAttribute('aria-pressed', 'true')
+      );
+
+      mockUpdateChat.mockResolvedValue({ ...mockChatWithMessages, offline: false });
+      fireEvent.click(screen.getByTestId('chat-offline'));
+      await waitFor(() =>
+        expect(mockUpdateChat).toHaveBeenLastCalledWith(mockChatWithMessages.id, {
+          offline: false,
+        })
+      );
+    });
+
+    it("says why the open chat's offline mode could not be changed", async () => {
+      mockGetChat.mockResolvedValue(mockChatWithMessages);
+      mockUpdateChat.mockRejectedValue(new Error('Offline unavailable'));
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      fireEvent.click(await screen.findByTestId('chat-offline'));
+
+      expect(await screen.findByTestId('chat-operation-error')).toHaveTextContent(
+        'Offline unavailable'
+      );
     });
 
     it('names the project on an assistant chat that belongs to one', async () => {
@@ -1655,98 +1488,97 @@ describe('ChatsPage', () => {
       renderChatsPage();
       fireEvent.click(await screen.findByText('Chat 1'));
       expect(await screen.findByTestId('chat-project')).toHaveTextContent('Alpha');
-      expect(screen.getByRole('link', { name: 'Alpha' })).toHaveAttribute(
+      expect(screen.getByRole('link', { name: 'Open' })).toHaveAttribute(
         'href',
         '/projects?id=proj-alpha'
       );
     });
 
-    it('hides Agent mode for a model known not to call tools', async () => {
+    it('moves the open chat to another project from the chat header', async () => {
+      mockGetChat.mockResolvedValue({ ...mockChatWithMessages, project_id: 'proj-alpha' });
+      mockUpdateChat.mockResolvedValue({ ...mockChatWithMessages, project_id: 'proj-zeta' });
       renderChatsPage();
-      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
-      await waitFor(() => {
-        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
-      });
-      expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
+      fireEvent.click(await screen.findByText('Chat 1'));
 
-      const selectTrigger = screen.getByLabelText('Select Model');
-      fireEvent.mouseDown(selectTrigger);
-      fireEvent.mouseUp(selectTrigger);
-      fireEvent.click(selectTrigger);
-      await waitFor(() => {
-        expect(screen.getByRole('option', { name: 'llama2' })).toBeInTheDocument();
-      });
-      fireEvent.click(screen.getByRole('option', { name: 'llama2' }));
-      expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
+      const picker = await screen.findByTestId('chat-project-select');
+      fireEvent.keyDown(picker, { key: 'ArrowDown' });
+      fireEvent.click(await screen.findByRole('option', { name: 'Zeta' }));
 
-      fireEvent.mouseDown(selectTrigger);
-      fireEvent.mouseUp(selectTrigger);
-      fireEvent.click(selectTrigger);
-      await waitFor(() => {
-        expect(screen.getByRole('option', { name: 'llama3.1' })).toBeInTheDocument();
-      });
-      fireEvent.click(screen.getByRole('option', { name: 'llama3.1' }));
-      await waitFor(() => {
-        expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
-      });
+      await waitFor(() =>
+        expect(mockUpdateChat).toHaveBeenCalledWith(mockChatWithMessages.id, {
+          project_id: 'proj-zeta',
+        })
+      );
     });
 
-    it('keeps a failed create in the dialog, out of the open chat', async () => {
-      mockClient.createChat.mockRejectedValueOnce(new Error('Failed to create'));
+    it('takes the open chat out of its project from the chat header', async () => {
+      mockGetChat.mockResolvedValue({ ...mockChatWithMessages, project_id: 'proj-alpha' });
+      mockUpdateChat.mockResolvedValue({ ...mockChatWithMessages, project_id: null });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      const picker = await screen.findByTestId('chat-project-select');
+      fireEvent.keyDown(picker, { key: 'ArrowDown' });
+      fireEvent.click(await screen.findByRole('option', { name: 'No project' }));
+
+      await waitFor(() =>
+        expect(mockUpdateChat).toHaveBeenCalledWith(mockChatWithMessages.id, {
+          clear_project: true,
+        })
+      );
+    });
+
+    it('offers a project to a chat that is in none', async () => {
+      mockGetChat.mockResolvedValue(mockChatWithMessages);
+      mockUpdateChat.mockResolvedValue({ ...mockChatWithMessages, project_id: 'proj-alpha' });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      const picker = await screen.findByTestId('chat-project-select');
+      expect(picker).toHaveTextContent('No project');
+      fireEvent.keyDown(picker, { key: 'ArrowDown' });
+      fireEvent.click(await screen.findByRole('option', { name: 'Alpha' }));
+
+      await waitFor(() =>
+        expect(mockUpdateChat).toHaveBeenCalledWith(mockChatWithMessages.id, {
+          project_id: 'proj-alpha',
+        })
+      );
+    });
+
+    it("leaves a project's own planner chat bound to it", async () => {
+      mockGetChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        purpose: 'project_planner',
+        project_id: 'proj-alpha',
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      expect(await screen.findByTestId('chat-purpose')).toHaveTextContent('Project planner');
+      expect(screen.queryByTestId('chat-project-select')).not.toBeInTheDocument();
+    });
+
+    it('says why a chat could not be created, keeping it out of the open chat', async () => {
+      mockCreateChat.mockRejectedValueOnce(new Error('Failed to create'));
+      mockGetChat.mockResolvedValue(mockChatWithMessages);
       renderChatsPage();
       fireEvent.click(await screen.findByText('Chat 1'));
       await screen.findByTestId('chat-provider');
 
       fireEvent.click(newChatButtons()[0]);
-      await screen.findByRole('heading', { name: 'New Chat' });
-      const model = screen.getByLabelText('Select Model');
-      fireEvent.keyDown(model, { key: 'ArrowDown' });
-      fireEvent.click(await screen.findByRole('option', { name: 'llama2' }));
-      fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
 
-      await waitFor(() => expect(screen.getByText('Failed to create')).toBeInTheDocument());
+      expect(await screen.findByText('Failed to create')).toBeInTheDocument();
       expect(screen.queryByTestId('chat-operation-error')).not.toBeInTheDocument();
     });
 
-    it('shows error when create chat fails', async () => {
-      mockClient.createChat.mockRejectedValueOnce(new Error('Failed to create'));
-
+    it('says a new chat fell back to the default settings when they could not be read', async () => {
+      mockGetWorkspaceChatProviders.mockRejectedValue(new Error('Providers unavailable'));
       renderChatsPage();
 
-      await waitFor(() => {
-        expect(newChatButtons()[0]).toBeInTheDocument();
-      });
-
-      fireEvent.click(newChatButtons()[0]);
-
-      await waitFor(() => {
-        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
-      });
-
-      // Open the select dropdown by clicking the trigger
-      const selectTrigger = screen.getByLabelText('Select Model');
-      fireEvent.mouseDown(selectTrigger);
-      fireEvent.mouseUp(selectTrigger);
-      fireEvent.click(selectTrigger);
-
-      // Wait for options to appear and click the llama2 option
-      await waitFor(() => {
-        expect(screen.getByRole('option', { name: 'llama2' })).toBeInTheDocument();
-      });
-
-      const option = screen.getByRole('option', { name: 'llama2' });
-      fireEvent.mouseDown(option);
-      fireEvent.mouseUp(option);
-      fireEvent.click(option);
-
-      // Now submit the form
-      const createButton = screen.getByRole('button', { name: 'Create Chat' });
-      fireEvent.click(createButton);
-
-      await waitFor(() => {
-        const errorMessages = screen.getAllByText('Failed to create');
-        expect(errorMessages.length).toBeGreaterThan(0);
-      });
+      expect(await screen.findByTestId('new-chat-providers-error')).toHaveTextContent(
+        'Providers unavailable'
+      );
     });
   });
 

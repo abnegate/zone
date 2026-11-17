@@ -910,6 +910,46 @@ describe('useChat', () => {
     expect(result.current.chat?.messages).toHaveLength(2);
   });
 
+  it('persists the offline toggle on the chat', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    mockUpdateChat.mockResolvedValue({ ...mockChat, offline: true });
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    await result.current.setOffline(true);
+
+    expect(mockUpdateChat).toHaveBeenCalledWith('1', { offline: true });
+    await waitFor(() => {
+      expect(result.current.chat?.offline).toBe(true);
+    });
+    expect(result.current.chat?.messages).toHaveLength(2);
+  });
+
+  it('moves the chat to a project, and clears it rather than sending no id', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    mockUpdateChat.mockResolvedValue({ ...mockChat, project_id: 'proj-1' });
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    await result.current.setProject('proj-1');
+    expect(mockUpdateChat).toHaveBeenCalledWith('1', { project_id: 'proj-1' });
+    await waitFor(() => {
+      expect(result.current.chat?.project_id).toBe('proj-1');
+    });
+
+    mockUpdateChat.mockResolvedValue({ ...mockChat, project_id: null });
+    await result.current.setProject(null);
+    expect(mockUpdateChat).toHaveBeenLastCalledWith('1', { clear_project: true });
+  });
+
   it('persists a model change on the chat', async () => {
     mockGetChat.mockResolvedValue(mockChat);
     mockUpdateChat.mockResolvedValue({ ...mockChat, model_name: 'opus' });

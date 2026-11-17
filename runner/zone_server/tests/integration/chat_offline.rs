@@ -1,4 +1,4 @@
-//! A new chat can opt out of public web for its lifetime.
+//! A chat can opt out of public web, at creation or from its header later.
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
@@ -54,6 +54,26 @@ async fn create_chat(client: &TestClient, token: &str, body: Value) -> (StatusCo
     (response.status, response.json_value())
 }
 
+async fn update_chat(
+    client: &TestClient,
+    token: &str,
+    chat_id: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let response = client
+        .put_json_auth(&format!("/api/chats/{chat_id}"), &body, token)
+        .await;
+    (response.status, response.json_value())
+}
+
+async fn fetch_chat(client: &TestClient, token: &str, chat_id: &str) -> Value {
+    let response = client
+        .get_auth(&format!("/api/chats/{chat_id}"), token)
+        .await;
+    response.assert_status(StatusCode::OK);
+    response.json_value()["chat"].clone()
+}
+
 #[tokio::test]
 async fn create_binds_offline_and_list_returns_it() {
     let client = TestClient::with_db().await;
@@ -106,4 +126,71 @@ async fn create_without_offline_stays_online() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["chat"]["offline"], false);
+}
+
+#[tokio::test]
+async fn update_takes_a_chat_offline_and_back_online() {
+    let client = TestClient::with_db().await;
+    let token = register(&client).await;
+    let workspace_id = workspace(&client, &token).await;
+
+    let (status, body) = create_chat(
+        &client,
+        &token,
+        json!({
+            "workspace_id": workspace_id,
+            "title": "Switchable chat",
+            "model_name": "gpt-4",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let chat_id = body["chat"]["id"].as_str().expect("an id").to_string();
+
+    let (status, body) = update_chat(&client, &token, &chat_id, json!({ "offline": true })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["chat"]["offline"], true);
+    assert_eq!(
+        fetch_chat(&client, &token, &chat_id).await["offline"],
+        true,
+        "going offline must survive a reload"
+    );
+
+    let (status, body) = update_chat(&client, &token, &chat_id, json!({ "offline": false })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["chat"]["offline"], false);
+    assert_eq!(
+        fetch_chat(&client, &token, &chat_id).await["offline"],
+        false,
+        "coming back online must survive a reload"
+    );
+}
+
+#[tokio::test]
+async fn update_without_offline_leaves_it_alone() {
+    let client = TestClient::with_db().await;
+    let token = register(&client).await;
+    let workspace_id = workspace(&client, &token).await;
+
+    let (status, body) = create_chat(
+        &client,
+        &token,
+        json!({
+            "workspace_id": workspace_id,
+            "title": "Offline chat",
+            "model_name": "gpt-4",
+            "offline": true,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let chat_id = body["chat"]["id"].as_str().expect("an id").to_string();
+
+    let (status, body) =
+        update_chat(&client, &token, &chat_id, json!({ "title": "Renamed" })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["chat"]["offline"], true,
+        "an update that says nothing about offline must not bring the chat back online"
+    );
 }
