@@ -9,6 +9,7 @@ mod analytics_window;
 mod api;
 mod artifacts;
 mod audit;
+mod audit_events;
 mod auth_console_contract;
 mod auth_session_revocation;
 mod authz_ai_settings_role;
