@@ -6,6 +6,8 @@ use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
+use crate::audit::destination::REDACTED;
+
 pub const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 pub const SERVICE: &str = "s3";
 pub const DATE_HEADER: &str = "x-amz-date";
@@ -34,7 +36,7 @@ impl fmt::Debug for Credentials<'_> {
         formatter
             .debug_struct("Credentials")
             .field("access_key_id", &self.access_key_id)
-            .field("secret_access_key", &"<redacted>")
+            .field("secret_access_key", &REDACTED)
             .finish()
     }
 }
@@ -416,5 +418,6 @@ mod tests {
         let shown = format!("{CREDENTIALS:?}");
         assert!(shown.contains(CREDENTIALS.access_key_id), "{shown}");
         assert!(!shown.contains(CREDENTIALS.secret_access_key), "{shown}");
+        assert!(shown.contains(REDACTED), "{shown}");
     }
 }

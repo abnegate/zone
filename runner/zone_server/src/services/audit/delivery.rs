@@ -7,9 +7,10 @@ use sqlx::PgPool;
 use tokio::time::Instant;
 use uuid::Uuid;
 use zone_enterprise::audit::delivery::{RETRY_BASE, RETRY_FACTOR, RETRY_MAXIMUM, S3_FLUSH_AGE};
-use zone_enterprise::audit::{FailureCode, Kind, Pause, Standing};
+use zone_enterprise::audit::{FailureCode, Kind, Pause};
 
 use super::events::event;
+use super::standing;
 use super::transport::{Batch, Failure, Transport};
 use crate::db::audit::deliveries::{self, Delivery};
 use crate::db::audit::destinations::{self, DestinationRecord};
@@ -83,8 +84,7 @@ pub async fn deliver(
     cadence: Cadence,
     open: &dyn Open,
 ) -> Result<Outcome, sqlx::Error> {
-    let stored = state.stored_license().await?;
-    let standing = Standing::of(stored.license(), stored.refusal().is_some(), Utc::now());
+    let standing = standing(state).await?;
     if let Some(pause) = standing.pause {
         return Ok(Outcome::Paused(pause));
     }
