@@ -9,6 +9,7 @@ mod analytics_window;
 mod api;
 mod artifacts;
 mod audit;
+mod audit_destination_store;
 mod audit_events;
 mod auth_console_contract;
 mod auth_session_revocation;
