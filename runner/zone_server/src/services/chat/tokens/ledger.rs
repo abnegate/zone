@@ -2,8 +2,6 @@ use abnegate_llm::Usage;
 
 use super::share::Share;
 
-/// What a turn spent so far, kept per model so a turn handed over to another
-/// model bills each model for its own part.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Ledger {
     shares: Vec<Share>,
@@ -15,23 +13,29 @@ impl Ledger {
         share.rounds = share.rounds.saturating_add(1);
     }
 
-    pub fn called(&mut self, model: &str) {
+    pub fn tool_call(&mut self, model: &str) {
         let share = self.share(model);
         share.tool_calls = share.tool_calls.saturating_add(1);
     }
 
-    /// Add one round's `usage` to what `model` was billed.
     pub fn add(&mut self, model: &str, usage: Usage) {
         let share = self.share(model);
-        share.billed = Some(share.billed.map_or(usage, |billed| billed.plus(usage)));
+        share.reported = Some(
+            share
+                .reported
+                .map_or(usage, |reported| reported.plus(usage)),
+        );
     }
 
-    /// Every model's bill together, or `None` when no provider reported one.
     pub fn total(&self) -> Option<Usage> {
         self.shares
             .iter()
-            .filter_map(|share| share.billed)
+            .filter_map(|share| share.reported)
             .reduce(Usage::plus)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.shares.is_empty()
     }
 
     pub fn rounds(&self) -> usize {
@@ -63,11 +67,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_model_is_billed_only_for_its_own_rounds() {
+    fn each_model_counts_only_its_own_rounds() {
         let mut ledger = Ledger::default();
         ledger.round("sonnet");
         ledger.add("sonnet", Usage::new(3, 2));
-        ledger.called("sonnet");
+        ledger.tool_call("sonnet");
         ledger.round("gpt-5");
         ledger.add("gpt-5", Usage::new(5, 7));
         ledger.round("gpt-5");
@@ -76,11 +80,11 @@ mod tests {
         let shares = ledger.shares();
         assert_eq!(shares.len(), 2, "{shares:?}");
         assert_eq!(shares[0].model, "sonnet");
-        assert_eq!(shares[0].billed, Some(Usage::new(3, 2)));
+        assert_eq!(shares[0].reported, Some(Usage::new(3, 2)));
         assert_eq!(shares[0].rounds, 1);
         assert_eq!(shares[0].tool_calls, 1);
         assert_eq!(shares[1].model, "gpt-5");
-        assert_eq!(shares[1].billed, Some(Usage::new(6, 8)));
+        assert_eq!(shares[1].reported, Some(Usage::new(6, 8)));
         assert_eq!(shares[1].rounds, 2);
         assert_eq!(ledger.total(), Some(Usage::new(9, 10)));
         assert_eq!(ledger.rounds(), 3);
@@ -95,7 +99,15 @@ mod tests {
         ledger.add("sonnet", Usage::new(3, 3));
 
         assert_eq!(ledger.shares().len(), 2);
-        assert_eq!(ledger.shares()[0].billed, Some(Usage::new(4, 4)));
+        assert_eq!(ledger.shares()[0].reported, Some(Usage::new(4, 4)));
+    }
+
+    #[test]
+    fn a_ledger_nothing_was_added_to_is_empty() {
+        let mut ledger = Ledger::default();
+        assert!(ledger.is_empty());
+        ledger.round("llama3");
+        assert!(!ledger.is_empty());
     }
 
     #[test]

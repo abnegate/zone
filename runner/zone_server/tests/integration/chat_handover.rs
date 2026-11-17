@@ -233,6 +233,8 @@ enum Run<'a> {
     Answers(&'a str),
     /// It streams `partial`, then [`FOLLOWING`] as a second message, and says nothing more.
     Streams(&'a str),
+    /// It reports what a request took without having written any of its answer.
+    Silent,
     /// It streams `partial`, then refuses the rest as an account past its
     /// five-hour window, which resets at `resets_at`.
     Limited {
@@ -263,6 +265,13 @@ impl Run<'_> {
                 .into_iter()
                 .chain([json!({"type": "assistant", "message": {"content": [{"type": "text", "text": FOLLOWING}]}})])
                 .collect(),
+            Self::Silent => vec![json!({
+                "type": "assistant",
+                "message": {
+                    "content": [],
+                    "usage": {"input_tokens": PARTIAL_INPUT_TOKENS, "output_tokens": PARTIAL_OUTPUT_TOKENS},
+                },
+            })],
             Self::Limited { partial, resets_at } => streamed(partial)
                 .into_iter()
                 .chain([
@@ -432,7 +441,7 @@ impl Agent {
             "id=\"{thread}\"\nprevious=\"\"\nfor argument in \"$@\"; do\n  [ \"$previous\" = \
              \"{CODEX_RESUME}\" ] && id=\"$argument\"\n  previous=\"$argument\"\ndone\nprintf \
              '{{\"type\":\"thread.started\",\"thread_id\":\"%s\"}}\\n' \"$id\"\ncat \
-             \"$plans/default.jsonl\"\n"
+             \"$plans/default.jsonl\"\nwhile [ -e \"$plans/{STALL}\" ]; do sleep 0.05; done\n"
         );
         agent.install("CODEX_HOME", &body)
     }
@@ -1311,6 +1320,96 @@ async fn a_turn_stopped_after_its_agent_reported_usage_records_that_usage_once()
             Some(i64::from(PARTIAL_OUTPUT_TOKENS))
         ),
         "what the agent reported before the stop is counted, and counted once: {rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_turn_stopped_before_any_content_still_records_what_its_agent_reported() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    harness.claude.plan(ALICE, 0, Run::Silent);
+    std::fs::write(harness.claude.plans.join(STALL), "").expect("the stall");
+
+    let mut socket = harness.connect().await;
+    send(&mut socket, json!({"type": "send", "content": QUESTION})).await;
+    let prompt = harness.claude.runs.join("0").join("prompt");
+    assert!(
+        eventually(|| async { prompt.exists() }).await,
+        "the agent never started"
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    send(&mut socket, json!({"type": "cancel"})).await;
+    let frames = finish(&mut socket).await;
+    std::fs::remove_file(harness.claude.plans.join(STALL)).expect("the stall to be lifted");
+
+    assert!(
+        kinds(&frames, CHUNK).is_empty(),
+        "the turn never wrote anything: {frames:?}"
+    );
+    let rows = spent(&harness, 1).await;
+    let [row] = rows.as_slice() else {
+        panic!("one turn on one model is one row: {rows:?}");
+    };
+    assert_eq!(row.model, CHAT_MODEL, "{rows:?}");
+    assert_eq!(
+        (row.prompt_tokens, row.completion_tokens),
+        (
+            Some(i64::from(PARTIAL_INPUT_TOKENS)),
+            Some(i64::from(PARTIAL_OUTPUT_TOKENS))
+        ),
+        "a turn with no answer still counts what it spent, once: {rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn usage_reported_before_a_stop_is_counted_for_the_model_that_ran_the_round() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    harness.sign_in_codex(CAROL).await;
+    harness.claude.plan(
+        ALICE,
+        0,
+        Run::Limited {
+            partial: Some(PARTIAL),
+            resets_at: reset_in(TimeDelta::hours(2)),
+        },
+    );
+    std::fs::write(harness.codex.plans.join(STALL), "").expect("the stall");
+
+    let mut socket = harness.connect().await;
+    send(&mut socket, json!({"type": "send", "content": QUESTION})).await;
+    let mut streamed = String::new();
+    while !streamed.contains(CODEX_ANSWER) {
+        let frame = next(&mut socket).await;
+        assert_ne!(frame["type"], ERROR, "{frame}");
+        if frame["type"] == CHUNK {
+            streamed.push_str(frame["content"].as_str().unwrap_or_default());
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    send(&mut socket, json!({"type": "cancel"})).await;
+    let frames = finish(&mut socket).await;
+    std::fs::remove_file(harness.codex.plans.join(STALL)).expect("the stall to be lifted");
+    assert_eq!(kinds(&frames, CANCELLED).len(), 1, "{frames:?}");
+
+    let rows = spent(&harness, 2).await;
+    let [claude, codex] = rows.as_slice() else {
+        panic!("one share per model: {rows:?}");
+    };
+    assert_eq!(claude.model, CHAT_MODEL, "{rows:?}");
+    assert_eq!(
+        (claude.prompt_tokens, claude.completion_tokens),
+        (
+            Some(i64::from(PARTIAL_INPUT_TOKENS)),
+            Some(i64::from(PARTIAL_OUTPUT_TOKENS))
+        ),
+        "Claude keeps only what it reported before its limit: {rows:?}"
+    );
+    assert_ne!(codex.model, CHAT_MODEL, "{rows:?}");
+    assert_eq!(
+        (codex.prompt_tokens, codex.completion_tokens),
+        (Some(1), Some(1)),
+        "what codex reported before the stop is codex's: {rows:?}"
     );
 }
 

@@ -158,11 +158,11 @@ fn handle() -> PrometheusHandle {
             );
             describe_counter!(
                 CHAT_TOKENS,
-                "Tokens chat turns were billed, by model and prompt/completion"
+                "Tokens chat turns spent, by model and prompt/completion"
             );
             describe_histogram!(
                 CHAT_TURN_TOKENS,
-                "Tokens one model was billed in all for its part of a chat turn"
+                "Tokens one model spent in all on its part of a chat turn"
             );
             describe_histogram!(CHAT_TURN_ROUNDS, "Model rounds one chat turn took");
             describe_histogram!(CHAT_TURN_TOOL_CALLS, "Tool calls one chat turn made");
@@ -613,7 +613,7 @@ pub fn record_citation_markers(status: &'static str, count: usize) {
 pub struct BilledTokens {
     pub prompt: u64,
     pub completion: u64,
-    /// What was billed in all, which can exceed the other two together once
+    /// What was spent in all, which can exceed the other two together once
     /// cache writes and reads are counted, so it is carried rather than summed.
     pub total: u64,
 }
@@ -626,14 +626,14 @@ pub fn record_chat_turn(rounds: u64, tool_calls: u64) {
     histogram!(CHAT_TURN_TOOL_CALLS).record(tool_calls as f64);
 }
 
-/// Record what `model` was billed for its part of one chat turn.
-pub fn record_chat_tokens(model: &str, billed: BilledTokens) {
+/// Record the tokens `model` spent on its part of one chat turn.
+pub fn record_chat_tokens(model: &str, tokens: BilledTokens) {
     init();
     counter!(CHAT_TOKENS, "model" => model.to_string(), "kind" => TOKENS_PROMPT)
-        .increment(billed.prompt);
+        .increment(tokens.prompt);
     counter!(CHAT_TOKENS, "model" => model.to_string(), "kind" => TOKENS_COMPLETION)
-        .increment(billed.completion);
-    histogram!(CHAT_TURN_TOKENS, "model" => model.to_string()).record(billed.total as f64);
+        .increment(tokens.completion);
+    histogram!(CHAT_TURN_TOKENS, "model" => model.to_string()).record(tokens.total as f64);
 }
 
 /// Record where one turn's final context went, a category at a time.

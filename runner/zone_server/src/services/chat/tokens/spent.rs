@@ -15,7 +15,6 @@ const SUMMARY: &str = "summary";
 const ATTACHMENTS: &str = "attachments";
 const OVERHEAD: &str = "overhead";
 
-/// One finished turn, as the generation that ran it saw it.
 #[derive(Debug, Clone)]
 pub struct Spent {
     pub message: Uuid,
@@ -24,22 +23,24 @@ pub struct Spent {
     /// The model the turn ended on, whose share carries the closing context.
     pub model: String,
     pub effort: ReasoningEffort,
-    pub billed: Ledger,
-    pub context: ContextUsage,
+    pub ledger: Ledger,
+    pub context: Option<ContextUsage>,
 }
 
 impl Spent {
     pub(super) fn turn(&self) -> Turn {
         let mut shares: Vec<chat_token_usage::Share> =
-            self.billed.shares().iter().map(stored).collect();
-        let closing = match shares.iter().position(|share| share.model == self.model) {
-            Some(index) => index,
-            None => {
-                shares.push(stored(&Share::new(&self.model)));
-                shares.len() - 1
-            }
-        };
-        shares[closing].context = Some(self.breakdown());
+            self.ledger.shares().iter().map(stored).collect();
+        if let Some(context) = &self.context {
+            let closing = match shares.iter().position(|share| share.model == self.model) {
+                Some(index) => index,
+                None => {
+                    shares.push(stored(&Share::new(&self.model)));
+                    shares.len() - 1
+                }
+            };
+            shares[closing].context = Some(breakdown(context));
+        }
         Turn {
             message_id: self.message,
             chat_id: self.chat,
@@ -49,23 +50,11 @@ impl Spent {
         }
     }
 
-    fn breakdown(&self) -> Breakdown {
-        let breakdown = &self.context.breakdown;
-        Breakdown {
-            total: to_bigint(self.context.used),
-            instructions: to_bigint(breakdown.instructions),
-            conversation: to_bigint(breakdown.conversation),
-            tools: to_bigint(breakdown.tools),
-            results: to_bigint(breakdown.results),
-            summary: to_bigint(breakdown.summary),
-            attachments: breakdown.attachments.map(to_bigint),
-            overhead: to_bigint(breakdown.overhead),
-            estimated: self.context.estimated,
-        }
-    }
-
     pub(super) fn categories(&self) -> Vec<(&'static str, u64)> {
-        let breakdown = &self.context.breakdown;
+        let Some(context) = &self.context else {
+            return Vec::new();
+        };
+        let breakdown = &context.breakdown;
         let mut categories = vec![
             (INSTRUCTIONS, breakdown.instructions),
             (CONVERSATION, breakdown.conversation),
@@ -74,8 +63,6 @@ impl Spent {
             (SUMMARY, breakdown.summary),
             (OVERHEAD, breakdown.overhead),
         ];
-        // Absent rather than zero: a turn that carried no attachment should not
-        // pull the attachment distribution down towards nothing.
         if let Some(attachments) = breakdown.attachments {
             categories.push((ATTACHMENTS, attachments));
         }
@@ -83,7 +70,22 @@ impl Spent {
     }
 }
 
-pub(super) fn billed(usage: Usage) -> BilledTokens {
+fn breakdown(context: &ContextUsage) -> Breakdown {
+    let breakdown = &context.breakdown;
+    Breakdown {
+        total: to_bigint(context.used),
+        instructions: to_bigint(breakdown.instructions),
+        conversation: to_bigint(breakdown.conversation),
+        tools: to_bigint(breakdown.tools),
+        results: to_bigint(breakdown.results),
+        summary: to_bigint(breakdown.summary),
+        attachments: breakdown.attachments.map(to_bigint),
+        overhead: to_bigint(breakdown.overhead),
+        estimated: context.estimated,
+    }
+}
+
+pub(super) fn counted(usage: Usage) -> BilledTokens {
     BilledTokens {
         prompt: u64::from(usage.prompt_tokens),
         completion: u64::from(usage.completion_tokens),
@@ -94,10 +96,10 @@ pub(super) fn billed(usage: Usage) -> BilledTokens {
 fn stored(share: &Share) -> chat_token_usage::Share {
     chat_token_usage::Share {
         model: share.model.clone(),
-        reported: share.billed.map(|billed| Reported {
-            prompt_tokens: i64::from(billed.prompt_tokens),
-            completion_tokens: i64::from(billed.completion_tokens),
-            total_tokens: i64::from(billed.total_tokens),
+        reported: share.reported.map(|usage| Reported {
+            prompt_tokens: i64::from(usage.prompt_tokens),
+            completion_tokens: i64::from(usage.completion_tokens),
+            total_tokens: i64::from(usage.total_tokens),
         }),
         rounds: to_integer(share.rounds),
         tool_calls: to_integer(share.tool_calls),
@@ -105,8 +107,6 @@ fn stored(share: &Share) -> chat_token_usage::Share {
     }
 }
 
-/// Saturates rather than failing, since an overflow is a bug upstream and not
-/// worth the whole row.
 fn to_bigint(tokens: u64) -> i64 {
     i64::try_from(tokens).unwrap_or(i64::MAX)
 }
@@ -145,15 +145,15 @@ mod tests {
         usage
     }
 
-    fn spent(billed: Ledger) -> Spent {
+    fn spent(ledger: Ledger) -> Spent {
         Spent {
             message: Uuid::nil(),
             chat: Uuid::nil(),
             workspace: Uuid::nil(),
             model: "llama3".to_string(),
             effort: ReasoningEffort::Medium,
-            billed,
-            context: context(),
+            ledger,
+            context: Some(context()),
         }
     }
 
@@ -162,8 +162,8 @@ mod tests {
         for _ in 0..rounds {
             ledger.round("llama3");
         }
-        ledger.called("llama3");
-        ledger.called("llama3");
+        ledger.tool_call("llama3");
+        ledger.tool_call("llama3");
         if let Some(usage) = usage {
             ledger.add("llama3", usage);
         }
@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn a_handed_over_turn_bills_each_model_and_closes_on_the_last() {
+    fn a_handed_over_turn_counts_each_model_and_closes_on_the_last() {
         let mut ledger = Ledger::default();
         ledger.round("sonnet");
         ledger.add("sonnet", Usage::new(3, 2));
@@ -247,6 +247,21 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_whose_context_is_unknown_records_what_it_spent_without_one() {
+        let mut spent = spent(reported(1, Some(Usage::new(5, 5))));
+        spent.context = None;
+
+        let turn = spent.turn();
+
+        let [share] = turn.shares.as_slice() else {
+            panic!("{turn:?}");
+        };
+        assert_eq!(share.rounds, 1);
+        assert_eq!(share.context, None);
+        assert!(spent.categories().is_empty());
+    }
+
+    #[test]
     fn a_turn_that_never_reached_its_model_still_keeps_its_context() {
         let turn = spent(Ledger::default()).turn();
 
@@ -261,14 +276,22 @@ mod tests {
     #[test]
     fn an_absent_attachment_count_is_not_published_as_zero() {
         let mut spent = spent(Ledger::default());
-        spent.context.breakdown.attachments = None;
+        spent
+            .context
+            .as_mut()
+            .expect("a context")
+            .breakdown
+            .attachments = None;
 
         let categories = spent.categories();
         assert!(
             !categories.iter().any(|(name, _)| *name == ATTACHMENTS),
             "a turn with no attachments reports no attachment category: {categories:?}"
         );
-        assert_eq!(spent.breakdown().attachments, None);
+        assert_eq!(
+            breakdown(spent.context.as_ref().expect("a context")).attachments,
+            None
+        );
     }
 
     #[test]
@@ -290,7 +313,7 @@ mod tests {
         );
         assert_eq!(
             categories.iter().map(|(_, tokens)| tokens).sum::<u64>(),
-            spent.context.breakdown.total(),
+            spent.context.as_ref().expect("a context").breakdown.total(),
             "the published categories account for the whole breakdown"
         );
     }
@@ -298,8 +321,11 @@ mod tests {
     #[test]
     fn a_count_too_large_for_postgres_is_clamped_rather_than_lost() {
         let mut spent = spent(Ledger::default());
-        spent.context.used = u64::MAX;
+        spent.context.as_mut().expect("a context").used = u64::MAX;
 
-        assert_eq!(spent.breakdown().total, i64::MAX);
+        assert_eq!(
+            breakdown(spent.context.as_ref().expect("a context")).total,
+            i64::MAX
+        );
     }
 }

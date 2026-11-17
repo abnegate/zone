@@ -3749,7 +3749,7 @@ async fn handle_chat_generation(
     generation.started = true;
 
     let mut handovers: Vec<Notice> = Vec::new();
-    let mut billed = tokens::Ledger::default();
+    let mut ledger = tokens::Ledger::default();
     let mut logins: Vec<Uuid> = handover.iter().map(Handover::login).collect();
     let mut observed = router::Observed::default();
     if let Some(notice) = handover.as_mut().and_then(Handover::opened) {
@@ -3884,9 +3884,9 @@ async fn handle_chat_generation(
                         }
                         Some(AgentEvent::Usage(observed)) => {
                             tracing::debug!(prompt_tokens=observed.prompt_tokens,completion_tokens=observed.completion_tokens,"Observed provider usage");
-                            billed.add(&model, observed);
+                            ledger.add(&model, observed);
                         }
-                        Some(AgentEvent::Round) => billed.round(&model),
+                        Some(AgentEvent::Round) => ledger.round(&model),
                         Some(AgentEvent::Window(window)) => {
                             tracing::debug!(window=%window.name,used_percent=?window.used_percent,"Observed agent usage window");
                             if let Some(handover) = &handover {
@@ -3977,7 +3977,7 @@ async fn handle_chat_generation(
                                 thought,
                             );
                             tool_calls.push(record);
-                            billed.called(&model);
+                            ledger.tool_call(&model);
                             publish(stream, tool_msg).await;
                             persist_now = true;
                         }
@@ -4135,7 +4135,7 @@ async fn handle_chat_generation(
                             &generated_images,
                             &round_reasoning,
                             &handovers,
-                            billed.total(),
+                            ledger.total(),
                         )
                         .await
                         {
@@ -4159,8 +4159,8 @@ async fn handle_chat_generation(
         // Drop the producer before acknowledging cancellation so it cannot emit
         // more events after the terminal frame.
         drop(events);
-        if let Some(usage) = context.unreported.take() {
-            billed.add(&model, usage);
+        if let Some(usage) = context.pending_usage.take() {
+            ledger.add(&model, usage);
         }
 
         if refused
@@ -4294,7 +4294,7 @@ async fn handle_chat_generation(
                 &generated_images,
                 &round_reasoning,
                 &handovers,
-                billed.total(),
+                ledger.total(),
             )
             .await
             {
@@ -4375,7 +4375,7 @@ async fn handle_chat_generation(
             &generated_images,
             &round_reasoning,
             &handovers,
-            billed.total(),
+            ledger.total(),
         )
         .await
         {
@@ -4444,6 +4444,20 @@ async fn handle_chat_generation(
     }
     leave_unfinished(&mut tool_calls);
 
+    let spent_tokens = ledger.total();
+    let mut pending = tokens::Pending::new(
+        state.db().clone(),
+        tokens::Spent {
+            message: assistant_message_id,
+            chat: chat_id,
+            workspace: workspace_id,
+            model: model.clone(),
+            effort,
+            ledger,
+            context: None,
+        },
+    );
+
     // Nothing generated yet: there is no reply worth keeping. A turn that ran
     // tools or produced an image before it broke is worth keeping even with no
     // prose, because both show the reader what was attempted.
@@ -4459,13 +4473,15 @@ async fn handle_chat_generation(
             }
             Err(error) => return Err(error.into()),
         }
+        let usage = blocked.unwrap_or_else(|| replay.usage(&model, definitions.as_deref()));
+        pending.context(usage.clone());
         session.close().await?;
         publish(
             stream,
             ServerMessage::Context {
                 chat_id,
                 message_id: Some(assistant_message_id),
-                usage: blocked.unwrap_or_else(|| replay.usage(&model, definitions.as_deref())),
+                usage,
             },
         )
         .await;
@@ -4516,7 +4532,7 @@ async fn handle_chat_generation(
         &action_receipts,
         Some(&round_reasoning),
         &handovers,
-        billed.total(),
+        spent_tokens,
     );
 
     let partial = if !pending_content.is_empty() || !pending_images.is_empty() {
@@ -4539,6 +4555,7 @@ async fn handle_chat_generation(
         .await
     {
         Ok(msg) => {
+            pending.stored();
             if let Some(pinned) = &pinned {
                 let entry = session.store.latest().await.unwrap_or_else(|error| {
                     tracing::warn!(%chat_id, %error, "Could not read how far the chat has run; the agent session keeps its place");
@@ -4559,15 +4576,7 @@ async fn handle_chat_generation(
             replay.summary = history.summary.map(session::core_summary);
             replay.search(&SearchContext::new(&state.config().web_search));
             let usage = blocked.unwrap_or_else(|| replay.usage(&model, definitions.as_deref()));
-            let spent = tokens::Spent {
-                message: msg.id,
-                chat: chat_id,
-                workspace: workspace_id,
-                model: model.clone(),
-                effort,
-                billed,
-                context: usage.clone(),
-            };
+            pending.context(usage.clone());
             publish(
                 stream,
                 ServerMessage::Context {
@@ -4577,10 +4586,7 @@ async fn handle_chat_generation(
                 },
             )
             .await;
-            if let Err(error) = session.close().await {
-                tokens::spawn(state.db().clone(), spent);
-                return Err(error.into());
-            }
+            session.close().await?;
             // Spawn background task to generate assistant message embedding
             if !full_content.trim().is_empty() {
                 spawn_message_embedding_task(state.clone(), msg.id, chat_id, full_content.clone());
@@ -4606,7 +4612,6 @@ async fn handle_chat_generation(
                 }
             };
             publish(stream, end_msg).await;
-            tokens::spawn(state.db().clone(), spent);
 
             tracing::debug!(
                 "Assistant message completed: chat_id={}, message_id={}, db_id={}, length={}",

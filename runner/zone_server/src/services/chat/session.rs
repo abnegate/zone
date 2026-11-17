@@ -148,7 +148,7 @@ pub struct RunContext {
     /// The round in flight's latest usage the run has not yet yielded as
     /// `AgentEvent::Usage`. A consumer that drops the run mid-round takes it
     /// from here, so the round is still counted, and counted once.
-    pub unreported: Option<Usage>,
+    pub pending_usage: Option<Usage>,
 }
 
 impl RunContext {
@@ -174,7 +174,7 @@ impl RunContext {
             artifacts: None,
             vision: true,
             reported: None,
-            unreported: None,
+            pending_usage: None,
         }
     }
 
@@ -582,7 +582,7 @@ pub async fn build(
         )),
         vision: sees_images(&chat.model_name, capacity.vision),
         reported,
-        unreported: None,
+        pending_usage: None,
     };
     context.search(&SearchContext::new(&state.config().web_search));
     let sent = agentic.then(|| tools.definitions());

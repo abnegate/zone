@@ -1,11 +1,7 @@
 use abnegate_llm::Usage;
 
-/// What one completion stream was billed, read the way
-/// `abnegate_agent_cli::StdoutParseResult` reads a coding agent's run: within
-/// a turn each report restates the turn so far, so the latest stands, and
-/// turns that finished add up. A turn ends at its finish but only gives way
-/// to the next once that one writes something, since a provider may restate
-/// the finished turn's usage after the finish.
+/// A provider may restate a finished turn's usage after its finish, so a turn
+/// only gives way to the next once the stream carries content again.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Tally {
     finished: Option<Usage>,
@@ -22,8 +18,7 @@ impl Tally {
         self.closed = true;
     }
 
-    /// Note that the stream wrote something, which after a finish starts the next turn.
-    pub(super) fn wrote(&mut self) {
+    pub(super) fn content(&mut self) {
         if self.closed {
             self.finished = self.current;
             self.closed = false;
@@ -42,9 +37,9 @@ mod tests {
     #[test]
     fn a_turns_result_replaces_the_messages_that_led_to_it() {
         let mut tally = Tally::default();
-        tally.wrote();
+        tally.content();
         tally.observe(Usage::new(10, 1));
-        tally.wrote();
+        tally.content();
         tally.observe(Usage::new(20, 2));
         tally.observe(Usage::new(30, 3));
         tally.finish();
@@ -57,7 +52,7 @@ mod tests {
         let mut tally = Tally::default();
         tally.observe(Usage::new(10, 1));
         tally.finish();
-        tally.wrote();
+        tally.content();
         tally.observe(Usage::new(4, 4));
         tally.observe(Usage::new(5, 5));
         tally.finish();
@@ -68,7 +63,7 @@ mod tests {
     #[test]
     fn usage_reported_after_the_finish_is_counted_once() {
         let mut tally = Tally::default();
-        tally.wrote();
+        tally.content();
         tally.observe(Usage::new(7, 2));
         tally.finish();
         tally.observe(Usage::new(7, 3));
@@ -79,7 +74,7 @@ mod tests {
     #[test]
     fn a_stream_that_reported_nothing_totals_nothing() {
         let mut tally = Tally::default();
-        tally.wrote();
+        tally.content();
         tally.finish();
 
         assert_eq!(tally.total(), None);

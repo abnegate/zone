@@ -131,9 +131,7 @@ pub enum AgentEvent {
         summary: Summary,
     },
     Context(ContextUsage),
-    /// A completion request went out to the model.
     Round,
-    /// What one round was billed, when the provider said.
     Usage(Usage),
     Finalizing(String),
     /// The model asked for a tool and we are about to run it.
@@ -371,24 +369,24 @@ pub fn run_with_context(
             let mut images = Vec::new();
             let mut cut_short = false;
             let mut tally = Tally::default();
-            context.unreported = None;
+            context.pending_usage = None;
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
                     Err(error) => {
-                        if let Some(usage) = context.unreported.take() {
+                        if let Some(usage) = context.pending_usage.take() {
                             yield AgentEvent::Usage(usage);
                         }
                         yield halted(error);
                         return;
                     }
                 };
-                if chunk.choices.first().is_some_and(|choice| writes(&choice.delta)) {
-                    tally.wrote();
+                if chunk.choices.first().is_some_and(|choice| carries_content(&choice.delta)) {
+                    tally.content();
                 }
                 if let Some(usage) = chunk.usage {
                     tally.observe(usage);
-                    context.unreported = tally.total();
+                    context.pending_usage = tally.total();
                 }
                 if let Some(window) = chunk.window {
                     yield AgentEvent::Window(window);
@@ -444,7 +442,7 @@ pub fn run_with_context(
                 // A usage-only SSE frame, or the window a coding agent reports once it has
                 // exited, may follow finish_reason; drain through the stream's end.
             }
-            if let Some(usage) = context.unreported.take() {
+            if let Some(usage) = context.pending_usage.take() {
                 yield AgentEvent::Usage(usage);
             }
             let mut requested = pending.finish();
@@ -748,7 +746,7 @@ impl Parked {
     }
 }
 
-fn writes(delta: &StreamDelta) -> bool {
+fn carries_content(delta: &StreamDelta) -> bool {
     delta
         .content
         .as_ref()
@@ -2415,8 +2413,6 @@ mod tests {
             assert_eq!(offered, [plan::SUBMIT_PLAN]);
         }
 
-        /// A stand-in agent that reports what each of its messages took, then
-        /// the whole turn in its result, as `claude` does.
         fn itemizing(directory: &TempDir) -> PathBuf {
             use std::io::Write;
             use std::os::unix::fs::PermissionsExt;
@@ -2457,7 +2453,7 @@ mod tests {
             path
         }
 
-        fn billed(events: &[AgentEvent]) -> Vec<Usage> {
+        fn counted(events: &[AgentEvent]) -> Vec<Usage> {
             events
                 .iter()
                 .filter_map(|event| match event {
@@ -2475,14 +2471,14 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn a_turns_result_is_billed_instead_of_on_top_of_its_messages() {
+        async fn a_turns_result_is_counted_instead_of_on_top_of_its_messages() {
             let directory = TempDir::new().expect("a temporary directory");
 
             let events = turn(cli(itemizing(&directory)), ChatTools::empty()).await;
 
             assert!(failures(&events).is_empty(), "{:?}", failures(&events));
             assert_eq!(
-                billed(&events),
+                counted(&events),
                 [Usage::new(30, 3)],
                 "the result restates the turn, so its messages are not added to it"
             );
@@ -2522,11 +2518,9 @@ mod tests {
             assert!(failures(&events).is_empty(), "{:?}", failures(&events));
             assert_eq!(*sent.lock().expect("the request count"), 2);
             assert_eq!(requested(&events), 2, "{events:?}");
-            assert!(billed(&events).is_empty(), "{events:?}");
+            assert!(counted(&events).is_empty(), "{events:?}");
         }
 
-        /// A stand-in agent that reports what its first message took, then
-        /// keeps the round open until it is stopped.
         fn stalling(directory: &TempDir) -> PathBuf {
             use std::io::Write;
             use std::os::unix::fs::PermissionsExt;
@@ -2581,9 +2575,9 @@ mod tests {
                 }
             }
 
-            assert!(billed(&seen).is_empty(), "{seen:?}");
-            assert_eq!(context.unreported.take(), Some(Usage::new(10, 1)));
-            assert_eq!(context.unreported, None, "the round is counted once");
+            assert!(counted(&seen).is_empty(), "{seen:?}");
+            assert_eq!(context.pending_usage.take(), Some(Usage::new(10, 1)));
+            assert_eq!(context.pending_usage, None, "the round is counted once");
         }
     }
 }
