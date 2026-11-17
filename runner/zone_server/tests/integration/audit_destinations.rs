@@ -12,11 +12,11 @@ use zone_enterprise::audit::signature::SIGNATURE_HEADER;
 use zone_enterprise::audit::{
     BUCKET_INVALID, CERTIFICATE_INVALID, DESTINATION_DUPLICATE, DESTINATION_NOT_FOUND,
     FACILITY_INVALID, HOST_INVALID, HOSTNAME_INVALID, KIND_INVALID, NAME_INVALID, PORT_INVALID,
-    PREFIX_INVALID, REGION_INVALID, SECRET_INVALID, URL_INVALID,
+    PREFIX_INVALID, REBASING, REGION_INVALID, SECRET_INVALID, URL_INVALID,
 };
 use zone_server::config::Config;
-use zone_server::db::audit::actions;
 use zone_server::db::audit::position::Position;
+use zone_server::db::audit::{actions, events};
 use zone_server::db::organization_members::OrgRole;
 use zone_server::routes::audit::refusal::BODY_INVALID;
 use zone_server::services::audit::delivery::Cadence;
@@ -42,6 +42,7 @@ const CLIENT_KEY: &str = include_str!("../fixtures/audit/client.key");
 const OTHER_KEY: &str = include_str!("../fixtures/audit/server.key");
 const NOT_DER: &str = "-----BEGIN CERTIFICATE-----\nAAECAwQF\n-----END CERTIFICATE-----\n";
 const NOT_KEY: &str = "-----BEGIN PRIVATE KEY-----\nAAECAwQF\n-----END PRIVATE KEY-----\n";
+const REFUSAL_WAIT: Duration = Duration::from_secs(30);
 const CADENCE: Cadence = Cadence {
     tick: Duration::from_millis(50),
     lease: Duration::from_secs(1),
@@ -1428,6 +1429,61 @@ async fn a_host_the_operator_no_longer_allows_is_refused_when_sending() {
         received(&server, "/hook").await.is_empty(),
         "nothing reaches a host the operator no longer allows"
     );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn adding_a_destination_never_waits_for_a_rebase_in_flight() {
+    let fixture = Fixture::new(PREFIX).await;
+    let client = &fixture.sso.client;
+    let pool = fixture.pool();
+    let path = destinations(fixture.organization);
+    let owner = &fixture.owner;
+    fixture.license(Tier::Enterprise).await;
+    let restored = Destination::new(Some(fixture.organization))
+        .create(
+            pool,
+            Position {
+                transaction_id: i64::MAX - 1,
+                sequence: i64::MAX,
+            },
+        )
+        .await;
+    let mut rebasing = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(events::REBASE_LOCK)
+        .execute(&mut *rebasing)
+        .await
+        .unwrap();
+    let siem = webhook("SIEM", "http://10.0.0.5/hook");
+
+    let refusal = tokio::time::timeout(REFUSAL_WAIT, post(client, &path, owner, &siem))
+        .await
+        .expect("adding a destination does not wait for the rebase");
+    refused(&refusal, StatusCode::SERVICE_UNAVAILABLE, REBASING);
+    let named: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_destinations WHERE name = $1")
+        .bind("SIEM")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(named, 0, "nothing starts below the restored rows");
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(events::REBASE_LOCK)
+        .execute(&mut *rebasing)
+        .await
+        .unwrap();
+    drop(rebasing);
+    post(client, &path, owner, &siem)
+        .await
+        .assert_status(StatusCode::CREATED);
+    let cursor: i64 =
+        sqlx::query_scalar("SELECT transaction_id FROM audit_deliveries WHERE destination_id = $1")
+            .bind(restored)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(cursor, 0, "the request that took the lock rebased first");
     fixture.cleanup().await;
 }
 

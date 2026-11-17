@@ -18,10 +18,12 @@ pub const CERTIFICATE_INVALID: &str = "audit_destination_certificate_invalid";
 pub const RETENTION_INVALID: &str = "audit_retention_invalid";
 pub const EXPORT_RANGE_INVALID: &str = "audit_export_range_invalid";
 pub const EXPORT_FORMAT_INVALID: &str = "audit_export_format_invalid";
+pub const REBASING: &str = "audit_rebasing";
 
 const NOT_FOUND: u16 = 404;
 const CONFLICT: u16 = 409;
 const BAD_REQUEST: u16 = 400;
+const SERVICE_UNAVAILABLE: u16 = 503;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
@@ -91,6 +93,10 @@ pub enum Error {
     ExportRangeInvalid,
     #[error("Choose ndjson or csv as the export format.")]
     ExportFormatInvalid,
+    #[error(
+        "Zone is rebasing audit positions after a database restore. Try again once it finishes."
+    )]
+    Rebasing,
 }
 
 impl Error {
@@ -118,6 +124,7 @@ impl Error {
             Self::RetentionInvalid => RETENTION_INVALID,
             Self::ExportRangeInvalid => EXPORT_RANGE_INVALID,
             Self::ExportFormatInvalid => EXPORT_FORMAT_INVALID,
+            Self::Rebasing => REBASING,
         }
     }
 
@@ -125,6 +132,7 @@ impl Error {
         match self {
             Self::DestinationNotFound => NOT_FOUND,
             Self::DestinationDuplicate => CONFLICT,
+            Self::Rebasing => SERVICE_UNAVAILABLE,
             _ => BAD_REQUEST,
         }
     }
@@ -146,7 +154,7 @@ fn host_refusal(reason: &UrlReason) -> &'static str {
 mod tests {
     use super::*;
 
-    fn every() -> [Error; 27] {
+    fn every() -> [Error; 28] {
         [
             Error::DestinationNotFound,
             Error::DestinationDuplicate,
@@ -175,6 +183,7 @@ mod tests {
             Error::HostRefused(UrlReason::Unlisted),
             Error::HostRefused(UrlReason::Host),
             Error::CertificateMismatched,
+            Error::Rebasing,
         ]
     }
 
@@ -211,6 +220,7 @@ mod tests {
                 "audit_destination_host_invalid",
                 "audit_destination_host_invalid",
                 "audit_destination_certificate_invalid",
+                "audit_rebasing",
             ]
         );
     }
@@ -234,6 +244,7 @@ mod tests {
         assert_eq!(RETENTION_INVALID, "audit_retention_invalid");
         assert_eq!(EXPORT_RANGE_INVALID, "audit_export_range_invalid");
         assert_eq!(EXPORT_FORMAT_INVALID, "audit_export_format_invalid");
+        assert_eq!(REBASING, "audit_rebasing");
     }
 
     #[test]
@@ -242,6 +253,7 @@ mod tests {
             let expected = match error.code() {
                 DESTINATION_NOT_FOUND => 404,
                 DESTINATION_DUPLICATE => 409,
+                REBASING => 503,
                 _ => 400,
             };
             assert_eq!(error.status(), expected, "{error:?}");

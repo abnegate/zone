@@ -133,6 +133,8 @@ const REFUSALS: Readonly<Record<AuditCodeValue, string>> = {
   [AuditCode.ExportRangeInvalid]:
     'Choose a start date and an end date, with the start on or before the end.',
   [AuditCode.ExportFormatInvalid]: 'Choose NDJSON or CSV.',
+  [AuditCode.Rebasing]:
+    'Zone is updating audit positions after a database restore. Try again in a minute.',
 };
 
 const REFUSAL_FIELDS: Readonly<Partial<Record<AuditCodeValue, DestinationField>>> = {

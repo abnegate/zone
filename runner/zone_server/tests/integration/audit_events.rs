@@ -18,6 +18,16 @@ const BATCH: i64 = 2;
 const LOCK_WAIT: StdDuration = StdDuration::from_secs(30);
 const LOCK_POLL: StdDuration = StdDuration::from_millis(20);
 const RESTORED: i64 = 1 << 40;
+const SEEDED: i64 = 200_000;
+const SEEDED_REBASE: StdDuration = StdDuration::from_secs(10);
+const SCANNING: [(&str, &str); 3] = [
+    ("enable_indexscan", "off"),
+    ("enable_indexonlyscan", "off"),
+    ("enable_bitmapscan", "off"),
+];
+const SERVER_SEEDED: i64 = 20_000;
+const SERVER_PAGE: i64 = 100;
+const SERVER_PAGE_READS: i64 = 1_000;
 const ORIGIN: Position = Position {
     transaction_id: 0,
     sequence: 0,
@@ -143,6 +153,36 @@ async fn delivery(pool: &PgPool, destination: Uuid) -> Delivery {
 async fn pending(pool: &PgPool, scope: Scope, destination: Uuid) -> Vec<Uuid> {
     let cursor = delivery(pool, destination).await.position();
     drain(pool, scope, cursor).await.0
+}
+
+async fn seed(pool: &PgPool, organization: Option<Uuid>, count: i64) {
+    sqlx::query(
+        "INSERT INTO audit_logs (organization_id, action, resource_type) \
+         SELECT $1, $2, $3 FROM generate_series(1, $4)",
+    )
+    .bind(organization)
+    .bind(actions::SETTINGS_UPDATED)
+    .bind(resources::ORGANIZATION)
+    .bind(count)
+    .execute(pool)
+    .await
+    .expect("the audit rows are seeded");
+}
+
+async fn analyze(pool: &PgPool) {
+    sqlx::query("ANALYZE audit_logs")
+        .execute(pool)
+        .await
+        .expect("the audit log is analyzed");
+}
+
+/// A pool whose sessions read every table by scanning it, as the planner may choose for a log
+/// restored moments ago, so a statement's cost cannot hide behind a lucky index path.
+async fn scanning(pool: &PgPool) -> PgPool {
+    let options = (*pool.connect_options()).clone().options(SCANNING);
+    PgPool::connect_with(options)
+        .await
+        .expect("the scanning pool connects")
 }
 
 async fn rebase(pool: &PgPool) -> bool {
@@ -1059,6 +1099,77 @@ async fn counts_stop_at_the_cap_and_say_there_are_more() {
             .await
             .expect("expired is readable"),
         counted(events::COUNT_CAP, events::COUNT_CAP)
+    );
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_rebase_over_a_large_log_reads_it_in_one_pass() {
+    let database = database("audit_events_rebase_large").await;
+    let pool = &database.pool;
+    let organization = organization(pool).await;
+    let old = written(pool, Some(organization), 2).await;
+    settle(pool).await;
+    let delivered = position(pool, old[0]).await;
+    restore(pool, &old).await;
+    Destination::new(Some(organization))
+        .create(pool, restored(delivered))
+        .await;
+    seed(pool, Some(organization), SEEDED).await;
+    analyze(pool).await;
+
+    let scanning = scanning(pool).await;
+    let started = Instant::now();
+    assert!(rebase(&scanning).await, "the restored rows are rebased");
+    let elapsed = started.elapsed();
+    scanning.close().await;
+
+    assert!(
+        elapsed < SEEDED_REBASE,
+        "a rebase over {SEEDED} rows took {elapsed:?}; finding shared sequences must not compare every pair of rows"
+    );
+    let (unmoved, shared): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE transaction_id <> 0), count(*) - count(DISTINCT sequence) \
+         FROM audit_logs",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("the audit rows are readable");
+    assert_eq!(unmoved, 0, "every row is rebased");
+    assert_eq!(shared, 0, "no row shares its sequence");
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn server_reads_take_the_next_page_from_the_server_position_index() {
+    let database = database("audit_events_server_index").await;
+    let pool = &database.pool;
+    let organization = organization(pool).await;
+    seed(pool, Some(organization), 4 * SERVER_SEEDED).await;
+    seed(pool, None, SERVER_SEEDED).await;
+    analyze(pool).await;
+    settle(pool).await;
+
+    let mut transaction = pool.begin().await.expect("a transaction begins");
+    for _ in 0..8 {
+        let rows = events::after(&mut *transaction, Scope::Server, ORIGIN, None, SERVER_PAGE)
+            .await
+            .expect("the final rows are readable");
+        assert_eq!(rows.len(), usize::try_from(SERVER_PAGE).unwrap());
+    }
+    let read: i64 = sqlx::query_scalar(
+        "SELECT seq_tup_read + COALESCE(idx_tup_fetch, 0) FROM pg_stat_xact_user_tables \
+         WHERE relname = 'audit_logs'",
+    )
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("the transaction's table statistics are readable");
+    transaction.rollback().await.expect("the transaction ends");
+
+    assert!(
+        read < 8 * SERVER_PAGE_READS,
+        "eight pages of {SERVER_PAGE} server rows read {read} rows of a log with {SERVER_SEEDED} server rows behind {} organization rows",
+        4 * SERVER_SEEDED
     );
     database.cleanup().await;
 }

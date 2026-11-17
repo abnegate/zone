@@ -86,6 +86,7 @@ export const AuditCode = {
   RetentionInvalid: 'audit_retention_invalid',
   ExportRangeInvalid: 'audit_export_range_invalid',
   ExportFormatInvalid: 'audit_export_format_invalid',
+  Rebasing: 'audit_rebasing',
 } as const;
 
 export const AUDIT_SCOPE_KINDS = [AuditScopeKind.Organization, AuditScopeKind.Server] as const;
@@ -157,6 +158,7 @@ export const AUDIT_ADMIN_CODES = [
   AuditCode.RetentionInvalid,
   AuditCode.ExportRangeInvalid,
   AuditCode.ExportFormatInvalid,
+  AuditCode.Rebasing,
 ] as const;
 
 export const KIND_SECRETS = {

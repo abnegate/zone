@@ -73,7 +73,7 @@ describe('audit vocabulary', () => {
     expect(AUDIT_ADMIN_CODES).toContain('license_required');
     expect(AUDIT_ADMIN_CODES).toContain('audit_body_invalid');
     expect(new Set(AUDIT_ADMIN_CODES).size).toBe(AUDIT_ADMIN_CODES.length);
-    expect(AUDIT_ADMIN_CODES).toHaveLength(19);
+    expect(AUDIT_ADMIN_CODES).toHaveLength(20);
     for (const code of AUDIT_ADMIN_CODES) {
       expect(code === 'license_required' || code.startsWith('audit_'), code).toBe(true);
     }

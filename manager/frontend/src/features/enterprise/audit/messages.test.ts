@@ -142,6 +142,7 @@ describe('refusalField', () => {
     [AuditCode.RetentionInvalid]: null,
     [AuditCode.ExportRangeInvalid]: null,
     [AuditCode.ExportFormatInvalid]: null,
+    [AuditCode.Rebasing]: null,
   };
 
   for (const code of AUDIT_ADMIN_CODES) {

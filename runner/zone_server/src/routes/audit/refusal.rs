@@ -233,6 +233,15 @@ mod tests {
             invalid["error"],
             "The URL must not point at a link-local or cloud metadata address."
         );
+        let rebasing = Refusal::from(destinations::Error::from(
+            zone_enterprise::audit::Error::Rebasing,
+        ))
+        .into_response();
+        assert_eq!(rebasing.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body(rebasing).await["code"],
+            zone_enterprise::audit::REBASING
+        );
     }
 
     #[tokio::test]
