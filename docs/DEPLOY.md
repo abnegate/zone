@@ -982,6 +982,6 @@ Order and rollback:
 
 1. Deploy the new server binary first. It reads envelopes, values sealed before envelopes existed, and plaintext where the column allows it.
 2. Take the backup, run `--dry-run`, read the report, then run without it.
-3. After a run, the previous binary cannot read `ENC[v1:…]` values. Restoring the backup is the only rollback, so keep it until the new binary is settled.
+3. After a run, the previous binary cannot read `ENC[v1:…]` values. Restoring the backup is the only rollback, so keep it until the new binary is settled. Restoring a `pg_dump` archive is a logical restore: a server that streams audit events rebases their delivery positions at its next start, rewriting every `audit_logs` row once, and can send events to their destinations again (see [AUDIT.md](AUDIT.md#logical-restores)).
 
 Run while the server is idle if possible. Resealing a webhook secret changes its ciphertext, and a secret rotation in flight compares ciphertext (`superseded` in `routes/sync.rs`, `unsigned` in `sync/hook.rs`), so a rotation racing the run can read its secret as replaced. Every resealed `sync_configs` row also gets a new `updated_at`.

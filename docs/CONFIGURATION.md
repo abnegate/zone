@@ -338,7 +338,8 @@ as an attachment of unknown size.
 ### `ZONE_ENDPOINT_HOSTS`
 
 - **Purpose**: Limits the hosts organizations and workspaces may save endpoints
-  on in AI Settings
+  on in AI Settings, and the hosts audit destinations may send to (see
+  [AUDIT.md](AUDIT.md#where-a-destination-may-send))
 - **Format**: Comma-separated hosts or suffixes. A host (`api.openai.com`,
   `192.168.1.20`) matches only itself; a suffix (`.corp.example` or
   `*.corp.example`) matches `corp.example` and every name under it. Case and a
@@ -349,6 +350,9 @@ as an attachment of unknown size.
   match that provider's default host. A row saved before the list was set that
   it does not match can no longer be used: its completions fail with the reason
   rather than going to the instance endpoint (see *Saved endpoints*).
+  An audit destination is checked again before every delivery, and one whose
+  host the list no longer matches fails with `configuration` until it does.
+  S3 without an endpoint needs `s3.{region}.amazonaws.com` listed.
   Link-local and metadata addresses stay refused even when listed.
 
 ### Usage credits
