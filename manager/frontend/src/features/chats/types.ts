@@ -326,6 +326,9 @@ export interface MessageMetadata {
   handovers?: Handover[];
   source?: string;
   reminder_id?: string;
+  task_id?: string;
+  run_id?: string;
+  status?: string;
 }
 
 export interface Message {

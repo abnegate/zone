@@ -23,6 +23,7 @@ use crate::db::chat_pull_requests::{self, Claim, PullRequestRow};
 use crate::db::projects;
 use crate::db::sources;
 use crate::db::tasks::{Create, Origin};
+use crate::services::chat::notice;
 use crate::state::AppState;
 
 /// Why a pull request wants fixing, in the words the run is asked to act on.
@@ -341,11 +342,8 @@ impl Finished {
             "run_id": run_id,
             "link": self.url,
         });
-        match chat_pull_requests::announce(state.db(), self.chat_id, &content, metadata).await {
-            Ok(stored) => crate::db::actions::publish(self.chat_id, stored),
-            Err(error) => {
-                tracing::warn!(%run_id, %error, "could not say in the chat how an auto-fix run ended");
-            }
+        if let Some(notice) = notice::post(state.db(), self.chat_id, &content, metadata).await {
+            notice.publish();
         }
     }
 }
