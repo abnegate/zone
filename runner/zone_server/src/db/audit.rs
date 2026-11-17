@@ -4,6 +4,9 @@
 //! across the system. Audit logs track important actions like user logins,
 //! permission changes, and resource modifications.
 
+pub mod position;
+pub mod scope;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
