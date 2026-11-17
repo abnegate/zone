@@ -123,27 +123,30 @@ describe('SettingsNav', () => {
       ['Members', '/settings/organization/members'],
       ['Devices', '/settings/organization/devices'],
       ['Audit log', '/settings/organization/audit'],
+      ['Audit export', '/settings/organization/audit-export'],
       ['GitHub', '/settings/organization/github'],
       ['MCP servers', '/settings/organization/mcp'],
       ['Features', '/settings/server/features'],
       ['Connect a device', '/settings/server/connect'],
       ['License', '/settings/server/license'],
       ['Single sign-on', '/settings/server/sso'],
+      ['Audit export', '/settings/server/audit-export'],
       ['Sessions', '/settings/you/sessions'],
     ]);
   });
 
-  it('lists License and Single sign-on under This server only for a server admin', () => {
+  it('lists License, Single sign-on and Audit export under This server only for a server admin', () => {
     renderNav(ownerAccess);
     expect(linkLabels('This server')).toEqual([
       'Features',
       'Connect a device',
       'License',
       'Single sign-on',
+      'Audit export',
     ]);
   });
 
-  it('leaves License and Single sign-on out of This server for anyone who does not administer the server', () => {
+  it('leaves License, Single sign-on and Audit export out of This server for anyone who does not administer the server', () => {
     renderNav({ ...ownerAccess, administersServer: false });
     expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
   });
@@ -180,6 +183,7 @@ describe('SettingsNav', () => {
       'Members',
       'Devices',
       'Audit log',
+      'Audit export',
       'GitHub',
       'MCP servers',
     ]);

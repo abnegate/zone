@@ -7,6 +7,7 @@ const ORGANIZATION_TABS = [
   ['invitations', '/settings/organization/members'],
   ['devices', '/settings/organization/devices'],
   ['audit', '/settings/organization/audit'],
+  ['audit-export', '/settings/organization/audit-export'],
   ['github', '/settings/organization/github'],
 ] as const;
 
