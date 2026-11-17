@@ -833,7 +833,10 @@ pub struct AutoProjectConfig {
     pub require_distinct_reviewer: bool,
     /// Models to review with, tried before the workspace's own settings.
     pub review_models: Vec<String>,
-    /// Review bots to wait for and read; empty means every bot this build knows.
+    /// Review bots to wait for and read, named by their GitHub account. A bot
+    /// this build has no vendor knowledge of is read by the conventions review
+    /// bots share. Empty means the bots this build knows, plus whichever other
+    /// bot turns out to have reviewed the pull request.
     pub review_bots: Vec<String>,
     /// How long to wait for an expected bot to review a new head.
     pub bot_review_grace_secs: u64,
