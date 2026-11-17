@@ -4,9 +4,12 @@
 //! across the system. Audit logs track important actions like user logins,
 //! permission changes, and resource modifications.
 
+pub mod deliveries;
 pub mod destinations;
 pub mod events;
 pub mod position;
+mod predicate;
+pub mod retentions;
 pub mod scope;
 
 use chrono::{DateTime, Utc};
