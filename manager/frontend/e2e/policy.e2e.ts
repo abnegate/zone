@@ -181,9 +181,12 @@ test.describe('Organization agent policy', () => {
     await page.getByRole('button', { name: SAVE_LABEL }).click();
 
     await expect.poll(() => server.patches).toEqual([{ mcp_servers: ['github'] }]);
+    await expect(page.getByRole('button', { name: SAVE_LABEL })).toBeDisabled();
 
     const models = field(page, 'Models');
-    await models.getByRole('textbox', { name: 'Add to Models' }).fill('gpt-5**');
+    const pattern = models.getByRole('textbox', { name: 'Add to Models' });
+    await expect(pattern).toBeEnabled();
+    await pattern.fill('gpt-5**');
     await models.getByRole('button', { name: 'Add to Models' }).click();
     await page.getByRole('button', { name: SAVE_LABEL }).click();
 
