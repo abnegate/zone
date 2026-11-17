@@ -4,6 +4,7 @@
 //! Only organization admins can access audit logs.
 
 pub mod access;
+pub mod destinations;
 pub mod refusal;
 
 use axum::{

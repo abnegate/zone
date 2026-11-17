@@ -13,6 +13,7 @@ mod audit_access;
 mod audit_delivery;
 mod audit_delivery_store;
 mod audit_destination_store;
+mod audit_destinations;
 mod audit_events;
 mod audit_retention_store;
 mod audit_s3;
