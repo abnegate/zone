@@ -1,4 +1,5 @@
 pub mod client;
+pub mod open;
 pub mod s3;
 pub mod syslog;
 pub mod webhook;

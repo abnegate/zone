@@ -26,6 +26,7 @@ use crate::auth::entitlement::Unentitled;
 use crate::auth::{AuthUser, ServerAdmin};
 use crate::db::audit::scope::Scope;
 use crate::services::audit::destinations::{self, Actor, Draft, Overview, Revision, View};
+use crate::services::audit::transport::Failure;
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -200,6 +201,23 @@ pub struct TestResponse {
     pub error: Option<String>,
 }
 
+impl From<Result<(), Failure>> for TestResponse {
+    fn from(sent: Result<(), Failure>) -> Self {
+        match sent {
+            Ok(()) => Self {
+                delivered: true,
+                error_code: None,
+                error: None,
+            },
+            Err(failure) => Self {
+                delivered: false,
+                error_code: Some(failure.code),
+                error: Some(failure.message),
+            },
+        }
+    }
+}
+
 fn on() -> bool {
     true
 }
@@ -271,6 +289,19 @@ pub async fn delete(
         deleted(&state, scope, &actor, transaction, id).await
     };
     removed(result.await)
+}
+
+/// POST /api/organizations/{org_id}/audit-destinations/{destination_id}/tests
+pub async fn test(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    path: Result<Path<(Uuid, Uuid)>, PathRejection>,
+) -> Response {
+    let result = async {
+        let (scope, actor, transaction, id) = organization_destination(&state, &auth, path).await?;
+        tested(&state, scope, &actor, transaction, id).await
+    };
+    respond(StatusCode::OK, result.await)
 }
 
 /// GET /api/audit-destinations
@@ -348,6 +379,24 @@ pub async fn server_delete(
         deleted(&state, Scope::Server, &actor, transaction, id).await
     };
     removed(result.await)
+}
+
+/// POST /api/audit-destinations/{destination_id}/tests
+pub async fn server_test(
+    State(state): State<AppState>,
+    ServerAdmin(admin): ServerAdmin,
+    path: Result<Path<Uuid>, PathRejection>,
+) -> Response {
+    let result = async {
+        let id = destination(path)?;
+        let transaction = state.db().begin().await?;
+        let actor = Actor {
+            id: admin.id,
+            email: &admin.email,
+        };
+        tested(&state, Scope::Server, &actor, transaction, id).await
+    };
+    respond(StatusCode::OK, result.await)
 }
 
 /// The organization's scope, the caller, and a transaction holding the caller's role.
@@ -453,6 +502,21 @@ async fn deleted(
 ) -> Result<(), Refusal> {
     destinations::delete(state, transaction, scope, id, actor).await?;
     Ok(())
+}
+
+/// The role lock is released before sending, so a slow destination holds no row lock and no
+/// snapshot horizon.
+async fn tested(
+    state: &AppState,
+    scope: Scope,
+    actor: &Actor<'_>,
+    transaction: Transaction<'static, Postgres>,
+    id: Uuid,
+) -> Result<TestResponse, Refusal> {
+    transaction.commit().await?;
+    streams(&destinations::standing(state).await?)?;
+    let sent = destinations::test(state, scope, id, actor).await?;
+    Ok(TestResponse::from(sent))
 }
 
 fn streams(standing: &Standing) -> Result<(), Refusal> {
@@ -638,6 +702,19 @@ mod tests {
             assert!(!shown.contains("whsec-plaintext"), "{shown}");
             assert!(shown.contains(REDACTED), "{shown}");
         }
+    }
+
+    #[test]
+    fn a_delivered_test_carries_no_error() {
+        let body = serde_json::to_value(TestResponse::from(Ok(()))).unwrap();
+        assert_eq!(
+            body,
+            json!({"delivered": true, "error_code": null, "error": null})
+        );
+        let failed = TestResponse::from(Err(Failure::new(FailureCode::Status, "HTTP 500")));
+        assert!(!failed.delivered);
+        assert_eq!(failed.error_code, Some(FailureCode::Status));
+        assert_eq!(failed.error.as_deref(), Some("HTTP 500"));
     }
 
     #[test]
