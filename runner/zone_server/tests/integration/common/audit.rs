@@ -15,7 +15,7 @@ use zone_server::db::{migrations, organizations};
 use zone_server::services::audit::transport::Batch;
 
 use crate::common::TestResponse;
-use crate::common::database::Database;
+use crate::common::database::{Database, quiesce};
 
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 const SETTLE_POLL: Duration = Duration::from_millis(50);
@@ -76,7 +76,16 @@ pub async fn database(prefix: &'static str) -> Database {
 }
 
 pub async fn settle(pool: &PgPool) {
-    let deadline = Instant::now() + SETTLE_TIMEOUT;
+    settle_within(pool, SETTLE_TIMEOUT).await;
+}
+
+/// Returns once every audit row is below the snapshot horizon. The time limit starts only after
+/// every test-database drop running at the call has finished: a drop holds the horizon through a
+/// forced checkpoint, which is slow under load but is not a transaction a test left open.
+pub async fn settle_within(pool: &PgPool, limit: Duration) {
+    let quiesced = quiesce();
+    tokio::pin!(quiesced);
+    let mut deadline = None;
     loop {
         let settled: bool = sqlx::query_scalar(SETTLED)
             .fetch_one(pool)
@@ -85,11 +94,19 @@ pub async fn settle(pool: &PgPool) {
         if settled {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "audit rows stayed at or above the snapshot horizon for {SETTLE_TIMEOUT:?}: a transaction elsewhere in the cluster is still open"
-        );
-        sleep(SETTLE_POLL).await;
+        match deadline {
+            Some(deadline) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "audit rows stayed at or above the snapshot horizon for {limit:?}: a transaction elsewhere in the cluster is still open"
+                );
+                sleep(SETTLE_POLL).await;
+            }
+            None => tokio::select! {
+                () = &mut quiesced => deadline = Some(Instant::now() + limit),
+                () = sleep(SETTLE_POLL) => {}
+            },
+        }
     }
 }
 

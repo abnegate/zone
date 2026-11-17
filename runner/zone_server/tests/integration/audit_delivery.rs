@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::future::join_all;
 use sqlx::{Executor, PgPool};
+use tokio::sync::Notify;
 use uuid::Uuid;
 use zone_enterprise::Tier;
 use zone_enterprise::audit::delivery::{RETRY_BASE, S3_BATCH, S3_FLUSH_AGE};
@@ -32,11 +33,10 @@ use crate::common::{Database, test_config};
 const PREFIX: &str = "audit_delivery";
 const CADENCE: Cadence = Cadence {
     tick: Duration::from_millis(50),
-    lease: Duration::from_secs(1),
+    lease: Duration::from_secs(30),
     concurrency: 4,
 };
 const RESTORED: i64 = 1 << 40;
-const CRASH: Duration = Duration::from_millis(200);
 const UNAVAILABLE: &str = "HTTP 503";
 const JITTER: f64 = 0.75;
 
@@ -47,6 +47,7 @@ struct Receiver {
     sending: Mutex<HashSet<Uuid>>,
     overlaps: AtomicUsize,
     hang: AtomicBool,
+    hung: Notify,
     pause: AtomicU64,
 }
 
@@ -86,6 +87,7 @@ impl Transport for Sending {
         }
         receiver.batches.lock().unwrap().push(batch.clone());
         if receiver.hang.load(Ordering::SeqCst) {
+            receiver.hung.notify_one();
             std::future::pending::<()>().await;
         }
         tokio::time::sleep(Duration::from_millis(receiver.pause.load(Ordering::SeqCst))).await;
@@ -334,8 +336,10 @@ async fn a_new_owner_resends_the_identical_pinned_batch_after_the_lease_expires(
     let crashed = Uuid::new_v4();
 
     engine.receiver.hang.store(true, Ordering::SeqCst);
-    let interrupted = tokio::time::timeout(CRASH, engine.drain_as(crashed)).await;
-    assert!(interrupted.is_err(), "the crashed owner never finished");
+    tokio::select! {
+        _ = engine.drain_as(crashed) => panic!("the crashed owner never finishes a hung send"),
+        () = engine.receiver.hung.notified() => {}
+    }
     engine.receiver.hang.store(false, Ordering::SeqCst);
     let stranded = engine.delivery(destination).await;
     assert_eq!(stranded.lease_owner, Some(crashed));
