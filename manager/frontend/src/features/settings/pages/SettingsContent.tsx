@@ -2,8 +2,11 @@ import type { ReactNode } from 'react';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { SessionsSection } from '../../auth/components';
 import {
+  AuditExportSection,
   LicenseSection,
   OrganizationPolicySection,
+  organizationScope,
+  SERVER_SCOPE,
   SsoSection,
   WorkspacePolicySection,
 } from '../../enterprise';
@@ -144,6 +147,8 @@ function organizationContent(
       return <DevicesSection orgId={organizationId} />;
     case SettingsSection.Audit:
       return <AuditLogsSection orgId={organizationId} />;
+    case SettingsSection.AuditExport:
+      return <AuditExportSection scope={organizationScope(organizationId)} />;
     default:
       return null;
   }
@@ -159,6 +164,8 @@ function serverContent(section: SettingsSection): ReactNode {
       return <LicenseSection />;
     case SettingsSection.Sso:
       return <SsoSection />;
+    case SettingsSection.AuditExport:
+      return <AuditExportSection scope={SERVER_SCOPE} />;
     default:
       return null;
   }

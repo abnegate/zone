@@ -50,8 +50,11 @@ mock.module('../server/components', () => ({
 }));
 
 mock.module('../../enterprise', () => ({
+  AuditExportSection: marker('audit-export-section'),
   LicenseSection: marker('license-section'),
   OrganizationPolicySection: marker('organization-policy-section'),
+  organizationScope: (id: string) => ({ kind: 'organization', organizationId: id }),
+  SERVER_SCOPE: { kind: 'server' },
   SsoSection: marker('sso-section'),
   WorkspacePolicySection: marker('workspace-policy-section'),
 }));
@@ -407,6 +410,63 @@ describe('SettingsContent', () => {
     it('lets an organization member connect a device', () => {
       renderSection(SettingsGroup.Server, SettingsSection.Connect, access('viewer', 'member'));
       expect(propsOf('connect-devices-section')).toEqual({});
+    });
+  });
+
+  describe('audit export', () => {
+    for (const role of ['admin', 'owner'] as const) {
+      it(`shows an organization ${role} the organization audit export`, () => {
+        renderSection(
+          SettingsGroup.Organization,
+          SettingsSection.AuditExport,
+          access('viewer', role)
+        );
+        expect(propsOf('audit-export-section')).toEqual({
+          scope: { kind: 'organization', organizationId },
+        });
+      });
+    }
+
+    it('renders no organization audit export for an organization member', () => {
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.AuditExport}
+          access={access('admin', 'member')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('renders no organization audit export without a current organization', () => {
+      workspaceContext.currentOrganization = null;
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.AuditExport}
+          access={access('admin', 'admin')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('shows a server admin the server-wide audit export', () => {
+      renderSection(SettingsGroup.Server, SettingsSection.AuditExport, {
+        ...access('viewer', 'member'),
+        administersServer: true,
+      });
+      expect(propsOf('audit-export-section')).toEqual({ scope: { kind: 'server' } });
+    });
+
+    it('renders no server-wide audit export for anyone who does not administer the server', () => {
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Server}
+          section={SettingsSection.AuditExport}
+          access={access('admin', 'owner')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
     });
   });
 

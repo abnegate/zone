@@ -4,7 +4,7 @@ export const ORGANIZATION_DESCRIPTION =
   "Stream this organization's audit log to your SIEM, decide how long events are kept, and download it for a date range.";
 
 export const SERVER_DESCRIPTION =
-  'Stream server-wide audit events, such as sign-ins and license changes, decide how long they are kept, and download them for a date range.';
+  'Stream server-wide events like sign-ins and license changes, decide how long they are kept, and download them.';
 
 export const AUDIT_LOG_LINK = 'Export, streaming and retention';
 
@@ -158,3 +158,60 @@ export const END_DATE_LABEL = 'To';
 export const FORMAT_LABEL = 'Format';
 
 export const DOWNLOAD_LABEL = 'Download';
+
+export const LOADING_LABEL = 'Loading audit export...';
+
+export const RETRY_LABEL = 'Retry';
+
+export const LICENSE_LINK_LABEL = 'Go to License';
+
+export const RENEW_LINK_LABEL = 'Renew on the License page';
+
+export const NO_DESTINATIONS_READ_ONLY = 'No destinations are set up.';
+
+export const UNENCRYPTED_LABEL = 'Unencrypted';
+
+export const ENABLED_DESCRIPTION = 'Send audit events to this destination.';
+
+export const NAME_PLACEHOLDER = 'Splunk';
+
+export const URL_PLACEHOLDER = 'https://siem.example.com/zone/audit';
+
+export const BUCKET_PLACEHOLDER = 'acme-audit';
+
+export const REGION_PLACEHOLDER = 'us-east-1';
+
+export const ENDPOINT_PLACEHOLDER = 'https://minio.internal:9000';
+
+export const PREFIX_PLACEHOLDER = 'zone/audit/';
+
+export const HOST_PLACEHOLDER = 'siem.internal';
+
+export const CERTIFICATES_HINT =
+  'Optional PEM text. Add a CA certificate to trust a private CA, and a client certificate and key together for mutual TLS.';
+
+export const SECRET_REMOVED = 'Removed when you save.';
+
+export const SECRET_KEEP_LABEL = 'Keep';
+
+export const NAME_REQUIRED = 'Enter a name for this destination.';
+
+export const URL_REQUIRED = 'Enter the URL that receives audit events.';
+
+export const BUCKET_REQUIRED = 'Enter the bucket name.';
+
+export const REGION_REQUIRED = 'Enter the region, like us-east-1.';
+
+export const HOST_REQUIRED = 'Enter the syslog host.';
+
+export const SECRET_REQUIRED = 'Enter this secret.';
+
+export const CLIENT_PAIR_REQUIRED = 'Enter the client certificate and key together.';
+
+export const RETENTION_SAVED = 'Retention saved.';
+
+export const RETENTION_DAYS_HINT = 'At least 1 day.';
+
+export const DOWNLOADED_LABEL = 'Downloaded';
+
+export const S3_SCHEME = 's3://';

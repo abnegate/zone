@@ -129,6 +129,16 @@ describe('settings surfaces', () => {
     expect(rule(members, '.role-select')).toContain('height: var(--ui-control-height-sm)');
   });
 
+  it('wraps the audit log actions on a phone so Export CSV stays on screen', () => {
+    const audit = read(join(settings, 'organization', 'components', 'AuditLogsSection.css'));
+    const actions = rule(
+      media(audit, '(max-width: 768px)'),
+      '.audit-logs-section .section-row-actions'
+    );
+    expect(actions).toContain('flex-wrap: wrap');
+    expect(actions).toContain('max-width: 100%');
+  });
+
   it('sets connect URLs in the body face at the control height', () => {
     const css = read(join(settings, 'server', 'components', 'ConnectDevicesSection.css'));
     expect(css).not.toMatch(/#[0-9a-f]{3,6}\b/i);

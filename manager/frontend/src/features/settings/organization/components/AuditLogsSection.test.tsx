@@ -10,8 +10,10 @@ import {
   spyOn,
 } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { clientModule } from '../../../../test/client';
 import { chooseSelect } from '../../../../test/select';
+import { AUDIT_LOG_LINK } from '../../../enterprise/audit/labels';
 import type { AuditLog, AuditLogsResponse } from '../types';
 
 const mockGetAuditLogs = mock();
@@ -25,10 +27,11 @@ mock.module('../../../../api/client', () =>
 );
 
 let AuditLogsSection: typeof import('./AuditLogsSection').AuditLogsSection;
+let AUDIT_EXPORT_PATH: string;
 let createElementSpy: ReturnType<typeof spyOn> | null = null;
 
 beforeAll(async () => {
-  ({ AuditLogsSection } = await import('./AuditLogsSection'));
+  ({ AuditLogsSection, AUDIT_EXPORT_PATH } = await import('./AuditLogsSection'));
 });
 
 afterAll(() => {
@@ -37,6 +40,13 @@ afterAll(() => {
 
 describe('AuditLogsSection', () => {
   const orgId = 'org-123';
+
+  const renderSection = () =>
+    render(
+      <MemoryRouter>
+        <AuditLogsSection orgId={orgId} />
+      </MemoryRouter>
+    );
 
   const mockLogs: AuditLog[] = [
     {
@@ -88,7 +98,7 @@ describe('AuditLogsSection', () => {
     it('renders loading state initially', () => {
       mockGetAuditLogs.mockImplementation(() => new Promise(() => {}));
 
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       expect(screen.getByText('Loading audit logs...')).toBeInTheDocument();
     });
@@ -101,7 +111,7 @@ describe('AuditLogsSection', () => {
 
       mockGetAuditLogs.mockResolvedValue(response);
 
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       // Wait for loading to complete and data to render
       await waitFor(
@@ -131,10 +141,21 @@ describe('AuditLogsSection', () => {
       expect(bobElements.length).toBeGreaterThan(0);
     });
 
+    it('links to export, streaming and retention next to the Community CSV export', async () => {
+      mockGetAuditLogs.mockResolvedValue({ logs: mockLogs, total: 3 });
+
+      renderSection();
+
+      const link = await screen.findByRole('link', { name: AUDIT_LOG_LINK });
+      expect(link).toHaveAttribute('href', '/settings/organization/audit-export');
+      expect(AUDIT_EXPORT_PATH).toBe('/settings/organization/audit-export');
+      expect(screen.getByRole('button', { name: 'Export CSV' })).toBeInTheDocument();
+    });
+
     it('displays error state when fetch fails', async () => {
       mockGetAuditLogs.mockRejectedValue(new Error('Failed to load'));
 
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getByText('Failed to load')).toBeInTheDocument();
@@ -148,7 +169,7 @@ describe('AuditLogsSection', () => {
         .mockRejectedValueOnce(new Error('Failed to load'))
         .mockResolvedValueOnce({ logs: mockLogs, total: 3 });
 
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getByText('Failed to load')).toBeInTheDocument();
@@ -191,7 +212,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('displays all columns', async () => {
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getByText('Time')).toBeInTheDocument();
@@ -205,7 +226,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('displays action badges with correct classes', async () => {
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getByText('member.added')).toBeInTheDocument();
@@ -221,7 +242,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('displays actor information', async () => {
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       // Wait for loading to complete
       await waitFor(
@@ -258,7 +279,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('displays resource types and IDs', async () => {
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getByText('member')).toBeInTheDocument();
@@ -281,7 +302,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('shows metadata when expand button is clicked', async () => {
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getAllByText('Show')[0]).toBeInTheDocument();
@@ -298,7 +319,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('hides metadata when hide button is clicked', async () => {
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getAllByText('Show')[0]).toBeInTheDocument();
@@ -319,7 +340,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('only shows one expanded row at a time', async () => {
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getAllByText('Show').length).toBeGreaterThan(1);
@@ -351,7 +372,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('shows filters when toggle button is clicked', async () => {
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getByText(/3 total entries/)).toBeInTheDocument();
@@ -367,7 +388,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('applies filters when Apply Filters is clicked', async () => {
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       // Wait for initial loading to complete
       await waitFor(
@@ -447,7 +468,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('resets filters when Reset is clicked', async () => {
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       // Wait for initial loading to complete
       await waitFor(
@@ -514,7 +535,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('filters by date range', async () => {
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       // Wait for initial loading to complete
       await waitFor(
@@ -595,7 +616,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('filters by actor', async () => {
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       // Wait for initial loading to complete
       await waitFor(
@@ -687,7 +708,7 @@ describe('AuditLogsSection', () => {
       const mockBlob = new Blob(['csv,data'], { type: 'text/csv' });
       mockExportAuditLogs.mockResolvedValue(mockBlob);
 
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getByText(/3 total entries/)).toBeInTheDocument();
@@ -707,7 +728,7 @@ describe('AuditLogsSection', () => {
       const mockBlob = new Blob(['csv,data'], { type: 'text/csv' });
       mockExportAuditLogs.mockResolvedValue(mockBlob);
 
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(
         () => {
@@ -744,7 +765,7 @@ describe('AuditLogsSection', () => {
     it('handles export errors', async () => {
       mockExportAuditLogs.mockRejectedValue(new Error('Export failed'));
 
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getByText(/3 total entries/)).toBeInTheDocument();
@@ -765,7 +786,7 @@ describe('AuditLogsSection', () => {
         total: 100,
       });
 
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getByText(/Load More.*97 remaining/)).toBeInTheDocument();
@@ -778,7 +799,7 @@ describe('AuditLogsSection', () => {
         total: 3,
       });
 
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(
         () => {
@@ -796,7 +817,7 @@ describe('AuditLogsSection', () => {
         total: 100,
       });
 
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getByText(/Load More/)).toBeInTheDocument();
@@ -828,7 +849,7 @@ describe('AuditLogsSection', () => {
         total: 0,
       });
 
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getByText('No audit logs found.')).toBeInTheDocument();
@@ -841,7 +862,7 @@ describe('AuditLogsSection', () => {
         total: 3,
       });
 
-      render(<AuditLogsSection orgId={orgId} />);
+      renderSection();
 
       await waitFor(() => {
         expect(screen.getByText(/3 total entries/)).toBeInTheDocument();

@@ -36,12 +36,18 @@ const ALL_SECTIONS = [
   { group: SettingsGroup.Organization, section: SettingsSection.Members, label: 'Members' },
   { group: SettingsGroup.Organization, section: SettingsSection.Devices, label: 'Devices' },
   { group: SettingsGroup.Organization, section: SettingsSection.Audit, label: 'Audit log' },
+  {
+    group: SettingsGroup.Organization,
+    section: SettingsSection.AuditExport,
+    label: 'Audit export',
+  },
   { group: SettingsGroup.Organization, section: SettingsSection.GitHub, label: 'GitHub' },
   { group: SettingsGroup.Organization, section: SettingsSection.Mcp, label: 'MCP servers' },
   { group: SettingsGroup.Server, section: SettingsSection.Features, label: 'Features' },
   { group: SettingsGroup.Server, section: SettingsSection.Connect, label: 'Connect a device' },
   { group: SettingsGroup.Server, section: SettingsSection.License, label: 'License' },
   { group: SettingsGroup.Server, section: SettingsSection.Sso, label: 'Single sign-on' },
+  { group: SettingsGroup.Server, section: SettingsSection.AuditExport, label: 'Audit export' },
   { group: SettingsGroup.You, section: SettingsSection.Sessions, label: 'Sessions' },
 ] as const;
 
@@ -65,6 +71,11 @@ const FEATURES = settingsPath(SettingsGroup.Server, SettingsSection.Features);
 const CONNECT = settingsPath(SettingsGroup.Server, SettingsSection.Connect);
 const LICENSE = settingsPath(SettingsGroup.Server, SettingsSection.License);
 const SSO = settingsPath(SettingsGroup.Server, SettingsSection.Sso);
+const SERVER_AUDIT_EXPORT = settingsPath(SettingsGroup.Server, SettingsSection.AuditExport);
+const ORGANIZATION_AUDIT_EXPORT = settingsPath(
+  SettingsGroup.Organization,
+  SettingsSection.AuditExport
+);
 const SESSIONS = settingsPath(SettingsGroup.You, SettingsSection.Sessions);
 const SOURCES = settingsPath(SettingsGroup.Workspace, SettingsSection.Sources);
 
@@ -90,6 +101,7 @@ describe('settings constants', () => {
       Members: 'members',
       Devices: 'devices',
       Audit: 'audit',
+      AuditExport: 'audit-export',
       GitHub: 'github',
       Mcp: 'mcp',
       Features: 'features',
@@ -221,7 +233,7 @@ describe('visibleSections', () => {
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
 
-  it('shows all nineteen sections to a server admin who owns the organization and administers the workspace', () => {
+  it('shows all twenty-one sections to a server admin who owns the organization and administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -232,7 +244,7 @@ describe('visibleSections', () => {
       administersServer: true,
     });
 
-    expect(visible).toHaveLength(19);
+    expect(visible).toHaveLength(21);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 
@@ -413,7 +425,7 @@ describe('visibleSections', () => {
     expect(sso(false)).toBe(false);
   });
 
-  it('shows License and Single sign-on to a server admin outside any organization, after Connect a device', () => {
+  it('shows License, Single sign-on and Audit export to a server admin outside any organization, after Connect a device', () => {
     expect(
       paths({
         organization: false,
@@ -424,7 +436,58 @@ describe('visibleSections', () => {
         readsSources: false,
         administersServer: true,
       })
-    ).toEqual([CONNECT, LICENSE, SSO, SESSIONS]);
+    ).toEqual([CONNECT, LICENSE, SSO, SERVER_AUDIT_EXPORT, SESSIONS]);
+  });
+
+  it('shows the organization Audit export only to organization owners and admins', () => {
+    for (const [organizationRole, shown] of [
+      ['owner', true],
+      ['admin', true],
+      ['member', false],
+      [undefined, true],
+    ] as const) {
+      expect(
+        paths({
+          organization: true,
+          organizationRole,
+          workspace: true,
+          workspaceRole: 'viewer',
+          installsModels: false,
+          readsSources: false,
+          administersServer: false,
+        }).includes(ORGANIZATION_AUDIT_EXPORT),
+        String(organizationRole)
+      ).toBe(shown);
+    }
+  });
+
+  it('shows the server Audit export only to a server admin', () => {
+    const shown = (administersServer: boolean) =>
+      paths({
+        organization: true,
+        organizationRole: 'owner',
+        workspace: true,
+        workspaceRole: 'admin',
+        installsModels: true,
+        readsSources: true,
+        administersServer,
+      }).includes(SERVER_AUDIT_EXPORT);
+
+    expect(shown(true)).toBe(true);
+    expect(shown(false)).toBe(false);
+  });
+
+  it('finds Audit export in the organization and server groups at a kebab-case path', () => {
+    for (const group of [SettingsGroup.Organization, SettingsGroup.Server]) {
+      expect(findSection(group, 'audit-export'), group).toMatchObject({
+        group,
+        section: SettingsSection.AuditExport,
+        label: 'Audit export',
+      });
+    }
+    expect(findSection(SettingsGroup.Workspace, 'audit-export')).toBeUndefined();
+    expect(ORGANIZATION_AUDIT_EXPORT).toBe('/settings/organization/audit-export');
+    expect(SERVER_AUDIT_EXPORT).toBe('/settings/server/audit-export');
   });
 
   it('finds the License section in the server group', () => {
