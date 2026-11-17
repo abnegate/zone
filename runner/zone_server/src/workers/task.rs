@@ -3398,6 +3398,7 @@ async fn run_task_loop(
             }
             AgentEvent::Consumed(_)
             | AgentEvent::Context(_)
+            | AgentEvent::Round
             | AgentEvent::Usage(_)
             | AgentEvent::Session(_)
             | AgentEvent::Image(_)

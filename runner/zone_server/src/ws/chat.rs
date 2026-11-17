@@ -1004,10 +1004,7 @@ fn trace_started(
 /// Fold the tool trace, citations, write receipts and the logins the answer
 /// moved across into the image metadata, since one turn can produce all of
 /// them and they share the message's single metadata column. `usage`, the
-/// tokens the turn spent across every round and every login it ran on, rides
-/// with any answer the provider reported a figure for: the console shows it
-/// against the message, and `chat_token_usage` keeps the same number in a
-/// shape a query can group.
+/// tokens every login the turn ran on spent together, rides only with a move.
 fn merge_metadata(
     images: Option<serde_json::Value>,
     tool_calls: &[ToolCallRecord],
@@ -1023,7 +1020,6 @@ fn merge_metadata(
         && receipts.is_empty()
         && reasoning.is_none()
         && handovers.is_empty()
-        && usage.is_none()
     {
         return images;
     }
@@ -1053,9 +1049,9 @@ fn merge_metadata(
     }
     if !handovers.is_empty() {
         object.insert(HANDOVERS_KEY.to_string(), serde_json::json!(handovers));
-    }
-    if let Some(usage) = usage {
-        object.insert(USAGE_KEY.to_string(), serde_json::json!(usage));
+        if let Some(usage) = usage {
+            object.insert(USAGE_KEY.to_string(), serde_json::json!(usage));
+        }
     }
     Some(serde_json::Value::Object(object))
 }
@@ -1063,8 +1059,7 @@ fn merge_metadata(
 /// Where an answer that moved across logins keeps each move, as its `handover` frame said it.
 const HANDOVERS_KEY: &str = "handovers";
 
-/// Where an answer keeps the tokens its turn spent, across every round and
-/// every login it ran on.
+/// Where an answer that moved across logins keeps the tokens they spent on it together.
 const USAGE_KEY: &str = "usage";
 
 const LIVE_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(300);
@@ -3754,13 +3749,7 @@ async fn handle_chat_generation(
     generation.started = true;
 
     let mut handovers: Vec<Notice> = Vec::new();
-    let mut usage: Option<Usage> = None;
-    // Model rounds the turn took, counted as the usage reports it produced:
-    // the loop sends one completion per round and a provider reports once per
-    // completion, which is the same assumption `usage` itself rests on when it
-    // adds each report to the last. An agentic turn replays its whole context
-    // every round, so this is the largest single lever on what a chat costs.
-    let mut rounds = 0usize;
+    let mut ledger = tokens::Ledger::default();
     let mut logins: Vec<Uuid> = handover.iter().map(Handover::login).collect();
     let mut observed = router::Observed::default();
     if let Some(notice) = handover.as_mut().and_then(Handover::opened) {
@@ -3895,9 +3884,9 @@ async fn handle_chat_generation(
                         }
                         Some(AgentEvent::Usage(observed)) => {
                             tracing::debug!(prompt_tokens=observed.prompt_tokens,completion_tokens=observed.completion_tokens,"Observed provider usage");
-                            usage = Some(usage.map_or(observed, |spent| spent.plus(observed)));
-                            rounds = rounds.saturating_add(1);
+                            ledger.add(&model, observed);
                         }
+                        Some(AgentEvent::Round) => ledger.round(&model),
                         Some(AgentEvent::Window(window)) => {
                             tracing::debug!(window=%window.name,used_percent=?window.used_percent,"Observed agent usage window");
                             if let Some(handover) = &handover {
@@ -3988,6 +3977,7 @@ async fn handle_chat_generation(
                                 thought,
                             );
                             tool_calls.push(record);
+                            ledger.tool_call(&model);
                             publish(stream, tool_msg).await;
                             persist_now = true;
                         }
@@ -4145,7 +4135,7 @@ async fn handle_chat_generation(
                             &generated_images,
                             &round_reasoning,
                             &handovers,
-                            usage,
+                            ledger.total(),
                         )
                         .await
                         {
@@ -4169,6 +4159,9 @@ async fn handle_chat_generation(
         // Drop the producer before acknowledging cancellation so it cannot emit
         // more events after the terminal frame.
         drop(events);
+        if let Some(usage) = context.pending_usage.take() {
+            ledger.add(&model, usage);
+        }
 
         if refused
             && !cancelled
@@ -4301,7 +4294,7 @@ async fn handle_chat_generation(
                 &generated_images,
                 &round_reasoning,
                 &handovers,
-                usage,
+                ledger.total(),
             )
             .await
             {
@@ -4382,7 +4375,7 @@ async fn handle_chat_generation(
             &generated_images,
             &round_reasoning,
             &handovers,
-            usage,
+            ledger.total(),
         )
         .await
         {
@@ -4451,6 +4444,21 @@ async fn handle_chat_generation(
     }
     leave_unfinished(&mut tool_calls);
 
+    let spent_tokens = ledger.total();
+    let mut pending = tokens::Pending::new(
+        state.db().clone(),
+        state.background().clone(),
+        tokens::Spent {
+            message: assistant_message_id,
+            chat: chat_id,
+            workspace: workspace_id,
+            model: model.clone(),
+            effort,
+            ledger,
+            context: None,
+        },
+    );
+
     // Nothing generated yet: there is no reply worth keeping. A turn that ran
     // tools or produced an image before it broke is worth keeping even with no
     // prose, because both show the reader what was attempted.
@@ -4466,13 +4474,15 @@ async fn handle_chat_generation(
             }
             Err(error) => return Err(error.into()),
         }
+        let usage = blocked.unwrap_or_else(|| replay.usage(&model, definitions.as_deref()));
+        pending.context(usage.clone());
         session.close().await?;
         publish(
             stream,
             ServerMessage::Context {
                 chat_id,
                 message_id: Some(assistant_message_id),
-                usage: blocked.unwrap_or_else(|| replay.usage(&model, definitions.as_deref())),
+                usage,
             },
         )
         .await;
@@ -4523,7 +4533,7 @@ async fn handle_chat_generation(
         &action_receipts,
         Some(&round_reasoning),
         &handovers,
-        usage,
+        spent_tokens,
     );
 
     let partial = if !pending_content.is_empty() || !pending_images.is_empty() {
@@ -4546,6 +4556,7 @@ async fn handle_chat_generation(
         .await
     {
         Ok(msg) => {
+            pending.stored();
             if let Some(pinned) = &pinned {
                 let entry = session.store.latest().await.unwrap_or_else(|error| {
                     tracing::warn!(%chat_id, %error, "Could not read how far the chat has run; the agent session keeps its place");
@@ -4565,39 +4576,14 @@ async fn handle_chat_generation(
                 }));
             replay.summary = history.summary.map(session::core_summary);
             replay.search(&SearchContext::new(&state.config().web_search));
-            // `usage` is the provider's count for the turn until this line
-            // shadows it with where the context ended up. Both are wanted, so
-            // the billed figure is held onto first.
-            let billed = usage;
             let usage = blocked.unwrap_or_else(|| replay.usage(&model, definitions.as_deref()));
+            pending.context(usage.clone());
             publish(
                 stream,
                 ServerMessage::Context {
                     chat_id,
                     message_id: Some(assistant_message_id),
-                    // Cloned so the reader has this frame before the telemetry
-                    // write below, rather than behind it. One clone of one
-                    // turn's usage is cheaper than a frame that waits on
-                    // Postgres.
-                    usage: usage.clone(),
-                },
-            )
-            .await;
-            // The answer is stored and the frames are out, so telemetry can
-            // only add to this turn, never cost it. `record` logs its own
-            // failure rather than failing a delivered answer.
-            tokens::record(
-                state.db(),
-                tokens::Spent {
-                    message: msg.id,
-                    chat: chat_id,
-                    workspace: workspace_id,
-                    model: &model,
-                    effort,
-                    billed,
-                    rounds,
-                    tool_calls: tool_calls.len(),
-                    context: &usage,
+                    usage,
                 },
             )
             .await;
@@ -7359,7 +7345,7 @@ cat 'DIR/reply.jsonl'
     }
 
     #[test]
-    fn every_answer_keeps_what_it_spent_and_a_moved_one_keeps_each_move() {
+    fn an_answer_that_moved_keeps_each_move_and_what_every_login_spent() {
         let spent = Usage::new(120, 30);
 
         let merged = merge_metadata(None, &[], &[], &[], None, &[moved(10)], Some(spent))
@@ -7384,16 +7370,8 @@ cat 'DIR/reply.jsonl'
             })
         );
         assert_eq!(
-            unmoved,
-            Some(serde_json::json!({
-                "usage": {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150},
-            })),
-            "a turn that stayed on one login still keeps what it spent"
-        );
-        assert_eq!(
-            merge_metadata(None, &[], &[], &[], None, &[], None),
-            None,
-            "a turn the provider reported nothing for still produces no metadata"
+            unmoved, None,
+            "a turn on one login keeps its metadata as it was"
         );
     }
 

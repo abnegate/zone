@@ -46,6 +46,7 @@ mod chat_sources;
 mod chat_subagents;
 mod chat_tasks;
 mod chat_title;
+mod chat_token_usage;
 mod chat_vision_history;
 mod chat_ws;
 mod chat_ws_contract;

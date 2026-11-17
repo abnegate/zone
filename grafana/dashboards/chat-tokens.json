@@ -935,7 +935,7 @@
       ],
       "title": "Tokens / turn mean by model",
       "type": "timeseries",
-      "description": "Two models over the same window is the cheapest token experiment there is."
+      "description": "Two models over the same window is the cheapest token experiment there is. A turn handed over between models counts the usage its models reported, all under the model it ended on; a model that reported nothing adds nothing. zone_chat_tokens_total has each model's own reported prompt and completion tokens."
     },
     {
       "datasource": {

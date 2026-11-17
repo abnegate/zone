@@ -9,7 +9,7 @@ import {
   ChatSourcesResponseSchema,
   ChatsResponseSchema,
   ChatTasksResponseSchema,
-  ChatTokenUsageResponseSchema,
+  ChatTokenTotalsResponseSchema,
   ContextResponseSchema,
   MessageResponseSchema,
   MessagesResponseSchema,
@@ -35,7 +35,6 @@ import type {
   ChatSearchResponse,
   ChatSource,
   ChatTask,
-  ChatTokenUsage,
   ChatWithMessages,
   ContextUsage,
   CreateChatRequest,
@@ -44,6 +43,7 @@ import type {
   PullRequestDiff,
   SendMessageRequest,
   SetChatProviderRequest,
+  TokenTotals,
   UpdateChatRequest,
   WorkspaceChatProviders,
 } from '../features/chats/types';
@@ -359,16 +359,15 @@ class ChatsApi {
     return parse(ChatTasksResponseSchema, await response.json()).tasks;
   }
 
-  async getChatTokenUsage(chatId: string, limit?: number): Promise<ChatTokenUsage> {
-    const query = limit === undefined ? '' : `?limit=${encodeURIComponent(limit)}`;
+  async getChatTokenTotals(chatId: string): Promise<TokenTotals> {
     const response = await fetch(
-      `${API_BASE}/api/chats/${encodeURIComponent(chatId)}/token-usage${query}`,
+      `${API_BASE}/api/chats/${encodeURIComponent(chatId)}/token-usage?limit=0`,
       { headers: this.getHeaders() }
     );
     if (!response.ok) {
       throw await ApiError.from(response, 'Failed to load token usage');
     }
-    return parse(ChatTokenUsageResponseSchema, await response.json());
+    return parse(ChatTokenTotalsResponseSchema, await response.json()).totals;
   }
 
   async getChatSubagents(chatId: string): Promise<SubagentList> {

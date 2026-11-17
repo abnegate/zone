@@ -3,11 +3,9 @@ use serde::Serialize;
 use super::chat_totals_response::ChatTotalsResponse;
 use super::model_totals_response::ModelTotalsResponse;
 
-/// A workspace's token spend over one window, by chat and by model.
-///
-/// The two lists cover the same turns cut two ways, so their totals agree;
-/// `chats` is capped by the request's limit and `models` is not, because a
-/// workspace has few models and many chats.
+/// A workspace's token spend over one window, by chat and by model. `chats`
+/// is capped by the request's limit and leaves out deleted chats; `models`
+/// counts every turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkspaceUsageResponse {
     pub workspace_id: String,

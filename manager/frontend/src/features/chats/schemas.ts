@@ -246,17 +246,6 @@ export const HandoverSchema = z.object({
 
 export const HandoversSchema = tolerantArray(HandoverSchema);
 
-/**
- * The tokens one turn spent, as the provider reported them across every round
- * and every login the turn ran on. Present on any answer a provider gave a
- * figure for; absent on the backends that report none.
- */
-export const MessageUsageSchema = z.object({
-  prompt_tokens: z.number(),
-  completion_tokens: z.number(),
-  total_tokens: z.number(),
-});
-
 export const MessageMetadataSchema = z
   .object({
     attachments: z.array(MessageAttachmentSchema).optional(),
@@ -268,7 +257,6 @@ export const MessageMetadataSchema = z
     reasoning: z.string().optional(),
     reasoning_at: z.number().int().nonnegative().optional().catch(undefined),
     handovers: HandoversSchema.optional().catch(undefined),
-    usage: MessageUsageSchema.optional().catch(undefined),
     source: z.string().optional().catch(undefined),
     reminder_id: z.string().optional().catch(undefined),
   })
@@ -605,14 +593,7 @@ export const PullRequestDiffSchema = z.object({
   truncated: z.boolean(),
 });
 
-/**
- * What a set of turns spent.
- *
- * `turns` counts every recorded turn and `reported_turns` only those a provider
- * gave a figure for, so a per-turn average is divided by the right denominator
- * rather than by whichever one was to hand. `peak_context_tokens` is one turn's
- * context at its largest, not a sum: it is what the window had to hold.
- */
+/** `peak_context_tokens` is one turn's context at its largest, not a sum. */
 export const TokenTotalsSchema = z.object({
   turns: z.number(),
   reported_turns: z.number(),
@@ -633,34 +614,6 @@ export const TokenTotalsSchema = z.object({
   last_at: z.string().nullable(),
 });
 
-/**
- * One turn's spend. The three billed counts are null, not zero, when the
- * provider reported nothing, which several of the coding-agent backends do.
- */
-export const TokenTurnSchema = z.object({
-  message_id: z.string(),
-  model: z.string(),
-  reasoning_effort: z.string(),
-  prompt_tokens: z.number().nullable(),
-  completion_tokens: z.number().nullable(),
-  total_tokens: z.number().nullable(),
-  rounds: z.number(),
-  tool_calls: z.number(),
-  context_tokens: z.number(),
-  instructions_tokens: z.number(),
-  conversation_tokens: z.number(),
-  tools_tokens: z.number(),
-  results_tokens: z.number(),
-  summary_tokens: z.number(),
-  attachments_tokens: z.number().nullable(),
-  overhead_tokens: z.number(),
-  estimated: z.boolean(),
-  recorded_at: z.string(),
-});
-
-export const ChatTokenUsageResponseSchema = z.object({
-  chat_id: z.string(),
+export const ChatTokenTotalsResponseSchema = z.object({
   totals: TokenTotalsSchema,
-  turns: tolerantArray(TokenTurnSchema).default([]),
-  truncated: z.boolean(),
 });
