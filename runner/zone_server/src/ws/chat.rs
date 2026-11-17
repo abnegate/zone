@@ -4159,6 +4159,9 @@ async fn handle_chat_generation(
         // Drop the producer before acknowledging cancellation so it cannot emit
         // more events after the terminal frame.
         drop(events);
+        if let Some(usage) = context.unreported.take() {
+            billed.add(&model, usage);
+        }
 
         if refused
             && !cancelled
@@ -4574,7 +4577,10 @@ async fn handle_chat_generation(
                 },
             )
             .await;
-            session.close().await?;
+            if let Err(error) = session.close().await {
+                tokens::spawn(state.db().clone(), spent);
+                return Err(error.into());
+            }
             // Spawn background task to generate assistant message embedding
             if !full_content.trim().is_empty() {
                 spawn_message_embedding_task(state.clone(), msg.id, chat_id, full_content.clone());

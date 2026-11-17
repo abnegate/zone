@@ -371,11 +371,12 @@ pub fn run_with_context(
             let mut images = Vec::new();
             let mut cut_short = false;
             let mut tally = Tally::default();
+            context.unreported = None;
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
                     Err(error) => {
-                        if let Some(usage) = tally.total() {
+                        if let Some(usage) = context.unreported.take() {
                             yield AgentEvent::Usage(usage);
                         }
                         yield halted(error);
@@ -387,6 +388,7 @@ pub fn run_with_context(
                 }
                 if let Some(usage) = chunk.usage {
                     tally.observe(usage);
+                    context.unreported = tally.total();
                 }
                 if let Some(window) = chunk.window {
                     yield AgentEvent::Window(window);
@@ -442,7 +444,7 @@ pub fn run_with_context(
                 // A usage-only SSE frame, or the window a coding agent reports once it has
                 // exited, may follow finish_reason; drain through the stream's end.
             }
-            if let Some(usage) = tally.total() {
+            if let Some(usage) = context.unreported.take() {
                 yield AgentEvent::Usage(usage);
             }
             let mut requested = pending.finish();
@@ -2521,6 +2523,67 @@ mod tests {
             assert_eq!(*sent.lock().expect("the request count"), 2);
             assert_eq!(requested(&events), 2, "{events:?}");
             assert!(billed(&events).is_empty(), "{events:?}");
+        }
+
+        /// A stand-in agent that reports what its first message took, then
+        /// keeps the round open until it is stopped.
+        fn stalling(directory: &TempDir) -> PathBuf {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+
+            let message = json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "Reading. "}],
+                    "usage": {"input_tokens": 10, "output_tokens": 1},
+                },
+            });
+            let path = directory.path().join("agent");
+            let mut file = std::fs::File::create(&path).expect("the fake agent");
+            writeln!(
+                file,
+                "#!/bin/sh\ncat > /dev/null\necho '{message}'\nexec sleep 30"
+            )
+            .expect("the fake agent body");
+            drop(file);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the fake agent to be executable");
+            path
+        }
+
+        #[tokio::test]
+        async fn a_round_stopped_after_it_reported_usage_leaves_that_usage_to_take_once() {
+            let directory = TempDir::new().expect("a temporary directory");
+            let run = AgentRun {
+                llm: cli(stalling(&directory)),
+                model: "sonnet".into(),
+                tools: ChatTools::empty(),
+                messages: vec![LlmMessage::user("Plan the release.")],
+                budget: LoopBudget::chat(),
+                approval: ApprovalPolicy::auto(),
+            };
+            let mut context = RunContext::from_messages(run.messages.clone());
+            let mut seen = Vec::new();
+            {
+                let events = run_with_context(run, &mut context, true);
+                futures::pin_mut!(events);
+                while let Some(event) = events.next().await {
+                    let chunk = matches!(event, AgentEvent::Chunk(_));
+                    seen.push(event);
+                    if chunk {
+                        break;
+                    }
+                }
+                if let Ok(Some(event)) =
+                    tokio::time::timeout(Duration::from_millis(200), events.next()).await
+                {
+                    seen.push(event);
+                }
+            }
+
+            assert!(billed(&seen).is_empty(), "{seen:?}");
+            assert_eq!(context.unreported.take(), Some(Usage::new(10, 1)));
+            assert_eq!(context.unreported, None, "the round is counted once");
         }
     }
 }

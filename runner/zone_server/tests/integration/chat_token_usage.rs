@@ -145,6 +145,44 @@ async fn rounds_are_counted_when_the_provider_reports_no_usage() {
     );
 }
 
+/// Every release of the chat's lease fails, so a turn that stored its answer
+/// cannot close its session.
+async fn refuse_to_release(harness: &Harness) {
+    let name = format!("refuse_release_{}", harness.chat.simple());
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN IF NEW.chat_id = '{chat}' AND NEW.expires_at <= clock_timestamp() THEN \
+         RAISE EXCEPTION 'the lease is held'; END IF; RETURN NEW; END $$; \
+         CREATE TRIGGER {name} BEFORE UPDATE ON chat_leases \
+         FOR EACH ROW EXECUTE FUNCTION {name}();",
+        chat = harness.chat,
+    )))
+    .execute(&harness.pool)
+    .await
+    .expect("the refusing trigger");
+}
+
+#[tokio::test]
+async fn a_turn_whose_session_fails_to_close_is_still_recorded() {
+    let harness = Harness::new(Some(100_000), true, vec![]).await;
+    refuse_to_release(&harness).await;
+    harness.script.push(answer("Spent"));
+
+    let frames = harness.turn("Spend something").await;
+    assert!(
+        frames.iter().any(|frame| frame["type"] == "error"),
+        "the failed close is reported: {frames:?}"
+    );
+
+    let rows = recorded(&harness, 1).await;
+    let [row] = rows.as_slice() else {
+        panic!("one turn on one model is one row: {rows:?}");
+    };
+    assert_eq!(row.model, MODEL);
+    assert_eq!(row.rounds, 1);
+    assert_eq!(row.total_tokens, Some(TOTAL_TOKENS));
+}
+
 #[tokio::test]
 async fn deleting_the_answer_keeps_what_it_cost_in_the_workspace() {
     let harness = Harness::new(Some(100_000), true, vec![]).await;

@@ -18,7 +18,7 @@ use abnegate_agent::chat::{self, Capacity, History, NewEntry, ReplayMessage};
 use abnegate_agent::context::{
     self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary,
 };
-use abnegate_llm::{Message, ReasoningEffort, Role};
+use abnegate_llm::{Message, ReasoningEffort, Role, Usage};
 use abnegate_search::SearchContext;
 use base64::Engine;
 use serde_json::Value;
@@ -145,6 +145,10 @@ pub struct RunContext {
     /// filled, its own prompt and tools included, which zone's estimate of
     /// what it sends leaves out.
     pub reported: Option<u64>,
+    /// The round in flight's latest usage the run has not yet yielded as
+    /// `AgentEvent::Usage`. A consumer that drops the run mid-round takes it
+    /// from here, so the round is still counted, and counted once.
+    pub unreported: Option<Usage>,
 }
 
 impl RunContext {
@@ -170,6 +174,7 @@ impl RunContext {
             artifacts: None,
             vision: true,
             reported: None,
+            unreported: None,
         }
     }
 
@@ -577,6 +582,7 @@ pub async fn build(
         )),
         vision: sees_images(&chat.model_name, capacity.vision),
         reported,
+        unreported: None,
     };
     context.search(&SearchContext::new(&state.config().web_search));
     let sent = agentic.then(|| tools.definitions());
