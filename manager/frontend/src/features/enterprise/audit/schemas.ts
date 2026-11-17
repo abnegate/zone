@@ -320,6 +320,7 @@ export const SecretsRequestSchema = z.union([
 export const DeliveryResponseSchema = z.object({
   health: DeliveryHealthSchema,
   backlog: count,
+  backlog_capped: z.boolean(),
   oldest_pending_at: z.string().nullable(),
   attempts: count,
   next_attempt_at: z.string().nullable(),
@@ -384,7 +385,9 @@ export const RetentionResponseSchema = z.object({
   days: retentionDays.nullable(),
   cutoff: z.string().nullable(),
   expired: count,
+  expired_capped: z.boolean(),
   held: count,
+  held_capped: z.boolean(),
   holders: z.array(HolderResponseSchema),
   swept_at: z.string().nullable(),
   deleted_count: count,

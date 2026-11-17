@@ -7,6 +7,7 @@ export * from './labels';
 export {
   addressingLabel,
   backlogText,
+  countText,
   DestinationField,
   deletedText,
   deleteMessage,

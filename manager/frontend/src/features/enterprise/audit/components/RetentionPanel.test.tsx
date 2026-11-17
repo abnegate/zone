@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AuditRefusal } from '../AuditRefusal';
 import {
+  CAPPED_RETENTION,
   COMMUNITY_RETENTION,
   COMMUNITY_SAVED_RETENTION,
   ENTERPRISE_RETENTION,
@@ -112,6 +113,12 @@ describe('RetentionPanel', () => {
 
     expect(screen.getByText('Splunk HEC')).toBeInTheDocument();
     expect(screen.getByText(waitMessage(RetentionWait.Failing))).toBeInTheDocument();
+  });
+
+  it('marks a count the server stopped at as a lower bound', () => {
+    renderPanel(CAPPED_RETENTION);
+
+    expect(screen.getAllByText('10,000+')).toHaveLength(2);
   });
 
   it('sets a new period', async () => {

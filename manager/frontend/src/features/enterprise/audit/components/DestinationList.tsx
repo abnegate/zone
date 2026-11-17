@@ -131,7 +131,7 @@ function DestinationRow({
         <dl className="audit-stats">
           <div className="audit-stat">
             <dt>{BACKLOG_LABEL}</dt>
-            <dd>{backlogText(delivery.backlog)}</dd>
+            <dd>{backlogText(delivery.backlog, delivery.backlog_capped)}</dd>
           </div>
           <div className="audit-stat">
             <dt>{LAST_SUCCESS_LABEL}</dt>

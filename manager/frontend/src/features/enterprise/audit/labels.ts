@@ -150,6 +150,8 @@ export const DAY_PLURAL = 'days';
 
 export const BACKLOG_WAITING = '{} waiting';
 
+export const CAPPED_COUNT = '{}+';
+
 export const DELETE_CONFIRMATION =
   "Delete {}? Zone stops sending audit events to it and forgets its secrets. Events it hasn't received are no longer held back from retention.";
 

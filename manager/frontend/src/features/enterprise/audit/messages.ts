@@ -3,6 +3,7 @@ import { LicenseStatus } from '../schemas';
 import { Tone } from '../status';
 import {
   BACKLOG_WAITING,
+  CAPPED_COUNT,
   DAY_PLURAL,
   DAY_SINGULAR,
   DELETE_CONFIRMATION,
@@ -270,12 +271,12 @@ function fill(template: string, value: string): string {
   return template.replace(SLOT, () => value);
 }
 
-function counted(count: number, singular: string, plural: string): string {
-  return `${count.toLocaleString()} ${count === 1 ? singular : plural}`;
+function counted(count: number, singular: string, plural: string, capped = false): string {
+  return `${countText(count, capped)} ${count === 1 && !capped ? singular : plural}`;
 }
 
-function events(count: number): string {
-  return counted(count, EVENT_SINGULAR, EVENT_PLURAL);
+function events(count: number, capped = false): string {
+  return counted(count, EVENT_SINGULAR, EVENT_PLURAL, capped);
 }
 
 function days(count: number): string {
@@ -423,8 +424,13 @@ export function unencryptedWarning(settings: SettingsRequest): string | null {
   }
 }
 
-export function backlogText(backlog: number): string {
-  return backlog === 0 ? UP_TO_DATE : fill(BACKLOG_WAITING, events(backlog));
+export function countText(count: number, capped = false): string {
+  const text = count.toLocaleString();
+  return capped ? fill(CAPPED_COUNT, text) : text;
+}
+
+export function backlogText(backlog: number, capped = false): string {
+  return backlog === 0 ? UP_TO_DATE : fill(BACKLOG_WAITING, events(backlog, capped));
 }
 
 export function retentionText(period: number | null): string {
@@ -437,12 +443,12 @@ export function retentionSummary(period: number | null, applies: boolean): strin
     : fill(RETENTION_PERIOD_SAVED, days(period));
 }
 
-export function expiredText(expired: number): string {
-  return fill(EXPIRED_COUNT, events(expired));
+export function expiredText(expired: number, capped = false): string {
+  return fill(EXPIRED_COUNT, events(expired, capped));
 }
 
-export function heldText(held: number): string {
-  return fill(HELD_COUNT, events(held));
+export function heldText(held: number, capped = false): string {
+  return fill(HELD_COUNT, events(held, capped));
 }
 
 export function deletedText(deleted: number): string {

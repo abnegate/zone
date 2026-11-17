@@ -225,6 +225,7 @@ function freshDelivery(enabled: boolean): DeliveryResponse {
   return {
     health: enabled ? DeliveryHealth.Healthy : DeliveryHealth.Disabled,
     backlog: 0,
+    backlog_capped: false,
     oldest_pending_at: null,
     attempts: 0,
     next_attempt_at: enabled ? NOW : null,
@@ -293,7 +294,9 @@ function retained(server: AuditServer, days: number | null): RetentionResponse {
       days: null,
       cutoff: null,
       expired: 0,
+      expired_capped: false,
       held: 0,
+      held_capped: false,
       holders: [],
       updated_at: NOW,
     };

@@ -98,6 +98,7 @@ export const UNVERIFIED_STANDING: Standing = {
 const DELIVERED: DeliveryResponse = {
   health: DeliveryHealth.Healthy,
   backlog: 0,
+  backlog_capped: false,
   oldest_pending_at: null,
   attempts: 0,
   next_attempt_at: '2026-11-17T11:59:40Z',
@@ -118,6 +119,7 @@ export const FAILING_WEBHOOK: DestinationResponse = {
   delivery: {
     health: DeliveryHealth.Failing,
     backlog: 342,
+    backlog_capped: false,
     oldest_pending_at: '2026-11-17T09:12:00Z',
     attempts: 6,
     next_attempt_at: '2026-11-17T12:08:00Z',
@@ -276,7 +278,9 @@ export const COMMUNITY_RETENTION: RetentionResponse = {
   days: null,
   cutoff: null,
   expired: 0,
+  expired_capped: false,
   held: 0,
+  held_capped: false,
   holders: [],
   swept_at: null,
   deleted_count: 0,
@@ -288,7 +292,9 @@ export const ENTERPRISE_RETENTION: RetentionResponse = {
   days: 90,
   cutoff: '2026-08-19T12:00:00Z',
   expired: 0,
+  expired_capped: false,
   held: 0,
+  held_capped: false,
   holders: [],
   swept_at: '2026-11-17T11:00:00Z',
   deleted_count: 1_204,
@@ -312,6 +318,14 @@ export const WAITING_RETENTION: RetentionResponse = {
     },
   ],
   deleted_count: 70,
+};
+
+export const CAPPED_RETENTION: RetentionResponse = {
+  ...WAITING_RETENTION,
+  expired: 10_000,
+  expired_capped: true,
+  held: 10_000,
+  held_capped: true,
 };
 
 export const LAPSED_RETENTION: RetentionResponse = {

@@ -39,10 +39,12 @@ import {
 import {
   addressingLabel,
   backlogText,
+  countText,
   DestinationField,
   deleteMessage,
   deliveryError,
   enabledLabel,
+  expiredText,
   facilityLabel,
   failureMessage,
   failureText,
@@ -189,6 +191,14 @@ describe('delivery copy', () => {
     expect(backlogText(0)).toBe(UP_TO_DATE);
     expect(backlogText(1)).toBe('1 event waiting');
     expect(backlogText(1_204)).toBe('1,204 events waiting');
+  });
+
+  it('marks a capped count as a lower bound', () => {
+    expect(countText(10_000)).toBe('10,000');
+    expect(countText(10_000, true)).toBe('10,000+');
+    expect(backlogText(10_000, true)).toBe('10,000+ events waiting');
+    expect(expiredText(10_000, true)).toBe('10,000+ events past the retention period');
+    expect(heldText(10_000, true)).toBe('10,000+ events kept until delivered');
   });
 
   it('reports a test result', () => {

@@ -19,6 +19,7 @@ import {
   SAVE_RETENTION_LABEL,
 } from '../labels';
 import {
+  countText,
   deletedText,
   LicensedFeature,
   readOnlyMessage,
@@ -157,11 +158,11 @@ export function RetentionPanel({ scope, retention }: RetentionPanelProps) {
           )}
           <div className="audit-stat">
             <dt>{EXPIRED_LABEL}</dt>
-            <dd>{retention.expired.toLocaleString()}</dd>
+            <dd>{countText(retention.expired, retention.expired_capped)}</dd>
           </div>
           <div className="audit-stat">
             <dt>{HELD_LABEL}</dt>
-            <dd>{retention.held.toLocaleString()}</dd>
+            <dd>{countText(retention.held, retention.held_capped)}</dd>
           </div>
           <div className="audit-stat">
             <dt>{LAST_SWEEP_LABEL}</dt>
