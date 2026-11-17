@@ -4,6 +4,7 @@
 //! Only organization admins can access audit logs.
 
 pub mod access;
+pub mod exports;
 pub mod refusal;
 
 use axum::{
@@ -68,13 +69,13 @@ fn default_limit() -> i64 {
 
 /// A bound given either as an RFC 3339 instant or as a calendar date; a date
 /// on its own means the start of that day.
-fn parse_start(value: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_start(value: &str) -> Option<DateTime<Utc>> {
     parse_bound(value, NaiveTime::MIN)
 }
 
 /// A bound given either as an RFC 3339 instant or as a calendar date; a date
 /// on its own means the end of that day.
-fn parse_end(value: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_end(value: &str) -> Option<DateTime<Utc>> {
     parse_bound(value, NaiveTime::from_hms_opt(23, 59, 59)?)
 }
 
