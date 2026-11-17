@@ -1497,20 +1497,32 @@ async fn a_turn_recorded_before_spend_was_split_by_model_keeps_its_figures() {
     .execute(&database.pool)
     .await
     .unwrap();
+    let homeless = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO chats(id, workspace_id, title, model_name) VALUES($1, NULL, 'Homeless', 'llama3')",
+    )
+    .bind(homeless)
+    .execute(&database.pool)
+    .await
+    .unwrap();
     let mut messages = Vec::new();
-    for _ in 0..2 {
+    for owner in [chat, chat, homeless] {
         let message = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO messages(id, chat_id, role, content) VALUES($1, $2, 'assistant', 'answer')",
         )
         .bind(message)
-        .bind(chat)
+        .bind(owner)
         .execute(&database.pool)
         .await
         .unwrap();
         messages.push(message);
     }
-    for (message, recorded_in) in [(messages[0], Some(workspace)), (messages[1], None)] {
+    for (message, owner, recorded_in) in [
+        (messages[0], chat, Some(workspace)),
+        (messages[1], chat, None),
+        (messages[2], homeless, None),
+    ] {
         sqlx::query(
             "INSERT INTO chat_token_usage(message_id, chat_id, workspace_id, model, reasoning_effort, \
              prompt_tokens, completion_tokens, total_tokens, rounds, tool_calls, context_tokens, \
@@ -1520,7 +1532,7 @@ async fn a_turn_recorded_before_spend_was_split_by_model_keeps_its_figures() {
              400, 50, NULL, 40, TRUE)",
         )
         .bind(message)
-        .bind(chat)
+        .bind(owner)
         .bind(recorded_in)
         .execute(&database.pool)
         .await
@@ -1556,6 +1568,6 @@ async fn a_turn_recorded_before_spend_was_split_by_model_keeps_its_figures() {
         rows,
         vec![turn(messages[0], false), turn(messages[1], true)],
         "each turn keeps its message's id, takes its chat's workspace when it had none, and \
-         outlives its message"
+         outlives its message, while a turn no workspace can claim is dropped"
     );
 }

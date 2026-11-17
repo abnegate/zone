@@ -52,10 +52,19 @@ pub struct Turn {
     pub shares: Vec<Share>,
 }
 
-/// Store every share of `turn` together. A message or chat deleted before the
-/// write lands is stored as gone rather than refused, since its tokens were
-/// still billed.
+/// Storing a turn again adds nothing. A message or chat deleted while the write
+/// is in flight is stored as gone rather than refused, because the tokens were
+/// spent all the same.
 pub async fn record(pool: &PgPool, turn: &Turn) -> DbResult<()> {
+    match insert(pool, turn).await {
+        Err(sqlx::Error::Database(error)) if error.is_foreign_key_violation() => {
+            insert(pool, turn).await
+        }
+        stored => stored,
+    }
+}
+
+async fn insert(pool: &PgPool, turn: &Turn) -> DbResult<()> {
     let mut transaction = pool.begin().await?;
     for share in &turn.shares {
         let context = share.context;
@@ -69,7 +78,7 @@ pub async fn record(pool: &PgPool, turn: &Turn) -> DbResult<()> {
                  $1, (SELECT id FROM messages WHERE id = $1), (SELECT id FROM chats WHERE id = $2), \
                  $3, $4, $5, $6, $7, $8, $9, $10, \
                  $11, $12, $13, $14, $15, $16, $17, $18, $19 \
-             )",
+             ) ON CONFLICT (turn_id, model) DO NOTHING",
         )
         .bind(turn.message_id)
         .bind(turn.chat_id)
@@ -196,13 +205,15 @@ pub async fn chat_totals(pool: &PgPool, chat: Uuid) -> DbResult<Totals> {
     .await
 }
 
-/// One chat's shares, newest first, at most `limit` of them.
+/// The shares of the chat's `limit` newest turns, newest first.
 pub async fn chat_turns(pool: &PgPool, chat: Uuid, limit: i64) -> DbResult<Vec<TurnRow>> {
     sqlx::query_as(turn_query!(
         "FROM chat_token_usage \
-         WHERE chat_id = $1 \
-         ORDER BY recorded_at DESC, turn_id, model \
-         LIMIT $2"
+         WHERE chat_id = $1 AND turn_id IN ( \
+             SELECT turn_id FROM chat_token_usage WHERE chat_id = $1 \
+             GROUP BY turn_id ORDER BY max(recorded_at) DESC, turn_id LIMIT $2 \
+         ) \
+         ORDER BY recorded_at DESC, turn_id, model"
     ))
     .bind(chat)
     .bind(limit)
@@ -596,5 +607,105 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].turn_id, gone);
         assert_eq!(turns[0].message_id, None);
+    }
+
+    #[tokio::test]
+    async fn a_message_deleted_while_its_turn_is_being_written_is_stored_as_gone() {
+        let Fixture {
+            pool,
+            chat,
+            workspace,
+        } = fixture().await;
+        let doomed = message(&pool, chat).await;
+        let mut deleting = pool.begin().await.expect("a transaction");
+        sqlx::query("DELETE FROM messages WHERE id = $1")
+            .bind(doomed)
+            .execute(&mut *deleting)
+            .await
+            .expect("the message is deleted, not yet committed");
+
+        let writer = {
+            let pool = pool.clone();
+            let spent = turn(doomed, chat, workspace);
+            tokio::spawn(async move { record(&pool, &spent).await })
+        };
+        let mut blocked = false;
+        for _ in 0..100 {
+            blocked = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' AND query LIKE 'INSERT INTO chat_token_usage%')",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("the activity");
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            blocked,
+            "the insert saw the message and waits on its foreign key"
+        );
+        deleting.commit().await.expect("the delete commits");
+
+        writer
+            .await
+            .expect("the writer finishes")
+            .expect("the foreign key violation is retried, not raised");
+        let turns = chat_turns(&pool, chat, 10).await.expect("the turns");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].turn_id, doomed);
+        assert_eq!(turns[0].message_id, None);
+    }
+
+    #[tokio::test]
+    async fn recording_a_turn_again_adds_nothing() {
+        let Fixture {
+            pool,
+            chat,
+            workspace,
+        } = fixture().await;
+        let only = message(&pool, chat).await;
+        let mut handed = turn(only, chat, workspace);
+        handed.shares = vec![share("sonnet", None), share("gpt-5", Some(CONTEXT))];
+
+        record(&pool, &handed).await.expect("the first write");
+        record(&pool, &handed).await.expect("the repeat");
+
+        let totals = chat_totals(&pool, chat).await.expect("totals");
+        assert_eq!(totals.turns, 1);
+        assert_eq!(totals.total_tokens, 3_000, "the repeat counted nothing");
+        assert_eq!(
+            chat_turns(&pool, chat, 10).await.expect("the turns").len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn the_limit_counts_turns_so_a_handed_over_turn_keeps_every_share() {
+        let Fixture {
+            pool,
+            chat,
+            workspace,
+        } = fixture().await;
+        let older = message(&pool, chat).await;
+        record(&pool, &turn(older, chat, workspace))
+            .await
+            .expect("the older turn");
+        let newer = message(&pool, chat).await;
+        let mut handed = turn(newer, chat, workspace);
+        handed.shares = vec![share("sonnet", None), share("gpt-5", Some(CONTEXT))];
+        record(&pool, &handed).await.expect("the newer turn");
+
+        let turns = chat_turns(&pool, chat, 1).await.expect("the turns");
+
+        let models: Vec<_> = turns.iter().map(|row| row.model.as_str()).collect();
+        assert_eq!(models, ["gpt-5", "sonnet"], "{turns:?}");
+        assert!(turns.iter().all(|row| row.turn_id == newer), "{turns:?}");
+        assert_eq!(
+            chat_turns(&pool, chat, 2).await.expect("the turns").len(),
+            3
+        );
     }
 }

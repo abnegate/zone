@@ -11,6 +11,7 @@ use wiremock::ResponseTemplate;
 use crate::common::context::{Harness, MODEL, answer, calls, successful, tool};
 use crate::common::eventually::eventually;
 use crate::common::{test_email, test_password};
+use zone_server::db::chat_token_usage;
 
 const PROMPT_TOKENS: i64 = 37;
 const TOTAL_TOKENS: i64 = 46;
@@ -210,19 +211,130 @@ async fn deleting_the_answer_keeps_what_it_cost_in_the_workspace() {
         .await;
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
+    assert_eq!(body["models"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body["models"][0]["model"], MODEL, "{body}");
+    let totals = &body["models"][0]["totals"];
+    assert_eq!(totals["turns"], 1, "{body}");
+    assert_eq!(totals["reported_turns"], 1, "{body}");
+    assert_eq!(totals["prompt_tokens"], PROMPT_TOKENS, "{body}");
     assert_eq!(
-        body["models"],
-        json!([{
-            "model": MODEL,
-            "totals": body["models"][0]["totals"],
-        }]),
+        totals["completion_tokens"],
+        TOTAL_TOKENS - PROMPT_TOKENS,
         "{body}"
     );
+    assert_eq!(totals["total_tokens"], TOTAL_TOKENS, "{body}");
+    assert_eq!(totals["rounds"], 1, "{body}");
+    assert_eq!(totals["tool_calls"], 0, "{body}");
+    assert!(totals["peak_context_tokens"].as_i64() > Some(0), "{body}");
+    assert!(totals["first_at"].is_string(), "{body}");
+}
+
+#[tokio::test]
+async fn deleting_the_chat_unlinks_its_turns_and_keeps_the_workspace_totals() {
+    let harness = Harness::new(Some(100_000), true, vec![]).await;
+    harness.script.push(answer("Spent"));
+    successful(&harness.turn("Spend something").await);
+    recorded(&harness, 1).await;
+
+    harness
+        .client
+        .delete_auth(&format!("/api/chats/{}", harness.chat), &harness.token)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    let linked: Vec<(Option<Uuid>, Option<Uuid>)> =
+        sqlx::query_as("SELECT chat_id, message_id FROM chat_token_usage WHERE workspace_id = $1")
+            .bind(harness.workspace)
+            .fetch_all(&harness.pool)
+            .await
+            .expect("the workspace's rows");
+    assert_eq!(linked.len(), 1, "the chat's turn outlives it: {linked:?}");
+    assert_eq!(linked[0].0, None, "the row no longer names the chat");
+    let response = harness
+        .client
+        .get_auth(
+            &format!("/api/chats/token-usage?workspace_id={}", harness.workspace),
+            &harness.token,
+        )
+        .await;
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
     assert_eq!(body["models"][0]["totals"]["turns"], 1, "{body}");
     assert_eq!(
         body["models"][0]["totals"]["total_tokens"], TOTAL_TOKENS,
         "{body}"
     );
+    assert_eq!(
+        body["chats"],
+        json!([]),
+        "a deleted chat is not ranked: {body}"
+    );
+}
+
+#[tokio::test]
+async fn the_limit_counts_turns_so_a_handed_over_turn_is_listed_whole() {
+    let harness = Harness::new(Some(100_000), true, vec![]).await;
+    harness.script.push(answer("Spent"));
+    successful(&harness.turn("Spend something").await);
+    recorded(&harness, 1).await;
+    let handed = Uuid::new_v4();
+    let share = |model: &str| chat_token_usage::Share {
+        model: model.to_string(),
+        reported: Some(chat_token_usage::Reported {
+            prompt_tokens: 3,
+            completion_tokens: 2,
+            total_tokens: 5,
+        }),
+        rounds: 1,
+        tool_calls: 0,
+        context: None,
+    };
+    chat_token_usage::record(
+        &harness.pool,
+        &chat_token_usage::Turn {
+            message_id: handed,
+            chat_id: harness.chat,
+            workspace_id: harness.workspace,
+            reasoning_effort: "auto".to_string(),
+            shares: vec![share("sonnet"), share("gpt-5")],
+        },
+    )
+    .await
+    .expect("a turn handed between two models");
+    let uri = format!("/api/chats/{}/token-usage", harness.chat);
+
+    let response = harness
+        .client
+        .get_auth(&format!("{uri}?limit=1"), &harness.token)
+        .await;
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    let listed: Vec<_> = body["turns"]
+        .as_array()
+        .expect("the turns")
+        .iter()
+        .map(|turn| (turn["turn_id"].as_str().unwrap_or_default(), &turn["model"]))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (handed.to_string().as_str(), &json!("gpt-5")),
+            (handed.to_string().as_str(), &json!("sonnet"))
+        ],
+        "one turn is asked for and both its models come back: {body}"
+    );
+    assert_eq!(
+        body["truncated"], true,
+        "an older turn was left out: {body}"
+    );
+
+    let response = harness
+        .client
+        .get_auth(&format!("{uri}?limit=2"), &harness.token)
+        .await;
+    let body = response.json_value();
+    assert_eq!(body["turns"].as_array().map(Vec::len), Some(3), "{body}");
+    assert_eq!(body["truncated"], false, "every turn is listed: {body}");
 }
 
 #[tokio::test]

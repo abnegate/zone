@@ -34,6 +34,7 @@ ALTER TABLE chat_token_usage
     ALTER COLUMN overhead_tokens DROP NOT NULL,
     ALTER COLUMN estimated DROP NOT NULL,
     ADD PRIMARY KEY (id),
+    ADD CONSTRAINT chat_token_usage_turn_model_key UNIQUE (turn_id, model),
     ADD CONSTRAINT chat_token_usage_message_id_fkey
         FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE SET NULL,
     ADD CONSTRAINT chat_token_usage_chat_id_fkey
