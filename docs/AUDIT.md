@@ -709,21 +709,6 @@ Refusals are `{"error": "…", "code": "…"}`.
 | `audit_export_range_invalid` | 400 | A date is missing or unreadable, or the start is after the end. |
 | `audit_rebasing` | 503 | Adding a destination found positions left by a [logical restore](#logical-restores) while a rebase or a retention batch was running. Try again once it finishes. |
 
-## Upgrading
-
-Migration `0028_audit_logs_positions` adds the position columns to
-`audit_logs`. It rewrites the whole table and builds three indexes while holding
-an `ACCESS EXCLUSIVE` lock, so nothing can read or write the audit log until
-it finishes, which takes time in proportion to the table's size: seconds to
-minutes at the sizes a self-hosted server reaches. If it can't take the lock
-within 5 seconds, the migration fails and the server doesn't start; starting
-it again retries. The migration runs at startup, before the server listens for
-requests, so on a server with a very large audit log raise the liveness probe's
-initial delay for this upgrade, or run the migrations ahead of it with
-`zone-server --migrate-only`.
-
-Migrations 0028 to 0031 run on PostgreSQL 14 and later.
-
 ## Logical restores
 
 A position's transaction ID comes from PostgreSQL's transaction counter. A
