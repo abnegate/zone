@@ -4,6 +4,10 @@
 //! across the system. Audit logs track important actions like user logins,
 //! permission changes, and resource modifications.
 
+pub mod events;
+pub mod position;
+pub mod scope;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -123,6 +127,14 @@ pub mod actions {
     pub const AGENT_POLICY_UPDATED: &str = "agent_policy.updated";
     pub const AGENT_POLICY_TURN_DENIED: &str = "agent_policy.turn_denied";
     pub const AGENT_POLICY_TOOL_DENIED: &str = "agent_policy.tool_denied";
+
+    pub const AUDIT_DESTINATION_CREATED: &str = "audit_destination.created";
+    pub const AUDIT_DESTINATION_UPDATED: &str = "audit_destination.updated";
+    pub const AUDIT_DESTINATION_DELETED: &str = "audit_destination.deleted";
+    pub const AUDIT_DESTINATION_TESTED: &str = "audit_destination.tested";
+    pub const AUDIT_RETENTION_UPDATED: &str = "audit_retention.updated";
+    pub const AUDIT_RETENTION_APPLIED: &str = "audit_retention.applied";
+    pub const AUDIT_EXPORT_DOWNLOADED: &str = "audit_export.downloaded";
 }
 
 pub mod resources {
@@ -149,6 +161,9 @@ pub mod resources {
     pub const WORKSPACE_AGENT_POLICY: &str = "workspace_agent_policy";
     pub const CHAT: &str = "chat";
     pub const TASK: &str = "task";
+    pub const AUDIT_DESTINATION: &str = "audit_destination";
+    pub const AUDIT_RETENTION: &str = "audit_retention";
+    pub const AUDIT_EXPORT: &str = "audit_export";
 }
 
 /// Log an action to the audit trail
