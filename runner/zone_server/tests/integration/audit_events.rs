@@ -19,7 +19,7 @@ const LOCK_WAIT: StdDuration = StdDuration::from_secs(30);
 const LOCK_POLL: StdDuration = StdDuration::from_millis(20);
 const RESTORED: i64 = 1 << 40;
 const SEEDED: i64 = 200_000;
-const SEEDED_REBASE: StdDuration = StdDuration::from_secs(10);
+const SEEDED_COLLIDED: StdDuration = StdDuration::from_secs(5);
 const SCANNING: [(&str, &str); 3] = [
     ("enable_indexscan", "off"),
     ("enable_indexonlyscan", "off"),
@@ -1103,10 +1103,8 @@ async fn counts_stop_at_the_cap_and_say_there_are_more() {
     database.cleanup().await;
 }
 
-#[tokio::test]
-async fn a_rebase_over_a_large_log_reads_it_in_one_pass() {
-    let database = database("audit_events_rebase_large").await;
-    let pool = &database.pool;
+/// A restored organization log of [`SEEDED`] rows behind a destination with a restored cursor.
+async fn restored_large_log(pool: &PgPool) {
     let organization = organization(pool).await;
     let old = written(pool, Some(organization), 2).await;
     settle(pool).await;
@@ -1117,17 +1115,44 @@ async fn a_rebase_over_a_large_log_reads_it_in_one_pass() {
         .await;
     seed(pool, Some(organization), SEEDED).await;
     analyze(pool).await;
+}
+
+#[tokio::test]
+async fn finding_shared_sequences_reads_a_large_log_in_one_pass() {
+    let database = database("audit_events_collided_large").await;
+    let pool = &database.pool;
+    restored_large_log(pool).await;
+    let horizon: i64 =
+        sqlx::query_scalar("SELECT ((pg_snapshot_xmax(pg_current_snapshot()))::text)::bigint")
+            .fetch_one(pool)
+            .await
+            .expect("the horizon is readable");
 
     let scanning = scanning(pool).await;
     let started = Instant::now();
-    assert!(rebase(&scanning).await, "the restored rows are rebased");
+    events::collided(&scanning, horizon)
+        .await
+        .expect("shared sequences are readable");
     let elapsed = started.elapsed();
     scanning.close().await;
 
     assert!(
-        elapsed < SEEDED_REBASE,
-        "a rebase over {SEEDED} rows took {elapsed:?}; finding shared sequences must not compare every pair of rows"
+        elapsed < SEEDED_COLLIDED,
+        "finding shared sequences over {SEEDED} rows took {elapsed:?}; it must not compare every pair of rows"
     );
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_rebase_over_a_large_log_moves_every_row() {
+    let database = database("audit_events_rebase_large").await;
+    let pool = &database.pool;
+    restored_large_log(pool).await;
+
+    let scanning = scanning(pool).await;
+    assert!(rebase(&scanning).await, "the restored rows are rebased");
+    scanning.close().await;
+
     let (unmoved, shared): (i64, i64) = sqlx::query_as(
         "SELECT count(*) FILTER (WHERE transaction_id <> 0), count(*) - count(DISTINCT sequence) \
          FROM audit_logs",

@@ -50,6 +50,9 @@ const DETECTED: &str = concat!(
     ")"
 );
 
+const COLLIDED: &str = "SELECT EXISTS (SELECT 1 FROM audit_logs GROUP BY sequence \
+     HAVING count(*) > 1 AND bool_or(transaction_id > 0 AND transaction_id < $1))";
+
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct Row {
     pub transaction_id: i64,
@@ -139,6 +142,7 @@ struct Sequences {
     moved: Option<i64>,
     highest: Option<i64>,
     issued: Option<i64>,
+    #[sqlx(skip)]
     collided: bool,
 }
 
@@ -430,6 +434,18 @@ async fn retried(connection: &mut PgConnection) -> DbResult<bool> {
     }
 }
 
+/// Whether a row below `horizon` shares its sequence with another row. Grouping by sequence reads
+/// the log once, where any join leaves the planner free to compare a restored log row against row.
+pub async fn collided<'e, E>(executor: E, horizon: i64) -> DbResult<bool>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query_scalar(COLLIDED)
+        .bind(horizon)
+        .fetch_one(executor)
+        .await
+}
+
 async fn detected<'e, E>(executor: E) -> DbResult<bool>
 where
     E: Executor<'e, Database = Postgres>,
@@ -469,13 +485,15 @@ async fn rebased(connection: &mut PgConnection) -> DbResult<bool> {
         "SELECT (SELECT max(sequence) FROM audit_logs WHERE transaction_id >= $1) AS moved, \
          (SELECT max(sequence) FROM audit_logs) AS highest, \
          pg_sequence_last_value(pg_get_serial_sequence('public.audit_logs', 'sequence')::regclass) \
-         AS issued, \
-         EXISTS (SELECT 1 FROM audit_logs GROUP BY sequence HAVING count(*) > 1 \
-         AND bool_or(transaction_id > 0 AND transaction_id < $1)) AS collided",
+         AS issued",
     )
     .bind(horizon)
     .fetch_one(&mut *transaction)
     .await?;
+    let sequences = Sequences {
+        collided: collided(&mut *transaction, horizon).await?,
+        ..sequences
+    };
     let lagged = sequences.lagged();
     let renumbered = if lagged {
         renumber(&mut transaction, horizon, sequences.behind()).await?
