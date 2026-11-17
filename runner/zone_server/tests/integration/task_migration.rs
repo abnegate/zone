@@ -1461,3 +1461,101 @@ fn each_no_transaction_migration_holds_one_concurrent_statement() {
         );
     }
 }
+
+const CHAT_TOKEN_USAGE_TURNS: &str = "chat token usage turns";
+
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+struct SplitTurn {
+    turn_id: Uuid,
+    message_id: Option<Uuid>,
+    chat_id: Option<Uuid>,
+    workspace_id: Uuid,
+    model: String,
+    total_tokens: Option<i64>,
+    rounds: i32,
+    context_tokens: Option<i64>,
+}
+
+#[tokio::test]
+async fn a_turn_recorded_before_spend_was_split_by_model_keeps_its_figures() {
+    let database = Database::new(PREFIX).await;
+    let migrator = migrator().await;
+    migrator
+        .run_to(
+            version_before(&migrator, CHAT_TOKEN_USAGE_TURNS),
+            &database.pool,
+        )
+        .await
+        .unwrap();
+    let (workspace, _) = database.workspace().await;
+    let chat = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO chats(id, workspace_id, title, model_name) VALUES($1, $2, 'Spend', 'llama3')",
+    )
+    .bind(chat)
+    .bind(workspace)
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    let mut messages = Vec::new();
+    for _ in 0..2 {
+        let message = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO messages(id, chat_id, role, content) VALUES($1, $2, 'assistant', 'answer')",
+        )
+        .bind(message)
+        .bind(chat)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        messages.push(message);
+    }
+    for (message, recorded_in) in [(messages[0], Some(workspace)), (messages[1], None)] {
+        sqlx::query(
+            "INSERT INTO chat_token_usage(message_id, chat_id, workspace_id, model, reasoning_effort, \
+             prompt_tokens, completion_tokens, total_tokens, rounds, tool_calls, context_tokens, \
+             instructions_tokens, conversation_tokens, tools_tokens, results_tokens, summary_tokens, \
+             attachments_tokens, overhead_tokens, estimated) \
+             VALUES($1, $2, $3, 'llama3', 'auto', 1200, 300, 1500, 3, 2, 9000, 4000, 3000, 1500, \
+             400, 50, NULL, 40, TRUE)",
+        )
+        .bind(message)
+        .bind(chat)
+        .bind(recorded_in)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    }
+
+    migrations::run(&database.pool).await.unwrap();
+    sqlx::query("DELETE FROM messages WHERE id = $1")
+        .bind(messages[0])
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let rows: Vec<SplitTurn> = sqlx::query_as(
+        "SELECT turn_id, message_id, chat_id, workspace_id, model, total_tokens, rounds, \
+         context_tokens FROM chat_token_usage ORDER BY message_id NULLS FIRST",
+    )
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    database.cleanup().await;
+
+    let turn = |message: Uuid, linked: bool| SplitTurn {
+        turn_id: message,
+        message_id: linked.then_some(message),
+        chat_id: Some(chat),
+        workspace_id: workspace,
+        model: "llama3".to_string(),
+        total_tokens: Some(1500),
+        rounds: 3,
+        context_tokens: Some(9000),
+    };
+    assert_eq!(
+        rows,
+        vec![turn(messages[0], false), turn(messages[1], true)],
+        "each turn keeps its message's id, takes its chat's workspace when it had none, and \
+         outlives its message"
+    );
+}
