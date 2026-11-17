@@ -290,6 +290,13 @@ CREATE TABLE device_policy (
     CONSTRAINT device_policy_singleton CHECK (id)
 );
 
+CREATE TABLE licenses (
+    id smallint DEFAULT 1 NOT NULL PRIMARY KEY,
+    key text NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT licenses_singleton_check CHECK (id = 1)
+);
+
 CREATE TABLE organizations (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     name text NOT NULL,
