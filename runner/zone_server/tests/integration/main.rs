@@ -10,6 +10,7 @@ mod api;
 mod artifacts;
 mod audit;
 mod audit_access;
+mod audit_delivery;
 mod audit_delivery_store;
 mod audit_destination_store;
 mod audit_events;
