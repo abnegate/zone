@@ -37,7 +37,9 @@ pub async fn drain(
     cadence: Cadence,
     open: &dyn Open,
 ) -> Result<usize, sqlx::Error> {
-    events::rebase(state.db()).await?;
+    if events::rebase(state.db()).await? {
+        tracing::info!("Rebased audit delivery positions left behind by a restore");
+    }
     let caught = Mutex::new(HashSet::new());
     let slots = (0..cadence.concurrency.max(1)).map(|_| slot(state, cadence, open, &caught));
     join_all(slots)

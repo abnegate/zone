@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::http::StatusCode;
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::future::join_all;
 use sqlx::{Executor, PgPool};
@@ -21,14 +22,16 @@ use zone_server::db::audit::{actions, resources};
 use zone_server::db::licenses;
 use zone_server::services::audit::delivery::{Cadence, Open, Outcome, deliver};
 use zone_server::services::audit::transport::{Batch, Failure, Transport};
+use zone_server::services::network_denial::NetworkDenial;
 use zone_server::state::AppState;
-use zone_server::workers::audit::drain;
+use zone_server::workers::audit::{drain, spawn};
 
 use crate::common::audit::{
     Destination, UNVERIFIABLE, created_at, database, organization, position, settle, write,
 };
+use crate::common::eventually::eventually;
 use crate::common::sso::{active, keyring, lapsed};
-use crate::common::{Database, test_config};
+use crate::common::{Database, TestClient, test_config};
 
 const PREFIX: &str = "audit_delivery";
 const CADENCE: Cadence = Cadence {
@@ -39,6 +42,7 @@ const CADENCE: Cadence = Cadence {
 const RESTORED: i64 = 1 << 40;
 const UNAVAILABLE: &str = "HTTP 503";
 const JITTER: f64 = 0.75;
+const BOOT_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct Receiver {
@@ -242,6 +246,14 @@ impl Engine {
             )))
             .await
             .unwrap();
+    }
+
+    async fn restored(&self) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE transaction_id >= $1")
+            .bind(RESTORED)
+            .fetch_one(self.pool())
+            .await
+            .unwrap()
     }
 
     async fn clock(&self) -> DateTime<Utc> {
@@ -662,6 +674,54 @@ async fn a_failed_rebase_aborts_the_tick() {
         ids,
         "the next tick rebases and delivers"
     );
+    engine.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_server_takes_requests_while_a_restore_waits_for_its_rebase() {
+    let engine = Engine::licensed(Tier::Enterprise).await;
+    let scope = engine.organization().await;
+    engine.destination(scope, Kind::Webhook).await;
+    engine.written(scope, 3).await;
+    settle(engine.pool()).await;
+    engine.restore().await;
+    let mut rebasing = engine.pool().acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(events::REBASE_LOCK)
+        .execute(&mut *rebasing)
+        .await
+        .unwrap();
+    engine.state.install_network_denial(NetworkDenial::Enforced);
+
+    tokio::time::timeout(BOOT_WAIT, engine.state.prepare())
+        .await
+        .expect("the boot does not wait for the rebase");
+    let worker = spawn(
+        engine.state.clone(),
+        Arc::new(Fake(engine.receiver.clone())),
+    );
+    let client = TestClient::with_state(engine.state.clone());
+    tokio::time::timeout(BOOT_WAIT, client.get("/health"))
+        .await
+        .expect("the server answers while the rebase waits for its lock")
+        .assert_status(StatusCode::OK);
+    assert!(
+        engine.restored().await > 0,
+        "the worker waits for the lock before moving anything"
+    );
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(events::REBASE_LOCK)
+        .execute(&mut *rebasing)
+        .await
+        .unwrap();
+    drop(rebasing);
+    assert!(
+        eventually(|| async { engine.restored().await == 0 }).await,
+        "the delivery worker's first tick rebases the restore in the background"
+    );
+    worker.abort();
+    let _ = worker.await;
     engine.cleanup().await;
 }
 

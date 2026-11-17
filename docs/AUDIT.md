@@ -717,7 +717,10 @@ an `ACCESS EXCLUSIVE` lock, so nothing can read or write the audit log until
 it finishes, which takes time in proportion to the table's size: seconds to
 minutes at the sizes a self-hosted server reaches. If it can't take the lock
 within 5 seconds, the migration fails and the server doesn't start; starting
-it again retries.
+it again retries. The migration runs at startup, before the server listens for
+requests, so on a server with a very large audit log raise the liveness probe's
+initial delay for this upgrade, or run the migrations ahead of it with
+`zone-server --migrate-only`.
 
 Migrations 0027 to 0030 run on PostgreSQL 14 and later.
 
@@ -732,10 +735,10 @@ would sort before ones already delivered. That covers `pg_dump` with
 replication to a new server.
 
 Zone detects this and rebases every position below the new counter. It
-checks at startup, before its workers start, at the start of every delivery
-pass and before every retention sweep: it rebases when any stored event, a
-destination's place or a stored batch is at or above the server's next
-transaction ID, and otherwise does nothing.
+checks at the start of every delivery pass, the first of which runs as the
+server starts, and before every retention sweep: it rebases when any stored
+event, a destination's place or a stored batch is at or above the server's
+next transaction ID, and otherwise does nothing.
 
 The rebase waits for any retention batch in flight, and for any other rebase,
 before it reads anything, then runs in one transaction. It sets every event's
@@ -770,10 +773,12 @@ number falls among the restored events' without matching any of them, which
 needs every restored number in that range to be one the new server skipped
 (a rolled-back write). Such an event isn't sent.
 
-**The first start after a logical restore takes longer.** Setting every
-event's transaction ID to 0 rewrites every row of `audit_logs` once, and the
-startup rebase runs before the server accepts requests, so startup waits in
-proportion to the table's size. If the startup rebase fails, the server logs
-the error and starts, and the next delivery pass tries again; nothing is
+**The first rebase after a logical restore takes a while.** Setting every
+event's transaction ID to 0 rewrites every row of `audit_logs` once, which
+takes time in proportion to the table's size. The delivery worker runs it in
+the background on its first pass, so the server takes requests meanwhile:
+adding a destination is refused with `503 audit_rebasing` until it finishes,
+and delivery and retention sweeps wait for it. If the rebase fails, the
+delivery worker logs the error and tries again on its next pass; nothing is
 delivered, no retention sweep runs and adding a destination is refused with
 `500` until a rebase succeeds.

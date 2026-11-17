@@ -5,6 +5,7 @@ use abnegate_agent::McpHub;
 use abnegate_exec::Niceness;
 use abnegate_http::{RateLimitConfig, RateLimiter};
 use abnegate_secret::MasterKey;
+use chrono::Utc;
 use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::{Arc, OnceLock};
@@ -21,7 +22,7 @@ use zone_core::llm::{LlmBackend, cli};
 #[cfg(any(test, feature = "testing"))]
 use zone_enterprise::Keyring;
 use zone_enterprise::sso::Oidc;
-use zone_enterprise::{Edition, License};
+use zone_enterprise::{Edition, License, status};
 
 use crate::cache::Cache;
 #[cfg(test)]
@@ -487,6 +488,24 @@ impl AppState {
     #[cfg(any(test, feature = "testing"))]
     pub fn install_keyring(&self, keyring: Keyring) {
         self.inner.licenses.install_keyring(keyring);
+    }
+
+    /// Loads what the server reads before it takes requests. Work that scales with stored data,
+    /// such as rebasing audit positions after a restore, belongs to a background worker: a boot
+    /// that waits on it outlasts the liveness probe and is killed before it finishes.
+    pub async fn prepare(&self) {
+        match self.licenses().load(self.db()).await {
+            Ok(stored) => tracing::info!(
+                edition = %Edition::from(stored.license()),
+                status = %status(stored.license(), Utc::now()),
+                "License loaded"
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "Could not load the license; running as Community until it loads")
+            }
+        }
+        self.mcp().configured().await;
+        self.network_denial().await.announce();
     }
 }
 

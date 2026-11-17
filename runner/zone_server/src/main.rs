@@ -9,7 +9,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::Utc;
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -18,10 +17,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use zone_context::context::ContextService;
-use zone_enterprise::{Edition, status};
 use zone_server::cache::Cache;
 use zone_server::config::Config;
-use zone_server::db::audit::events;
 use zone_server::db::reminders::Sweep;
 use zone_server::db::sealing::Options;
 use zone_server::db::sealing::Sealer;
@@ -208,25 +205,7 @@ async fn main() {
     } else {
         AppState::new_with_mail(config.clone(), db, Some(cache), mail)
     };
-    match state.licenses().load(state.db()).await {
-        Ok(stored) => tracing::info!(
-            edition = %Edition::from(stored.license()),
-            status = %status(stored.license(), Utc::now()),
-            "License loaded"
-        ),
-        Err(error) => {
-            tracing::warn!(%error, "Could not load the license; running as Community until it loads")
-        }
-    }
-    state.mcp().configured().await;
-    state.network_denial().await.announce();
-    match events::rebase(state.db()).await {
-        Ok(true) => tracing::info!("Rebased audit delivery positions left behind by a restore"),
-        Ok(false) => {}
-        Err(error) => {
-            tracing::error!(%error, "Could not rebase audit delivery positions; retrying on the next delivery tick")
-        }
-    }
+    state.prepare().await;
 
     zone_server::workers::housekeeping::spawn(state.clone());
     zone_server::workers::reminders::spawn(state.clone(), Sweep::All);
