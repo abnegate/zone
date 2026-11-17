@@ -464,10 +464,14 @@ export interface UpdateChatRequest {
   agent_enabled?: boolean;
   agent_sandboxed?: boolean;
   auto_approve?: boolean;
+  offline?: boolean;
   reasoning_effort?: ReasoningEffort;
   context_tokens?: number;
   character?: ChatCharacter | null;
   clear_character?: boolean;
+  /** The project to move the chat into. Taking it out of one is `clear_project`. */
+  project_id?: string;
+  clear_project?: boolean;
 }
 
 export interface SendMessageRequest {

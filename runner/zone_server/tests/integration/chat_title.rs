@@ -148,19 +148,9 @@ async fn manual_title_even_unchanged_wins_pending_generation() {
             .await
             .unwrap();
         assert!(message.title_claimed);
-        chats::update_chat(
-            &pool,
-            chat.id,
-            Some(title),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+        chats::update_chat(&pool, chat.id, chats::ChatChange::titled(title))
+            .await
+            .unwrap();
         assert!(
             !chats::complete_title(&pool, chat.id, message.id, "Travel planning")
                 .await
@@ -199,19 +189,9 @@ async fn custom_titles_and_renamed_empty_chats_are_not_claimed() {
         .await
         .unwrap();
         if automatic {
-            chats::update_chat(
-                &pool,
-                chat.id,
-                Some("Custom"),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+            chats::update_chat(&pool, chat.id, chats::ChatChange::titled("Custom"))
+                .await
+                .unwrap();
         }
         let message = chats::create_message(&pool, chat.id, "user", "Plan travel", None)
             .await

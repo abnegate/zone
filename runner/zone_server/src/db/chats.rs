@@ -293,18 +293,58 @@ pub async fn create_chat_with_title(
     Ok(map_chat_row!(row))
 }
 
+/// Which project an update moves a chat to. Leaving the one it is in is a
+/// change of its own, so it cannot be said with an absent id.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProjectChange {
+    /// Leave the chat in whichever project it is already in.
+    #[default]
+    Keep,
+    Join(Uuid),
+    Leave,
+}
+
+/// What an update changes about a chat. A `None` field is left as it is.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChatChange<'a> {
+    pub title: Option<&'a str>,
+    pub agent_enabled: Option<bool>,
+    pub agent_sandboxed: Option<bool>,
+    pub auto_approve: Option<bool>,
+    pub offline: Option<bool>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub context_tokens: Option<i64>,
+    pub model_name: Option<&'a str>,
+    pub project: ProjectChange,
+}
+
+impl<'a> ChatChange<'a> {
+    /// A change that only renames the chat.
+    pub fn titled(title: &'a str) -> Self {
+        Self {
+            title: Some(title),
+            ..Self::default()
+        }
+    }
+}
+
 /// Update a chat's title and/or agent mode. `None` leaves a field untouched.
 pub async fn update_chat(
     pool: &PgPool,
     id: Uuid,
-    title: Option<&str>,
-    agent_enabled: Option<bool>,
-    agent_sandboxed: Option<bool>,
-    auto_approve: Option<bool>,
-    reasoning_effort: Option<ReasoningEffort>,
-    context_tokens: Option<i64>,
-    model_name: Option<&str>,
+    change: ChatChange<'_>,
 ) -> DbResult<Option<ChatRow>> {
+    let ChatChange {
+        title,
+        agent_enabled,
+        agent_sandboxed,
+        auto_approve,
+        offline,
+        reasoning_effort,
+        context_tokens,
+        model_name,
+        project,
+    } = change;
     let mut transaction = pool.begin().await?;
     if title.is_some() {
         sqlx::query("UPDATE chats SET automatic_title = FALSE WHERE id = $1")
@@ -318,6 +358,29 @@ pub async fn update_chat(
             .bind(model_name)
             .execute(&mut *transaction)
             .await?;
+    }
+    if let Some(offline) = offline {
+        sqlx::query("UPDATE chats SET offline = $2 WHERE id = $1")
+            .bind(id)
+            .bind(offline)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    match project {
+        ProjectChange::Keep => {}
+        ProjectChange::Join(project_id) => {
+            sqlx::query("UPDATE chats SET project_id = $2 WHERE id = $1")
+                .bind(id)
+                .bind(project_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        ProjectChange::Leave => {
+            sqlx::query("UPDATE chats SET project_id = NULL WHERE id = $1")
+                .bind(id)
+                .execute(&mut *transaction)
+                .await?;
+        }
     }
     let configured = model_name.is_some()
         || agent_enabled.is_some()
@@ -1071,13 +1134,11 @@ mod tests {
         let moved = update_chat(
             &pool,
             chat.id,
-            None,
-            None,
-            None,
-            None,
-            Some(ReasoningEffort::Max),
-            None,
-            Some("opus"),
+            ChatChange {
+                reasoning_effort: Some(ReasoningEffort::Max),
+                model_name: Some("opus"),
+                ..ChatChange::default()
+            },
         )
         .await
         .expect("the model to be saved")
@@ -1085,13 +1146,10 @@ mod tests {
         let missing = update_chat(
             &pool,
             Uuid::new_v4(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("opus"),
+            ChatChange {
+                model_name: Some("opus"),
+                ..ChatChange::default()
+            },
         )
         .await
         .expect("an absent chat to be a no-op");
@@ -1203,13 +1261,10 @@ mod tests {
             let updated = update_chat(
                 &pool,
                 chat.id,
-                None,
-                None,
-                None,
-                None,
-                Some(level),
-                None,
-                None,
+                ChatChange {
+                    reasoning_effort: Some(level),
+                    ..ChatChange::default()
+                },
             )
             .await;
             let read = get_chat(&pool, chat.id).await.unwrap().expect("the chat");

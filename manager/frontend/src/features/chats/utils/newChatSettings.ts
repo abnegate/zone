@@ -4,13 +4,15 @@ import type {
   RecentChat,
   WorkspaceChatProviders,
 } from '../provider';
-import { REASONING_EFFORT_OPTIONS } from '../types';
+import { type CreateChatRequest, REASONING_EFFORT_OPTIONS } from '../types';
 import {
   AUTO_MODEL,
+  chatShowsReasoning,
   contextTokenOptions,
   defaultContextTokens,
   findInstalledModel,
   type LocalContextModel,
+  type ModelHints,
 } from './modelOptions';
 import {
   AUTO_EFFORT,
@@ -18,6 +20,8 @@ import {
   effortsFor,
   isAgentOffer,
   keepEffort,
+  offersAgentOn,
+  offersContextOn,
 } from './providerOptions';
 
 export interface NewChatSettings {
@@ -29,7 +33,7 @@ export interface NewChatSettings {
   context: string;
 }
 
-type ListedModel = LocalContextModel & { name: string; completion?: boolean };
+type ListedModel = LocalContextModel & ModelHints & { name: string };
 
 interface Resolved {
   provider: string;
@@ -111,5 +115,81 @@ export function newChatSettings(
     agent: recent.agent_enabled,
     offline: recent.offline,
     context: keepsContext ? context : String(defaultContextTokens(native)),
+  };
+}
+
+/** The provider the settings chose for this chat alone, null while they follow the workspace's. */
+function chosenOffer(
+  settings: NewChatSettings,
+  providers: WorkspaceChatProviders | null
+): ChatProviderOffer | null {
+  return providers?.providers.find((offer) => offer.provider === settings.provider) ?? null;
+}
+
+/** Whether a reasoning effort means anything to what `settings` would run on. */
+function showsReasoning(
+  settings: NewChatSettings,
+  efforts: ReasoningEffort[] | null,
+  installed: ListedModel[]
+): boolean {
+  if (efforts) return efforts.length > 0;
+  if (settings.model === AUTO_MODEL) {
+    return installed.some((model) => chatShowsReasoning({}, model));
+  }
+  const selected = findInstalledModel(installed, settings.model);
+  return selected ? chatShowsReasoning({}, selected) : false;
+}
+
+/**
+ * The chat `+` creates from `settings`: whatever the chat created last ran on,
+ * carrying only the fields that mean anything to it. There is no dialog to
+ * refuse a model in, so the settings are taken as the workspace offers them
+ * and anything it no longer offers has already fallen back to Automatic.
+ */
+export function newChatRequest(
+  workspaceId: string,
+  settings: NewChatSettings,
+  providers: WorkspaceChatProviders | null,
+  installed: ListedModel[]
+): CreateChatRequest {
+  const chosen = chosenOffer(settings, providers);
+  const fallback = providers?.default ?? null;
+  const offer = chosen ?? (fallback && isAgentOffer(fallback) ? fallback : null);
+  const model = settings.model.trim() || AUTO_MODEL;
+  const efforts = offer ? effortsFor(offer, model) : null;
+  const effort = efforts ? keepEffort(settings.reasoning, efforts) : settings.reasoning;
+  const workspaceProvider = fallback?.provider ?? null;
+  const agent = offersAgentOn(
+    offer,
+    offer === null || offer.provider === workspaceProvider ? installed : null,
+    model
+  )
+    ? settings.agent
+    : false;
+  const context = offersContextOn(
+    chosen?.provider ?? workspaceProvider,
+    workspaceProvider,
+    installed,
+    model
+  )
+    ? Number(settings.context)
+    : null;
+  return {
+    workspace_id: workspaceId,
+    title: model === AUTO_MODEL ? 'New chat' : `Chat with ${model}`,
+    automatic_title: true,
+    model_name: chosen ? AUTO_MODEL : model,
+    ...(chosen
+      ? { provider: chosen.provider, provider_model: model === AUTO_MODEL ? null : model }
+      : {}),
+    agent_enabled: agent,
+    // Never carried: chats have no owner, so the chat created last may be
+    // another member's, and approving its writes is not approving theirs.
+    auto_approve: false,
+    ...(showsReasoning(settings, efforts, installed) && effort !== AUTO_EFFORT
+      ? { reasoning_effort: effort }
+      : {}),
+    ...(settings.offline ? { offline: true } : {}),
+    ...(context !== null ? { context_tokens: context } : {}),
   };
 }

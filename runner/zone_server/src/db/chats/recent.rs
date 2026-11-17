@@ -47,9 +47,11 @@ impl From<Row> for Recent {
     }
 }
 
-/// The settings of the unarchived assistant chat in `workspace` a member used
-/// last: created, reconfigured or typed in. Planner and update chats belong to
-/// a project, so they never count.
+/// The settings of the unarchived assistant chat in `workspace` created last.
+/// Opening an older chat, typing in it or reconfiguring it never makes it the
+/// one a new chat starts from: `+` repeats the last chat somebody started, so
+/// which chat that is has to stop moving the moment it is created. Planner and
+/// update chats belong to a project, so they never count.
 pub async fn get<'e, E>(executor: E, workspace: Uuid) -> DbResult<Option<Recent>>
 where
     E: Executor<'e, Database = Postgres>,
@@ -59,7 +61,7 @@ where
          offline, context_tokens \
          FROM chats \
          WHERE workspace_id = $1 AND purpose = 'assistant' AND archived IS NOT TRUE \
-         ORDER BY used_at DESC \
+         ORDER BY created_at DESC, id DESC \
          LIMIT 1",
     )
     .bind(workspace)
@@ -79,7 +81,7 @@ mod tests {
 
     use super::*;
     use crate::db::chats::provider::{self, Choice};
-    use crate::db::chats::{create_chat_with_title, create_message, update_chat};
+    use crate::db::chats::{ChatChange, create_chat_with_title, create_message, update_chat};
     use crate::db::context::Store;
     use crate::services::stages::AUTO;
 
@@ -147,10 +149,13 @@ mod tests {
             chat
         }
 
+        /// Move every timestamp the ordering could read back by `days`, so a
+        /// test that makes one chat older cannot pass on the wrong column.
         async fn age(&self, chat: Uuid, days: i32) {
             sqlx::query(
                 "UPDATE chats SET used_at = NOW() - make_interval(days => $2), \
-                 updated_at = NOW() - make_interval(days => $2) WHERE id = $1",
+                 updated_at = NOW() - make_interval(days => $2), \
+                 created_at = NOW() - make_interval(days => $2) WHERE id = $1",
             )
             .bind(chat)
             .bind(days)
@@ -247,49 +252,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typing_in_or_reconfiguring_an_older_chat_makes_it_the_recent_one() {
+    async fn typing_in_or_reconfiguring_an_older_chat_never_makes_it_the_recent_one() {
         let fixture = Fixture::new().await;
         let older = fixture.chat(fixture.workspace, "older", None).await;
         fixture.age(older, 3).await;
-        let newer = fixture.chat(fixture.workspace, "newer", None).await;
+        fixture.chat(fixture.workspace, "newer", None).await;
 
         fixture.turn(older, None).await;
         assert_eq!(
             fixture.recent().await.model_name,
-            "older",
-            "a typed turn counts"
+            "newer",
+            "a typed turn in an older chat does not count"
         );
 
-        fixture.age(older, 3).await;
         fixture.post(older, "user", None).await;
         assert_eq!(
             fixture.recent().await.model_name,
-            "older",
-            "a posted message counts"
+            "newer",
+            "a message posted to an older chat does not count"
         );
 
-        fixture.age(older, 3).await;
-        fixture.age(newer, 2).await;
         update_chat(
             &fixture.pool,
-            newer,
-            None,
-            None,
-            None,
-            None,
-            Some(ReasoningEffort::Low),
-            None,
-            None,
+            older,
+            ChatChange {
+                reasoning_effort: Some(ReasoningEffort::Low),
+                model_name: Some("reconfigured"),
+                ..ChatChange::default()
+            },
         )
         .await
         .unwrap();
-        let recent = fixture.recent().await;
-        assert_eq!(
-            (recent.model_name.as_str(), recent.reasoning_effort),
-            ("newer", ReasoningEffort::Low),
-            "changing a setting counts"
-        );
-
         let openai = Choice {
             provider: Provider::OpenAI,
             model: Some("gpt-4.1".to_string()),
@@ -299,9 +292,46 @@ mod tests {
             .unwrap();
         let recent = fixture.recent().await;
         assert_eq!(
-            (recent.provider, recent.provider_model.as_deref()),
-            (Some(Provider::OpenAI), Some("gpt-4.1")),
-            "choosing a provider counts"
+            (
+                recent.model_name.as_str(),
+                recent.provider,
+                recent.reasoning_effort
+            ),
+            ("newer", None, ReasoningEffort::High),
+            "reconfiguring an older chat does not count either"
+        );
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn the_newest_chat_is_carried_as_it_now_reads() {
+        let fixture = Fixture::new().await;
+        let older = fixture.chat(fixture.workspace, "older", None).await;
+        fixture.age(older, 3).await;
+        let newest = fixture.chat(fixture.workspace, "newest", None).await;
+
+        update_chat(
+            &fixture.pool,
+            newest,
+            ChatChange {
+                reasoning_effort: Some(ReasoningEffort::Low),
+                context_tokens: Some(8_192),
+                offline: Some(false),
+                ..ChatChange::default()
+            },
+        )
+        .await
+        .unwrap();
+        let recent = fixture.recent().await;
+        assert_eq!(
+            (
+                recent.model_name.as_str(),
+                recent.reasoning_effort,
+                recent.offline,
+                recent.context_tokens
+            ),
+            ("newest", ReasoningEffort::Low, false, Some(8_192)),
+            "the chat created last is carried as it reads now, not as it was created"
         );
         fixture.cleanup().await;
     }
@@ -335,13 +365,12 @@ mod tests {
         update_chat(
             &fixture.pool,
             older,
-            Some("Renamed"),
-            None,
-            Some(true),
-            Some(true),
-            None,
-            None,
-            None,
+            ChatChange {
+                title: Some("Renamed"),
+                agent_sandboxed: Some(true),
+                auto_approve: Some(true),
+                ..ChatChange::default()
+            },
         )
         .await
         .unwrap();

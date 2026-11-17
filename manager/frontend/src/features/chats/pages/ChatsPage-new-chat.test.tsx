@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
-import { chooseSelect, openSelect } from '../../../test/select';
+
 import type {
   ChatProviderOffer,
   ReasoningEffort,
@@ -98,7 +98,6 @@ let modelsError: string | null = null;
 let installed = [toolModel];
 let workspaceProviders: WorkspaceChatProviders | null = null;
 let creation: Response;
-let providersGate: Promise<void> | null = null;
 let projects: Array<{ id: string; name: string }> = [];
 
 Element.prototype.scrollIntoView = mock();
@@ -188,40 +187,9 @@ const page = () => (
   </BrowserRouter>
 );
 
-const openDialog = async () => {
+/** Clicks `+` and returns the body of the create it sent. */
+const created = async (): Promise<Record<string, unknown>> => {
   fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
-  await screen.findByRole('heading', { name: 'New Chat' });
-};
-
-const closeDialog = () => {
-  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-};
-
-const openNewChat = async () => {
-  const view = render(page());
-  await openDialog();
-  return view;
-};
-
-const openNewChatWithProviders = async (
-  fallback: ChatProviderOffer,
-  providers: ChatProviderOffer[] = offers
-) => {
-  workspaceProviders = { default: fallback, providers };
-  const view = await openNewChat();
-  await screen.findByRole('combobox', { name: 'Provider' });
-  return view;
-};
-
-const optionLabels = (label: string): string[] => {
-  const trigger = openSelect(label);
-  const labels = screen.getAllByRole('option').map((option) => option.textContent ?? '');
-  fireEvent.keyDown(trigger, { key: 'Escape' });
-  return labels;
-};
-
-const createdBody = async (): Promise<Record<string, unknown>> => {
-  fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
   const fetchMock = globalThis.fetch as unknown as ReturnType<typeof mock>;
   await waitFor(() =>
     expect(
@@ -234,20 +202,32 @@ const createdBody = async (): Promise<Record<string, unknown>> => {
   return JSON.parse(String(init.body));
 };
 
-describe('ChatsPage new chat dialog', () => {
+/** The chat `+` would create once the workspace's providers have been read. */
+const createdOn = async (providers: WorkspaceChatProviders): Promise<Record<string, unknown>> => {
+  workspaceProviders = providers;
+  render(page());
+  return created();
+};
+
+const providerReads = (): number => {
+  const fetchMock = globalThis.fetch as unknown as ReturnType<typeof mock>;
+  return fetchMock.mock.calls.filter(([url]) =>
+    /\/api\/workspaces\/[^/]+\/chat-providers$/.test(String(url))
+  ).length;
+};
+
+describe('ChatsPage new chat', () => {
   beforeEach(() => {
     currentWorkspace = firstWorkspace;
     modelsError = null;
     installed = [toolModel];
     workspaceProviders = null;
-    providersGate = null;
     projects = [];
     creation = Response.json({ success: false, error: REFUSAL }, { status: 409 });
     window.history.pushState({}, '', '/');
     globalThis.fetch = mock(async (url: string, init?: RequestInit) => {
       if (init?.method === 'POST') return creation;
       if (/\/api\/workspaces\/[^/]+\/chat-providers$/.test(url)) {
-        if (providersGate) await providersGate;
         return workspaceProviders
           ? Response.json(workspaceProviders)
           : Response.json({ success: false, error: 'Not found' }, { status: 404 });
@@ -261,113 +241,99 @@ describe('ChatsPage new chat dialog', () => {
   });
 
   it("shows the server's reason when it refuses to create the chat", async () => {
-    await openNewChat();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
+    await createdOn({ default: selfHosted, providers: offers });
 
     expect(await screen.findByText(`Failed to create chat: ${REFUSAL}`)).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
   });
 
-  it("shows why the workspace's models could not be listed in the model picker", async () => {
-    modelsError = `Failed to fetch models: ${REFUSAL}`;
+  it("repeats the settings of the workspace's chat created last", async () => {
+    const body = await createdOn({ default: selfHosted, providers: offers, recent: recentCodex });
 
-    await openNewChat();
-
-    expect(screen.getByText(modelsError)).toBeInTheDocument();
+    expect(body).toMatchObject({
+      provider: 'codex',
+      provider_model: 'gpt-6-sol',
+      model_name: 'auto',
+      title: 'Chat with gpt-6-sol',
+      automatic_title: true,
+      reasoning_effort: 'high',
+      agent_enabled: true,
+      auto_approve: false,
+      offline: true,
+    });
   });
 
-  it("lists the Claude Code default's own models and efforts instead of local ones", async () => {
-    await openNewChatWithProviders(claudeCode);
+  it('reads the settings again on every click rather than only on mount', async () => {
+    workspaceProviders = { default: selfHosted, providers: offers, recent: recentCodex };
+    render(page());
+    expect(await created()).toMatchObject({ provider: 'codex' });
+    const onMount = providerReads();
 
-    expect(optionLabels('Provider')).toEqual([
-      'Default (Claude Code)',
-      'Self-Hosted',
-      'OpenAI',
-      'Claude Code',
-      'Codex',
-    ]);
-    expect(optionLabels('Select Model')).toEqual(['Automatic', 'Sonnet', 'Opus', 'Haiku']);
-    expect(optionLabels('Reasoning')).toEqual([
-      'Auto',
-      'Low',
-      'Medium',
-      'High',
-      'Extra high',
-      'Max',
-    ]);
-    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
+    workspaceProviders = {
+      default: selfHosted,
+      providers: offers,
+      recent: { ...recentCodex, provider: 'claude_code', provider_model: 'opus' },
+    };
+    fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
+
+    await waitFor(() => expect(providerReads()).toBeGreaterThan(onMount));
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof mock>;
+    await waitFor(() => {
+      const posts = fetchMock.mock.calls.filter(
+        ([, init]) => (init as RequestInit | undefined)?.method === 'POST'
+      );
+      expect(posts.length).toBe(2);
+      expect(JSON.parse(String((posts[1][1] as RequestInit).body))).toMatchObject({
+        provider: 'claude_code',
+        provider_model: 'opus',
+      });
+    });
   });
 
-  it('sends a Default chat on an agent default with the agent model and effort', async () => {
-    await openNewChatWithProviders(claudeCode);
+  it('sends a Default chat on an agent default with its model and effort', async () => {
+    const body = await createdOn({
+      default: claudeCode,
+      providers: offers,
+      recent: {
+        ...recentCodex,
+        provider: null,
+        provider_model: null,
+        model_name: 'opus',
+        reasoning_effort: 'max',
+        offline: false,
+      },
+    });
 
-    chooseSelect('Select Model', 'Opus');
-    chooseSelect('Reasoning', 'Max');
-
-    const body = await createdBody();
     expect(body.model_name).toBe('opus');
     expect(body.reasoning_effort).toBe('max');
     expect(body).not.toHaveProperty('provider');
     expect(body).not.toHaveProperty('context_tokens');
+    expect(body).not.toHaveProperty('offline');
   });
 
-  it('hides reasoning for a Claude model that takes no effort and sends none', async () => {
-    await openNewChatWithProviders(claudeCode);
+  it('sends no effort for a model of the default that takes none', async () => {
+    const body = await createdOn({
+      default: claudeCode,
+      providers: offers,
+      recent: {
+        ...recentCodex,
+        provider: null,
+        provider_model: null,
+        model_name: 'haiku',
+        reasoning_effort: 'max',
+      },
+    });
 
-    chooseSelect('Select Model', 'Sonnet');
-    chooseSelect('Reasoning', 'Max');
-    chooseSelect('Select Model', 'Haiku');
-
-    expect(screen.queryByRole('combobox', { name: 'Reasoning' })).not.toBeInTheDocument();
-    const body = await createdBody();
     expect(body.model_name).toBe('haiku');
     expect(body.reasoning_effort).toBeUndefined();
   });
 
-  it("refreshes the models and efforts with the chosen provider and restores Default's", async () => {
-    await openNewChatWithProviders(selfHosted);
+  it('sends the model a provider with none saved was last given', async () => {
+    const body = await createdOn({
+      default: selfHosted,
+      providers: offers,
+      recent: { ...recentCodex, provider: 'openai', provider_model: 'my-deployment' },
+    });
 
-    expect(optionLabels('Select Model')).toEqual(['Automatic', 'llama3.2']);
-    expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent(
-      'Default (Self-Hosted)'
-    );
-
-    chooseSelect('Provider', 'Codex');
-
-    expect(optionLabels('Select Model')).toEqual(['Automatic', 'gpt-6-sol', 'gpt-5.5']);
-    expect(optionLabels('Reasoning')).toEqual(['Auto', 'Low', 'Medium', 'High', 'Extra high']);
-
-    chooseSelect('Select Model', 'gpt-6-sol');
-    expect(optionLabels('Reasoning')).toContain('Ultra');
-    chooseSelect('Reasoning', 'Ultra');
-
-    chooseSelect('Select Model', 'gpt-5.5');
-    expect(optionLabels('Reasoning')).not.toContain('Ultra');
-    expect(screen.getByRole('combobox', { name: 'Reasoning' })).toHaveTextContent('Auto');
-
-    chooseSelect('Provider', 'Default (Self-Hosted)');
-
-    expect(optionLabels('Select Model')).toEqual(['Automatic', 'llama3.2']);
-    expect(screen.queryByRole('combobox', { name: 'Reasoning' })).not.toBeInTheDocument();
-  });
-
-  it('asks for a typed model name on a provider with none saved and sends it', async () => {
-    await openNewChatWithProviders(selfHosted);
-
-    chooseSelect('Provider', 'OpenAI');
-
-    expect(screen.queryByRole('combobox', { name: 'Select Model' })).not.toBeInTheDocument();
-    const field = screen.getByRole('textbox', { name: 'Model name' });
-    expect(field).toHaveValue('');
-    expect(screen.getByRole('button', { name: 'Create Chat' })).toBeDisabled();
-    fireEvent.change(field, { target: { value: '   ' } });
-    expect(screen.getByRole('button', { name: 'Create Chat' })).toBeDisabled();
-    fireEvent.change(field, { target: { value: ' my-deployment ' } });
-    expect(screen.getByRole('button', { name: 'Create Chat' })).toBeEnabled();
-
-    const body = await createdBody();
     expect(body).toMatchObject({
       provider: 'openai',
       provider_model: 'my-deployment',
@@ -376,13 +342,18 @@ describe('ChatsPage new chat dialog', () => {
     });
   });
 
-  it('sends the chosen provider with Automatic as no model', async () => {
-    await openNewChatWithProviders(selfHosted);
+  it('sends a chosen provider whose model was Automatic as no model', async () => {
+    const body = await createdOn({
+      default: selfHosted,
+      providers: offers,
+      recent: {
+        ...recentCodex,
+        provider: 'claude_code',
+        provider_model: null,
+        reasoning_effort: 'xhigh',
+      },
+    });
 
-    chooseSelect('Provider', 'Claude Code');
-    chooseSelect('Reasoning', 'Extra high');
-
-    const body = await createdBody();
     expect(body).toMatchObject({
       provider: 'claude_code',
       provider_model: null,
@@ -392,455 +363,125 @@ describe('ChatsPage new chat dialog', () => {
     expect(body).not.toHaveProperty('context_tokens');
   });
 
-  it("shows the server's refusal of the chosen provider in the dialog", async () => {
-    creation = Response.json({ success: false, error: UNAVAILABLE }, { status: 409 });
-    await openNewChatWithProviders(selfHosted);
+  it('falls back to Default when the chat created last ran on a provider no longer offered', async () => {
+    const body = await createdOn({
+      default: selfHosted,
+      providers: offers,
+      recent: { ...recentCodex, provider: 'anthropic', provider_model: 'claude-opus-4' },
+    });
 
-    chooseSelect('Provider', 'Codex');
-    fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
-
-    await waitFor(() =>
-      expect(document.querySelector('.modal-error')).toHaveTextContent(UNAVAILABLE)
-    );
-    expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
+    expect(body.model_name).toBe('auto');
+    expect(body).not.toHaveProperty('provider');
+    expect(body.offline, 'the settings it can still honour are kept').toBe(true);
   });
 
-  it('says why the providers cannot be listed and keeps the local model picker', async () => {
-    await openNewChat();
+  it('falls back to Automatic when the model of the chat created last is no longer installed', async () => {
+    const body = await createdOn({
+      default: selfHosted,
+      providers: offers,
+      recent: { ...recentCodex, provider: null, provider_model: null, model_name: 'qwen3:8b' },
+    });
+
+    expect(body.model_name).toBe('auto');
+  });
+
+  it('reads a padded model name as the trimmed one it sends', async () => {
+    const body = await createdOn({
+      default: selfHosted,
+      providers: offers,
+      recent: { ...recentCodex, provider: 'openai', provider_model: '  my-deployment  ' },
+    });
+
+    expect(body).toMatchObject({ provider: 'openai', provider_model: 'my-deployment' });
+  });
+
+  it('starts from the default settings when the providers cannot be read', async () => {
+    render(page());
 
     expect(await screen.findByTestId('new-chat-providers-error')).toHaveTextContent(
       PROVIDERS_REFUSED
     );
-    expect(screen.queryByRole('combobox', { name: 'Provider' })).not.toBeInTheDocument();
-    expect(optionLabels('Select Model')).toEqual(['Automatic', 'llama3.2']);
+    expect(await created()).toMatchObject({ model_name: 'auto', title: 'New chat' });
   });
 
-  it('lists the providers afresh each time the dialog opens', async () => {
-    await openNewChatWithProviders(selfHosted);
-    closeDialog();
-    await waitFor(() =>
-      expect(screen.queryByRole('heading', { name: 'New Chat' })).not.toBeInTheDocument()
-    );
-    workspaceProviders = { default: claudeCode, providers: offers };
-
-    await openDialog();
-
-    await waitFor(() =>
-      expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent(
-        'Default (Claude Code)'
-      )
-    );
-    expect(optionLabels('Select Model')).toEqual(['Automatic', 'Sonnet', 'Opus', 'Haiku']);
-  });
-
-  it('drops the providers error once they list on reopening the dialog', async () => {
-    await openNewChat();
-    await screen.findByTestId('new-chat-providers-error');
-    closeDialog();
-    await waitFor(() =>
-      expect(screen.queryByRole('heading', { name: 'New Chat' })).not.toBeInTheDocument()
-    );
-    workspaceProviders = { default: claudeCode, providers: offers };
-
-    await openDialog();
-
-    expect(await screen.findByRole('combobox', { name: 'Provider' })).toHaveTextContent(
-      'Default (Claude Code)'
-    );
-    expect(screen.queryByTestId('new-chat-providers-error')).not.toBeInTheDocument();
-    expect(optionLabels('Select Model')).toEqual(['Automatic', 'Sonnet', 'Opus', 'Haiku']);
-  });
-
-  it('starts from Default and the local models every time the dialog opens', async () => {
-    await openNewChatWithProviders(selfHosted);
-    chooseSelect('Provider', 'Codex');
-    chooseSelect('Select Model', 'gpt-6-sol');
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    await waitFor(() =>
-      expect(screen.queryByRole('heading', { name: 'New Chat' })).not.toBeInTheDocument()
-    );
-
-    await openDialog();
-
-    expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent(
-      'Default (Self-Hosted)'
-    );
-    expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('Automatic');
-    expect(optionLabels('Select Model')).toEqual(['Automatic', 'llama3.2']);
-  });
-
-  it("says an offline chat still uses Zone's own model services and reaches no other network", async () => {
-    await openNewChat();
-
-    expect(
-      screen.getByText(
-        "Still uses Zone's own model services (the model, embeddings, ComfyUI), but reaches no other network: no web search, shell network access, MCP servers or GitHub tools."
-      )
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/Connected sources still work/)).not.toBeInTheDocument();
-  });
-
-  it("warns that offline chats can't run commands on a host that can't enforce it", async () => {
-    workspaceProviders = { default: selfHosted, providers: offers, offline_enforced: false };
-    await openNewChat();
-
-    expect(
-      await screen.findByText(/so offline chats here can't run commands\.$/)
-    ).toBeInTheDocument();
-  });
-
-  it('says nothing about commands on a host that keeps them off the network', async () => {
-    workspaceProviders = { default: selfHosted, providers: offers, offline_enforced: true };
-    await openNewChat();
-    await screen.findByRole('combobox', { name: 'Provider' });
-
-    expect(screen.queryByText(/can't run commands/)).not.toBeInTheDocument();
-  });
-
-  it("starts from the settings of the workspace's most recent chat and sends them", async () => {
-    workspaceProviders = { default: selfHosted, providers: offers, recent: recentCodex };
-    await openNewChat();
-
-    await waitFor(() =>
-      expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('Codex')
-    );
-    expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('gpt-6-sol');
-    expect(screen.getByRole('combobox', { name: 'Reasoning' })).toHaveTextContent('High');
-    expect(screen.getByLabelText('Agent mode')).toBeChecked();
-    expect(screen.getByLabelText('Auto-approve writes and commands')).not.toBeChecked();
-    expect(screen.getByLabelText('Offline')).toBeChecked();
-
-    expect(await createdBody()).toMatchObject({
-      provider: 'codex',
-      provider_model: 'gpt-6-sol',
-      model_name: 'auto',
-      reasoning_effort: 'high',
-      agent_enabled: true,
-      auto_approve: false,
-      offline: true,
-    });
-  });
-
-  it('falls back to Default when the recent chat ran on a provider no longer offered', async () => {
-    workspaceProviders = {
-      default: selfHosted,
-      providers: offers,
-      recent: { ...recentCodex, provider: 'anthropic', provider_model: 'claude-opus-4' },
-    };
-    await openNewChat();
-    await waitFor(() => expect(screen.getByLabelText('Offline')).toBeChecked());
-
-    expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent(
-      'Default (Self-Hosted)'
-    );
-    expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('Automatic');
-    const body = await createdBody();
-    expect(body.model_name).toBe('auto');
-    expect(body).not.toHaveProperty('provider');
-  });
-
-  it('falls back to Automatic when the recent Default model is no longer installed', async () => {
-    workspaceProviders = {
-      default: selfHosted,
-      providers: offers,
-      recent: { ...recentCodex, provider: null, provider_model: null, model_name: 'qwen3:8b' },
-    };
-    await openNewChat();
-    await waitFor(() => expect(screen.getByLabelText('Offline')).toBeChecked());
-
-    expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('Automatic');
-    expect((await createdBody()).model_name).toBe('auto');
-  });
-
-  it('starts from the settings the last chat changed to each time the dialog opens', async () => {
-    workspaceProviders = { default: selfHosted, providers: offers, recent: recentCodex };
-    await openNewChat();
-    await waitFor(() =>
-      expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('Codex')
-    );
-    closeDialog();
-    await waitFor(() =>
-      expect(screen.queryByRole('heading', { name: 'New Chat' })).not.toBeInTheDocument()
-    );
-    workspaceProviders = {
-      default: selfHosted,
-      providers: offers,
-      recent: { ...recentCodex, provider: 'claude_code', provider_model: 'opus' },
-    };
-
-    await openDialog();
-
-    await waitFor(() =>
-      expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('Claude Code')
-    );
-    expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('Opus');
-  });
-
-  const holdProviders = async (next: WorkspaceChatProviders): Promise<() => void> => {
-    await openDialog();
-    await screen.findByRole('combobox', { name: 'Provider' });
-    closeDialog();
-    await waitFor(() =>
-      expect(screen.queryByRole('heading', { name: 'New Chat' })).not.toBeInTheDocument()
-    );
-    let release = () => {};
-    providersGate = new Promise((resolve) => {
-      release = resolve;
-    });
-    workspaceProviders = next;
-    await openDialog();
-    return release;
-  };
-
-  it('keeps what was chosen in the dialog when the recent settings load after it', async () => {
+  it('creates into the workspace that is open', async () => {
     workspaceProviders = { default: selfHosted, providers: offers };
-    render(page());
-    const release = await holdProviders({
-      default: claudeCode,
-      providers: offers,
-      recent: recentCodex,
-    });
-
-    chooseSelect('Provider', 'Claude Code');
-    release();
-
-    await waitFor(() => expect(optionLabels('Provider')).toContain('Default (Claude Code)'));
-    expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('Claude Code');
-    expect(screen.getByLabelText('Offline')).not.toBeChecked();
-  });
-
-  it('still starts from the recent settings after a project is chosen', async () => {
-    projects = [{ id: 'project-1', name: 'Launch' }];
-    workspaceProviders = { default: selfHosted, providers: offers };
-    render(page());
-    const release = await holdProviders({
-      default: selfHosted,
-      providers: offers,
-      recent: recentCodex,
-    });
-
-    chooseSelect('Project', 'Launch');
-    release();
-
-    await waitFor(() =>
-      expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('Codex')
-    );
-    expect(await createdBody()).toMatchObject({
-      provider: 'codex',
-      provider_model: 'gpt-6-sol',
-      project_id: 'project-1',
-    });
-  });
-
-  it('starts over when the workspace changes', async () => {
-    const view = await openNewChatWithProviders(selfHosted);
-    chooseSelect('Provider', 'Codex');
-    chooseSelect('Select Model', 'gpt-6-sol');
+    const view = render(page());
+    expect(await created()).toMatchObject({ workspace_id: 'ws-1' });
 
     currentWorkspace = secondWorkspace;
     view.rerender(page());
+    fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
 
-    await waitFor(() =>
-      expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent(
-        'Default (Self-Hosted)'
-      )
-    );
-    expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('Automatic');
-  });
-
-  it('offers agent mode and then auto-approve on a chosen Self-Hosted model that calls tools', async () => {
-    installed = [toolModel, toollessModel];
-    await openNewChatWithProviders(selfHosted, [instanceModels, openAi, claudeCode, codex]);
-
-    chooseSelect('Provider', 'Self-Hosted');
-    expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
-    chooseSelect('Select Model', 'llama3.2');
-    expect(screen.queryByLabelText('Auto-approve writes and commands')).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByLabelText('Agent mode'));
-
-    expect(screen.getByLabelText('Auto-approve writes and commands')).toBeInTheDocument();
-  });
-
-  it('sends agent mode and auto-approve for a chosen Self-Hosted model', async () => {
-    await openNewChatWithProviders(selfHosted, [instanceModels, openAi, claudeCode, codex]);
-
-    chooseSelect('Provider', 'Self-Hosted');
-    chooseSelect('Select Model', 'llama3.2');
-    fireEvent.click(screen.getByLabelText('Agent mode'));
-    fireEvent.click(screen.getByLabelText('Auto-approve writes and commands'));
-
-    const body = await createdBody();
-    expect(body).toMatchObject({
-      provider: 'self_hosted',
-      provider_model: 'llama3.2',
-      agent_enabled: true,
-      auto_approve: true,
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof mock>;
+    await waitFor(() => {
+      const posts = fetchMock.mock.calls.filter(
+        ([, init]) => (init as RequestInit | undefined)?.method === 'POST'
+      );
+      expect(posts.length).toBe(2);
+      expect(JSON.parse(String((posts[1][1] as RequestInit).body))).toMatchObject({
+        workspace_id: 'ws-2',
+      });
     });
   });
 
-  it("shows Context for an installed model on the workspace's own self-hosted provider", async () => {
-    await openNewChatWithProviders(selfHosted, [instanceModels, openAi, claudeCode, codex]);
+  it('carries the context window of a local chat and none off a provider', async () => {
+    installed = [{ ...toolModel, details: { context_length: 131072 } }];
+    const local = await createdOn({
+      default: selfHosted,
+      providers: [instanceModels, openAi, claudeCode, codex],
+      recent: {
+        ...recentCodex,
+        provider: null,
+        provider_model: null,
+        model_name: 'llama3.2',
+        context_tokens: 8192,
+      },
+    });
 
-    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
-    chooseSelect('Select Model', 'llama3.2');
-    expect(screen.getByRole('combobox', { name: 'Context' })).toBeInTheDocument();
-
-    chooseSelect('Provider', 'Self-Hosted');
-    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
-    chooseSelect('Select Model', 'llama3.2');
-    expect(screen.getByRole('combobox', { name: 'Context' })).toBeInTheDocument();
+    expect(local).toMatchObject({ model_name: 'llama3.2', context_tokens: 8192 });
   });
 
-  it('hides Context on Claude Code and Codex models whatever the instance has installed', async () => {
-    installed = [
-      toolModel,
-      { name: 'sonnet', size: 1, modified_at: '', completion: true, tools: true },
-      { name: 'gpt-5.5', size: 1, modified_at: '', completion: true, tools: true },
-    ];
-    await openNewChatWithProviders(claudeCode);
+  it('sends no context window for a chat on an agent provider', async () => {
+    const body = await createdOn({
+      default: selfHosted,
+      providers: offers,
+      recent: { ...recentCodex, context_tokens: 8192 },
+    });
 
-    chooseSelect('Select Model', 'Sonnet');
-    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
-
-    chooseSelect('Provider', 'Codex');
-    chooseSelect('Select Model', 'gpt-5.5');
-    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
-  });
-
-  it('hides Context and sends none when the workspace defaults to another provider', async () => {
-    await openNewChatWithProviders(openAi);
-
-    chooseSelect('Select Model', 'llama3.2');
-
-    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
-    const body = await createdBody();
-    expect(body.model_name).toBe('llama3.2');
     expect(body).not.toHaveProperty('context_tokens');
   });
 
-  it('hides Context while the providers the model would run on are unknown', async () => {
-    await openNewChat();
-    await screen.findByTestId('new-chat-providers-error');
-
-    chooseSelect('Select Model', 'llama3.2');
-
-    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
-  });
-
-  it('sends the chosen context for a Self-Hosted model and none once Context hides', async () => {
-    await openNewChatWithProviders(selfHosted, [instanceModels, openAi, claudeCode, codex]);
-
-    chooseSelect('Provider', 'Self-Hosted');
-    chooseSelect('Select Model', 'llama3.2');
-    chooseSelect('Context', '8K tokens');
-
-    expect(await createdBody()).toMatchObject({
-      provider: 'self_hosted',
-      provider_model: 'llama3.2',
-      context_tokens: 8192,
-    });
-
-    (globalThis.fetch as unknown as ReturnType<typeof mock>).mockClear();
-    chooseSelect('Select Model', 'Automatic');
-    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
-    expect(await createdBody()).not.toHaveProperty('context_tokens');
-  });
-
-  it('offers agent mode on OpenAI for a typed model zone has no details for', async () => {
-    await openNewChatWithProviders(selfHosted);
-
-    chooseSelect('Provider', 'OpenAI');
-    fireEvent.change(screen.getByRole('textbox', { name: 'Model name' }), {
-      target: { value: 'gpt-4o' },
-    });
-    expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText('Agent mode'));
-
-    const body = await createdBody();
-    expect(body).toMatchObject({ provider: 'openai', agent_enabled: true, auto_approve: false });
-  });
-
-  it('hides agent mode for a chosen model known not to call tools and sends none', async () => {
+  it('carries agent mode only while the model it would run can call tools', async () => {
     installed = [toolModel, toollessModel];
-    await openNewChatWithProviders(selfHosted, [instanceModels, openAi, claudeCode, codex]);
-
-    chooseSelect('Provider', 'Self-Hosted');
-    chooseSelect('Select Model', 'llama3.2');
-    fireEvent.click(screen.getByLabelText('Agent mode'));
-    chooseSelect('Select Model', 'gemma3');
-
-    expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('Auto-approve writes and commands')).not.toBeInTheDocument();
-
-    chooseSelect('Select Model', 'llama3.2');
-    expect(screen.getByLabelText('Agent mode')).not.toBeChecked();
+    const calling = await createdOn({
+      default: selfHosted,
+      providers: [instanceModels, openAi, claudeCode, codex],
+      recent: {
+        ...recentCodex,
+        provider: null,
+        provider_model: null,
+        model_name: 'llama3.2',
+        agent_enabled: true,
+      },
+    });
+    expect(calling).toMatchObject({ model_name: 'llama3.2', agent_enabled: true });
   });
 
-  it('offers agent mode on Claude Code whatever the instance can run', async () => {
-    installed = [toollessModel];
-    await openNewChatWithProviders(selfHosted);
-
-    expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
-    chooseSelect('Provider', 'Claude Code');
-    expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
-  });
-
-  it('drops agent mode ticked on an agent provider when switching to one that cannot use it', async () => {
-    installed = [toollessModel];
-    await openNewChatWithProviders(selfHosted);
-
-    chooseSelect('Provider', 'Claude Code');
-    fireEvent.click(screen.getByLabelText('Agent mode'));
-    fireEvent.click(screen.getByLabelText('Auto-approve writes and commands'));
-    chooseSelect('Provider', 'Self-Hosted');
-
-    expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
-    chooseSelect('Provider', 'Codex');
-    expect(screen.getByLabelText('Agent mode')).not.toBeChecked();
-    fireEvent.click(screen.getByLabelText('Agent mode'));
-    expect(screen.getByLabelText('Auto-approve writes and commands')).not.toBeChecked();
-
-    const body = await createdBody();
-    expect(body).toMatchObject({ provider: 'codex', agent_enabled: true, auto_approve: false });
-  });
-
-  it('offers agent mode on OpenAI for a model the instance lists as unable to call tools', async () => {
-    installed = [toolModel, { ...toollessModel, name: 'gpt-4o' }];
-    await openNewChatWithProviders(selfHosted);
-
-    chooseSelect('Provider', 'OpenAI');
-    fireEvent.change(screen.getByRole('textbox', { name: 'Model name' }), {
-      target: { value: 'gpt-4o' },
+  it('drops agent mode for a model the instance lists as unable to call tools', async () => {
+    installed = [toolModel, toollessModel];
+    const body = await createdOn({
+      default: selfHosted,
+      providers: [instanceModels, openAi, claudeCode, codex],
+      recent: {
+        ...recentCodex,
+        provider: null,
+        provider_model: null,
+        model_name: 'gemma3',
+        agent_enabled: true,
+      },
     });
 
-    expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
-  });
-
-  it('reads a padded model name as the trimmed one it sends', async () => {
-    installed = [toolModel, toollessModel];
-    await openNewChatWithProviders(openAi);
-
-    chooseSelect('Provider', 'OpenAI');
-    const field = screen.getByRole('textbox', { name: 'Model name' });
-    fireEvent.change(field, { target: { value: 'llama3.2' } });
-    expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
-    fireEvent.change(field, { target: { value: ' gemma3 ' } });
-
-    expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
-  });
-
-  it('words the agent model hint so it reads right for any model', async () => {
-    await openNewChatWithProviders(selfHosted);
-
-    chooseSelect('Provider', 'Codex');
-    chooseSelect('Select Model', 'gpt-6-sol');
-
-    expect(
-      screen.getByText('Choose Automatic to let Codex pick its own model.')
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText('Automatic lets Codex choose its own model.')
-    ).not.toBeInTheDocument();
+    expect(body).toMatchObject({ model_name: 'gemma3', agent_enabled: false });
   });
 });
