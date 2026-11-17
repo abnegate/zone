@@ -61,8 +61,8 @@ export default function RegisterPage() {
         display_name: displayName.trim() || undefined,
       });
       navigate('/');
-    } catch (err) {
-      setError(messageOf(err, 'Registration failed'));
+    } catch (error) {
+      setError(messageOf(error, 'Registration failed'));
     } finally {
       setLoading(false);
     }

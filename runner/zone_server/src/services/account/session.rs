@@ -3,6 +3,8 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use super::auth_response::AuthResponse;
+use super::credential::Credential;
+use super::grant::Grant;
 use super::refusal::Refusal;
 use super::tokens::Tokens;
 use crate::auth::{create_refresh_token, create_session_access_token};
@@ -11,13 +13,11 @@ use crate::db::{refresh_tokens, sessions, users};
 use crate::state::AppState;
 use crate::utils::crypto::hash_token;
 
-/// A password sign-in passes the hash it verified, so a reclaim that replaced the password since
-/// refuses the session instead of leaving the old owner signed in.
 pub async fn issue(
     state: &AppState,
     user_id: Uuid,
     headers: &HeaderMap,
-    password_hash: Option<&str>,
+    credential: Credential<'_>,
 ) -> Result<AuthResponse, Refusal> {
     let user = match users::get_user_with_permissions(state.db(), user_id).await {
         Ok(Some(user)) => user,
@@ -28,7 +28,7 @@ pub async fn issue(
         }
     };
     let device = admit_device(state, user_id, headers, None).await?;
-    let tokens = generate_tokens(state, &user, headers, &device, None, password_hash).await?;
+    let tokens = generate_tokens(state, &user, headers, &device, Grant::SignIn(credential)).await?;
     Ok(AuthResponse::new(
         &user,
         tokens,
@@ -69,15 +69,12 @@ pub async fn admit_device(
     }
 }
 
-/// Issue a fresh refresh token and an access token bound to a session: a new
-/// session for a sign-in, or the caller's existing one when `session` names it.
 pub async fn generate_tokens(
     state: &AppState,
     user: &users::UserWithPermissions,
     headers: &HeaderMap,
     device: &Device,
-    session: Option<Uuid>,
-    password_hash: Option<&str>,
+    grant: Grant<'_>,
 ) -> Result<Tokens, Refusal> {
     let config = state.config();
     if let Some(zone) = crate::auth::time_zone::claim(headers)
@@ -101,14 +98,17 @@ pub async fn generate_tokens(
     })?;
 
     let token_hash = hash_token(&refresh_token);
-    let expires_at = Utc::now() + config.refresh_token_lifetime();
+    let now = Utc::now();
+    let expires_at = now + config.refresh_token_lifetime();
 
     let mut transaction = state
         .db()
         .begin()
         .await
         .map_err(unavailable("Failed to begin a session"))?;
-    if let Some(verified) = password_hash {
+    if let Grant::SignIn(credential) = grant
+        && let Some(verified) = credential.password_hash()
+    {
         let current = users::lock_password_hash(&mut transaction, user.user.id)
             .await
             .map_err(unavailable("Failed to recheck the password"))?;
@@ -116,39 +116,40 @@ pub async fn generate_tokens(
             return Err(Refusal::Superseded);
         }
     }
-    refresh_tokens::create_refresh_token(
-        &mut *transaction,
-        user.user.id,
-        &token_hash,
-        expires_at.naive_utc(),
-        user_agent,
-        ip_address,
-    )
-    .await
-    .map_err(unavailable("Failed to store refresh token"))?;
-    let session = match session {
-        Some(session_id) => sessions::rotate_session(
-            &mut *transaction,
-            session_id,
-            &token_hash,
-            expires_at.naive_utc(),
-        )
-        .await
-        .and_then(|rotated| rotated.ok_or(sqlx::Error::RowNotFound)),
-        None => {
-            sessions::create_session(
+    let session = match grant {
+        Grant::Refresh(session_id) => {
+            sessions::rotate_session(&mut *transaction, session_id, &token_hash, expires_at)
+                .await
+                .and_then(|rotated| rotated.ok_or(sqlx::Error::RowNotFound))
+        }
+        Grant::SignIn(credential) => {
+            sessions::start(
                 &mut *transaction,
-                user.user.id,
-                &token_hash,
-                ip_address,
-                user_agent,
-                Some(device_info),
-                expires_at.naive_utc(),
+                sessions::NewSession {
+                    user_id: user.user.id,
+                    refresh_token_hash: &token_hash,
+                    ip_address,
+                    user_agent,
+                    device_info: Some(device_info),
+                    sso_provider_id: credential.provider(),
+                    expires_at,
+                    absolute_expires_at: now + config.session_lifetime(),
+                },
             )
             .await
         }
     }
     .map_err(unavailable("Failed to bind session"))?;
+    refresh_tokens::create_refresh_token(
+        &mut *transaction,
+        user.user.id,
+        &token_hash,
+        session.expires_at.naive_utc(),
+        user_agent,
+        ip_address,
+    )
+    .await
+    .map_err(unavailable("Failed to store refresh token"))?;
     sessions::attach_device(&mut *transaction, session.id, device.id)
         .await
         .map_err(unavailable("Failed to bind the session to its device"))?;

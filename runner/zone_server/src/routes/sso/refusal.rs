@@ -5,8 +5,9 @@ use zone_enterprise::sso::Error;
 
 use crate::routes::common::ErrorResponse;
 
-/// A provider that can't be discovered is the admin's input to fix while it is being configured,
-/// and the identity provider's failure once people sign in through it.
+pub const PROVIDER_UNAVAILABLE: &str = "The identity provider couldn't be reached or isn't set up correctly. Try again, or ask a server admin to check the server logs.";
+pub const PROVIDER_REFUSED: &str = "The identity provider didn't accept the sign-in. Try again, or ask a server admin to check the server logs.";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Configuration,
@@ -42,9 +43,22 @@ pub fn status(error: &Error, stage: Stage) -> StatusCode {
 pub fn respond(error: &Error, stage: Stage) -> Response {
     (
         status(error, stage),
-        Json(ErrorResponse::with_code(error.to_string(), error.code())),
+        Json(ErrorResponse::with_code(
+            message(error, stage),
+            error.code(),
+        )),
     )
         .into_response()
+}
+
+fn message(error: &Error, stage: Stage) -> String {
+    let generic = match (error, stage) {
+        (Error::Discovery(_), Stage::SignIn) => PROVIDER_UNAVAILABLE,
+        (Error::TokenExchange(_), Stage::SignIn) => PROVIDER_REFUSED,
+        _ => return error.to_string(),
+    };
+    tracing::warn!(%error, code = error.code(), "The identity provider failed a sign-in");
+    generic.to_owned()
 }
 
 #[cfg(test)]
@@ -97,6 +111,36 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         assert_eq!(status(&error, Stage::SignIn), StatusCode::BAD_GATEWAY);
+    }
+
+    async fn body(response: Response) -> Value {
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_never_shows_the_identity_provider_failure_detail() {
+        for (error, message) in [
+            (
+                Error::Discovery("https://idp.internal:8443 couldn't be fetched".into()),
+                PROVIDER_UNAVAILABLE,
+            ),
+            (
+                Error::TokenExchange("https://idp.internal:8443/token answered HTTP 500".into()),
+                PROVIDER_REFUSED,
+            ),
+        ] {
+            let shown = body(respond(&error, Stage::SignIn)).await;
+            assert_eq!(shown, json!({ "error": message, "code": error.code() }));
+            assert!(!shown.to_string().contains("idp.internal"), "{shown}");
+        }
+    }
+
+    #[tokio::test]
+    async fn configuring_a_provider_shows_the_admin_why_discovery_failed() {
+        let error = Error::Discovery("https://idp.internal:8443 couldn't be fetched".into());
+        let shown = body(respond(&error, Stage::Configuration)).await;
+        assert_eq!(shown["error"], json!(error.to_string()));
     }
 
     #[tokio::test]

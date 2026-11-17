@@ -11,9 +11,9 @@ see that section.
 
 ## Licensing
 
-Single sign-on is part of Zone Team and Zone Enterprise. To add, change or
-delete a provider, or to turn enforcement on or off, the server needs a Team
-or Enterprise license that's either active or in its 30-day grace period
+Single sign-on is part of Zone Team and Zone Enterprise. To add or change a
+provider, or to turn enforcement on, the server needs a Team or Enterprise
+license that's either active or in its 30-day grace period
 after expiry. You install the license under **Settings → This server →
 License**.
 
@@ -23,10 +23,17 @@ License**.
 | Lapsed (past grace) | Keeps working | Keeps working | Read-only, with a renewal warning |
 | Removed, or never installed (Community) | Keeps working for providers already set up | Keeps working if it was on | Read-only, with an upgrade notice |
 
-Without an active or grace license, every change is refused with
-`license_required`. That includes turning enforcement off and deleting a
-provider, so a server whose license has lapsed needs a renewed license
-before it can stop using SSO.
+Without an active or grace license, a change is refused with
+`license_required`, except for changes that only reduce what SSO can do:
+
+- disabling a provider, with a request that changes nothing else
+- deleting a provider
+- turning enforcement off
+
+So if a provider is compromised after your license lapses, you can still
+turn enforcement off and disable or delete the provider. The console shows
+the settings read-only without a license, so make these changes through the
+[API](#api).
 
 On Community, the section shows an upgrade notice that links to the License
 section, and lists any providers that already exist as read-only.
@@ -229,9 +236,11 @@ sign-in fails with `sso_email_unverified` while **Require verified email**
 is on. There are two ways to handle this:
 
 - **Turn off Require verified email and set Allowed domains.** This is what
-  the console recommends. Zone then trusts the email Entra sends, and the
-  allowed domains limit which addresses can sign in at all. Read
-  [Verified email](#verified-email) first.
+  the console recommends. Zone then trusts the email Entra sends to create
+  accounts, and the allowed domains limit which addresses can sign in at
+  all. It never links an Entra sign-in to an existing Zone account by
+  email, so people who already have a Zone account can't use Entra with
+  it. Read [Verified email](#verified-email) first.
 - **Keep Require verified email on and add the `xms_edov` optional claim**
   to the ID token, in the same way as `email` in step 8. When
   `email_verified` is missing, Zone counts the email as verified if
@@ -297,7 +306,9 @@ limits that to your organization, but set allowed domains anyway.
    `APP_BASE_URL`, the button first sends them to `{APP_BASE_URL}/login`,
    because sign-in has to start and finish on the same origin.
 2. Zone sends the browser to the provider. Each sign-in attempt can be used
-   once and expires after 10 minutes.
+   once and expires after 10 minutes. Starting a sign-in needs no account,
+   so Zone keeps at most 10,000 unexpired attempts and answers 429 to more
+   until some finish or expire.
 3. The provider sends the browser back to `/sso/callback`.
 4. The console hands the code to the Zone server. The server redeems it at
    the provider's token endpoint and verifies the ID token:
@@ -339,9 +350,12 @@ device that's waiting for approval or blocked is refused with
 `device_pending` or `device_blocked`.
 
 Zone doesn't receive deprovisioning events from your identity provider.
-Removing someone from the app at the provider stops new SSO sign-ins, but a
-Zone session they already have keeps working until it expires or is
-revoked.
+Removing someone from the app at the provider stops new SSO sign-ins. A
+Zone session they already have keeps working until it ends, which is at
+most `SESSION_LIFETIME` seconds (30 days by default) after they signed in:
+refreshing a session never takes it past that, so they have to sign in
+through the provider again. Disabling or deleting the provider ends every
+session signed in through it at once.
 
 ## Accounts: matching, linking and JIT provisioning
 
@@ -351,10 +365,10 @@ Each time someone signs in, Zone looks for their account in this order.
    linked account. A returning user is matched on that alone, even if
    their email has changed at the provider. Zone doesn't change the
    account's email in that case.
-2. **By email.** If no account is linked to that subject, Zone looks for an
-   account with the same email, ignoring case. If it finds one, it links
-   that account to the subject, and the user signs in to their existing
-   account.
+2. **By email.** If no account is linked to that subject, and the provider
+   has **Require verified email** on, Zone looks for an account with the
+   same email, ignoring case. If it finds one, it links that account to the
+   subject, and the user signs in to their existing account.
 3. **Just-in-time (JIT) provisioning.** If no account matches, Zone
    creates one.
 
@@ -362,17 +376,27 @@ Linking is by email, so it's only as trustworthy as the email the provider
 sends. With **Require verified email** on, the provider must say the email
 is verified before Zone links or creates anything.
 
-Zone refuses the sign-in with `sso_email_conflict` when:
+Email addresses are unique ignoring case: `Jane@acme.com` and
+`jane@acme.com` are the same account, and Zone stores new addresses in
+lower case. If an existing server has accounts whose emails differ only in
+case, the upgrade stops before it starts the server and names those
+addresses. Change the email of all but one of each, or delete the extras,
+and start Zone again. Zone never merges or deletes them itself.
 
-- the email matches more than one Zone account, ignoring case
-- the matching account is already linked to a different subject at the
-  same provider. This also happens when the provider starts sending a new
+Zone refuses the sign-in with `sso_email_conflict` when an account has the
+email and:
+
+- **Require verified email** is off. Zone never links an existing account,
+  admin or not, through a provider that doesn't vouch for the email.
+  Otherwise anyone who can change their email at the provider, such as an
+  Entra user editing their mail attribute, could take over a colleague's
+  account.
+- the account is already linked to an identity at any provider. Once an
+  account signs in through one provider, another provider can't claim it
+  by email. This also happens when the provider starts sending a new
   subject for the same person without the issuer or client ID changing in
   Zone. To link everyone again by email, delete the provider and add it
   again.
-- **Require verified email** is off and the matching account is a server
-  admin. Zone never links a server admin on an email that the provider
-  hasn't confirmed as verified.
 
 An account can be linked to one identity per provider.
 
@@ -442,12 +466,14 @@ verified: `email_verified` must be `true`, or, when `email_verified` is
 missing, Entra's `xms_edov` must be `true`. Otherwise the sign-in is
 refused with `sso_email_unverified`.
 
-When you turn it off, Zone trusts whatever email the provider sends, both
-for creating accounts and for linking to existing ones. Anyone who can set
-their own email at the provider could then sign in to the Zone account
-with that email. Turn it off only when your provider controls users' email
-addresses, and always set allowed domains when you do. Even then, Zone
-won't link a server admin through a provider with this setting off.
+When you turn it off, Zone trusts whatever email the provider sends when
+it creates an account, but it never links a sign-in to an existing account
+by email. Someone who signs in for the first time with the email of an
+existing Zone account is refused with `sso_email_conflict`. To move such a
+person to SSO, either turn the setting on for long enough that they sign in
+once (for Entra, with the `xms_edov` claim), or delete their Zone account
+so that SSO creates a new one. Always set allowed domains when this setting
+is off.
 
 ## Enforcement and break-glass
 
@@ -462,8 +488,13 @@ everyone except server admins:
 | Reset password | Refused with `sso_required`; the reset link and the password stay unchanged | Works as usual |
 
 While it's on, the sign-in page says that password sign-in is for server
-admins and hides the "Forgot password?" and "Create one" links. The
-invitation page hides **Create Account** but keeps sign-in.
+admins, hides the "Create one" link, and labels the password reset link
+"Server admin? Forgot password?". The invitation page hides **Create
+Account** but keeps sign-in.
+
+A password sign-in is refused with `sso_required` before Zone checks the
+password, for every email that isn't a server admin's, including emails
+with no account. The answer doesn't show whether the password was right.
 
 A server admin is an active user with the server admin flag, the same rule
 the rest of the server uses. Every password sign-in by a server admin while
@@ -476,13 +507,19 @@ Rules for turning it on and off:
 - You can turn enforcement on only while at least one provider is enabled.
 - While it's on, you can't disable or delete the last enabled provider.
   Either change is refused with `sso_provider_required`.
-- Turning it on or off needs an active or grace license, like any other
-  change.
+- Turning it on needs an active or grace license. Turning it off doesn't.
 
 Things to know:
 
-- Sessions that started with a password before you turned enforcement on
-  aren't ended. They keep working until they expire or are revoked.
+- Zone records how each session started: with a password or through a
+  provider. While SSO is required, a password session that doesn't belong
+  to a server admin can't be refreshed. The refresh is refused with
+  `sso_required` and the session is revoked, so someone who signed in with
+  a password before you turned enforcement on is signed out within the
+  access token lifetime (`JWT_ACCESS_LIFETIME`, 15 minutes by default) and
+  has to sign in with SSO.
+- Every session ends `SESSION_LIFETIME` seconds after its sign-in (30 days
+  by default), however often it's refreshed.
 - Before you turn enforcement on, sign in with SSO yourself, and check that
   a server admin can still sign in with a password. If your identity
   provider goes down, that password is the only way in.
@@ -515,11 +552,15 @@ log. None of them ever contains a client secret.
 
 ## Disabling and deleting providers
 
-- **Disabling** a provider hides its button and refuses sign-in through it.
-  Accounts stay linked, so enabling it again restores sign-in.
-- **Deleting** a provider removes it and every link to it. The Zone
-  accounts themselves stay. If you add the provider again, people are
-  matched by email again on their next sign-in.
+- **Disabling** a provider hides its button, refuses sign-in through it,
+  and revokes every session that was signed in through it. Accounts stay
+  linked, so enabling it again restores sign-in.
+- **Deleting** a provider removes it, every link to it and every session
+  signed in through it. The Zone accounts themselves stay. If you add the
+  provider again, people are matched by email again on their next sign-in.
+
+Neither needs a license, so you can always take a compromised provider out
+of service through the [API](#api).
 
 ## Troubleshooting
 
@@ -528,12 +569,12 @@ each one.
 
 | Code | Meaning | What to check |
 |---|---|---|
-| `sso_discovery_failed` | Zone couldn't load or accept the provider's discovery document. | The Issuer URL matches the document's `issuer` exactly. The Zone server can reach the provider. Every endpoint uses `https` or a loopback host. |
+| `sso_discovery_failed` | Zone couldn't load or accept the provider's discovery document. When this happens at sign-in, the person sees a general message and the server log has the details. | The Issuer URL matches the document's `issuer` exactly. The Zone server can reach the provider. Every endpoint uses `https` or a loopback host. |
 | `sso_issuer_invalid` | The Issuer URL isn't valid. | It's an absolute `https` URL with no query or fragment. `http` is allowed only for loopback hosts. |
 | `sso_provider_duplicate` | A provider with that issuer and client ID already exists. | Edit the existing provider instead. |
 | `sso_provider_not_found` | The provider doesn't exist or is disabled. | The provider is enabled. |
 | `sso_state_invalid` | The sign-in attempt is unknown, was already used, or is more than 10 minutes old. | Start again from the sign-in page. |
-| `sso_token_exchange_failed` | The provider's token endpoint refused the code, or its userinfo endpoint failed. | The client secret is correct and hasn't expired. The redirect URI registered at the provider is exactly `{APP_BASE_URL}/sso/callback`. |
+| `sso_token_exchange_failed` | The provider's token endpoint refused the code, or its userinfo endpoint failed. The person sees a general message and the server log has the details. | The client secret is correct and hasn't expired. The redirect URI registered at the provider is exactly `{APP_BASE_URL}/sso/callback`. |
 | `sso_id_token_invalid` | The ID token failed verification: signature, algorithm, issuer, audience, expiry or nonce, or the userinfo `sub` differed from it. | The Zone server's clock is correct. The client ID matches the provider's application. |
 | `sso_email_missing` | Neither the ID token nor userinfo has an `email` claim. | The provider puts `email` in the ID token. For Entra, add the `email` optional claim. |
 | `sso_email_unverified` | The email isn't marked verified while Require verified email is on. | See [Verified email](#verified-email). |
@@ -580,7 +621,9 @@ user who isn't a server admin gets 403.
 | `DELETE /api/sso/providers/{provider_id}` | Delete a provider. |
 | `PUT /api/sso/enforcement` | Turn enforcement on or off with `{"required": true}` or `{"required": false}`. |
 
-Every change is checked against the license before anything else.
+Every change is checked against the license before anything else, except
+the ones listed under [Licensing](#licensing) that only reduce what SSO can
+do.
 
 ## SAML
 

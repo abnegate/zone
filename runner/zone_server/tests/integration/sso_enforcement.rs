@@ -11,7 +11,7 @@ use zone_server::db::password_reset;
 
 use crate::common::identity_provider::IdentityProvider;
 use crate::common::sso::{Account, Fixture};
-use crate::common::{TestResponse, test_password};
+use crate::common::{TestResponse, test_email, test_password};
 
 const PREFIX: &str = "sso_enforcement";
 const NEW_PASSWORD: &str = "Brand-new-passw0rd";
@@ -57,6 +57,16 @@ impl Server {
 
     async fn login(&self, account: &Account) -> TestResponse {
         self.fixture.login(&account.email, &test_password()).await
+    }
+
+    async fn refresh(&self, refresh_token: &str) -> TestResponse {
+        self.fixture
+            .client
+            .post_json(
+                "/api/auth/refresh",
+                &json!({ "refresh_token": refresh_token }),
+            )
+            .await
     }
 
     async fn forgot(&self, account: &Account) -> TestResponse {
@@ -255,16 +265,74 @@ async fn a_member_password_login_is_refused_with_the_terminal_friendly_message()
 }
 
 #[tokio::test]
-async fn a_wrong_password_is_still_wrong_under_enforcement() {
+async fn a_member_is_refused_the_same_way_whatever_the_password() {
+    let server = Server::enforced().await;
+
+    let right = server.login(&server.member).await;
+    let wrong = server
+        .fixture
+        .login(&server.member.email, "Wrong-passw0rd")
+        .await;
+    let unknown = server.fixture.login(&test_email(), "Wrong-passw0rd").await;
+
+    for response in [&right, &wrong, &unknown] {
+        assert_sso_required(response);
+    }
+    assert_eq!(right.json_value(), wrong.json_value());
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_wrong_admin_password_is_still_wrong_under_enforcement() {
     let server = Server::enforced().await;
 
     let response = server
         .fixture
-        .login(&server.member.email, "Wrong-passw0rd")
+        .login(&server.admin.email, "Wrong-passw0rd")
         .await;
 
     response.assert_status(StatusCode::UNAUTHORIZED);
     assert!(response.json_value().get("code").is_none());
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_member_password_session_ends_at_its_next_refresh_once_sso_is_required() {
+    let server = Server::new().await;
+    let member = server.login(&server.member).await.json_value();
+    let admin = server.login(&server.admin).await.json_value();
+    let member_access = member["access_token"].as_str().unwrap();
+    let member_refresh = member["refresh_token"].as_str().unwrap();
+
+    server.enforce(true).await.assert_status(StatusCode::OK);
+
+    assert_sso_required(&server.refresh(member_refresh).await);
+    server
+        .fixture
+        .client
+        .get_auth("/api/auth/sessions", member_access)
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    server
+        .refresh(member_refresh)
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    server
+        .refresh(admin["refresh_token"].as_str().unwrap())
+        .await
+        .assert_status(StatusCode::OK);
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_member_password_session_refreshes_while_sso_is_not_required() {
+    let server = Server::new().await;
+    let member = server.login(&server.member).await.json_value();
+
+    server
+        .refresh(member["refresh_token"].as_str().unwrap())
+        .await
+        .assert_status(StatusCode::OK);
     server.cleanup().await;
 }
 
@@ -299,7 +367,7 @@ async fn an_admin_password_login_breaks_the_glass_and_is_audited() {
 }
 
 #[tokio::test]
-async fn a_disabled_account_is_refused_as_disabled_before_enforcement() {
+async fn a_disabled_member_is_told_only_that_sso_is_required() {
     let server = Server::enforced().await;
     sqlx::query("UPDATE users SET is_active = false WHERE id = $1")
         .bind(server.member.id)
@@ -307,8 +375,9 @@ async fn a_disabled_account_is_refused_as_disabled_before_enforcement() {
         .await
         .unwrap();
 
+    assert_sso_required(&server.login(&server.member).await);
+    server.enforce(false).await.assert_status(StatusCode::OK);
     let response = server.login(&server.member).await;
-
     response.assert_status(StatusCode::FORBIDDEN);
     assert_eq!(response.json_value()["code"], "account_disabled");
     server.cleanup().await;
@@ -450,7 +519,7 @@ async fn without_enforcement_every_password_path_works_as_before() {
 }
 
 #[tokio::test]
-async fn enforcement_outlives_the_license_while_changes_need_a_new_one() {
+async fn enforcement_outlives_the_license_and_can_still_be_turned_off() {
     let server = Server::enforced().await;
 
     server.fixture.remove_license(&server.admin).await;
@@ -460,9 +529,6 @@ async fn enforcement_outlives_the_license_while_changes_need_a_new_one() {
         .login(&server.admin)
         .await
         .assert_status(StatusCode::OK);
-    let off = server.enforce(false).await;
-    off.assert_status(StatusCode::FORBIDDEN);
-    assert_eq!(off.json_value()["code"], LICENSE_REQUIRED);
     let body = server
         .fixture
         .settings(&server.admin.token)
@@ -470,6 +536,17 @@ async fn enforcement_outlives_the_license_while_changes_need_a_new_one() {
         .json_value();
     assert_eq!(body["required"], true, "{body}");
     assert_eq!(body["entitled"], false, "{body}");
+
+    let off = server.enforce(false).await;
+    off.assert_status(StatusCode::OK);
+    assert_eq!(off.json_value(), json!({ "required": false }));
+    server
+        .login(&server.member)
+        .await
+        .assert_status(StatusCode::OK);
+    let on = server.enforce(true).await;
+    on.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(on.json_value()["code"], LICENSE_REQUIRED);
     server.cleanup().await;
 }
 
@@ -483,11 +560,27 @@ async fn enforcement_outlives_a_lapsed_license() {
         .await;
 
     assert_sso_required(&server.login(&server.member).await);
-    let delete = server
+    assert_provider_required(
+        &server
+            .fixture
+            .delete(&server.admin.token, server.provider)
+            .await,
+    );
+    server.enforce(false).await.assert_status(StatusCode::OK);
+    server
+        .fixture
+        .update(
+            &server.admin.token,
+            server.provider,
+            &json!({ "enabled": false }),
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    server
         .fixture
         .delete(&server.admin.token, server.provider)
-        .await;
-    delete.assert_status(StatusCode::FORBIDDEN);
-    assert_eq!(delete.json_value()["code"], LICENSE_REQUIRED);
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert_eq!(server.fixture.providers().await, 0);
     server.cleanup().await;
 }

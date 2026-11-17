@@ -460,7 +460,7 @@ test.describe('Single sign-on sign-in', () => {
     );
   });
 
-  test('hides the password links and explains a refused password login while required', async ({
+  test('keeps only the admin password reset link and explains a refused password login while required', async ({
     page,
   }) => {
     await startPublic(page, SSO_REQUIRED);
@@ -474,7 +474,10 @@ test.describe('Single sign-on sign-in', () => {
 
     await expect(page.getByRole('button', { name: 'Sign in with Okta' })).toBeVisible();
     await expect(page.getByText(ADMIN_PASSWORD_NOTICE)).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Forgot password?' })).toHaveCount(0);
+    await expect(
+      page.getByRole('link', { name: 'Server admin? Forgot password?', exact: true })
+    ).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Forgot password?', exact: true })).toHaveCount(0);
     await expect(page.getByRole('link', { name: 'Create one' })).toHaveCount(0);
 
     await page.getByLabel('Email', { exact: true }).fill('dev@example.com');

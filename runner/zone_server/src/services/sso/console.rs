@@ -2,8 +2,6 @@ use reqwest::Url;
 
 pub const CALLBACK_PATH: &str = "/sso/callback";
 
-/// Where identity providers send people back: the console's callback page, which hands the code
-/// to the server.
 pub fn redirect_uri(app_base_url: &str) -> String {
     format!("{}{CALLBACK_PATH}", callback_origin(app_base_url))
 }

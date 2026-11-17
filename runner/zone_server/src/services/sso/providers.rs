@@ -6,6 +6,7 @@ use zone_enterprise::sso::{Error, Fields, Provider};
 use super::failure::Failure;
 use super::revision::Revision;
 use crate::db::audit::{actions, resources};
+use crate::db::sessions;
 use crate::db::sso::{
     NewProvider, ProviderChanges, ProviderRecord, identities, providers, settings,
 };
@@ -88,6 +89,9 @@ pub async fn update(
     } else {
         None
     };
+    if changes.enabled == Some(false) {
+        sessions::revoke_provider_sessions(&mut *transaction, id).await?;
+    }
     transaction.commit().await?;
     if changes.issuer.is_some() {
         state.oidc().forget(&locked.issuer);
@@ -145,8 +149,6 @@ fn revised(
     Ok(Provider::parse(&revision.fields(record, &client_secret))?)
 }
 
-/// Whether removing one enabled provider would leave enforcement on with none. The caller holds
-/// the settings lock, so no other change can pass the same count.
 async fn last_enabled(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<bool, Failure> {
@@ -179,8 +181,6 @@ fn changes(
     }
 }
 
-/// What the audit log keeps of a provider. Never the client secret: whoever can read the audit
-/// log could otherwise sign in as Zone at the identity provider.
 pub fn recorded(record: &ProviderRecord) -> Map<String, Value> {
     let Value::Object(map) = json!({
         "protocol": record.protocol,

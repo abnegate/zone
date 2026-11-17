@@ -18,11 +18,11 @@ pub enum SignInFailure {
     Password(#[from] PasswordError),
     #[error("The account changed while the sign-in was linking it")]
     Stale,
+    #[error("Too many sign-ins are waiting for the identity provider")]
+    Busy,
 }
 
 impl SignInFailure {
-    /// Whether a concurrent change got there first: another sign-in created the same user or
-    /// identity, or the account changed after it was resolved. Resolving again finds what it did.
     pub fn raced(&self, constraints: &[&str]) -> bool {
         match self {
             Self::Stale => true,

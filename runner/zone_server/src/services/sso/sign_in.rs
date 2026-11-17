@@ -14,21 +14,19 @@ use crate::db::sso::{attempts, identities, providers};
 use crate::db::users::{self, UserRow};
 use crate::db::{refresh_tokens, sessions};
 use crate::routes::common::{AuditEvent, audit};
-use crate::services::account::{AuthResponse, provision, session};
+use crate::services::account::{AuthResponse, Credential, provision, session};
 use crate::state::AppState;
 use crate::utils::crypto::generate_token;
 
 const PROVIDER_ID: &str = "provider_id";
 
-/// The unique keys two concurrent first sign-ins of one person collide on.
-const RACED: [&str; 3] = [
+const RACED: [&str; 4] = [
     users::EMAIL_KEY,
+    users::EMAIL_LOWER_KEY,
     identities::SUBJECT_KEY,
     identities::USER_KEY,
 ];
 
-/// Starts a sign-in: the provider's authorization URL, with its state, nonce and PKCE verifier
-/// kept until the callback.
 pub async fn authorize(
     state: &AppState,
     provider_id: Uuid,
@@ -38,12 +36,12 @@ pub async fn authorize(
         .oidc()
         .authorize(&provider, &redirect_uri(&state.config().app_base_url))
         .await?;
-    attempts::issue(state.db(), provider_id, &authorization).await?;
+    attempts::issue(state.db(), provider_id, &authorization)
+        .await?
+        .ok_or(SignInFailure::Busy)?;
     Ok(authorization)
 }
 
-/// Finishes a sign-in: redeems the code, finds or creates the account the identity belongs to,
-/// and starts a session for it exactly as a password sign-in would.
 pub async fn complete(
     state: &AppState,
     callback: &Callback<'_>,
@@ -81,7 +79,13 @@ pub async fn complete(
     if let Err(error) = users::update_last_login(state.db(), settlement.user).await {
         tracing::warn!(user_id = %settlement.user, %error, "Failed to update last login");
     }
-    let response = session::issue(state, settlement.user, headers, None).await?;
+    let response = session::issue(
+        state,
+        settlement.user,
+        headers,
+        Credential::Provider(attempt.provider_id),
+    )
+    .await?;
     record(
         state,
         settlement.user,
@@ -102,9 +106,6 @@ async fn enabled(state: &AppState, provider_id: Uuid) -> Result<Provider, SignIn
     Ok(Provider::parse(&record.fields(&client_secret))?)
 }
 
-/// Two first sign-ins of one person can race to create the same user or identity, and an account
-/// can change between resolving and linking it. The loser rolls back and resolves once more,
-/// which finds what the winner created or changed.
 async fn settle(
     state: &AppState,
     provider_id: Uuid,
@@ -135,10 +136,8 @@ async fn land(
         None => None,
     };
     let by_email = users::find_by_email_ignoring_case(state.db(), &identity.email).await?;
-    let linked_elsewhere = match by_email.as_slice() {
-        [user] if known.is_none() => identities::find_for_user(state.db(), provider_id, user.id)
-            .await?
-            .is_some(),
+    let linked = match by_email.as_slice() {
+        [user] if known.is_none() => identities::linked(state.db(), user.id).await?,
         _ => false,
     };
     let accounts: Vec<_> = by_email.iter().map(UserRow::account).collect();
@@ -146,7 +145,7 @@ async fn land(
     match resolve(
         by_subject,
         &accounts,
-        linked_elsewhere,
+        linked,
         provider.policy.require_verified_email,
     )? {
         Resolution::SignIn(user) => {
@@ -166,9 +165,6 @@ async fn land(
     }
 }
 
-/// Links the identity to the account with its email. Reclaiming an account whose email was never
-/// proved also locks out whoever registered it: their password stops working and every session
-/// and refresh token they hold is revoked.
 async fn link(
     state: &AppState,
     provider_id: Uuid,
@@ -203,8 +199,6 @@ async fn link(
     Ok(())
 }
 
-/// Creates a verified, non-admin account for a person the identity provider vouches for, with the
-/// identity linked in the same transaction.
 async fn create(
     state: &AppState,
     provider_id: Uuid,
@@ -242,8 +236,6 @@ async fn create(
     Ok(user.id)
 }
 
-/// A password nobody knows: the users table needs a hash, and single sign-on accounts sign in
-/// without one.
 async fn unusable() -> Result<String, SignInFailure> {
     let hashed = tokio::task::spawn_blocking(|| hash_password(&generate_token()))
         .await

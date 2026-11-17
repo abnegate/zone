@@ -14,12 +14,14 @@ use super::refusal::{self, Stage};
 use super::unreadable;
 use crate::db::sso::{Listing, providers, settings};
 use crate::error::ServerError;
+use crate::routes::common::ErrorResponse;
 use crate::services::sso::console::callback_origin;
 use crate::services::sso::{Callback, SignInFailure, sign_in};
 use crate::state::AppState;
 
 const LOAD_FAILED: &str = "Could not load single sign-on";
 const SIGN_IN_FAILED: &str = "Could not complete single sign-on";
+const BUSY: &str = "Too many sign-ins are in progress. Try again in a few minutes.";
 
 #[derive(Debug, Serialize)]
 pub struct PublicProvidersResponse {
@@ -138,6 +140,14 @@ fn failed(failure: SignInFailure) -> Response {
     match failure {
         SignInFailure::Refused(error) => refusal::respond(&error, Stage::SignIn),
         SignInFailure::Session(refusal) => refusal.into_response(),
+        SignInFailure::Busy => {
+            tracing::warn!("Refused a single sign-on start: too many are waiting for a callback");
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(ErrorResponse::new(BUSY)),
+            )
+                .into_response()
+        }
         failure => {
             tracing::error!(%failure, "Failed to complete single sign-on");
             ServerError::Internal(SIGN_IN_FAILED.to_owned()).into_response()

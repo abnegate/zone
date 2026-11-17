@@ -11,10 +11,13 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
+
 use crate::common::mail::Silent;
 use crate::common::{TestClient, test_email, test_password};
 use zone_server::db::{email_verification, password_reset, users};
 use zone_server::services::mail::AccountMail;
+use zone_server::utils::crypto::hash_token;
 
 /// Far longer than a handler takes without mail, far shorter than a stalled
 /// relay holds a send open.
@@ -330,4 +333,126 @@ async fn register_login_and_refresh_answer_one_session_shape() {
             "{body}"
         );
     }
+}
+
+async fn refresh(client: &TestClient, refresh_token: &str) -> crate::common::TestResponse {
+    client
+        .post_json(
+            "/api/auth/refresh",
+            &json!({ "refresh_token": refresh_token }),
+        )
+        .await
+}
+
+async fn lifetime(
+    client: &TestClient,
+    user: Uuid,
+) -> (DateTime<Utc>, DateTime<Utc>, DateTime<Utc>) {
+    sqlx::query_as(
+        "SELECT created_at, expires_at, absolute_expires_at FROM sessions \
+         WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(user)
+    .fetch_one(client.state().db())
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn an_email_that_differs_only_in_case_is_already_registered() {
+    let client = TestClient::with_db().await;
+    let email = format!("Mixed.{}@Example.com", Uuid::new_v4().simple());
+    let account = register(&client, &email).await;
+
+    let stored: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+        .bind(account.user)
+        .fetch_one(client.state().db())
+        .await
+        .unwrap();
+    assert_eq!(stored, email.to_lowercase());
+    for variant in [email.to_uppercase(), email.to_lowercase()] {
+        let response = client
+            .post_json(
+                "/api/auth/register",
+                &json!({ "email": variant, "password": test_password() }),
+            )
+            .await;
+        response.assert_status(StatusCode::CONFLICT);
+        assert_eq!(
+            response.json_value()["error"],
+            json!("Email already registered")
+        );
+    }
+    let accounts: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE lower(email) = lower($1)")
+            .bind(&email)
+            .fetch_one(client.state().db())
+            .await
+            .unwrap();
+    assert_eq!(accounts, 1);
+    assert_eq!(
+        login(&client, &email.to_uppercase()).await.user,
+        account.user
+    );
+}
+
+#[tokio::test]
+async fn a_sign_in_starts_a_session_that_ends_after_the_session_lifetime() {
+    let client = TestClient::with_db().await;
+    let account = register(&client, &test_email()).await;
+
+    let (created, expires, absolute) = lifetime(&client, account.user).await;
+
+    let config = client.state().config();
+    let slack = TimeDelta::minutes(1);
+    assert!((absolute - created - config.session_lifetime()).abs() < slack);
+    assert!((expires - created - config.refresh_token_lifetime()).abs() < slack);
+}
+
+#[tokio::test]
+async fn a_refresh_never_takes_a_session_past_its_absolute_lifetime() {
+    let client = TestClient::with_db().await;
+    let account = register(&client, &test_email()).await;
+    let ends: DateTime<Utc> = sqlx::query_scalar(
+        "UPDATE sessions SET absolute_expires_at = now() + interval '1 hour' \
+         WHERE user_id = $1 RETURNING absolute_expires_at",
+    )
+    .bind(account.user)
+    .fetch_one(client.state().db())
+    .await
+    .unwrap();
+
+    let first = refresh(&client, &account.refresh).await;
+    first.assert_status(StatusCode::OK);
+    let first = login_from(first.json_value());
+    let second = refresh(&client, &first.refresh).await;
+    second.assert_status(StatusCode::OK);
+    let second = login_from(second.json_value());
+
+    let (_, expires, absolute) = lifetime(&client, account.user).await;
+    assert_eq!(absolute, ends);
+    assert_eq!(expires, ends);
+    let token_expires: NaiveDateTime =
+        sqlx::query_scalar("SELECT expires_at FROM refresh_tokens WHERE token_hash = $1")
+            .bind(hash_token(&second.refresh))
+            .fetch_one(client.state().db())
+            .await
+            .unwrap();
+    assert_eq!(token_expires, ends.naive_utc());
+
+    sqlx::query(
+        "UPDATE sessions SET absolute_expires_at = now() - interval '1 second' WHERE user_id = $1",
+    )
+    .bind(account.user)
+    .execute(client.state().db())
+    .await
+    .unwrap();
+
+    refresh(&client, &second.refresh)
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    client
+        .get_auth("/api/auth/sessions", &second.access)
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
 }

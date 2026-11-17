@@ -107,7 +107,11 @@ impl Server {
     }
 
     async fn start(&self) -> Started {
-        let response = self.authorize_at(self.provider).await;
+        self.start_at(self.provider).await
+    }
+
+    async fn start_at(&self, provider: Uuid) -> Started {
+        let response = self.authorize_at(provider).await;
         response.assert_status(StatusCode::CREATED);
         let body = response.json_value();
         let url = Url::parse(body["url"].as_str().unwrap()).unwrap();
@@ -800,33 +804,157 @@ async fn an_unverified_admin_is_linked_but_never_reclaimed() {
 }
 
 #[tokio::test]
-async fn trusting_unverified_emails_never_links_to_an_admin_but_links_a_member() {
+async fn trusting_unverified_emails_never_claims_an_existing_account() {
     let server = Server::with(json!({ "require_verified_email": false })).await;
-    let admin_hash = server.password_hash(server.admin.id).await;
-
-    let conflicted = server
-        .sign_in(|claims| Claims {
-            subject: "admin-lookalike".into(),
-            email: Some(server.admin.email.clone()),
-            email_verified: Some(false),
-            ..claims
-        })
-        .await;
-
-    refused(&conflicted, StatusCode::CONFLICT, EMAIL_CONFLICT);
-    assert_eq!(server.password_hash(server.admin.id).await, admin_hash);
-    assert_eq!(server.user(server.admin.id).await, (false, true, true));
-    assert!(server.identities().await.is_empty());
-
     let member = server.fixture.register().await;
-    let session = server
-        .signed_in(|claims| Claims {
-            email: Some(member.email.clone()),
-            email_verified: Some(false),
-            ..claims
-        })
+    let verified = server.fixture.register().await;
+    server.verify_email(verified.id).await;
+    let accounts = [&server.admin, &member, &verified];
+    let mut hashes = Vec::new();
+    for account in accounts {
+        hashes.push(server.password_hash(account.id).await);
+    }
+    let mut sessions = Vec::new();
+    for account in accounts {
+        sessions.push(server.live_sessions(account.id).await);
+    }
+
+    for (index, account) in accounts.iter().enumerate() {
+        let conflicted = server
+            .sign_in(|claims| Claims {
+                subject: format!("lookalike-{index}"),
+                email: Some(account.email.to_uppercase()),
+                email_verified: Some(false),
+                ..claims
+            })
+            .await;
+        refused(&conflicted, StatusCode::CONFLICT, EMAIL_CONFLICT);
+    }
+
+    for ((account, hash), live) in accounts.iter().zip(&hashes).zip(&sessions) {
+        assert_eq!(&server.password_hash(account.id).await, hash);
+        assert_eq!(&server.live_sessions(account.id).await, live);
+    }
+    assert!(server.identities().await.is_empty());
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_account_linked_through_one_provider_cannot_be_claimed_by_email_through_another() {
+    let server = Server::new().await;
+    let first = server.signed_in(unchanged).await;
+    let other = IdentityProvider::start().await;
+    let second = server
+        .fixture
+        .created(&server.admin.token, &other.provider())
         .await;
-    assert_eq!(session.user, member.id);
+
+    let started = server.start_at(second).await;
+    let code = format!("code-{}", Uuid::new_v4().simple());
+    other.grant(
+        &code,
+        &started.challenge,
+        Claims {
+            subject: "someone-else-at-the-second-provider".into(),
+            ..other.claims(&started.nonce)
+        },
+    );
+    let response = server.callback(&started.state, &code).await;
+
+    refused(&response, StatusCode::CONFLICT, EMAIL_CONFLICT);
+    assert_eq!(
+        server.identities().await,
+        [(
+            first.user,
+            testing::SUBJECT.to_owned(),
+            testing::EMAIL.to_owned()
+        )]
+    );
+    assert_eq!(server.users_with_email(testing::EMAIL).await, 1);
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_single_sign_on_session_refreshes_while_sso_is_required() {
+    let server = Server::new().await;
+    let session = server.signed_in(unchanged).await;
+    server.enforce().await;
+
+    server
+        .fixture
+        .client
+        .post_json(
+            "/api/auth/refresh",
+            &json!({ "refresh_token": session.refresh }),
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn disabling_or_deleting_a_provider_ends_the_sessions_signed_in_through_it() {
+    let server = Server::new().await;
+    let other = IdentityProvider::start().await;
+    let second = server
+        .fixture
+        .created(&server.admin.token, &other.provider())
+        .await;
+    let disabled = server.signed_in(unchanged).await;
+    let deleted = {
+        let started = server.start_at(second).await;
+        let code = format!("code-{}", Uuid::new_v4().simple());
+        other.grant(
+            &code,
+            &started.challenge,
+            Claims {
+                subject: "second-person".into(),
+                email: Some(test_email()),
+                ..other.claims(&started.nonce)
+            },
+        );
+        let response = server.callback(&started.state, &code).await;
+        response.assert_status(StatusCode::OK);
+        session(&response)
+    };
+
+    server
+        .fixture
+        .update(
+            &server.admin.token,
+            server.provider,
+            &json!({ "enabled": false }),
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    server
+        .fixture
+        .delete(&server.admin.token, second)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    for ended in [&disabled, &deleted] {
+        server
+            .fixture
+            .client
+            .get_auth("/api/auth/sessions", &ended.access)
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+        server
+            .fixture
+            .client
+            .post_json(
+                "/api/auth/refresh",
+                &json!({ "refresh_token": ended.refresh }),
+            )
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+    server
+        .fixture
+        .settings(&server.admin.token)
+        .await
+        .assert_status(StatusCode::OK);
     server.cleanup().await;
 }
 
@@ -859,27 +987,6 @@ async fn an_account_linked_to_another_subject_is_a_conflict() {
     let identities = server.identities().await;
     assert_eq!(identities.len(), 1);
     assert_eq!(identities[0].0, first.user);
-    server.cleanup().await;
-}
-
-#[tokio::test]
-async fn an_email_shared_by_two_accounts_ignoring_case_is_a_conflict() {
-    let server = Server::new().await;
-    let lower = format!("{}@acme.com", Uuid::new_v4().simple());
-    for email in [lower.clone(), lower.to_uppercase()] {
-        server
-            .fixture
-            .register_as(&email)
-            .await
-            .assert_status(StatusCode::CREATED);
-    }
-
-    refused(
-        &server.sign_in(with_email(&lower)).await,
-        StatusCode::CONFLICT,
-        EMAIL_CONFLICT,
-    );
-    assert!(server.identities().await.is_empty());
     server.cleanup().await;
 }
 

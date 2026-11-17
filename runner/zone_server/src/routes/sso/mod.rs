@@ -1,5 +1,6 @@
-//! Server-wide single sign-on routes. Signing in is public. Configuration needs a server admin
-//! and, for every change, a Team or Enterprise license.
+//! Server-wide single sign-on routes. Signing in is public. Configuration needs a server admin,
+//! and a Team or Enterprise license for every change except disabling or deleting a provider and
+//! turning enforcement off, so a lapsed license never keeps a compromised provider in service.
 
 pub mod enforcement;
 pub mod providers;

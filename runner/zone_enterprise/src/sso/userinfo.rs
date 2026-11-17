@@ -17,8 +17,6 @@ pub(crate) struct Userinfo {
 }
 
 impl Userinfo {
-    /// Fills only what the ID token left out. A verification flag describes the address it came
-    /// with, so it is borrowed only when userinfo's address is the one the sign-in will use.
     pub(crate) fn complete(self, claims: Claims) -> Result<Claims, Error> {
         if self.subject != claims.subject {
             return Err(Error::IdTokenInvalid(Rejection::Subject));

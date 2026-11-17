@@ -23,18 +23,11 @@ pub async fn find(
     .await
 }
 
-pub async fn find_for_user(
-    executor: impl PgExecutor<'_>,
-    provider_id: Uuid,
-    user_id: Uuid,
-) -> DbResult<Option<Identity>> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM sso_identities WHERE provider_id = $1 AND user_id = $2"
-    )))
-    .bind(provider_id)
-    .bind(user_id)
-    .fetch_optional(executor)
-    .await
+pub async fn linked(executor: impl PgExecutor<'_>, user_id: Uuid) -> DbResult<bool> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sso_identities WHERE user_id = $1)")
+        .bind(user_id)
+        .fetch_one(executor)
+        .await
 }
 
 pub async fn link(

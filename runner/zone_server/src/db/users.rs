@@ -9,6 +9,7 @@ use super::DbResult;
 use crate::services::time_zone::{self, TimeZone};
 
 pub const EMAIL_KEY: &str = "users_email_key";
+pub const EMAIL_LOWER_KEY: &str = "users_email_lower_key";
 
 const ADMINISTRATOR_ROLE: &str = "admin";
 
@@ -158,7 +159,7 @@ pub async fn get_user_by_email(
         SELECT id, email, display_name, is_active, is_admin, email_verified,
                created_at, updated_at, last_login_at, password_hash
         FROM users
-        WHERE email = $1
+        WHERE lower(email) = lower($1)
         "#,
         email
     )
