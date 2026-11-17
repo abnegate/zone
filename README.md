@@ -425,7 +425,7 @@ cd runner && cargo test
 # Run frontend tests
 cd manager/frontend && bun test
 
-# Run E2E tests
+# Run E2E tests (once per machine: make test-e2e-setup)
 cd manager/frontend && bun run test:e2e
 
 # Install the zone CLI
