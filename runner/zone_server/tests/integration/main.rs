@@ -15,6 +15,7 @@ mod audit_destination_store;
 mod audit_events;
 mod audit_retention_store;
 mod audit_s3;
+mod audit_syslog;
 mod audit_webhook;
 mod auth_console_contract;
 mod auth_session_revocation;
