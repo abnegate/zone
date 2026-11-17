@@ -1,3 +1,7 @@
+mod error;
+
+pub use error::ExportError;
+
 use bytes::Bytes;
 use futures::{Stream, stream};
 use sqlx::PgPool;
@@ -24,7 +28,7 @@ pub fn stream(
     scope: Scope,
     format: Format,
     range: Range,
-) -> impl Stream<Item = Result<Bytes, sqlx::Error>> + Send + 'static {
+) -> impl Stream<Item = Result<Bytes, ExportError>> + Send + 'static {
     let first = match format {
         Format::Csv => Cursor::Header,
         Format::Ndjson => Cursor::Page(None),
@@ -62,7 +66,7 @@ async fn page(
     format: Format,
     range: Range,
     after: Option<Bookmark>,
-) -> Result<Option<(Bytes, Cursor)>, sqlx::Error> {
+) -> Result<Option<(Bytes, Cursor)>, ExportError> {
     let rows = events::page(pool, scope, range, after, PAGE as i64).await?;
     let Some(last) = rows.last() else {
         return Ok(None);
@@ -72,8 +76,7 @@ async fn page(
     } else {
         Cursor::Page(Some(last.bookmark()))
     };
-    let chunk = encode(format, rows).map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
-    Ok(Some((chunk, next)))
+    Ok(Some((encode(format, rows)?, next)))
 }
 
 fn encode(format: Format, rows: Vec<Row>) -> serde_json::Result<Bytes> {
