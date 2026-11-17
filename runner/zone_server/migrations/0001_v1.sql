@@ -337,6 +337,29 @@ CREATE TABLE source_types (
 );
 CREATE INDEX idx_source_types_category ON source_types (category);
 
+CREATE TABLE sso_providers (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    protocol text DEFAULT 'oidc'::text NOT NULL,
+    display_name text NOT NULL,
+    issuer text NOT NULL,
+    client_id text NOT NULL,
+    client_secret text NOT NULL,
+    allowed_domains text[] DEFAULT '{}'::text[] NOT NULL,
+    require_verified_email boolean DEFAULT true NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    UNIQUE (issuer, client_id),
+    CONSTRAINT sso_providers_protocol_check CHECK ((protocol = 'oidc'::text))
+);
+
+CREATE TABLE sso_settings (
+    id boolean DEFAULT true NOT NULL PRIMARY KEY,
+    required boolean DEFAULT false NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT sso_settings_singleton_check CHECK (id)
+);
+
 CREATE TABLE users (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     email text NOT NULL UNIQUE,
@@ -351,6 +374,7 @@ CREATE TABLE users (
     time_zone text
 );
 CREATE INDEX idx_users_is_active ON users (is_active);
+CREATE UNIQUE INDEX users_email_lower_key ON users (lower(email));
 
 CREATE TABLE wiki_entries (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
@@ -511,6 +535,30 @@ CREATE TABLE role_permissions (
 );
 CREATE INDEX idx_role_permissions_role_id ON role_permissions (role_id);
 
+CREATE TABLE sso_attempts (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    state_hash text NOT NULL UNIQUE,
+    provider_id uuid NOT NULL REFERENCES sso_providers(id) ON DELETE CASCADE,
+    nonce text NOT NULL,
+    code_verifier text NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+CREATE INDEX sso_attempts_expires_at_idx ON sso_attempts (expires_at);
+
+CREATE TABLE sso_identities (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    provider_id uuid NOT NULL REFERENCES sso_providers(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    subject text NOT NULL,
+    email text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_signed_in_at timestamp with time zone DEFAULT now() NOT NULL,
+    UNIQUE (provider_id, subject),
+    UNIQUE (provider_id, user_id)
+);
+CREATE INDEX sso_identities_user_id_idx ON sso_identities (user_id);
+
 CREATE TABLE user_roles (
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role_id uuid NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
@@ -610,11 +658,14 @@ CREATE TABLE sessions (
     expires_at timestamp with time zone NOT NULL,
     revoked_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    device_id uuid REFERENCES devices(id)
+    device_id uuid REFERENCES devices(id),
+    sso_provider_id uuid REFERENCES sso_providers(id) ON DELETE CASCADE,
+    absolute_expires_at timestamp with time zone NOT NULL
 );
 CREATE INDEX idx_sessions_expires ON sessions (expires_at);
 CREATE INDEX idx_sessions_user_active ON sessions (user_id, last_active_at DESC) WHERE (revoked_at IS NULL);
 CREATE INDEX sessions_device_id_idx ON sessions (device_id);
+CREATE INDEX sessions_sso_provider_id_idx ON sessions (sso_provider_id) WHERE (sso_provider_id IS NOT NULL);
 
 CREATE TABLE github_apps (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
