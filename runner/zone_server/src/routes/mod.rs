@@ -281,6 +281,10 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(audit::destinations::server_delete),
         )
         .route(
+            "/api/audit-destinations/{destination_id}/tests",
+            post(audit::destinations::server_test),
+        )
+        .route(
             "/api/audit-retention",
             get(audit::retention::server).put(audit::retention::update_server),
         )
@@ -638,6 +642,10 @@ pub fn create_router(state: AppState) -> Router {
             get(audit::destinations::get)
                 .patch(audit::destinations::update)
                 .delete(audit::destinations::delete),
+        )
+        .route(
+            "/api/organizations/{org_id}/audit-destinations/{destination_id}/tests",
+            post(audit::destinations::test),
         )
         .route(
             "/api/organizations/{org_id}/audit-retention",

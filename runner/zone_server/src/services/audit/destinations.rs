@@ -1,7 +1,8 @@
 //! Audit destinations: where an organization's, or the server's, audit events are streamed.
 //! Settings are checked against the endpoint rule both when saved and when opened for sending,
-//! secrets are sealed at rest and only their names leave this module, and every change is
-//! audited.
+//! certificates are parsed before they are saved, secrets are sealed at rest and only their
+//! names leave this module, and every change is audited. Testing a destination is not a change,
+//! so it is never audited.
 
 mod actor;
 mod draft;
@@ -18,6 +19,7 @@ pub use revision::Revision;
 pub use view::View;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use abnegate_http::metadata;
 use abnegate_secret::{MasterKey, SecretValue};
@@ -29,9 +31,11 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 use zone_enterprise::audit::delivery::STALL_AGE;
 use zone_enterprise::audit::destination::{self, SecretName, Secrets, Settings};
-use zone_enterprise::audit::{FailureCode, Kind, Standing, UrlReason};
+use zone_enterprise::audit::{Event, FailureCode, Kind, Standing, UrlReason, VERSION};
 
-use super::transport::Failure;
+use super::delivery::Open;
+use super::transport::open::Transports;
+use super::transport::{Batch, Failure, syslog};
 use crate::db::audit::deliveries::{self, Delivery};
 use crate::db::audit::destinations::{
     self as store, DestinationChanges, DestinationRecord, NewDestination,
@@ -110,6 +114,7 @@ pub async fn create(
     let settings = requested(draft.settings)?;
     let secrets = Secrets::parse(settings.kind(), draft.secrets)?;
     settings.admits(&secrets)?;
+    certified(&secrets)?;
     check(&settings, &state.config().endpoint_hosts)?;
 
     let record = store::create(
@@ -178,6 +183,9 @@ pub async fn update(
     };
     if let Some(effective) = secrets.as_ref().or(opened.as_ref()) {
         settings.as_ref().unwrap_or(&stored).admits(effective)?;
+    }
+    if let Some(secrets) = &secrets {
+        certified(secrets)?;
     }
 
     let rotated = changed(opened.as_ref(), secrets.as_ref());
@@ -250,6 +258,53 @@ pub async fn delete(
     Ok(())
 }
 
+/// Sends one synthetic event, which is never written to the audit log, to the destination now,
+/// whether or not it is enabled and without touching its delivery cursor. The outer error is
+/// the destination's own; the inner one is how the send failed.
+pub async fn test(
+    state: &AppState,
+    scope: Scope,
+    id: Uuid,
+    actor: &Actor<'_>,
+) -> Result<Result<(), Failure>, Error> {
+    let record = store::get(state.db(), scope, id)
+        .await?
+        .ok_or(zone_enterprise::audit::Error::DestinationNotFound)?;
+    let batch = Batch {
+        destination_id: id,
+        scope,
+        events: vec![Event {
+            id: Uuid::new_v4(),
+            version: VERSION,
+            created_at: Utc::now(),
+            organization_id: scope.organization_id(),
+            workspace_id: None,
+            actor_id: Some(actor.id),
+            actor_email: Some(actor.email.to_owned()),
+            action: actions::AUDIT_DESTINATION_TESTED.to_owned(),
+            resource_type: resources::AUDIT_DESTINATION.to_owned(),
+            resource_id: Some(id),
+            old_values: None,
+            new_values: None,
+            ip_address: None,
+            user_agent: None,
+        }],
+    };
+    let transports = Transports::new(
+        Arc::clone(state.master_key()),
+        state.config().endpoint_hosts.clone(),
+    );
+    Ok(sent(&transports, &record, &batch).await)
+}
+
+async fn sent(
+    transports: &Transports,
+    record: &DestinationRecord,
+    batch: &Batch,
+) -> Result<(), Failure> {
+    transports.open(record).await?.deliver(batch).await
+}
+
 /// The settings and secrets to send with, re-checked against the endpoint rule: an operator may
 /// have narrowed `ZONE_ENDPOINT_HOSTS` since the destination was saved.
 pub fn open(
@@ -286,6 +341,15 @@ pub fn check(settings: &Settings, hosts: &Hosts) -> Result<(), zone_enterprise::
             }
             Ok(())
         }
+    }
+}
+
+/// TLS certificates and keys parse into the client the transport would build, so a bad one is
+/// refused when saved rather than at every delivery.
+fn certified(secrets: &Secrets) -> Result<(), zone_enterprise::audit::Error> {
+    match secrets {
+        Secrets::Syslog(secrets) => syslog::check(secrets),
+        Secrets::Webhook(_) | Secrets::S3(_) => Ok(()),
     }
 }
 
@@ -496,6 +560,7 @@ mod tests {
     use super::*;
 
     static KEY: LazyLock<MasterKey> = LazyLock::new(|| MasterKey::generate().expect("a key"));
+    const CERTIFICATE: &str = include_str!("../../../tests/fixtures/audit/ca.pem");
 
     fn record(kind: Kind, settings: Value, secrets: &str) -> DestinationRecord {
         DestinationRecord {
@@ -752,6 +817,24 @@ mod tests {
             open(&broken, &KEY, &Hosts::default()).unwrap_err().code,
             FailureCode::Configuration
         );
+    }
+
+    #[test]
+    fn a_certificate_that_is_pem_but_not_a_certificate_is_refused() {
+        let parsed = |ca: &str| {
+            Secrets::parse(Kind::Syslog, json!({"ca_certificate": ca})).expect("PEM form")
+        };
+        assert_eq!(
+            certified(&parsed(
+                "-----BEGIN CERTIFICATE-----\nAAECAwQF\n-----END CERTIFICATE-----\n"
+            )),
+            Err(zone_enterprise::audit::Error::CertificateInvalid(
+                SecretName::CaCertificate
+            ))
+        );
+        assert_eq!(certified(&parsed(CERTIFICATE)), Ok(()));
+        let webhook = Secrets::parse(Kind::Webhook, json!({"signing_secret": "whsec"})).unwrap();
+        assert_eq!(certified(&webhook), Ok(()));
     }
 
     #[test]

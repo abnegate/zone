@@ -1,10 +1,14 @@
+use std::time::Duration;
+
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
+use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 use zone_enterprise::LICENSE_REQUIRED;
 use zone_enterprise::Tier;
+use zone_enterprise::audit::signature::SIGNATURE_HEADER;
 use zone_enterprise::audit::{
     BUCKET_INVALID, CERTIFICATE_INVALID, DESTINATION_DUPLICATE, DESTINATION_NOT_FOUND,
     FACILITY_INVALID, HOST_INVALID, HOSTNAME_INVALID, KIND_INVALID, NAME_INVALID, PORT_INVALID,
@@ -14,10 +18,14 @@ use zone_server::config::Config;
 use zone_server::db::audit::actions;
 use zone_server::db::organization_members::OrgRole;
 use zone_server::routes::audit::refusal::BODY_INVALID;
+use zone_server::services::audit::delivery::Cadence;
+use zone_server::services::audit::destinations::HOST_REFUSED;
+use zone_server::services::audit::transport::open::Transports;
 use zone_server::services::hosts::Hosts;
 use zone_server::state::AppState;
+use zone_server::workers::audit::drain;
 
-use crate::common::audit::{UNVERIFIABLE, refused, settle};
+use crate::common::audit::{UNVERIFIABLE, header, refused, settle};
 use crate::common::policy::Fixture;
 use crate::common::sso::{self, Account};
 use crate::common::{TestClient, TestResponse, test_config};
@@ -27,7 +35,17 @@ const SERVER: &str = "/api/audit-destinations";
 const SIGNING_SECRET: &str = "whsec-0123456789abcdef";
 const ACCESS_KEY_ID: &str = "AKIAEXAMPLESECRETID";
 const SECRET_ACCESS_KEY: &str = "wJalrXUtnFEMI-secret-access-key";
-const CERTIFICATE: &str = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+const CERTIFICATE: &str = include_str!("../fixtures/audit/ca.pem");
+const CLIENT_CERTIFICATE: &str = include_str!("../fixtures/audit/client.pem");
+const CLIENT_KEY: &str = include_str!("../fixtures/audit/client.key");
+const OTHER_KEY: &str = include_str!("../fixtures/audit/server.key");
+const NOT_DER: &str = "-----BEGIN CERTIFICATE-----\nAAECAwQF\n-----END CERTIFICATE-----\n";
+const NOT_KEY: &str = "-----BEGIN PRIVATE KEY-----\nAAECAwQF\n-----END PRIVATE KEY-----\n";
+const CADENCE: Cadence = Cadence {
+    tick: Duration::from_millis(50),
+    lease: Duration::from_secs(1),
+    concurrency: 1,
+};
 
 fn destinations(organization: Uuid) -> String {
     format!("/api/organizations/{organization}/audit-destinations")
@@ -35,6 +53,17 @@ fn destinations(organization: Uuid) -> String {
 
 fn destination(organization: Uuid, id: impl std::fmt::Display) -> String {
     format!("{}/{id}", destinations(organization))
+}
+
+fn tests(organization: Uuid, id: impl std::fmt::Display) -> String {
+    format!("{}/tests", destination(organization, id))
+}
+
+fn certificate_line() -> &'static str {
+    CERTIFICATE
+        .lines()
+        .nth(1)
+        .expect("the CA fixture has a body")
 }
 
 fn webhook(name: &str, url: &str) -> Value {
@@ -82,6 +111,43 @@ async fn delivery_attempts(pool: &PgPool, id: Uuid) -> (i32, Option<i64>) {
     .fetch_one(pool)
     .await
     .unwrap()
+}
+
+async fn last_error_code(pool: &PgPool, id: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT last_error_code FROM audit_deliveries WHERE destination_id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn receiver() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/hook"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/down"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn received(server: &MockServer, route: &str) -> Vec<Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|request| request.url.path() == route)
+        .map(|request| {
+            assert!(!header(request, SIGNATURE_HEADER).is_empty());
+            request.body_json::<Value>().unwrap()
+        })
+        .collect()
 }
 
 async fn fail_delivery(pool: &PgPool, id: Uuid, attempts: i32) {
@@ -539,7 +605,7 @@ async fn secrets_are_sealed_and_only_their_names_are_ever_shown() {
         "whsec-rotated-value",
         ACCESS_KEY_ID,
         SECRET_ACCESS_KEY,
-        "MIIB",
+        certificate_line(),
     ] {
         for (place, text) in [
             ("a create response", body.to_string()),
@@ -951,6 +1017,329 @@ async fn health_reports_failures_resets_on_change_and_reports_a_stall() {
     assert_eq!(
         client.get_auth(&path, &owner.token).await.json_value()["stalled_since"],
         Value::Null
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_test_sends_one_unaudited_event_and_reports_how_the_send_went() {
+    let fixture = Fixture::new(PREFIX).await;
+    fixture.license(Tier::Enterprise).await;
+    let client = &fixture.sso.client;
+    let path = destinations(fixture.organization);
+    let owner = &fixture.owner;
+    let pool = fixture.pool();
+    let server = receiver().await;
+
+    let up = id(&post(
+        client,
+        &path,
+        owner,
+        &webhook("Up", &format!("{}/hook", server.uri())),
+    )
+    .await);
+    let down = id(&post(
+        client,
+        &path,
+        owner,
+        &webhook("Down", &format!("{}/down", server.uri())),
+    )
+    .await);
+
+    let delivered = post(client, &tests(fixture.organization, up), owner, &json!({})).await;
+    delivered.assert_status(StatusCode::OK);
+    assert_eq!(
+        delivered.json_value(),
+        json!({"delivered": true, "error_code": null, "error": null})
+    );
+    let sent = received(&server, "/hook").await;
+    assert_eq!(sent.len(), 1);
+    let events = sent[0]["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "a test sends exactly one event");
+    let event = &events[0];
+    assert_eq!(event["action"], actions::AUDIT_DESTINATION_TESTED);
+    assert_eq!(event["resource_type"], "audit_destination");
+    assert_eq!(event["resource_id"], json!(up));
+    assert_eq!(event["organization_id"], json!(fixture.organization));
+    assert_eq!(event["actor_id"], json!(owner.id));
+    assert_eq!(event["actor_email"], json!(owner.email));
+    assert_eq!(event["version"], 1);
+    assert!(event["id"].as_str().unwrap().parse::<Uuid>().is_ok());
+
+    let failed = post(
+        client,
+        &tests(fixture.organization, down),
+        owner,
+        &json!({}),
+    )
+    .await;
+    failed.assert_status(StatusCode::OK);
+    assert_eq!(
+        failed.json_value(),
+        json!({"delivered": false, "error_code": "status", "error": "HTTP 500"})
+    );
+    assert_eq!(received(&server, "/down").await.len(), 1);
+    assert_eq!(
+        delivery_attempts(pool, down).await,
+        (0, None),
+        "a test never touches the delivery"
+    );
+    assert_eq!(last_error_code(pool, down).await, None);
+
+    client
+        .patch_json_auth(
+            &destination(fixture.organization, up),
+            &json!({"enabled": false}),
+            &owner.token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    let disabled = post(client, &tests(fixture.organization, up), owner, &json!({})).await;
+    assert_eq!(
+        disabled.json_value()["delivered"],
+        true,
+        "a disabled destination can be tested"
+    );
+
+    let instance = id(&post(
+        client,
+        SERVER,
+        owner,
+        &webhook("Instance", &format!("{}/hook", server.uri())),
+    )
+    .await);
+    let server_test = post(
+        client,
+        &format!("{SERVER}/{instance}/tests"),
+        owner,
+        &json!({}),
+    )
+    .await;
+    server_test.assert_status(StatusCode::OK);
+    assert_eq!(server_test.json_value()["delivered"], true);
+    let sent = received(&server, "/hook").await;
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[2]["events"][0]["organization_id"], Value::Null);
+    assert_eq!(sent[2]["events"][0]["resource_id"], json!(instance));
+
+    for uri in [
+        tests(fixture.organization, Uuid::new_v4()),
+        tests(fixture.organization, instance),
+        tests(fixture.organization, "not-a-uuid"),
+        format!("{SERVER}/{up}/tests"),
+    ] {
+        refused(
+            &post(client, &uri, owner, &json!({})).await,
+            StatusCode::NOT_FOUND,
+            DESTINATION_NOT_FOUND,
+        );
+    }
+
+    assert!(
+        fixture
+            .audits(actions::AUDIT_DESTINATION_TESTED)
+            .await
+            .is_empty(),
+        "a test is never audited"
+    );
+    let logged: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE action = $1")
+        .bind(actions::AUDIT_DESTINATION_TESTED)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(logged, 0);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn only_admins_with_streaming_can_test_a_destination() {
+    let fixture = Fixture::new(PREFIX).await;
+    fixture.license(Tier::Enterprise).await;
+    let client = &fixture.sso.client;
+    let path = destinations(fixture.organization);
+    let owner = &fixture.owner;
+    let server = receiver().await;
+    let hook = format!("{}/hook", server.uri());
+
+    let siem = id(&post(client, &path, owner, &webhook("SIEM", &hook)).await);
+    let instance = id(&post(client, SERVER, owner, &webhook("Instance", &hook)).await);
+    let organization_test = tests(fixture.organization, siem);
+    let server_test = format!("{SERVER}/{instance}/tests");
+
+    let member = fixture.member(OrgRole::Member, None).await;
+    let outsider = fixture.stranger().await;
+    for (account, status) in [
+        (&member, StatusCode::FORBIDDEN),
+        (&outsider, StatusCode::NOT_FOUND),
+    ] {
+        post(client, &organization_test, account, &json!({}))
+            .await
+            .assert_status(status);
+        post(client, &server_test, account, &json!({}))
+            .await
+            .assert_status(StatusCode::FORBIDDEN);
+    }
+    let admin = fixture.member(OrgRole::Admin, None).await;
+    let tested = post(client, &organization_test, &admin, &json!({})).await;
+    tested.assert_status(StatusCode::OK);
+    assert_eq!(tested.json_value()["delivered"], true);
+    post(client, &server_test, &admin, &json!({}))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+
+    fixture.store_license(&sso::lapsed(Tier::Enterprise)).await;
+    for uri in [&organization_test, &server_test] {
+        refused(
+            &post(client, uri, owner, &json!({})).await,
+            StatusCode::FORBIDDEN,
+            LICENSE_REQUIRED,
+        );
+    }
+    fixture.sso.remove_license(owner).await;
+    for uri in [&organization_test, &server_test] {
+        refused(
+            &post(client, uri, owner, &json!({})).await,
+            StatusCode::FORBIDDEN,
+            LICENSE_REQUIRED,
+        );
+    }
+    assert_eq!(
+        received(&server, "/hook").await.len(),
+        1,
+        "only the admin's entitled test was sent"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn certificates_that_do_not_parse_are_refused_at_create_and_update() {
+    let fixture = Fixture::new(PREFIX).await;
+    fixture.license(Tier::Enterprise).await;
+    let client = &fixture.sso.client;
+    let path = destinations(fixture.organization);
+    let owner = &fixture.owner;
+    let tls = json!({"host": "siem.lan", "port": 6514, "protocol": "tls"});
+
+    for secrets in [
+        json!({"ca_certificate": NOT_DER}),
+        json!({"client_certificate": NOT_DER, "client_key": CLIENT_KEY}),
+        json!({"client_certificate": CLIENT_CERTIFICATE, "client_key": NOT_KEY}),
+        json!({"client_certificate": CLIENT_CERTIFICATE, "client_key": OTHER_KEY}),
+    ] {
+        let shown = secrets.to_string();
+        let response = post(client, &path, owner, &syslog(tls.clone(), secrets)).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{shown}");
+        assert_eq!(
+            response.json_value()["code"],
+            CERTIFICATE_INVALID,
+            "{shown}: {}",
+            response.text()
+        );
+    }
+
+    let feed = post(
+        client,
+        &path,
+        owner,
+        &syslog(tls.clone(), json!({"ca_certificate": CERTIFICATE})),
+    )
+    .await;
+    feed.assert_status(StatusCode::CREATED);
+    let feed = id(&feed);
+    let uri = destination(fixture.organization, feed);
+    for secrets in [
+        json!({"ca_certificate": NOT_DER}),
+        json!({"client_certificate": CLIENT_CERTIFICATE, "client_key": OTHER_KEY}),
+    ] {
+        refused(
+            &client
+                .patch_json_auth(&uri, &json!({"secrets": secrets}), &owner.token)
+                .await,
+            StatusCode::BAD_REQUEST,
+            CERTIFICATE_INVALID,
+        );
+    }
+    assert!(
+        fixture
+            .audits(actions::AUDIT_DESTINATION_UPDATED)
+            .await
+            .is_empty(),
+        "a refused certificate changes nothing"
+    );
+
+    let paired = client
+        .patch_json_auth(
+            &uri,
+            &json!({"secrets": {"client_certificate": CLIENT_CERTIFICATE, "client_key": CLIENT_KEY}}),
+            &owner.token,
+        )
+        .await;
+    paired.assert_status(StatusCode::OK);
+    assert_eq!(
+        paired.json_value()["secrets"],
+        json!(["ca_certificate", "client_certificate", "client_key"])
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_host_the_operator_no_longer_allows_is_refused_when_sending() {
+    let fixture = Fixture::new(PREFIX).await;
+    fixture.license(Tier::Enterprise).await;
+    let pool = fixture.pool();
+    let server = receiver().await;
+    let siem = id(&post(
+        &fixture.sso.client,
+        &destinations(fixture.organization),
+        &fixture.owner,
+        &webhook("SIEM", &format!("{}/hook", server.uri())),
+    )
+    .await);
+
+    let restricted = AppState::new_with_mail(
+        Config {
+            endpoint_hosts: Hosts::parse("allowed.example"),
+            ..test_config()
+        },
+        pool.clone(),
+        None,
+        None,
+    );
+    restricted.disable_mcp();
+    restricted.install_keyring(sso::keyring());
+    restricted.licenses().load(pool).await.unwrap();
+    let transports = Transports::new(
+        restricted.master_key().clone(),
+        restricted.config().endpoint_hosts.clone(),
+    );
+
+    settle(pool).await;
+    drain(&restricted, Uuid::new_v4(), CADENCE, &transports)
+        .await
+        .unwrap();
+    assert_eq!(
+        last_error_code(pool, siem).await.as_deref(),
+        Some("configuration")
+    );
+    let (attempts, _) = delivery_attempts(pool, siem).await;
+    assert_eq!(attempts, 1);
+
+    let client = TestClient::with_state(restricted);
+    let tested = post(
+        &client,
+        &tests(fixture.organization, siem),
+        &fixture.owner,
+        &json!({}),
+    )
+    .await;
+    tested.assert_status(StatusCode::OK);
+    assert_eq!(
+        tested.json_value(),
+        json!({"delivered": false, "error_code": "configuration", "error": HOST_REFUSED})
+    );
+    assert!(
+        received(&server, "/hook").await.is_empty(),
+        "nothing reaches a host the operator no longer allows"
     );
     fixture.cleanup().await;
 }
