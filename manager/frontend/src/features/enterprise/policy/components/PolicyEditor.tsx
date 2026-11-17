@@ -12,6 +12,7 @@ import {
   uncovered,
   withEntries,
 } from '../draft';
+import { DISCARD_LABEL, SAVE_LABEL } from '../labels';
 import {
   agentLabel,
   isAdminCode,
@@ -33,10 +34,6 @@ import { PolicyScope } from '../source';
 import type { PolicyAgent, PolicyProvider, PolicyRules, UpdatePolicyRequest } from '../types';
 import { PolicyCeilingField } from './PolicyCeilingField';
 import { PolicyListField, type PolicyOption } from './PolicyListField';
-
-export const SAVE_LABEL = 'Save policy';
-
-export const DISCARD_LABEL = 'Discard changes';
 
 export const LEGENDS: Readonly<Record<PolicyScope, string>> = {
   [PolicyScope.Organization]: 'Organization agent policy',

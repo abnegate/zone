@@ -5,9 +5,7 @@ import {
   SettingsSection,
   settingsPath,
 } from '../../../settings/navigation/sections';
-
-export const UPGRADE_NOTICE =
-  'Agent policy is part of Zone Team and Enterprise. Add a license to choose which providers, models and coding agents people can use, and when tools need approval.';
+import { UPGRADE_NOTICE } from '../labels';
 
 export const LICENSE_PATH = settingsPath(SettingsGroup.Server, SettingsSection.License);
 

@@ -12,14 +12,6 @@ import {
   COMMUNITY_ORGANIZATION,
   LAPSED_ORGANIZATION,
 } from '../src/features/enterprise/policy/fixtures';
-import { SAVE_LABEL } from '../src/features/enterprise/policy/components/PolicyEditor';
-import {
-  EFFECTIVE_SUMMARY,
-  ORGANIZATION_SUMMARY,
-} from '../src/features/enterprise/policy/components/PolicyFieldFrame';
-import { LAPSED_NOTICE } from '../src/features/enterprise/policy/components/PolicyLapsedNotice';
-import { SOURCE_LABELS } from '../src/features/enterprise/policy/components/PolicySourceBadge';
-import { UPGRADE_NOTICE } from '../src/features/enterprise/policy/components/PolicyUpgradeNotice';
 import {
   AGENT_POLICY_LINK,
   agentLabel,
@@ -47,6 +39,7 @@ import {
   setupCommonRoutes,
 } from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
+import { EFFECTIVE_SUMMARY, LAPSED_NOTICE, ORGANIZATION_SUMMARY, SAVE_LABEL, SOURCE_LABELS, UPGRADE_NOTICE } from '../src/features/enterprise/policy/labels';
 
 const INHERITED = SOURCE_LABELS[PolicySource.Organization];
 const OVERRIDDEN = SOURCE_LABELS[PolicySource.Workspace];

@@ -2,12 +2,13 @@ import { describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describedText } from '../../../../test/select';
 import { ORGANIZATION_RULES, WORKSPACE_RULES } from '../fixtures';
+import { SAVE_LABEL } from '../labels';
 import { NOTHING_ALLOWED_WARNING, notAllowed, pendingText, refusalMessage } from '../messages';
 import { PolicyRefusal } from '../PolicyRefusal';
 import { PolicyCode, PolicyProvider } from '../schemas';
 import { PolicyScope } from '../source';
 import type { PolicyRules } from '../types';
-import { LEGENDS, PolicyEditor, SAVE_LABEL } from './PolicyEditor';
+import { LEGENDS, PolicyEditor } from './PolicyEditor';
 
 interface EditorOptions {
   scope?: PolicyScope;

@@ -11,16 +11,19 @@ import {
   ORGANIZATION_RULES,
   WORKSPACE_ID,
 } from '../fixtures';
+import {
+  EFFECTIVE_SUMMARY,
+  LAPSED_NOTICE,
+  ORGANIZATION_SUMMARY,
+  SAVE_LABEL,
+  SOURCE_LABELS,
+  UPGRADE_NOTICE,
+} from '../labels';
 import { NOT_ALLOWED } from '../messages';
 import { PolicyRefusal } from '../PolicyRefusal';
 import { PolicyCode, PolicyTier } from '../schemas';
 import type { WorkspacePolicyResponse } from '../types';
-import { SAVE_LABEL } from './PolicyEditor';
-import { EFFECTIVE_SUMMARY, ORGANIZATION_SUMMARY } from './PolicyFieldFrame';
-import { LAPSED_NOTICE } from './PolicyLapsedNotice';
 import { INHERIT_LABEL } from './PolicyListField';
-import { SOURCE_LABELS } from './PolicySourceBadge';
-import { UPGRADE_NOTICE } from './PolicyUpgradeNotice';
 import { WORKSPACE_READ_ONLY } from './WorkspacePolicy';
 import { ORGANIZATION_POLICY_LINK } from './WorkspacePolicySection';
 

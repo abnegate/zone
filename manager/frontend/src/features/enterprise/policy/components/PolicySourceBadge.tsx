@@ -1,10 +1,5 @@
-import { PolicySource } from '../source';
-
-export const SOURCE_LABELS: Readonly<Record<PolicySource, string>> = {
-  [PolicySource.Organization]: 'Inherited from organization',
-  [PolicySource.Workspace]: 'Set for this workspace',
-  [PolicySource.None]: 'Not restricted',
-};
+import { SOURCE_LABELS } from '../labels';
+import type { PolicySource } from '../source';
 
 interface PolicySourceBadgeProps {
   source: PolicySource;

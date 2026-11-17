@@ -1,10 +1,7 @@
 import { type ReactNode, useId } from 'react';
+import { EFFECTIVE_SUMMARY, ORGANIZATION_SUMMARY } from '../labels';
 import type { PolicySource } from '../source';
 import { PolicySourceBadge } from './PolicySourceBadge';
-
-export const ORGANIZATION_SUMMARY = 'Organization';
-
-export const EFFECTIVE_SUMMARY = 'In effect';
 
 interface PolicyFieldFrameProps {
   label: string;

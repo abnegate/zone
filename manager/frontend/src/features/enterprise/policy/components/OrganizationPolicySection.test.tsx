@@ -9,14 +9,12 @@ import {
   LAPSED_ORGANIZATION,
   ORGANIZATION_ID,
 } from '../fixtures';
+import { DISCARD_LABEL, LAPSED_NOTICE, SAVE_LABEL, UPGRADE_NOTICE } from '../labels';
 import { NOTHING_ALLOWED_WARNING, refusalMessage, unrestrictedText } from '../messages';
 import { PolicyRefusal } from '../PolicyRefusal';
 import { PolicyCode, PolicyField } from '../schemas';
 import type { OrganizationPolicyResponse } from '../types';
 import { ORGANIZATION_READ_ONLY } from './OrganizationPolicy';
-import { DISCARD_LABEL, SAVE_LABEL } from './PolicyEditor';
-import { LAPSED_NOTICE } from './PolicyLapsedNotice';
-import { UPGRADE_NOTICE } from './PolicyUpgradeNotice';
 
 const organization = mock();
 const updateOrganization = mock();

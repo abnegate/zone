@@ -1,8 +1,6 @@
 import { Link } from 'react-router-dom';
+import { LAPSED_NOTICE } from '../labels';
 import { LICENSE_PATH } from './PolicyUpgradeNotice';
-
-export const LAPSED_NOTICE =
-  'Your Zone license has lapsed. Policies are still enforced; editing needs an active or grace license.';
 
 export function PolicyLapsedNotice() {
   return (
