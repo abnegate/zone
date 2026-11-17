@@ -312,9 +312,23 @@ impl Baseline {
                 .generate_branch_name(task.id, &task.title)
                 .map_err(|error| error.to_string())?,
         };
-        git.prepare_branch(worktree, &branch, task.pr_url.is_some())
+        // Git gives a branch to one worktree at a time, and a run that ended
+        // leaves its worktree holding the name, so a second run for the same
+        // branch is refused by a directory nobody is using. Freeing it is
+        // worth one more attempt — and only after a refusal, so a run whose
+        // branch nothing holds pays nothing for the scan. When nothing was
+        // freed, the refusal stands and says what it said.
+        if let Err(refused) = git
+            .prepare_branch(worktree, &branch, task.pr_url.is_some())
             .await
-            .map_err(|error| error.to_string())?;
+        {
+            if Checkout::release_branch(pool, worktree.top(), &branch).await == 0 {
+                return Err(refused.to_string());
+            }
+            git.prepare_branch(worktree, &branch, task.pr_url.is_some())
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         let commit = git
             .revision(worktree, "HEAD")
             .await
@@ -590,6 +604,159 @@ impl Checkout {
         Self::recover_root(pool, &Self::root(pool)).await
     }
 
+    /// Free `branch` from the worktree of a run that has ended, so the run
+    /// preparing one at `mine` can take the name.
+    ///
+    /// Only recovery removes a worktree, and not while any sibling run works
+    /// in the same base clone — so a repository with runs in it keeps every
+    /// finished run's directory, and with it every branch those directories
+    /// hold. Coming back to a branch is ordinary: a pull request fixed twice
+    /// asks for the same one. Without this the second run is refused for a
+    /// directory nobody is using.
+    ///
+    /// The rule is recovery's own and no weaker: a finished run's worktree
+    /// goes only when it holds nothing nobody else has. One holding work that
+    /// was never committed or never pushed is left, and the run is refused as
+    /// before, because that work outweighs this run starting. A run that has
+    /// not ended is left too: it is using the branch.
+    ///
+    /// Best effort, and never the reason a run fails. Whatever is still
+    /// holding the branch afterwards, `prepare_branch` is what answers for it.
+    pub(crate) async fn release_branch(pool: &PgPool, mine: &Path, branch: &BranchName) -> u64 {
+        Self::release_branch_in(pool, &Self::root(pool), mine, branch).await
+    }
+
+    async fn release_branch_in(
+        pool: &PgPool,
+        root: &Path,
+        mine: &Path,
+        branch: &BranchName,
+    ) -> u64 {
+        let root = root.to_path_buf();
+        let (directory, at) = (root.clone(), mine.to_path_buf());
+        let base = match Self::filesystem(move || Self::base_of(&directory, &at)).await {
+            // A run that is not a worktree of a base under this root shares no
+            // branch with anything here.
+            Ok(Some(base)) => base,
+            Ok(None) => return 0,
+            Err(error) => {
+                tracing::warn!(%error, "Cannot read which base clone this run works in");
+                return 0;
+            }
+        };
+        // Every git call below runs through the hardened service, which
+        // refuses a clone whose configuration carries anything beyond what
+        // Zone pins — and a run's tools write there as a matter of course, so
+        // without putting the base back first the reclaim would simply be
+        // refused on exactly the busy repository it exists for. This is the
+        // step `recover_path` takes before it removes a worktree.
+        //
+        // Recovery also defers while another run works in the base. That rule
+        // is not repeated here: the run asking for its branch is itself
+        // working in this base, so the guard would refuse every call. What it
+        // protects is the base's shared configuration, which Zone rewrites
+        // from what it knows before every use anyway — `refresh` did it for
+        // this very run moments ago, under the same lock.
+        let origin = {
+            let base = base.clone();
+            match Self::detailed(move || Self::origin_of(&base)).await {
+                Ok(origin) => origin,
+                Err(error) => {
+                    tracing::warn!(%error, "Cannot read the base clone's origin while freeing a branch");
+                    return 0;
+                }
+            }
+        };
+        if let Err(error) = sanitize(&base, &origin).await {
+            tracing::warn!(%error, "Cannot put the base clone back while freeing a branch");
+            return 0;
+        }
+        let directory = root.clone();
+        let entries = match Self::filesystem(move || Self::entries(&directory)).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(%error, "Cannot list checkouts while freeing a branch");
+                return 0;
+            }
+        };
+        let mut freed = 0;
+        for (run, path) in entries {
+            if path == mine {
+                continue;
+            }
+            match Self::ended(pool, run).await {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    tracing::warn!(%run, %error, "Cannot tell whether a checkout's run has ended");
+                    continue;
+                }
+            }
+            // What the service recorded for that run, exactly as recovery
+            // reads it: its own clone is never the witness for whether its
+            // commits are published.
+            let known: Vec<String> = match tasks::run_checkout(pool, run).await {
+                Ok(checkout) => checkout
+                    .map(|checkout| {
+                        std::iter::once(checkout.head)
+                            .chain(checkout.published)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                Err(error) => {
+                    tracing::warn!(%run, %error, "Cannot read a checkout's facts while freeing a branch");
+                    continue;
+                }
+            };
+            let (directory, at, base, wanted) =
+                (root.clone(), path.clone(), base.clone(), branch.clone());
+            let released = Self::detailed(move || {
+                let Some(worktree) = Self::bound(&directory, &at)? else {
+                    return Ok(false);
+                };
+                // A worktree of another repository may hold a branch of the
+                // same name; it is not this one's to take.
+                if worktree.repository() != base {
+                    return Ok(false);
+                }
+                if worktree::branch(&worktree).as_ref() != Some(&wanted) {
+                    return Ok(false);
+                }
+                Self::reclaim_worktree(&worktree, &known)
+            })
+            .await;
+            match released {
+                Ok(true) => {
+                    freed += 1;
+                    tracing::info!(
+                        %run,
+                        branch = %branch,
+                        path = %path.display(),
+                        "Freed a branch from a finished run's worktree that held nothing of its own"
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%run, %error, "Could not free a branch from a finished run's worktree")
+                }
+            }
+        }
+        freed
+    }
+
+    /// Whether `run` has ended, so its worktree is nobody's to work in. A run
+    /// no row answers for was deleted with its task, which ends it too.
+    async fn ended(pool: &PgPool, run: Uuid) -> Result<bool, sqlx::Error> {
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM task_runs WHERE id = $1")
+                .bind(run)
+                .fetch_optional(pool)
+                .await?;
+        Ok(!status
+            .as_deref()
+            .is_some_and(|status| !matches!(status, "completed" | "failed" | "cancelled")))
+    }
+
     pub(crate) async fn filesystem<T: Send + 'static>(
         operation: impl FnOnce() -> std::io::Result<T> + Send + 'static,
     ) -> Result<T, String> {
@@ -629,16 +796,10 @@ impl Checkout {
         let mut finished = Vec::new();
         let mut live = HashSet::new();
         for (run, path) in entries {
-            let status: Option<String> =
-                sqlx::query_scalar("SELECT status FROM task_runs WHERE id = $1")
-                    .bind(run)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| "Cannot inspect task checkout ownership".to_string())?;
             // Deleted tasks cascade to runs; their generated paths are reclaimable.
-            if status
-                .as_deref()
-                .is_some_and(|status| !matches!(status, "completed" | "failed" | "cancelled"))
+            if !Self::ended(pool, run)
+                .await
+                .map_err(|_| "Cannot inspect task checkout ownership".to_string())?
             {
                 // A base a live run works in is not sanitized under it: the
                 // run's own tools may have configured it on purpose.
@@ -1179,6 +1340,203 @@ mod tests {
             "",
             "a removed worktree's branch goes with it, so the next run can make it again"
         );
+    }
+
+    /// A finished run, claimed and with its start recorded, whose worktree of
+    /// `base` sits on `branch`.
+    async fn finished_run_on(
+        pool: &PgPool,
+        root: &Path,
+        base: &Path,
+        branch: &str,
+        settle: bool,
+    ) -> (Uuid, PathBuf, String) {
+        let organization = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations(id,name,slug) VALUES($1,'Branch reclaim',$1::text)")
+            .bind(organization)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO workspaces(id,organization_id,name,slug) VALUES($1,$2,'Branch reclaim',$1::text)").bind(workspace).bind(organization).execute(pool).await.unwrap();
+        let task = crate::db::tasks::create_task(
+            pool,
+            workspace,
+            &[],
+            "Fix a pull request",
+            "Regression",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = crate::db::tasks::create_task_run(pool, task.id)
+            .await
+            .unwrap();
+        let owner = Uuid::new_v4();
+        assert!(
+            crate::db::tasks::claim_task_run(pool, run.id, owner)
+                .await
+                .unwrap()
+        );
+        let mut checkout = Checkout::create(root, run.id, owner).unwrap();
+        checkout.worktree = Some(worktree::add(base, checkout.path(), "origin/HEAD").unwrap());
+        git(checkout.path(), &["checkout", "-q", "-b", branch]);
+        let start = git(checkout.path(), &["rev-parse", "HEAD"]);
+        assert!(
+            crate::db::tasks::record_run_checkout(pool, run.id, owner, &start)
+                .await
+                .unwrap()
+        );
+        let path = checkout.path().to_path_buf();
+        std::mem::forget(checkout);
+        if settle {
+            crate::db::tasks::complete_owned_task_run(
+                pool,
+                run.id,
+                Some(owner),
+                "completed",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        (organization, path, start)
+    }
+
+    async fn forget_organization(pool: &PgPool, organization: Uuid) {
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(organization)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// The bug this closes: a run that ended still held the branch, and every
+    /// later run for it was refused for a directory nobody was using.
+    #[tokio::test]
+    async fn a_run_takes_its_branch_back_from_a_finished_runs_worktree() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .unwrap();
+        let (_holder, root) = private_root();
+        let base = base_clone(&root);
+        let (organization, held, _) =
+            finished_run_on(&pool, &root, &base, "zone/shared", true).await;
+        let (other, untouched, _) =
+            finished_run_on(&pool, &root, &base, "zone/elsewhere", true).await;
+        let mine = run_worktree(&root, &base, "zone/mine");
+        let wanted = BranchName::parse("zone/shared").unwrap();
+
+        let freed = Checkout::release_branch_in(&pool, &root, mine.path(), &wanted).await;
+
+        assert_eq!(freed, 1, "the finished run's worktree gives the branch up");
+        assert!(!held.exists(), "and goes with it");
+        assert_eq!(
+            git(&base, &["branch", "--list", "zone/shared"]),
+            "",
+            "the branch is free for this run to make again"
+        );
+        assert!(
+            untouched.exists(),
+            "a worktree on another branch is nobody's business here"
+        );
+        assert!(
+            git(&base, &["branch", "--list", "zone/elsewhere"]).contains("zone/elsewhere"),
+            "and keeps its own branch"
+        );
+        forget_organization(&pool, organization).await;
+        forget_organization(&pool, other).await;
+    }
+
+    /// A base clone carries whatever a run's tools wrote to it — husky sets
+    /// `core.hooksPath`, an agent sets `user.email` — and the hardened git
+    /// service refuses a clone configured beyond what Zone pins. Freeing a
+    /// branch has to put the base back first, or it is refused on exactly the
+    /// repository it exists for.
+    #[tokio::test]
+    async fn a_branch_is_freed_from_a_base_a_run_wrote_to() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .unwrap();
+        let (_holder, root) = private_root();
+        let base = base_clone(&root);
+        let (organization, held, _) =
+            finished_run_on(&pool, &root, &base, "zone/dirty-base", true).await;
+        let mine = run_worktree(&root, &base, "zone/mine");
+        // What a run's own tools leave behind in the shared clone, written
+        // after the worktrees exist, as a run writes it while it works.
+        git(&base, &["config", "core.hooksPath", ".husky"]);
+        let wanted = BranchName::parse("zone/dirty-base").unwrap();
+
+        let freed = Checkout::release_branch_in(&pool, &root, mine.path(), &wanted).await;
+
+        assert_eq!(freed, 1, "the branch is freed despite the written config");
+        assert!(!held.exists());
+        let configured = git(&base, &["config", "--list"]).to_ascii_lowercase();
+        assert!(
+            !configured.contains("hookspath"),
+            "and the base is put back to what Zone knows: {configured}"
+        );
+        forget_organization(&pool, organization).await;
+    }
+
+    /// The safety rule is recovery's and is not relaxed to start a run: work
+    /// nobody else has outweighs this run taking the name it wants.
+    #[tokio::test]
+    async fn a_finished_worktree_holding_work_keeps_its_branch() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .unwrap();
+        let (_holder, root) = private_root();
+        let base = base_clone(&root);
+        let (organization, held, _) =
+            finished_run_on(&pool, &root, &base, "zone/unpublished", true).await;
+        std::fs::write(held.join("work.txt"), "committed, never pushed\n").unwrap();
+        git(&held, &["add", "work.txt"]);
+        git(&held, &["commit", "-q", "-m", "work"]);
+        let mine = run_worktree(&root, &base, "zone/mine");
+        let wanted = BranchName::parse("zone/unpublished").unwrap();
+
+        let freed = Checkout::release_branch_in(&pool, &root, mine.path(), &wanted).await;
+
+        assert_eq!(
+            freed, 0,
+            "a commit the service never pushed is not given up"
+        );
+        assert!(held.exists());
+        assert!(
+            git(&base, &["branch", "--list", "zone/unpublished"]).contains("zone/unpublished"),
+            "so the branch stays held and the run is refused as before"
+        );
+        forget_organization(&pool, organization).await;
+    }
+
+    /// A run that has not ended is using its branch.
+    #[tokio::test]
+    async fn a_live_runs_worktree_keeps_its_branch() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .unwrap();
+        let (_holder, root) = private_root();
+        let base = base_clone(&root);
+        let (organization, held, _) =
+            finished_run_on(&pool, &root, &base, "zone/working", false).await;
+        let mine = run_worktree(&root, &base, "zone/mine");
+        let wanted = BranchName::parse("zone/working").unwrap();
+
+        let freed = Checkout::release_branch_in(&pool, &root, mine.path(), &wanted).await;
+
+        assert_eq!(freed, 0, "a run still working is left to its branch");
+        assert!(held.exists());
+        forget_organization(&pool, organization).await;
     }
 
     /// Zone names a run's branch `zone/task-{short id}-{slug}`, as it always
