@@ -711,7 +711,7 @@ Refusals are `{"error": "…", "code": "…"}`.
 
 ## Upgrading
 
-Migration `0027_audit_logs_positions` adds the position columns to
+Migration `0028_audit_logs_positions` adds the position columns to
 `audit_logs`. It rewrites the whole table and builds three indexes while holding
 an `ACCESS EXCLUSIVE` lock, so nothing can read or write the audit log until
 it finishes, which takes time in proportion to the table's size: seconds to
@@ -722,7 +722,7 @@ requests, so on a server with a very large audit log raise the liveness probe's
 initial delay for this upgrade, or run the migrations ahead of it with
 `zone-server --migrate-only`.
 
-Migrations 0027 to 0030 run on PostgreSQL 14 and later.
+Migrations 0028 to 0031 run on PostgreSQL 14 and later.
 
 ## Logical restores
 
