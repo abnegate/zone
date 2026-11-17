@@ -1,3 +1,5 @@
+#[cfg(feature = "audit")]
+pub mod audit;
 mod duplicate_key;
 mod edition;
 mod encoding;
