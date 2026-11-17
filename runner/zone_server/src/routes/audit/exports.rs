@@ -1,37 +1,58 @@
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::rejection::PathRejection;
+use axum::extract::{Path, RawQuery, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::TryStreamExt;
-use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 use zone_enterprise::Feature;
-use zone_enterprise::audit::{Error, Format, Standing};
+use zone_enterprise::audit::{Error, Format};
 
+use super::access::{self, ORGANIZATION_MISSING};
 use super::refusal::Refusal;
-use super::{access, parse_end, parse_start};
+use super::{parse_end, parse_start};
 use crate::auth::entitlement::Unentitled;
 use crate::auth::{AuthUser, ServerAdmin};
 use crate::db::DbResult;
 use crate::db::audit::events::Range;
 use crate::db::audit::scope::Scope;
 use crate::db::audit::{AuditContext, actions, log_action, resources};
-use crate::services::audit::export;
+use crate::services::audit::{Actor, export, standing};
 use crate::state::AppState;
 
 const NO_STORE: &str = "no-store";
 const LAST_MICROSECOND: TimeDelta = TimeDelta::microseconds(999_999);
+const FORMAT: &str = "format";
+const START_DATE: &str = "start_date";
+const END_DATE: &str = "end_date";
 
-#[derive(Debug, Default, Deserialize)]
-pub struct ExportQuery {
-    #[serde(default)]
-    pub format: Option<String>,
-    #[serde(default)]
-    pub start_date: Option<String>,
-    #[serde(default)]
-    pub end_date: Option<String>,
+#[derive(Debug, Default)]
+struct ExportQuery {
+    format: Option<String>,
+    start_date: Option<String>,
+    end_date: Option<String>,
+}
+
+impl ExportQuery {
+    /// Unknown parameters are ignored; a repeated one is ambiguous, so it is refused with the
+    /// code of the value it would have set.
+    fn read(raw: Option<&str>) -> Result<Self, Error> {
+        let mut query = Self::default();
+        for (key, value) in form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
+            let (slot, error) = match key.as_ref() {
+                FORMAT => (&mut query.format, Error::ExportFormatInvalid),
+                START_DATE => (&mut query.start_date, Error::ExportRangeInvalid),
+                END_DATE => (&mut query.end_date, Error::ExportRangeInvalid),
+                _ => continue,
+            };
+            if slot.replace(value.into_owned()).is_some() {
+                return Err(error);
+            }
+        }
+        Ok(query)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +62,10 @@ struct Export {
 }
 
 impl Export {
+    fn read(raw: Option<&str>) -> Result<Self, Error> {
+        Self::parse(&ExportQuery::read(raw)?)
+    }
+
     fn parse(query: &ExportQuery) -> Result<Self, Error> {
         let format = match query.format.as_deref() {
             None => Format::default(),
@@ -79,48 +104,54 @@ fn end(value: &str) -> Option<DateTime<Utc>> {
     Some(end + LAST_MICROSECOND)
 }
 
-struct Actor {
-    id: Uuid,
-    email: String,
-}
-
+/// GET /api/organizations/{org_id}/audit-exports
 pub async fn organization(
     State(state): State<AppState>,
-    Path(organization): Path<Uuid>,
-    Query(query): Query<ExportQuery>,
     AuthUser(claims): AuthUser,
+    path: Result<Path<Uuid>, PathRejection>,
+    RawQuery(query): RawQuery,
 ) -> Result<Response, Refusal> {
     let user = claims.user_id().map_err(|_| Refusal::Unauthenticated)?;
+    let Ok(Path(organization)) = path else {
+        return Err(Refusal::Missing(ORGANIZATION_MISSING));
+    };
     let mut connection = state.db().acquire().await?;
     access::organization(&mut connection, organization, user).await?;
     drop(connection);
     let actor = Actor {
         id: user,
-        email: claims.email,
+        email: &claims.email,
     };
-    download(&state, Scope::Organization(organization), &actor, &query).await
+    download(
+        &state,
+        Scope::Organization(organization),
+        &actor,
+        query.as_deref(),
+    )
+    .await
 }
 
+/// GET /api/audit-exports
 pub async fn server(
     State(state): State<AppState>,
-    Query(query): Query<ExportQuery>,
     ServerAdmin(admin): ServerAdmin,
+    RawQuery(query): RawQuery,
 ) -> Result<Response, Refusal> {
     let actor = Actor {
         id: admin.id,
-        email: admin.email,
+        email: &admin.email,
     };
-    download(&state, Scope::Server, &actor, &query).await
+    download(&state, Scope::Server, &actor, query.as_deref()).await
 }
 
 async fn download(
     state: &AppState,
     scope: Scope,
-    actor: &Actor,
-    query: &ExportQuery,
+    actor: &Actor<'_>,
+    query: Option<&str>,
 ) -> Result<Response, Refusal> {
     entitled(state).await?;
-    let export = Export::parse(query)?;
+    let export = Export::read(query)?;
     if let Err(error) = record(state, scope, actor, export).await {
         tracing::error!(%error, "Refused an audit export whose own audit row could not be written");
         return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
@@ -146,20 +177,23 @@ async fn download(
 }
 
 async fn entitled(state: &AppState) -> Result<(), Refusal> {
-    let stored = state.stored_license().await?;
-    let standing = Standing::of(stored.license(), stored.refusal().is_some(), Utc::now());
-    if standing.export {
+    if standing(state).await?.export {
         return Ok(());
     }
     Err(Unentitled(Feature::AuditExport).into())
 }
 
-async fn record(state: &AppState, scope: Scope, actor: &Actor, export: Export) -> DbResult<Uuid> {
+async fn record(
+    state: &AppState,
+    scope: Scope,
+    actor: &Actor<'_>,
+    export: Export,
+) -> DbResult<Uuid> {
     let context = AuditContext {
         org_id: scope.organization_id(),
         workspace_id: None,
         actor_id: Some(actor.id),
-        actor_email: Some(actor.email.clone()),
+        actor_email: Some(actor.email.to_owned()),
         ip_address: None,
         user_agent: None,
     };
@@ -171,9 +205,9 @@ async fn record(state: &AppState, scope: Scope, actor: &Actor, export: Export) -
         None,
         None,
         Some(json!({
-            "format": export.format.as_str(),
-            "start_date": export.range.start,
-            "end_date": export.range.end,
+            FORMAT: export.format.as_str(),
+            START_DATE: export.range.start,
+            END_DATE: export.range.end,
         })),
     )
     .await
@@ -252,6 +286,39 @@ mod tests {
                 Error::ExportRangeInvalid,
                 "{case:?}"
             );
+        }
+    }
+
+    #[test]
+    fn the_query_string_is_decoded_and_unknown_parameters_are_ignored() {
+        let query = ExportQuery::read(Some(
+            "format=csv&start_date=2026-11-01T10%3A00%3A00%2B02%3A00&end_date=2026-11-02&page=3",
+        ))
+        .unwrap();
+        assert_eq!(query.format.as_deref(), Some("csv"));
+        assert_eq!(
+            query.start_date.as_deref(),
+            Some("2026-11-01T10:00:00+02:00")
+        );
+        assert_eq!(query.end_date.as_deref(), Some("2026-11-02"));
+        assert!(ExportQuery::read(None).unwrap().format.is_none());
+    }
+
+    #[test]
+    fn a_repeated_parameter_is_refused_with_the_code_of_its_value() {
+        let cases = [
+            ("format=csv&format=ndjson", Error::ExportFormatInvalid),
+            (
+                "start_date=2026-11-01&start_date=2026-11-02",
+                Error::ExportRangeInvalid,
+            ),
+            (
+                "end_date=2026-11-01&end_date=2026-11-02",
+                Error::ExportRangeInvalid,
+            ),
+        ];
+        for (raw, error) in cases {
+            assert_eq!(Export::read(Some(raw)).unwrap_err(), error, "{raw}");
         }
     }
 

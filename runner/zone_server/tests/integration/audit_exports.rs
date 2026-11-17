@@ -11,6 +11,7 @@ use zone_server::db::audit::events::Range;
 use zone_server::db::audit::scope::Scope;
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::organization_members::OrgRole;
+use zone_server::routes::audit::access::ORGANIZATION_MISSING;
 use zone_server::services::audit::export;
 
 use crate::common::policy::Fixture;
@@ -417,6 +418,44 @@ async fn an_invalid_format_or_range_is_refused_with_its_code() {
         let response = get(&fixture, &format!("{path}?{query}"), &fixture.owner).await;
         response.assert_status(StatusCode::BAD_REQUEST);
         assert_eq!(response.json_value()["code"], code, "{query}");
+    }
+    assert!(exports(&fixture).await.is_empty());
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_malformed_organization_or_repeated_parameter_is_refused_as_json() {
+    let fixture = Fixture::new(PREFIX).await;
+    fixture.license(Tier::Team).await;
+
+    let missing = get(
+        &fixture,
+        &format!("/api/organizations/not-an-id/audit-exports?{WHOLE_YEAR}"),
+        &fixture.owner,
+    )
+    .await;
+    missing.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(missing.json_value()["error"], ORGANIZATION_MISSING);
+
+    let path = organization_path(fixture.organization);
+    let cases = [
+        (
+            format!("{path}?format=csv&format=ndjson&{WHOLE_YEAR}"),
+            FORMAT_INVALID,
+        ),
+        (
+            format!("{path}?{WHOLE_YEAR}&start_date=2020-02-01"),
+            RANGE_INVALID,
+        ),
+        (
+            format!("{SERVER_PATH}?{WHOLE_YEAR}&end_date=2020-02-01"),
+            RANGE_INVALID,
+        ),
+    ];
+    for (path, code) in cases {
+        let response = get(&fixture, &path, &fixture.owner).await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(response.json_value()["code"], code, "{path}");
     }
     assert!(exports(&fixture).await.is_empty());
     fixture.cleanup().await;
