@@ -254,6 +254,22 @@ export const LAPSED_TEAM_DESTINATIONS: DestinationsResponse = {
   standing: LAPSED_TEAM_STANDING,
 };
 
+export const UNVERIFIED_DESTINATIONS: DestinationsResponse = {
+  ...LAPSED_DESTINATIONS,
+  standing: UNVERIFIED_STANDING,
+};
+
+export const CAPPED_WEBHOOK: DestinationResponse = {
+  ...FAILING_WEBHOOK,
+  delivery: { ...FAILING_WEBHOOK.delivery, backlog: 10_000, backlog_capped: true },
+};
+
+export const CAPPED_DESTINATIONS: DestinationsResponse = {
+  standing: ENTERPRISE_STANDING,
+  stalled_since: null,
+  destinations: [CAPPED_WEBHOOK, HEALTHY_S3],
+};
+
 export const STALLED_DESTINATIONS: DestinationsResponse = {
   standing: ENTERPRISE_STANDING,
   stalled_since: '2026-11-17T11:40:00Z',
@@ -339,6 +355,11 @@ export const LAPSED_RETENTION: RetentionResponse = {
     wait: RetentionWait.Paused,
   })),
   deleted_count: 0,
+};
+
+export const UNVERIFIED_RETENTION: RetentionResponse = {
+  ...LAPSED_RETENTION,
+  standing: UNVERIFIED_STANDING,
 };
 
 export const COMMUNITY_SAVED_RETENTION: RetentionResponse = {

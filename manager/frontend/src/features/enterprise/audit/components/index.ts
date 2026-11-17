@@ -1,5 +1,5 @@
 export { AuditExportSection } from './AuditExportSection';
-export { AuditLapsedNotice } from './AuditLapsedNotice';
+export { AuditLicenseWarning } from './AuditLicenseWarning';
 export { AuditUpgradeNotice, LICENSE_PATH } from './AuditUpgradeNotice';
 export { DeleteDestinationDialog } from './DeleteDestinationDialog';
 export { DestinationFields } from './DestinationFields';

@@ -3,6 +3,9 @@ import path from 'node:path';
 import type { Locator, Page, Route } from '@playwright/test';
 import { exportFilename } from '../src/features/enterprise/audit/filename';
 import {
+  CAPPED_DESTINATIONS,
+  CAPPED_RETENTION,
+  CAPPED_WEBHOOK,
   COMMUNITY_DESTINATIONS,
   COMMUNITY_RETENTION,
   COMMUNITY_SAVED_RETENTION,
@@ -25,6 +28,8 @@ import {
   SERVER_SYSLOG,
   TEAM_DESTINATIONS,
   TEAM_RETENTION,
+  UNVERIFIED_DESTINATIONS,
+  UNVERIFIED_RETENTION,
   WAITING_RETENTION,
 } from '../src/features/enterprise/audit/fixtures';
 import {
@@ -35,6 +40,7 @@ import {
   DELETE_TITLE,
   DOWNLOAD_LABEL,
   DOWNLOAD_READ_ONLY,
+  DOWNLOAD_UNVERIFIED,
   DOWNLOADED_LABEL,
   EDIT_DESTINATION_TITLE,
   EDIT_LABEL,
@@ -52,10 +58,14 @@ import {
   NO_DESTINATIONS,
   NO_DESTINATIONS_READ_ONLY,
   ORGANIZATION_DESCRIPTION,
+  PASTE_KEY_LINK_LABEL,
   READ_ONLY_EDITION,
   READ_ONLY_UNLICENSED,
+  READ_ONLY_UNVERIFIED,
+  RENEW_LINK_LABEL,
   RETENTION_DAYS_LABEL,
   RETENTION_SAVED,
+  RETENTION_STILL_APPLIED,
   SAVE_DESTINATION_LABEL,
   SAVE_RETENTION_LABEL,
   SECRET_SAVED_PLACEHOLDER,
@@ -63,10 +73,13 @@ import {
   SERVER_DESCRIPTION,
   START_DATE_LABEL,
   UNENCRYPTED_HTTP_WARNING,
+  UNVERIFIED_NOTICE,
   UPGRADE_NOTICE,
   URL_LABEL,
 } from '../src/features/enterprise/audit/labels';
 import {
+  backlogText,
+  countText,
   deleteMessage,
   enabledLabel,
   formatLabel,
@@ -741,10 +754,42 @@ test.describe('Organization audit export', () => {
     });
 
     await expect(page.getByRole('status').filter({ hasText: LAPSED_TEAM_NOTICE })).toBeVisible();
+    await expect(page.getByText(RETENTION_STILL_APPLIED, { exact: false })).toHaveCount(0);
     await expect(page.getByText(EDITION_NOTICE)).toHaveCount(0);
     await expect(page.getByRole('button', { name: DOWNLOAD_LABEL, exact: true })).toBeDisabled();
     await expect(page.getByText(DOWNLOAD_READ_ONLY)).toBeVisible();
     await expect(retentionCard(page).getByText(READ_ONLY_EDITION)).toBeVisible();
+  });
+
+  test('asks for the license key again when the stored one cannot be verified', async ({
+    page,
+  }) => {
+    await openOrganization(page, {
+      destinations: UNVERIFIED_DESTINATIONS,
+      retention: UNVERIFIED_RETENTION,
+    });
+
+    const warning = page.getByRole('status').filter({ hasText: UNVERIFIED_NOTICE });
+    await expect(warning.getByRole('link', { name: PASTE_KEY_LINK_LABEL })).toBeVisible();
+    await expect(page.getByRole('link', { name: RENEW_LINK_LABEL })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: DOWNLOAD_LABEL, exact: true })).toBeDisabled();
+    await expect(page.getByText(DOWNLOAD_UNVERIFIED)).toBeVisible();
+    await expect(page.getByText(DOWNLOAD_READ_ONLY)).toHaveCount(0);
+    await expect(retentionCard(page).getByText(READ_ONLY_UNVERIFIED)).toBeVisible();
+  });
+
+  test('marks counts the server stopped at as lower bounds', async ({ page }) => {
+    await openOrganization(page, {
+      destinations: CAPPED_DESTINATIONS,
+      retention: CAPPED_RETENTION,
+    });
+
+    const backlog = CAPPED_WEBHOOK.delivery;
+    await expect(
+      row(page, CAPPED_WEBHOOK.name).getByText(backlogText(backlog.backlog, backlog.backlog_capped))
+    ).toBeVisible();
+    const held = countText(CAPPED_RETENTION.held, CAPPED_RETENTION.held_capped);
+    await expect(retentionCard(page).getByText(held, { exact: true })).toHaveCount(2);
   });
 
   test('lets Team download but keeps streaming behind the upgrade', async ({ page }) => {
@@ -850,6 +895,8 @@ test.describe('Audit export layout', () => {
     ['lapsed', { destinations: LAPSED_DESTINATIONS, retention: LAPSED_RETENTION }],
     ['lapsed-team', { destinations: LAPSED_TEAM_DESTINATIONS, retention: LAPSED_TEAM_RETENTION }],
     ['team', { destinations: TEAM_DESTINATIONS, retention: TEAM_RETENTION }],
+    ['unverified', { destinations: UNVERIFIED_DESTINATIONS, retention: UNVERIFIED_RETENTION }],
+    ['capped', { destinations: CAPPED_DESTINATIONS, retention: CAPPED_RETENTION }],
   ];
 
   for (const viewport of WIDTHS) {
