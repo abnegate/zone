@@ -746,8 +746,8 @@ async fn a_tick_ends_even_when_an_idle_destination_is_released_already_due() {
     let s3 = engine.destination(scope, Kind::S3).await;
     let busy = engine.destination(scope, Kind::Webhook).await;
     engine.written(scope, 2).await;
-    let idle = engine.destination(scope, Kind::Webhook).await;
     settle(engine.pool()).await;
+    let idle = engine.destination(scope, Kind::Webhook).await;
     let skewed = Cadence {
         tick: Duration::ZERO,
         ..CADENCE
