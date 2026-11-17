@@ -3,6 +3,7 @@ use sqlx::{AssertSqlSafe, Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use super::position::Position;
+use super::predicate;
 use super::scope::Scope;
 use crate::db::DbResult;
 
@@ -11,8 +12,7 @@ pub const REBASE_LOCK: i64 = 0x7A6F_6E65_4155_4454;
 const REBASE_ATTEMPTS: u32 = 3;
 const SERIALIZATION_FAILURE: &str = "40001";
 const SCOPE: &str = "{scope}";
-const SERVER: &str = "organization_id IS NULL AND $1::uuid IS NULL";
-const ORGANIZATION: &str = "organization_id = $1";
+const COLUMN: &str = "organization_id";
 
 macro_rules! columns {
     () => {
@@ -126,11 +126,7 @@ impl Sequences {
 }
 
 fn scoped(scope: Scope, sql: &'static str) -> AssertSqlSafe<String> {
-    let predicate = match scope {
-        Scope::Server => SERVER,
-        Scope::Organization(_) => ORGANIZATION,
-    };
-    AssertSqlSafe(sql.replace(SCOPE, predicate))
+    AssertSqlSafe(sql.replace(SCOPE, &predicate::scoped(COLUMN, scope, 1)))
 }
 
 /// The position a new destination starts from: every row below the snapshot horizon counts as

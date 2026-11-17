@@ -225,32 +225,30 @@ pub async fn get(executor: impl PgExecutor<'_>, id: Uuid) -> DbResult<Option<Del
 
 pub async fn list(executor: impl PgExecutor<'_>, scope: Scope) -> DbResult<Vec<Delivery>> {
     let predicate = scoped("destination.organization_id", scope, 1);
-    let mut query = sqlx::query_as::<_, Row>(sqlx::AssertSqlSafe(format!(
+    let rows = sqlx::query_as::<_, Row>(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM audit_deliveries delivery \
          JOIN audit_destinations destination ON destination.id = delivery.destination_id \
          WHERE {predicate} \
          ORDER BY destination.created_at, destination.id"
-    )));
-    if let Some(organization) = scope.organization_id() {
-        query = query.bind(organization);
-    }
-    let rows = query.fetch_all(executor).await?;
+    )))
+    .bind(scope.organization_id())
+    .fetch_all(executor)
+    .await?;
     Ok(rows.into_iter().map(Delivery::from).collect())
 }
 
 pub async fn floor(executor: impl PgExecutor<'_>, scope: Scope) -> DbResult<Option<Position>> {
     let predicate = scoped("destination.organization_id", scope, 1);
-    let mut query = sqlx::query_as::<_, (i64, i64)>(sqlx::AssertSqlSafe(format!(
+    let lowest = sqlx::query_as::<_, (i64, i64)>(sqlx::AssertSqlSafe(format!(
         "SELECT delivery.transaction_id, delivery.sequence FROM audit_deliveries delivery \
          JOIN audit_destinations destination ON destination.id = delivery.destination_id \
          WHERE destination.enabled AND {predicate} \
          ORDER BY delivery.transaction_id, delivery.sequence \
          LIMIT 1"
-    )));
-    if let Some(organization) = scope.organization_id() {
-        query = query.bind(organization);
-    }
-    let lowest = query.fetch_optional(executor).await?;
+    )))
+    .bind(scope.organization_id())
+    .fetch_optional(executor)
+    .await?;
     Ok(lowest.map(|(transaction_id, sequence)| Position {
         transaction_id,
         sequence,
@@ -264,7 +262,7 @@ pub async fn holding(
 ) -> DbResult<Vec<Holding>> {
     let destinations = scoped("destination.organization_id", scope, 2);
     let entries = scoped("entry.organization_id", scope, 2);
-    let mut query = sqlx::query_as::<_, Holding>(sqlx::AssertSqlSafe(format!(
+    sqlx::query_as::<_, Holding>(sqlx::AssertSqlSafe(format!(
         "SELECT destination.id AS destination_id, destination.name, delivery.attempts \
          FROM audit_deliveries delivery \
          JOIN audit_destinations destination ON destination.id = delivery.destination_id \
@@ -275,9 +273,8 @@ pub async fn holding(
                AND (entry.transaction_id, entry.sequence) > (delivery.transaction_id, delivery.sequence)) \
          ORDER BY destination.created_at, destination.id"
     )))
-    .bind(before);
-    if let Some(organization) = scope.organization_id() {
-        query = query.bind(organization);
-    }
-    query.fetch_all(executor).await
+    .bind(before)
+    .bind(scope.organization_id())
+    .fetch_all(executor)
+    .await
 }

@@ -28,13 +28,12 @@ impl RetentionRecord {
 
 pub async fn get(executor: impl PgExecutor<'_>, scope: Scope) -> DbResult<Option<RetentionRecord>> {
     let predicate = scoped("organization_id", scope, 1);
-    let mut query = sqlx::query_as::<_, RetentionRecord>(sqlx::AssertSqlSafe(format!(
+    sqlx::query_as::<_, RetentionRecord>(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM audit_retentions WHERE {predicate}"
-    )));
-    if let Some(organization) = scope.organization_id() {
-        query = query.bind(organization);
-    }
-    query.fetch_optional(executor).await
+    )))
+    .bind(scope.organization_id())
+    .fetch_optional(executor)
+    .await
 }
 
 pub async fn set(
@@ -61,13 +60,12 @@ pub async fn clear(
     scope: Scope,
 ) -> DbResult<Option<RetentionRecord>> {
     let predicate = scoped("organization_id", scope, 1);
-    let mut query = sqlx::query_as::<_, RetentionRecord>(sqlx::AssertSqlSafe(format!(
+    sqlx::query_as::<_, RetentionRecord>(sqlx::AssertSqlSafe(format!(
         "DELETE FROM audit_retentions WHERE {predicate} RETURNING {COLUMNS}"
-    )));
-    if let Some(organization) = scope.organization_id() {
-        query = query.bind(organization);
-    }
-    query.fetch_optional(executor).await
+    )))
+    .bind(scope.organization_id())
+    .fetch_optional(executor)
+    .await
 }
 
 pub async fn all(executor: impl PgExecutor<'_>) -> DbResult<Vec<RetentionRecord>> {
@@ -80,13 +78,12 @@ pub async fn all(executor: impl PgExecutor<'_>) -> DbResult<Vec<RetentionRecord>
 
 pub async fn swept(executor: impl PgExecutor<'_>, scope: Scope, deleted: i64) -> DbResult<()> {
     let predicate = scoped("organization_id", scope, 2);
-    let mut query = sqlx::query(sqlx::AssertSqlSafe(format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE audit_retentions SET swept_at = now(), deleted_count = $1 WHERE {predicate}"
     )))
-    .bind(deleted);
-    if let Some(organization) = scope.organization_id() {
-        query = query.bind(organization);
-    }
-    query.execute(executor).await?;
+    .bind(deleted)
+    .bind(scope.organization_id())
+    .execute(executor)
+    .await?;
     Ok(())
 }
