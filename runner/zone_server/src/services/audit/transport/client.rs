@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use abnegate_http::metadata::MetadataResolver;
@@ -31,19 +31,28 @@ pub fn builder() -> ClientBuilder {
         .connect_timeout(CONNECT_TIMEOUT)
 }
 
-pub fn client() -> Client {
-    builder().build().expect("the audit delivery client builds")
+/// The one client every audit request shares, built on first use. A client that fails to build
+/// fails the delivery instead of the process, and the next delivery tries again.
+pub fn client() -> Result<Client, Failure> {
+    static SHARED: OnceLock<Client> = OnceLock::new();
+    if let Some(client) = SHARED.get() {
+        return Ok(client.clone());
+    }
+    let built = builder().build().map_err(|error| {
+        tracing::error!(%error, "Could not build the audit delivery HTTP client");
+        Failure::of(FailureCode::Configuration)
+    })?;
+    Ok(SHARED.get_or_init(|| built).clone())
 }
 
 pub fn target(url: &str) -> Result<Url, Failure> {
-    TargetPolicy::ExceptMetadata
-        .validate(url)
-        .map_err(|error| match error {
-            abnegate_http::Error::MetadataTarget => {
-                Failure::new(FailureCode::Target, error.to_string())
-            }
-            _ => Failure::new(FailureCode::Configuration, error.to_string()),
-        })
+    TargetPolicy::ExceptMetadata.validate(url).map_err(|error| {
+        tracing::warn!(%error, "Refused an audit delivery target");
+        match error {
+            abnegate_http::Error::MetadataTarget => Failure::of(FailureCode::Target),
+            _ => Failure::of(FailureCode::Configuration),
+        }
+    })
 }
 
 pub fn accepted(response: &Response) -> Result<(), Failure> {
@@ -62,24 +71,25 @@ pub fn accepted(response: &Response) -> Result<(), Failure> {
     Err(failure)
 }
 
+/// The fixed failure an organization's admins see; the cause, which can name the address and
+/// port Zone tried, goes only to the server log.
 pub fn failure(error: &reqwest::Error) -> Failure {
-    if let Some(refused) = cause::<abnegate_http::Error>(error) {
-        return Failure::new(FailureCode::Target, refused.to_string());
+    let code = classify(error);
+    let host = error.url().and_then(Url::host_str).unwrap_or_default();
+    tracing::warn!(%code, host, cause = %root(error), "An audit delivery request failed");
+    Failure::of(code)
+}
+
+fn classify(error: &reqwest::Error) -> FailureCode {
+    if cause::<abnegate_http::Error>(error).is_some() {
+        FailureCode::Target
+    } else if error.is_timeout() {
+        FailureCode::Timeout
+    } else if handshake(error) {
+        FailureCode::Tls
+    } else {
+        FailureCode::Connect
     }
-    if error.is_timeout() {
-        return Failure::new(
-            FailureCode::Timeout,
-            "The destination did not respond in time",
-        );
-    }
-    let root = root(error);
-    if handshake(error) {
-        return Failure::new(FailureCode::Tls, format!("TLS handshake failed: {root}"));
-    }
-    Failure::new(
-        FailureCode::Connect,
-        format!("Could not reach the destination: {root}"),
-    )
 }
 
 fn handshake(error: &reqwest::Error) -> bool {
@@ -148,6 +158,39 @@ mod tests {
             target("not a url").map_err(|failure| failure.code),
             Err(FailureCode::Configuration)
         );
+    }
+
+    #[test]
+    fn refusals_carry_the_fixed_sentence_for_their_code() {
+        for (url, code) in [
+            ("http://169.254.169.254/latest", FailureCode::Target),
+            ("not a url", FailureCode::Configuration),
+        ] {
+            assert_eq!(target(url), Err(Failure::of(code)), "{url}");
+        }
+    }
+
+    #[test]
+    fn every_caller_shares_one_client_without_panicking() {
+        assert!(client().is_ok());
+        assert!(client().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_names_no_address_or_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let error = client()
+            .unwrap()
+            .get(format!("http://{address}/hook"))
+            .send()
+            .await
+            .unwrap_err();
+        let failure = failure(&error);
+        assert_eq!(failure, Failure::of(FailureCode::Connect));
+        assert!(!failure.message.contains(&address.port().to_string()));
+        assert!(!failure.message.contains("127.0.0.1"));
     }
 
     #[test]

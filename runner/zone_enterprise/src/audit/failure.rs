@@ -37,6 +37,24 @@ impl FailureCode {
         }
     }
 
+    /// The sentence a failure shows its organization's admins. It names no host, port or
+    /// underlying error, so failures can't be used to probe the network Zone runs on.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Connect => "Zone couldn't connect to the destination or finish sending to it.",
+            Self::Timeout => "The destination didn't answer in time.",
+            Self::Tls => "The TLS handshake with the destination failed.",
+            Self::Status => "The destination answered with a status outside 2xx.",
+            Self::Target => {
+                "The destination's host resolves only to link-local or cloud metadata addresses, which audit delivery never reaches."
+            }
+            Self::Configuration => "The destination can't be used as saved.",
+            Self::Unsealable => {
+                "The destination's secrets can't be opened with this server's encryption key."
+            }
+        }
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|code| code.as_str() == value)
     }
@@ -74,6 +92,18 @@ mod tests {
         for code in FailureCode::ALL {
             assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());
             assert_eq!(code.to_string(), code.as_str());
+        }
+    }
+
+    #[test]
+    fn every_message_is_one_fixed_sentence() {
+        for code in FailureCode::ALL {
+            let message = code.message();
+            assert!(
+                message.ends_with('.') && !message.contains('\n'),
+                "{message}"
+            );
+            assert!(!message.contains(':'), "{code}: {message}");
         }
     }
 

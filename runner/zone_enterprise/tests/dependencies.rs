@@ -9,7 +9,7 @@ const ALLOWED: [&str; 7] = [
 ];
 
 const FEATURES: [(&str, &[&str]); 2] = [
-    ("audit", &["hex", "hmac", "sha2", "url"]),
+    ("audit", &["hex", "hmac", "md-5", "sha2", "url"]),
     (
         "sso",
         &["dashmap", "jsonwebtoken", "rand", "reqwest", "sha2", "url"],

@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -6,6 +7,7 @@ use std::time::Duration;
 
 use abnegate_http::metadata;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use rustls::crypto::{CryptoProvider, aws_lc_rs};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -16,10 +18,12 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, UdpSocket, lookup_host};
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
+use uuid::Uuid;
 use zone_enterprise::audit::destination::{Protocol, SecretName, SyslogSecrets, SyslogSettings};
 use zone_enterprise::audit::syslog::{Header, UDP_BUDGET, message, octet_counted};
 use zone_enterprise::audit::{Error, Event, FailureCode};
 
+use super::tls::Configurations;
 use super::{Batch, Failure, Transport};
 
 pub const TIMEOUT: Duration = Duration::from_secs(10);
@@ -39,9 +43,29 @@ enum Channel {
 
 impl Syslog {
     pub fn new(settings: &SyslogSettings, secrets: &SyslogSecrets) -> Result<Self, Failure> {
+        Self::configured(settings, || config(secrets))
+    }
+
+    /// As `new`, reusing the TLS configuration built for this version of destination `id`.
+    pub fn reusing(
+        settings: &SyslogSettings,
+        secrets: &SyslogSecrets,
+        configurations: &Configurations,
+        id: Uuid,
+        updated_at: DateTime<Utc>,
+    ) -> Result<Self, Failure> {
+        Self::configured(settings, || {
+            configurations.get(id, updated_at, || config(secrets))
+        })
+    }
+
+    fn configured(
+        settings: &SyslogSettings,
+        config: impl FnOnce() -> Result<Arc<ClientConfig>, Failure>,
+    ) -> Result<Self, Failure> {
         let channel = match settings.protocol {
             Protocol::Tls => Channel::Tls {
-                connector: TlsConnector::from(Arc::new(config(secrets)?)),
+                connector: TlsConnector::from(config()?),
                 server: ServerName::try_from(settings.host.clone()).map_err(|_| {
                     Failure::new(
                         FailureCode::Configuration,
@@ -73,12 +97,7 @@ impl Syslog {
         }
         let resolved = bounded(authority, lookup_host(authority))
             .await?
-            .map_err(|error| {
-                Failure::new(
-                    FailureCode::Connect,
-                    format!("Could not resolve {authority}: {error}"),
-                )
-            })?;
+            .map_err(|error| logged(FailureCode::Connect, authority, error))?;
         let addresses: Vec<SocketAddr> = resolved
             .filter(|address| !metadata::is_address(address.ip()))
             .collect();
@@ -99,12 +118,7 @@ impl Syslog {
         let connection = connect(authority, addresses).await?;
         let mut tls = bounded(authority, connector.connect(server.clone(), connection))
             .await?
-            .map_err(|error| {
-                Failure::new(
-                    FailureCode::Tls,
-                    format!("The TLS handshake with {authority} failed: {error}"),
-                )
-            })?;
+            .map_err(|error| logged(FailureCode::Tls, authority, error))?;
         let header = self.header();
         let mut frames = Vec::new();
         for event in events {
@@ -196,7 +210,7 @@ fn provider() -> CryptoProvider {
     aws_lc_rs::default_provider()
 }
 
-fn config(secrets: &SyslogSecrets) -> Result<ClientConfig, Failure> {
+fn config(secrets: &SyslogSecrets) -> Result<Arc<ClientConfig>, Failure> {
     let provider = provider();
     let credentials = Credentials::parse(secrets, &provider)
         .map_err(|error| Failure::new(FailureCode::Configuration, error.to_string()))?;
@@ -207,12 +221,12 @@ fn config(secrets: &SyslogSecrets) -> Result<ClientConfig, Failure> {
         Some(roots) => builder.with_root_certificates(roots),
         None => builder.with_platform_verifier().map_err(unconfigurable)?,
     };
-    Ok(match credentials.identity {
+    Ok(Arc::new(match credentials.identity {
         Some(identity) => {
             builder.with_client_cert_resolver(Arc::new(SingleCertAndKey::from(identity)))
         }
         None => builder.with_no_client_auth(),
-    })
+    }))
 }
 
 fn roots(pem: &str) -> Result<RootCertStore, Error> {
@@ -238,9 +252,7 @@ fn identity(
     let identity = CertifiedKey::new(chain, key);
     match identity.keys_match() {
         Ok(()) | Err(rustls::Error::InconsistentKeys(InconsistentKeys::Unknown)) => Ok(identity),
-        Err(rustls::Error::InconsistentKeys(_)) => {
-            Err(Error::CertificateInvalid(SecretName::ClientKey))
-        }
+        Err(rustls::Error::InconsistentKeys(_)) => Err(Error::CertificateMismatched),
         Err(_) => Err(Error::CertificateInvalid(SecretName::ClientCertificate)),
     }
 }
@@ -256,20 +268,15 @@ fn certificates(pem: &str, name: SecretName) -> Result<Vec<CertificateDer<'stati
 }
 
 async fn connect(authority: &str, addresses: &[SocketAddr]) -> Result<TcpStream, Failure> {
-    let mut failure = refused(authority);
+    let mut failure = None;
     for address in addresses {
         match timeout(TIMEOUT, TcpStream::connect(address)).await {
             Ok(Ok(connection)) => return Ok(connection),
-            Ok(Err(error)) => {
-                failure = Failure::new(
-                    FailureCode::Connect,
-                    format!("Could not connect to {authority}: {error}"),
-                );
-            }
-            Err(_) => failure = elapsed(authority),
+            Ok(Err(error)) => failure = Some(logged(FailureCode::Connect, authority, error)),
+            Err(_) => failure = Some(elapsed(authority)),
         }
     }
-    Err(failure)
+    Err(failure.unwrap_or_else(|| refused(authority)))
 }
 
 async fn bounded<T>(authority: &str, future: impl Future<Output = T>) -> Result<T, Failure> {
@@ -279,21 +286,18 @@ async fn bounded<T>(authority: &str, future: impl Future<Output = T>) -> Result<
 }
 
 fn elapsed(authority: &str) -> Failure {
-    Failure::new(
+    logged(
         FailureCode::Timeout,
-        format!(
-            "{authority} did not answer within {} seconds.",
-            TIMEOUT.as_secs()
-        ),
+        authority,
+        format_args!("no answer within {} seconds", TIMEOUT.as_secs()),
     )
 }
 
 fn refused(authority: &str) -> Failure {
-    Failure::new(
+    logged(
         FailureCode::Target,
-        format!(
-            "{authority} names or resolves only to link-local or cloud metadata addresses, which audit delivery never reaches."
-        ),
+        authority,
+        "only link-local or cloud metadata addresses",
     )
 }
 
@@ -306,12 +310,17 @@ fn transfer(authority: &str, error: io::Error) -> Failure {
     } else {
         FailureCode::Connect
     };
-    Failure::new(code, format!("Could not send to {authority}: {error}"))
+    logged(code, authority, error)
+}
+
+/// The fixed failure an organization's admins see; the cause, naming the address and port Zone
+/// tried, goes only to the server log.
+fn logged(code: FailureCode, authority: &str, cause: impl Display) -> Failure {
+    tracing::warn!(%code, authority, %cause, "An audit syslog delivery failed");
+    Failure::of(code)
 }
 
 fn unconfigurable(error: rustls::Error) -> Failure {
-    Failure::new(
-        FailureCode::Configuration,
-        format!("The TLS client could not be configured: {error}"),
-    )
+    tracing::error!(%error, "Could not configure the audit syslog TLS client");
+    Failure::of(FailureCode::Configuration)
 }

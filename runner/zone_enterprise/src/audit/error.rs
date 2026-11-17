@@ -38,6 +38,10 @@ pub enum Error {
     #[error("{0}")]
     UrlInvalid(UrlReason),
     #[error(
+        "Virtual-host addressing puts the bucket in front of the endpoint's host name, so it needs an endpoint named by host, not by IP address. Use path addressing for this endpoint."
+    )]
+    VirtualHostUnaddressable,
+    #[error(
         "\"{0}\" is not a valid bucket name. Use 3 to 63 lowercase letters, digits, dots or hyphens, starting and ending with a letter or digit."
     )]
     BucketInvalid(String),
@@ -53,6 +57,8 @@ pub enum Error {
         "\"{0}\" is not a valid syslog host. Use a hostname or IP address, with no scheme, port or path."
     )]
     HostInvalid(String),
+    #[error("{}", host_refusal(.0))]
+    HostRefused(UrlReason),
     #[error("The port must be between 1 and 65535.")]
     PortInvalid,
     #[error("{0} is not a syslog facility. Use a number from 0 to 23.")]
@@ -69,6 +75,8 @@ pub enum Error {
     SecretInvalid(SecretName),
     #[error("The {} must be in PEM form.", .0.label())]
     CertificateInvalid(SecretName),
+    #[error("The client key doesn't belong to the client certificate.")]
+    CertificateMismatched,
     #[error("A client certificate and a client key go together: set both or neither.")]
     CertificateUnpaired,
     #[error("Certificates need the tls protocol: UDP syslog is unencrypted.")]
@@ -92,11 +100,11 @@ impl Error {
             Self::DestinationDuplicate => DESTINATION_DUPLICATE,
             Self::NameInvalid => NAME_INVALID,
             Self::KindInvalid => KIND_INVALID,
-            Self::UrlInvalid(_) => URL_INVALID,
+            Self::UrlInvalid(_) | Self::VirtualHostUnaddressable => URL_INVALID,
             Self::BucketInvalid(_) => BUCKET_INVALID,
             Self::RegionInvalid(_) => REGION_INVALID,
             Self::PrefixInvalid(_) => PREFIX_INVALID,
-            Self::HostInvalid(_) => HOST_INVALID,
+            Self::HostInvalid(_) | Self::HostRefused(_) => HOST_INVALID,
             Self::PortInvalid => PORT_INVALID,
             Self::FacilityInvalid(_) => FACILITY_INVALID,
             Self::HostnameInvalid(_) => HOSTNAME_INVALID,
@@ -104,6 +112,7 @@ impl Error {
                 SECRET_INVALID
             }
             Self::CertificateInvalid(_)
+            | Self::CertificateMismatched
             | Self::CertificateUnpaired
             | Self::CertificateWithoutTls => CERTIFICATE_INVALID,
             Self::RetentionInvalid => RETENTION_INVALID,
@@ -121,11 +130,23 @@ impl Error {
     }
 }
 
+fn host_refusal(reason: &UrlReason) -> &'static str {
+    match reason {
+        UrlReason::Metadata => {
+            "The syslog host must not be a link-local or cloud metadata address."
+        }
+        UrlReason::Unlisted => {
+            "The syslog host is not one this instance allows endpoints on: ZONE_ENDPOINT_HOSTS doesn't list it."
+        }
+        _ => "The syslog host is not one audit delivery can send to.",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn every() -> [Error; 22] {
+    fn every() -> [Error; 27] {
         [
             Error::DestinationNotFound,
             Error::DestinationDuplicate,
@@ -149,6 +170,11 @@ mod tests {
             Error::ExportRangeInvalid,
             Error::ExportFormatInvalid,
             Error::UrlInvalid(UrlReason::Metadata),
+            Error::VirtualHostUnaddressable,
+            Error::HostRefused(UrlReason::Metadata),
+            Error::HostRefused(UrlReason::Unlisted),
+            Error::HostRefused(UrlReason::Host),
+            Error::CertificateMismatched,
         ]
     }
 
@@ -180,6 +206,11 @@ mod tests {
                 "audit_export_range_invalid",
                 "audit_export_format_invalid",
                 "audit_destination_url_invalid",
+                "audit_destination_url_invalid",
+                "audit_destination_host_invalid",
+                "audit_destination_host_invalid",
+                "audit_destination_host_invalid",
+                "audit_destination_certificate_invalid",
             ]
         );
     }
@@ -245,5 +276,30 @@ mod tests {
             Error::UrlInvalid(UrlReason::Query).to_string(),
             "The URL must not include a query."
         );
+    }
+
+    #[test]
+    fn a_refused_syslog_host_says_why_without_calling_it_malformed() {
+        assert_eq!(
+            Error::HostRefused(UrlReason::Metadata).to_string(),
+            "The syslog host must not be a link-local or cloud metadata address."
+        );
+        let unlisted = Error::HostRefused(UrlReason::Unlisted).to_string();
+        assert!(unlisted.contains("ZONE_ENDPOINT_HOSTS"), "{unlisted}");
+        for reason in UrlReason::ALL {
+            let message = Error::HostRefused(reason).to_string();
+            assert!(!message.contains("not a valid"), "{message}");
+            assert!(message.starts_with("The syslog host"), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_mismatched_key_is_not_called_malformed() {
+        let message = Error::CertificateMismatched.to_string();
+        assert_eq!(
+            message,
+            "The client key doesn't belong to the client certificate."
+        );
+        assert!(!message.contains("PEM"));
     }
 }
