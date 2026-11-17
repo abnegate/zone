@@ -16,6 +16,7 @@ export * from './freshness';
 export * from './hooks';
 export * from './icons';
 export * from './notices';
+export * from './revalidation';
 export * from './schemas';
 export * from './sourceStatus';
 export type { Tint } from './tint';

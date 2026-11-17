@@ -64,7 +64,9 @@ test('a clip becomes reviewable frames with its sampling receipt', async ({
 
   // A frame is captioned by the clip it came from, and a mirrored one says so.
   await expect(page.locator('.train-pair-filename').first()).toContainText('training.mp4');
-  await expect(page.locator('.train-pair-filename', { hasText: '(mirrored)' }).first()).toBeVisible();
+  await expect(
+    page.locator('.train-pair-filename', { hasText: '(mirrored)' }).first()
+  ).toBeVisible();
   expect(consoleErrors).toEqual([]);
 });
 

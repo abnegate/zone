@@ -1,14 +1,21 @@
+use std::time::Duration;
+
 use serde_json::Value;
 use serde_json::json;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::any;
+use wiremock::matchers::body_partial_json;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+use wiremock::matchers::query_param;
 
 use super::*;
 use crate::services::github::client::FOREIGN_JOB;
+use crate::services::github::client::Guard;
+use crate::services::github::client::UNEXPECTED_RESPONSE;
 use crate::services::github::diff::LineKind;
 use crate::services::github::diff::PER_FILE_DIFF;
 use crate::services::github::diff::Status;
@@ -79,6 +86,62 @@ async fn open_pull_requests_are_read_up_to_the_limit_and_say_whether_that_was_al
         .collect();
     assert_eq!(numbers, [1, 2]);
     assert!(!complete);
+}
+
+async fn rest_page(server: &MockServer, page: u32, numbers: impl IntoIterator<Item = u64>) {
+    let rows: Vec<Value> = numbers.into_iter().map(listed_pull).collect();
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repository/pulls"))
+        .and(query_param("page", page.to_string()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!(rows)))
+        .mount(server)
+        .await;
+}
+
+async fn pages_read(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.path() == "/repos/owner/repository/pulls")
+        .filter_map(|request| {
+            request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "page")
+                .map(|(_, page)| page.into_owned())
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_pull_request_updated_onto_a_later_page_is_listed_once_and_the_listing_stays_whole() {
+    let server = MockServer::start().await;
+    rest_page(&server, 1, 1..=100).await;
+    rest_page(&server, 2, 100..=102).await;
+    let github = mocked(&server);
+
+    let (pulls, complete) = github.open_pulls(102).await.unwrap();
+
+    assert_eq!(numbers(&pulls), (1..=102).collect::<Vec<u64>>());
+    assert!(complete, "a repeat is not a pull request past the limit");
+    assert_eq!(pages_read(&server).await, ["1", "2"]);
+}
+
+#[tokio::test]
+async fn a_repeat_does_not_count_toward_the_limit_and_paging_goes_on() {
+    let server = MockServer::start().await;
+    rest_page(&server, 1, 1..=100).await;
+    rest_page(&server, 2, 100..=199).await;
+    rest_page(&server, 3, 200..=201).await;
+    let github = mocked(&server);
+
+    let (pulls, complete) = github.open_pulls(200).await.unwrap();
+
+    assert_eq!(numbers(&pulls), (1..=200).collect::<Vec<u64>>());
+    assert!(!complete, "pull request 201 is past the limit");
+    assert_eq!(pages_read(&server).await, ["1", "2", "3"]);
 }
 
 #[tokio::test]
@@ -287,4 +350,300 @@ async fn a_job_log_is_read_for_the_pull_requests_head_only() {
         github.job_log_tail(job, COMMIT, now).await.unwrap_err(),
         Fault::missing(FOREIGN_JOB)
     );
+}
+
+const REPOSITORY_ID: &str = "R_repository";
+const CURSOR: &str = "Y3Vyc29y";
+const LATER: &str = "bGF0ZXI=";
+
+fn open_row(number: u64) -> Value {
+    json!({
+        "id": format!("PR_{number}"),
+        "number": number,
+        "title": format!("Change {number}"),
+        "url": format!("{REPOSITORY_URL}/pull/{number}"),
+        "state": "OPEN",
+        "isDraft": false,
+        "updatedAt": "2026-11-14T03:00:00Z",
+        "headRefName": "feature",
+        "headRefOid": HEAD,
+        "baseRefName": "main",
+        "author": {"__typename": "User", "login": "octocat"},
+    })
+}
+
+/// A page of open pull requests `numbers` in the repository `id`, asked for
+/// `first` at a time after `after`, followed by the page after `next`.
+async fn open_page(
+    server: &MockServer,
+    id: &str,
+    first: u64,
+    after: Option<&str>,
+    numbers: std::ops::RangeInclusive<u64>,
+    next: Option<&str>,
+) {
+    let rows: Vec<Value> = numbers.map(open_row).collect();
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(
+            json!({"variables": {"first": first, "after": after}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "repository": {
+                "id": id,
+                "pullRequests": {
+                    "pageInfo": {"hasNextPage": next.is_some(), "endCursor": next},
+                    "nodes": rows,
+                },
+            },
+        }})))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+fn numbers(rows: &[ListedPullRequest]) -> Vec<u64> {
+    rows.iter()
+        .map(|row| row.reference.number().get())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_second_page_asks_for_what_the_limit_leaves_after_the_first_cursor() {
+    let server = MockServer::start().await;
+    open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
+    open_page(
+        &server,
+        REPOSITORY_ID,
+        20,
+        Some(CURSOR),
+        100..=120,
+        Some(LATER),
+    )
+    .await;
+    let github = mocked(&server);
+    let permits = Semaphore::new(1);
+
+    let (repository, rows, complete) = github.open_pull_requests(&permits, 120).await.unwrap();
+
+    assert_eq!(repository, RepositoryId::new(REPOSITORY_ID));
+    assert_eq!(
+        numbers(&rows),
+        (1..=120).collect::<Vec<u64>>(),
+        "a pull request listed on both pages is listed once"
+    );
+    assert!(!complete, "more pages follow the limit");
+    assert_eq!(permits.available_permits(), 1);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_last_page_inside_the_limit_is_every_open_pull_request() {
+    let server = MockServer::start().await;
+    open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
+    open_page(&server, REPOSITORY_ID, 50, Some(CURSOR), 101..=130, None).await;
+    let github = mocked(&server);
+
+    let (_, rows, complete) = github
+        .open_pull_requests(&Semaphore::new(1), 150)
+        .await
+        .unwrap();
+
+    assert_eq!(numbers(&rows), (1..=130).collect::<Vec<u64>>());
+    assert!(complete);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn pages_of_another_repository_part_way_through_are_refused() {
+    let server = MockServer::start().await;
+    open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
+    open_page(&server, "R_elsewhere", 50, Some(CURSOR), 101..=130, None).await;
+    let github = mocked(&server);
+
+    let refused = github.open_pull_requests(&Semaphore::new(1), 150).await;
+
+    assert_eq!(refused.err(), Some(Fault::upstream(MOVED_REPOSITORY)));
+    server.verify().await;
+}
+
+fn listed_row(github: &Github, number: u64) -> ListedPullRequest {
+    ListedPullRequest::new(
+        github.reference(number).unwrap(),
+        format!("PR_{number}"),
+        format!("{REPOSITORY_URL}/pull/{number}"),
+        abnegate_vcs::BranchName::parse("feature").unwrap(),
+        abnegate_vcs::BranchName::parse("main").unwrap(),
+    )
+}
+
+fn read(row: ListedPullRequest) -> EvidenceSlot {
+    EvidenceSlot::Read(Box::new(PullRequestEvidence::new(
+        row,
+        abnegate_vcs::MergeableState::Clean,
+        abnegate_vcs::ReviewThreadCount::new(0, 0, true),
+        Collected::new(Vec::new(), true),
+    )))
+}
+
+#[tokio::test]
+async fn slots_count_only_when_github_answered_for_every_pull_request_asked() {
+    let server = MockServer::start().await;
+    let github = mocked(&server);
+    let first = listed_row(&github, 1);
+    let second = listed_row(&github, 2);
+    let mut renumbered = second.clone();
+    renumbered.reference = github.reference(9).unwrap();
+
+    let short = github.vouched(vec![read(first.clone())], &[&first, &second]);
+    let vouched = github.vouched(
+        vec![read(first.clone()), read(renumbered)],
+        &[&first, &second],
+    );
+
+    assert_eq!(short, [None, None], "a short answer vouches for none");
+    assert!(vouched[0].is_some());
+    assert!(vouched[1].is_none(), "a slot for another pull request");
+}
+
+#[tokio::test]
+async fn a_batch_sent_once_the_listing_stopped_asks_github_for_nothing() {
+    let server = MockServer::start().await;
+    let github = mocked(&server);
+    let row = listed_row(&github, 1);
+    let stop = AtomicBool::new(true);
+
+    let read = github
+        .evidence(
+            &Semaphore::new(1),
+            &RepositoryId::new(REPOSITORY_ID),
+            &[&row],
+            &stop,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(read, [None]);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_batch_github_takes_too_long_over_leaves_the_batches_after_it_to_be_sent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": {"nodes": [null]}}))
+                .set_delay(Duration::from_secs(5)),
+        )
+        .mount(&server)
+        .await;
+    let github = mocked(&server).guarded(Guard::new(Duration::from_millis(50)));
+    let row = listed_row(&github, 1);
+    let stop = AtomicBool::new(false);
+
+    let read = github
+        .evidence(
+            &Semaphore::new(1),
+            &RepositoryId::new(REPOSITORY_ID),
+            &[&row],
+            &stop,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(read, [None], "its own pull request is read through REST");
+    assert!(
+        !stop.load(Ordering::Acquire),
+        "a slow batch stopped the batches after it"
+    );
+}
+
+/// A GitHub that fails the test on any page it was not told to answer, so a
+/// listing that keeps paging is caught rather than answered with a 404.
+async fn paged() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(u8::MAX)
+        .expect(0)
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn a_page_that_lists_nothing_new_but_says_more_follow_stops_the_listing() {
+    let empty = std::ops::RangeInclusive::new(1, 0);
+    for (name, rows) in [("an empty page", empty), ("a page listed before", 1..=100)] {
+        let server = paged().await;
+        open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
+        open_page(&server, REPOSITORY_ID, 50, Some(CURSOR), rows, Some(LATER)).await;
+        let github = mocked(&server);
+
+        let stalled = github.open_pull_requests(&Semaphore::new(1), 150).await;
+
+        assert_eq!(
+            stalled.err(),
+            Some(Fault::upstream(STALLED_CURSOR)),
+            "{name}"
+        );
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn a_page_that_names_the_cursor_it_was_read_after_stops_the_listing() {
+    let server = paged().await;
+    open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
+    open_page(
+        &server,
+        REPOSITORY_ID,
+        50,
+        Some(CURSOR),
+        101..=110,
+        Some(CURSOR),
+    )
+    .await;
+    let github = mocked(&server);
+
+    let stalled = github.open_pull_requests(&Semaphore::new(1), 150).await;
+
+    assert_eq!(
+        stalled.err(),
+        Some(Fault::upstream(UNEXPECTED_RESPONSE)),
+        "the crate refuses a cursor that never moved, short of a halt"
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_page_that_points_back_to_a_cursor_already_read_after_stops_the_listing() {
+    let server = paged().await;
+    open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
+    open_page(
+        &server,
+        REPOSITORY_ID,
+        100,
+        Some(CURSOR),
+        101..=200,
+        Some(LATER),
+    )
+    .await;
+    open_page(
+        &server,
+        REPOSITORY_ID,
+        50,
+        Some(LATER),
+        201..=210,
+        Some(CURSOR),
+    )
+    .await;
+    let github = mocked(&server);
+
+    let stalled = github.open_pull_requests(&Semaphore::new(1), 250).await;
+
+    assert_eq!(stalled.err(), Some(Fault::upstream(STALLED_CURSOR)));
+    server.verify().await;
 }

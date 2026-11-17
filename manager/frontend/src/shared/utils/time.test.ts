@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { absoluteTime, instant, relativeTime } from './time';
+import { absoluteTime, instant, relativeTime, utcInstant } from './time';
 
 const NOW = new Date('2026-11-13T12:00:00Z');
 
@@ -54,5 +54,26 @@ describe('instant', () => {
 
   it.each(['', 'yesterday', '2026-13-45'])('reads %p as no instant', (value) => {
     expect(instant(value)).toBeUndefined();
+  });
+});
+
+describe('utc instant', () => {
+  it('reads a zoneless server timestamp as UTC', () => {
+    expect(utcInstant('2026-11-16T10:00:00')?.toISOString()).toBe('2026-11-16T10:00:00.000Z');
+  });
+
+  it('reads a zoneless timestamp with microseconds', () => {
+    expect(utcInstant('2026-11-15T18:30:00.123456')?.toISOString()).toBe(
+      '2026-11-15T18:30:00.123Z'
+    );
+  });
+
+  it('keeps the zone a timestamp already names', () => {
+    expect(utcInstant('2026-11-16T10:00:00+02:00')?.toISOString()).toBe('2026-11-16T08:00:00.000Z');
+    expect(utcInstant('2026-11-16T10:00:00Z')?.toISOString()).toBe('2026-11-16T10:00:00.000Z');
+  });
+
+  it.each(['', 'yesterday'])('reads %p as no instant', (value) => {
+    expect(utcInstant(value)).toBeUndefined();
   });
 });

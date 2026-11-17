@@ -9,6 +9,7 @@ pub mod audit;
 pub mod comfy;
 pub mod context;
 pub mod database;
+pub mod eventually;
 pub mod github_app;
 pub mod identity_provider;
 pub mod logs;
@@ -106,6 +107,7 @@ pub fn test_config() -> Config {
         web_search: zone_server::services::search::defaults(),
         comfyui: zone_server::services::comfy::settings::development(),
         source_index: Default::default(),
+        evaluation: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
         train_upload_limit_mb: 512,
@@ -574,6 +576,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         web_search: zone_server::services::search::defaults(),
         comfyui: zone_server::services::comfy::settings::development(),
         source_index: Default::default(),
+        evaluation: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
         train_upload_limit_mb: 512,

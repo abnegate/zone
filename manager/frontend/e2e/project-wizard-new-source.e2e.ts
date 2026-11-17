@@ -121,9 +121,7 @@ test.describe('New project wizard: new source', () => {
     await card.click();
     await expect(nested).toBeVisible();
     await expect(project).toHaveAttribute('inert', '');
-    expect(await nested.evaluate((element) => element.contains(document.activeElement))).toBe(
-      true
-    );
+    expect(await nested.evaluate((element) => element.contains(document.activeElement))).toBe(true);
 
     await page.keyboard.press('Escape');
     await expect(nested).toHaveCount(0);
@@ -226,7 +224,9 @@ for (const width of [1280, 375]) {
       await addFilesystemSource(nested);
       await nested.getByRole('button', { name: 'Add Source' }).click();
       await expect(nested).toHaveCount(0);
-      await expect(project.getByRole('button', { name: /zone filesystem/ })).toHaveClass(/selected/);
+      await expect(project.getByRole('button', { name: /zone filesystem/ })).toHaveClass(
+        /selected/
+      );
       await project.getByRole('button', { name: /zone filesystem/ }).blur();
       await shoot('created');
     });

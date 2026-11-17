@@ -1,8 +1,6 @@
-import { test, expect } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { blockServiceWorker, routeApi } from './test-utils';
-
-const SUBPIXEL = 0.05;
 
 test.describe('Wiki Page', () => {
   test.beforeEach(async ({ context, page }) => {
@@ -95,11 +93,7 @@ test.describe('Wiki Page', () => {
       const spacing = await wiki.evaluate((element) => {
         const field = element.getBoundingClientRect();
         const icon = document.querySelector('.wiki-search-icon')!.getBoundingClientRect();
-        return (
-          field.left +
-          Number.parseFloat(getComputedStyle(element).paddingLeft) -
-          icon.right
-        );
+        return field.left + Number.parseFloat(getComputedStyle(element).paddingLeft) - icon.right;
       });
       expect(spacing).toBeGreaterThan(0);
       await page.screenshot({ path: test.info().outputPath('wiki.png') });
@@ -122,10 +116,7 @@ test.describe('Wiki Page', () => {
     test('shows search input', async ({ page }) => {
       const searchInput = page.getByRole('searchbox', { name: 'Search knowledge' });
       await expect(searchInput).toBeVisible();
-      await expect(searchInput).toHaveAttribute(
-        'placeholder',
-        'Search knowledge and sources...'
-      );
+      await expect(searchInput).toHaveAttribute('placeholder', 'Search knowledge and sources...');
     });
 
     test('shows add knowledge button', async ({ page }) => {
@@ -143,9 +134,7 @@ test.describe('Wiki Page', () => {
 
   test.describe('Empty State', () => {
     test('shows empty state when no entries exist', async ({ page }) => {
-      await expect(
-        page.getByRole('heading', { name: 'No knowledge entries found' })
-      ).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'No knowledge entries found' })).toBeVisible();
       await expect(
         page.getByText('Add your first knowledge entry to build your knowledge base')
       ).toBeVisible();

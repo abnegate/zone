@@ -8,7 +8,7 @@ WORKDIR /app
 # g++ provides libstdc++-dev, which the statically linked ONNX Runtime needs
 # to satisfy -lstdc++ (see manager/Dockerfile).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config libssl-dev g++ \
+        curl pkg-config libssl-dev g++ \
     && rm -rf /var/lib/apt/lists/*
 
 # Install cargo-watch for hot reloading

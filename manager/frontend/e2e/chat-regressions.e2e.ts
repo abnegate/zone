@@ -1,11 +1,11 @@
-import { test, expect } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import {
+  type ChatSocketController,
   GENERATED_ARTIFACT_URL,
-  MOCK_PNG_BYTES,
   generatedAttachment,
   installChatSocketMock,
-  type ChatSocketController,
+  MOCK_PNG_BYTES,
 } from './helpers/chatSocket';
 import { blockServiceWorker, CHAT_PROVIDERS, routeApi } from './test-utils';
 

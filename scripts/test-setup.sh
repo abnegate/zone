@@ -35,4 +35,15 @@ if bash "$script" --not-a-flag; then
     fail 'Expected unknown flags to fail'
 fi
 
+occupied=$(mktemp -d)
+trap 'rm -rf -- "$occupied"' EXIT
+users="$occupied/users.htpasswd"
+mkdir -p -- "$users"
+: > "$users/stray"
+if refused=$(printf '3\n' | SECURITY_BASIC_AUTH_USERS_FILE="$users" bash "$script" 2>&1); then
+    fail 'Expected basic auth setup to fail when the users file is a directory with files in it'
+fi
+printf '%s\n' "$refused" | grep -qF "Could not prepare the basic auth file at $users" \
+    || fail "Expected the failure to name $users, got: $refused"
+
 printf '%s\n' 'Setup script checks passed'

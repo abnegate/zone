@@ -40,8 +40,6 @@ pub const WEB: &str = "web";
 
 pub const TEXT: &str = "text";
 
-pub const NOTION: &str = "notion";
-
 pub const GOOGLE_CALENDAR: &str = "google_calendar";
 
 pub const GOOGLE_MAIL: &str = "google_mail";

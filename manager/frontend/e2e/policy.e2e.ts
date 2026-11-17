@@ -13,6 +13,14 @@ import {
   LAPSED_ORGANIZATION,
 } from '../src/features/enterprise/policy/fixtures';
 import {
+  EFFECTIVE_SUMMARY,
+  LAPSED_NOTICE,
+  ORGANIZATION_SUMMARY,
+  SAVE_LABEL,
+  SOURCE_LABELS,
+  UPGRADE_NOTICE,
+} from '../src/features/enterprise/policy/labels';
+import {
   AGENT_POLICY_LINK,
   agentLabel,
   denialMessage,
@@ -39,7 +47,6 @@ import {
   setupCommonRoutes,
 } from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
-import { EFFECTIVE_SUMMARY, LAPSED_NOTICE, ORGANIZATION_SUMMARY, SAVE_LABEL, SOURCE_LABELS, UPGRADE_NOTICE } from '../src/features/enterprise/policy/labels';
 
 const INHERITED = SOURCE_LABELS[PolicySource.Organization];
 const OVERRIDDEN = SOURCE_LABELS[PolicySource.Workspace];
@@ -67,7 +74,10 @@ const ANTHROPIC_DENIED = denialMessage(
   PolicyCode.ProviderDenied,
   providerLabel(PolicyProvider.Anthropic)
 );
-const OPENAI_DENIED = denialMessage(PolicyCode.ProviderDenied, providerLabel(PolicyProvider.OpenAI));
+const OPENAI_DENIED = denialMessage(
+  PolicyCode.ProviderDenied,
+  providerLabel(PolicyProvider.OpenAI)
+);
 const CODEX_DENIED = denialMessage(PolicyCode.AgentDenied, agentLabel(PolicyAgent.Codex));
 
 interface PolicyServer {

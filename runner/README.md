@@ -35,7 +35,6 @@ Zone is a comprehensive AI development assistant that combines:
   - **Web** - Web page scraping with SSRF protection
   - **iCal** - Calendar events
   - **Text** - Raw text content
-  - **Notion** - (planned)
   - **Slack** - (planned)
   - **Discord** - (planned)
   - **IMAP** - (planned)

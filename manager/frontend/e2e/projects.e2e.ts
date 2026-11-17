@@ -1,7 +1,7 @@
-import { test, expect } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { chooseSelect } from './helpers/select';
-import { blockServiceWorker, routeApi, CHAT_PROVIDERS } from './test-utils';
+import { blockServiceWorker, CHAT_PROVIDERS, routeApi } from './test-utils';
 
 // Mock data generators
 const generateMockProject = (
@@ -41,7 +41,13 @@ const generateMockAutomation = (
   parallelism: 3,
   planner_chat_id: 'chat-plan',
   updates_chat_id: 'chat-updates',
-  counts: { total: 2, agentic: 2, complete: 1, in_flight: 1, paused: options.paused_reason ? 1 : 0 },
+  counts: {
+    total: 2,
+    agentic: 2,
+    complete: 1,
+    in_flight: 1,
+    paused: options.paused_reason ? 1 : 0,
+  },
   tasks: [
     {
       task_id: 'task-1',
@@ -239,12 +245,8 @@ test.describe('Projects Page', () => {
 
   test.describe('Page Header', () => {
     test('displays page title and subtitle', async ({ page }) => {
-      await expect(
-        page.getByRole('heading', { name: 'Projects', exact: true })
-      ).toBeVisible();
-      await expect(
-        page.getByText('Organize work with GitHub integration')
-      ).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
+      await expect(page.getByText('Organize work with GitHub integration')).toBeVisible();
     });
 
     test('shows new project button', async ({ page }) => {
@@ -254,12 +256,8 @@ test.describe('Projects Page', () => {
 
   test.describe('Empty State', () => {
     test('shows empty state when no projects exist', async ({ page }) => {
-      await expect(
-        page.getByRole('heading', { name: 'No projects yet' })
-      ).toBeVisible();
-      await expect(
-        page.getByText('Create your first project to get started')
-      ).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'No projects yet' })).toBeVisible();
+      await expect(page.getByText('Create your first project to get started')).toBeVisible();
     });
 
     test('shows create project button in empty state', async ({ page }) => {
@@ -294,7 +292,9 @@ test.describe('Projects Page', () => {
 
     test('displays project name and description', async ({ page }) => {
       const mockProjects = [
-        generateMockProject('proj-1', 'My Project', 'active', { description: 'Project description here' }),
+        generateMockProject('proj-1', 'My Project', 'active', {
+          description: 'Project description here',
+        }),
       ];
 
       await page.unroute(projectsListRoutePattern);
@@ -461,10 +461,7 @@ test.describe('Projects Page', () => {
     });
 
     test('All filter is selected by default', async ({ page }) => {
-      await expect(page.getByRole('tab', { name: 'All' })).toHaveAttribute(
-        'data-state',
-        'active'
-      );
+      await expect(page.getByRole('tab', { name: 'All' })).toHaveAttribute('data-state', 'active');
     });
   });
 
@@ -485,7 +482,7 @@ test.describe('Projects Page', () => {
       const dialog = page.getByRole('dialog', { name: 'New Project' });
       await expect(dialog.locator('#project-name')).toBeVisible();
       await expect(dialog.locator('#project-description')).toBeVisible();
-      await dialog.locator('#project-name').fill( 'Test Project');
+      await dialog.locator('#project-name').fill('Test Project');
       await dialog.getByRole('button', { name: 'Next' }).click();
       await expect(dialog.getByRole('button', { name: /New source/ })).toBeVisible();
       await dialog.getByRole('button', { name: 'Next' }).click();
@@ -583,7 +580,7 @@ test.describe('Projects Page', () => {
     test('enables create button when name is entered', async ({ page }) => {
       await page.getByRole('button', { name: 'New project' }).click();
       const dialog = page.getByRole('dialog', { name: 'New Project' });
-      await dialog.locator('#project-name').fill( 'Test');
+      await dialog.locator('#project-name').fill('Test');
       await expect(dialog.getByRole('button', { name: 'Next' })).not.toBeDisabled();
     });
 
@@ -695,10 +692,7 @@ test.describe('Projects Page', () => {
 
     test('opens edit modal with pre-filled values', async ({ page }) => {
       await page.locator('.projects-page .project-card').first().click();
-      await page
-        .locator('.details-actions')
-        .getByRole('button', { name: 'Edit Project' })
-        .click();
+      await page.locator('.details-actions').getByRole('button', { name: 'Edit Project' }).click();
 
       await expect(page.getByRole('dialog', { name: 'Edit Project' })).toBeVisible();
       await expect(page.locator('#edit-name')).toHaveValue('Original Name');
@@ -707,10 +701,7 @@ test.describe('Projects Page', () => {
 
     test('closes edit modal on cancel', async ({ page }) => {
       await page.locator('.projects-page .project-card').first().click();
-      await page
-        .locator('.details-actions')
-        .getByRole('button', { name: 'Edit Project' })
-        .click();
+      await page.locator('.details-actions').getByRole('button', { name: 'Edit Project' }).click();
       await page.locator('.modal-actions').getByRole('button', { name: 'Cancel' }).click();
 
       await expect(page.getByRole('dialog', { name: 'Edit Project' })).toHaveCount(0);
@@ -826,9 +817,10 @@ test.describe('Projects Page', () => {
       await page.reload();
       await page.click('a[href="/projects"]');
 
-      await expect(
-        page.locator('.projects-page .project-card').first()
-      ).toHaveAttribute('tabindex', '0');
+      await expect(page.locator('.projects-page .project-card').first()).toHaveAttribute(
+        'tabindex',
+        '0'
+      );
     });
   });
 

@@ -32,7 +32,7 @@ const nullableTheme = {
 
 async function prepare(
   page: Page,
-  initial: typeof theme | typeof nullableTheme | null,
+  initial: typeof theme | typeof nullableTheme | null
 ): Promise<string[]> {
   await blockServiceWorker(page.context());
   await mockCommonEndpoints(page);
@@ -40,34 +40,27 @@ async function prepare(
   await page.emulateMedia({ colorScheme: 'light' });
   let saved = initial;
   const writes: string[] = [];
-  await routeApi(
-    page,
-    /\/api\/workspaces\/[^/]+\/theme(?:\?|$)/,
-    async (route) => {
-      const method = route.request().method();
-      if (method === 'PUT') {
-        writes.push('theme:PUT');
-        saved = { ...theme, ...route.request().postDataJSON() };
-      }
-      if (method === 'DELETE') {
-        writes.push('theme:DELETE');
-        const existed = saved !== null;
-        saved = null;
-        await route.fulfill({ status: existed ? 204 : 404 });
-        return;
-      }
-      await route.fulfill({
-        status: saved ? 200 : 404,
-        contentType: 'application/json',
-        body: JSON.stringify(
-          saved ? { theme: saved } : { error: 'Theme not found' },
-        ),
-      });
-    },
-  );
+  await routeApi(page, /\/api\/workspaces\/[^/]+\/theme(?:\?|$)/, async (route) => {
+    const method = route.request().method();
+    if (method === 'PUT') {
+      writes.push('theme:PUT');
+      saved = { ...theme, ...route.request().postDataJSON() };
+    }
+    if (method === 'DELETE') {
+      writes.push('theme:DELETE');
+      const existed = saved !== null;
+      saved = null;
+      await route.fulfill({ status: existed ? 204 : 404 });
+      return;
+    }
+    await route.fulfill({
+      status: saved ? 200 : 404,
+      contentType: 'application/json',
+      body: JSON.stringify(saved ? { theme: saved } : { error: 'Theme not found' }),
+    });
+  });
   await routeApi(page, /\/settings\/ai/, async (route) => {
-    if (route.request().method() !== 'GET')
-      writes.push(`ai:${route.request().method()}`);
+    if (route.request().method() !== 'GET') writes.push(`ai:${route.request().method()}`);
     const path = new URL(route.request().url()).pathname;
     await route.fulfill({
       status: 200,
@@ -92,7 +85,7 @@ async function prepare(
           model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
           model_audio: 'ace_step_v1_3.5b.safetensors',
           completions_routed: true,
-        }),
+        })
       ),
     });
   });
@@ -106,27 +99,22 @@ async function openSettings(page: Page): Promise<void> {
 }
 
 async function verifyTheme(page: Page, mode: 'light' | 'dark'): Promise<void> {
-  await expect(
-    page.getByRole('button', { name: 'Primary Button', exact: true }),
-  ).toHaveCSS(
+  await expect(page.getByRole('button', { name: 'Primary Button', exact: true })).toHaveCSS(
     'background-color',
-    mode === 'light' ? 'rgb(176, 48, 64)' : 'rgb(224, 128, 64)',
+    mode === 'light' ? 'rgb(176, 48, 64)' : 'rgb(224, 128, 64)'
   );
-  await expect(
-    page.getByRole('button', { name: 'Secondary Button', exact: true }),
-  ).toHaveCSS(
+  await expect(page.getByRole('button', { name: 'Secondary Button', exact: true })).toHaveCSS(
     'background-color',
-    mode === 'light' ? 'rgb(48, 96, 144)' : 'rgb(112, 176, 144)',
+    mode === 'light' ? 'rgb(48, 96, 144)' : 'rgb(112, 176, 144)'
   );
-  await expect(
-    page.getByRole('button', { name: 'Primary Button', exact: true }),
-  ).toHaveCSS(
+  await expect(page.getByRole('button', { name: 'Primary Button', exact: true })).toHaveCSS(
     'color',
-    mode === 'light' ? 'rgb(250, 247, 241)' : 'rgb(26, 22, 18)',
+    mode === 'light' ? 'rgb(250, 247, 241)' : 'rgb(26, 22, 18)'
   );
-  await expect(
-    page.getByRole('button', { name: 'Secondary Button', exact: true }),
-  ).toHaveCSS('color', mode === 'light' ? 'rgb(255, 255, 255)' : 'rgb(0, 0, 0)');
+  await expect(page.getByRole('button', { name: 'Secondary Button', exact: true })).toHaveCSS(
+    'color',
+    mode === 'light' ? 'rgb(255, 255, 255)' : 'rgb(0, 0, 0)'
+  );
   const workspaceSections = page
     .getByRole('navigation', { name: 'Settings' })
     .getByRole('group', { name: 'Workspace' });
@@ -137,15 +125,12 @@ async function verifyTheme(page: Page, mode: 'light' | 'dark'): Promise<void> {
   await expect(page.locator('body')).toHaveCSS('font-family', /Roboto/i);
   await expect(page.locator('.page-bar-title')).toHaveCSS('font-family', /Roboto/i);
   await expect
-    .poll(() =>
-      page.evaluate(
-        async () => (await document.fonts.load('18px Roboto')).length,
-      ),
-    )
+    .poll(() => page.evaluate(async () => (await document.fonts.load('18px Roboto')).length))
     .toBeGreaterThan(0);
-  await expect(
-    page.getByRole('button', { name: 'Primary Button', exact: true }),
-  ).toHaveCSS('border-radius', '0px');
+  await expect(page.getByRole('button', { name: 'Primary Button', exact: true })).toHaveCSS(
+    'border-radius',
+    '0px'
+  );
 }
 
 test('saved API theme controls actual light and dark component styles', async ({
@@ -193,92 +178,69 @@ test('first save survives reload outside settings and unsaved edits are discarde
   await expect(page.locator('body')).toHaveCSS('font-family', /Roboto/i);
   await expect(page.locator('html')).toHaveCSS('font-size', '18px');
   await page.locator('.sidebar a[href="/settings"]').click();
-  await expect(page.locator('#primary-light')).toHaveValue(
-    theme.primary_color_light,
-  );
+  await expect(page.locator('#primary-light')).toHaveValue(theme.primary_color_light);
 });
 
-test('reset accepts 204 and absent 404 without changing AI settings', async ({
-  page,
-}) => {
+test('reset accepts 204 and absent 404 without changing AI settings', async ({ page }) => {
   const writes = await prepare(page, theme);
   await openSettings(page);
   await expect(page.locator('html')).toHaveCSS('font-size', '18px');
-  await page
-    .getByRole('button', { name: 'Reset to Defaults', exact: true })
-    .click();
+  await page.getByRole('button', { name: 'Reset to Defaults', exact: true }).click();
   await expect(page.locator('.alert-success')).toBeVisible();
   await expect(page.locator('html')).toHaveCSS('font-size', '16px');
   await expect(page.locator('body')).not.toHaveCSS('font-family', /Roboto/i);
-  await page
-    .getByRole('button', { name: 'Reset to Defaults', exact: true })
-    .click();
+  await page.getByRole('button', { name: 'Reset to Defaults', exact: true }).click();
   await expect(page.locator('.alert-error')).not.toBeVisible();
   expect(writes).toEqual(['theme:DELETE', 'theme:DELETE']);
 });
 
-test('nullable persisted fields resolve to usable defaults', async ({
-  page,
-}) => {
+test('nullable persisted fields resolve to usable defaults', async ({ page }) => {
   await prepare(page, nullableTheme);
   await openSettings(page);
   await expect(page.locator('.alert-error')).not.toBeVisible();
   await expect(page.getByRole('combobox', { name: 'Font Family' })).toHaveText('App Default');
   await expect(page.locator('html')).toHaveCSS('font-size', '16px');
   await page.locator('#primary-light').fill('#b03040');
-  await expect(
-    page.getByRole('button', { name: 'Primary Button', exact: true }),
-  ).toHaveCSS('background-color', 'rgb(176, 48, 64)');
+  await expect(page.getByRole('button', { name: 'Primary Button', exact: true })).toHaveCSS(
+    'background-color',
+    'rgb(176, 48, 64)'
+  );
 });
 
-test('switching workspace clears saved theme outside settings', async ({
-  page,
-}) => {
+test('switching workspace clears saved theme outside settings', async ({ page }) => {
   await prepare(page, theme);
   const second = '00000000-0000-0000-0000-000000000002';
-  await routeApi(
-    page,
-    new RegExp(`/api/workspaces/${second}/theme`),
-    async (route) => {
-      await route.fulfill({
-        status: 404,
-        contentType: 'application/json',
-        body: '{}',
-      });
-    },
-  );
-  await routeApi(
-    page,
-    /\/api\/organizations\/[^/]+\/workspaces(?:\?|$)/,
-    async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          workspaces: [workspace, second].map((id, index) => ({
-            id,
-            organization_id: workspace,
-            name: index === 0 ? 'Default Workspace' : 'Second Workspace',
-            slug: index === 0 ? 'default' : 'second',
-            description: null,
-            is_active: true,
-            created_at: timestamp,
-            updated_at: timestamp,
-          })),
-        }),
-      });
-    },
-  );
+  await routeApi(page, new RegExp(`/api/workspaces/${second}/theme`), async (route) => {
+    await route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: '{}',
+    });
+  });
+  await routeApi(page, /\/api\/organizations\/[^/]+\/workspaces(?:\?|$)/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        workspaces: [workspace, second].map((id, index) => ({
+          id,
+          organization_id: workspace,
+          name: index === 0 ? 'Default Workspace' : 'Second Workspace',
+          slug: index === 0 ? 'default' : 'second',
+          description: null,
+          is_active: true,
+          created_at: timestamp,
+          updated_at: timestamp,
+        })),
+      }),
+    });
+  });
   await page.goto('/');
   await expect(page.locator('body')).toHaveCSS('font-family', /Roboto/i);
   await page.locator('.context-switcher-button').click();
-  await page
-    .getByRole('option', { name: 'Second Workspace', exact: true })
-    .click();
+  await page.getByRole('option', { name: 'Second Workspace', exact: true }).click();
   await expect(page.locator('html')).toHaveCSS('font-size', '16px');
   await expect(page.locator('body')).not.toHaveCSS('font-family', /Roboto/i);
   await page.locator('.sidebar a[href="/settings"]').click();
-  await expect(page.locator('#primary-light')).not.toHaveValue(
-    theme.primary_color_light,
-  );
+  await expect(page.locator('#primary-light')).not.toHaveValue(theme.primary_color_light);
 });

@@ -2,11 +2,12 @@ import { readFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import type { Page, Route } from '@playwright/test';
 import { ContextUsageSchema } from '../src/features/chats/schemas';
-import { test, expect } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { installChatSocketMock } from './helpers/chatSocket';
-import { blockServiceWorker, routeApi, CHAT_PROVIDERS } from './test-utils';
 import type { ContextUsage } from '../src/features/chats/types';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
+import { installChatSocketMock } from './helpers/chatSocket';
+import { blockServiceWorker, CHAT_PROVIDERS, routeApi } from './test-utils';
+
 const initial = ContextUsageSchema.parse(
   JSON.parse(
     readFileSync(
