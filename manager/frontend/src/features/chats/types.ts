@@ -324,11 +324,23 @@ export interface MessageMetadata {
   reasoning?: string;
   reasoning_at?: number;
   handovers?: Handover[];
+  /**
+   * What this turn spent, as the provider reported it across every round and
+   * every login the turn ran on. Absent on the backends that report none.
+   */
+  usage?: MessageUsage;
   source?: string;
   reminder_id?: string;
   task_id?: string;
   run_id?: string;
   status?: string;
+}
+
+/** The tokens one turn was billed. */
+export interface MessageUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
 }
 
 export interface Message {
@@ -708,4 +720,58 @@ export interface ChatTask {
   updated_at: string | null;
   run: ChatTaskRun | null;
   pull_request: ChatTaskPublication | null;
+}
+
+/** What a set of chat turns spent in tokens. */
+export interface TokenTotals {
+  turns: number;
+  /** Turns a provider gave a token figure for, which is the denominator a
+   * per-turn average belongs over. */
+  reported_turns: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  rounds: number;
+  tool_calls: number;
+  /** One turn's context at its largest, not a sum across turns. */
+  peak_context_tokens: number;
+  instructions_tokens: number;
+  conversation_tokens: number;
+  tools_tokens: number;
+  results_tokens: number;
+  summary_tokens: number;
+  attachments_tokens: number;
+  overhead_tokens: number;
+  first_at: string | null;
+  last_at: string | null;
+}
+
+/** One assistant turn's spend. Billed counts are null when no provider reported them. */
+export interface TokenTurn {
+  message_id: string;
+  model: string;
+  reasoning_effort: string;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  rounds: number;
+  tool_calls: number;
+  context_tokens: number;
+  instructions_tokens: number;
+  conversation_tokens: number;
+  tools_tokens: number;
+  results_tokens: number;
+  summary_tokens: number;
+  attachments_tokens: number | null;
+  overhead_tokens: number;
+  estimated: boolean;
+  recorded_at: string;
+}
+
+export interface ChatTokenUsage {
+  chat_id: string;
+  totals: TokenTotals;
+  turns: TokenTurn[];
+  /** Whether `turns` was cut short. The totals cover every recorded turn either way. */
+  truncated: boolean;
 }

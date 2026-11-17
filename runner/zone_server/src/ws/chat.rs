@@ -60,6 +60,7 @@ use crate::services::chat::observers::Observers;
 use crate::services::chat::pull_request::Recorder;
 use crate::services::chat::session::{self, Session};
 use crate::services::chat::subagent::{Announcer, ChatSubagent, Tracker};
+use crate::services::chat::tokens;
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
 use crate::services::endpoint::{Endpoint, Origin};
 use crate::services::login::router;
@@ -1003,7 +1004,10 @@ fn trace_started(
 /// Fold the tool trace, citations, write receipts and the logins the answer
 /// moved across into the image metadata, since one turn can produce all of
 /// them and they share the message's single metadata column. `usage`, the
-/// tokens every login the turn ran on spent together, rides only with a move.
+/// tokens the turn spent across every round and every login it ran on, rides
+/// with any answer the provider reported a figure for: the console shows it
+/// against the message, and `chat_token_usage` keeps the same number in a
+/// shape a query can group.
 fn merge_metadata(
     images: Option<serde_json::Value>,
     tool_calls: &[ToolCallRecord],
@@ -1019,6 +1023,7 @@ fn merge_metadata(
         && receipts.is_empty()
         && reasoning.is_none()
         && handovers.is_empty()
+        && usage.is_none()
     {
         return images;
     }
@@ -1048,9 +1053,9 @@ fn merge_metadata(
     }
     if !handovers.is_empty() {
         object.insert(HANDOVERS_KEY.to_string(), serde_json::json!(handovers));
-        if let Some(usage) = usage {
-            object.insert(USAGE_KEY.to_string(), serde_json::json!(usage));
-        }
+    }
+    if let Some(usage) = usage {
+        object.insert(USAGE_KEY.to_string(), serde_json::json!(usage));
     }
     Some(serde_json::Value::Object(object))
 }
@@ -1058,7 +1063,8 @@ fn merge_metadata(
 /// Where an answer that moved across logins keeps each move, as its `handover` frame said it.
 const HANDOVERS_KEY: &str = "handovers";
 
-/// Where an answer that moved across logins keeps the tokens they spent on it together.
+/// Where an answer keeps the tokens its turn spent, across every round and
+/// every login it ran on.
 const USAGE_KEY: &str = "usage";
 
 const LIVE_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(300);
@@ -3749,6 +3755,12 @@ async fn handle_chat_generation(
 
     let mut handovers: Vec<Notice> = Vec::new();
     let mut usage: Option<Usage> = None;
+    // Model rounds the turn took, counted as the usage reports it produced:
+    // the loop sends one completion per round and a provider reports once per
+    // completion, which is the same assumption `usage` itself rests on when it
+    // adds each report to the last. An agentic turn replays its whole context
+    // every round, so this is the largest single lever on what a chat costs.
+    let mut rounds = 0usize;
     let mut logins: Vec<Uuid> = handover.iter().map(Handover::login).collect();
     let mut observed = router::Observed::default();
     if let Some(notice) = handover.as_mut().and_then(Handover::opened) {
@@ -3884,6 +3896,7 @@ async fn handle_chat_generation(
                         Some(AgentEvent::Usage(observed)) => {
                             tracing::debug!(prompt_tokens=observed.prompt_tokens,completion_tokens=observed.completion_tokens,"Observed provider usage");
                             usage = Some(usage.map_or(observed, |spent| spent.plus(observed)));
+                            rounds = rounds.saturating_add(1);
                         }
                         Some(AgentEvent::Window(window)) => {
                             tracing::debug!(window=%window.name,used_percent=?window.used_percent,"Observed agent usage window");
@@ -4552,13 +4565,39 @@ async fn handle_chat_generation(
                 }));
             replay.summary = history.summary.map(session::core_summary);
             replay.search(&SearchContext::new(&state.config().web_search));
+            // `usage` is the provider's count for the turn until this line
+            // shadows it with where the context ended up. Both are wanted, so
+            // the billed figure is held onto first.
+            let billed = usage;
             let usage = blocked.unwrap_or_else(|| replay.usage(&model, definitions.as_deref()));
             publish(
                 stream,
                 ServerMessage::Context {
                     chat_id,
                     message_id: Some(assistant_message_id),
-                    usage,
+                    // Cloned so the reader has this frame before the telemetry
+                    // write below, rather than behind it. One clone of one
+                    // turn's usage is cheaper than a frame that waits on
+                    // Postgres.
+                    usage: usage.clone(),
+                },
+            )
+            .await;
+            // The answer is stored and the frames are out, so telemetry can
+            // only add to this turn, never cost it. `record` logs its own
+            // failure rather than failing a delivered answer.
+            tokens::record(
+                state.db(),
+                tokens::Spent {
+                    message: msg.id,
+                    chat: chat_id,
+                    workspace: workspace_id,
+                    model: &model,
+                    effort,
+                    billed,
+                    rounds,
+                    tool_calls: tool_calls.len(),
+                    context: &usage,
                 },
             )
             .await;
@@ -7320,7 +7359,7 @@ cat 'DIR/reply.jsonl'
     }
 
     #[test]
-    fn an_answer_that_moved_keeps_each_move_and_what_every_login_spent() {
+    fn every_answer_keeps_what_it_spent_and_a_moved_one_keeps_each_move() {
         let spent = Usage::new(120, 30);
 
         let merged = merge_metadata(None, &[], &[], &[], None, &[moved(10)], Some(spent))
@@ -7345,8 +7384,16 @@ cat 'DIR/reply.jsonl'
             })
         );
         assert_eq!(
-            unmoved, None,
-            "a turn on one login keeps its metadata as it was"
+            unmoved,
+            Some(serde_json::json!({
+                "usage": {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150},
+            })),
+            "a turn that stayed on one login still keeps what it spent"
+        );
+        assert_eq!(
+            merge_metadata(None, &[], &[], &[], None, &[], None),
+            None,
+            "a turn the provider reported nothing for still produces no metadata"
         );
     }
 
