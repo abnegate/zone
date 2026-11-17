@@ -9,6 +9,7 @@ import {
   DELETE_CONFIRMATION,
   DELETED_COUNT,
   DOWNLOAD_READ_ONLY,
+  DOWNLOAD_UNVERIFIED,
   EDITION_NOTICE,
   ENABLED_DESTINATION_LABEL,
   ENTERPRISE_NOTICE,
@@ -19,12 +20,16 @@ import {
   KEPT_FOREVER,
   LAPSED_NOTICE,
   LAPSED_TEAM_NOTICE,
+  LICENSE_LINK_LABEL,
+  PASTE_KEY_LINK_LABEL,
   READ_ONLY_EDITION,
   READ_ONLY_LAPSED,
   READ_ONLY_UNLICENSED,
   READ_ONLY_UNVERIFIED,
+  RENEW_LINK_LABEL,
   RETENTION_PERIOD,
   RETENTION_PERIOD_SAVED,
+  RETENTION_STILL_APPLIED,
   STALLED_NOTICE,
   TEST_DELIVERED,
   TEST_DESTINATION_LABEL,
@@ -100,6 +105,7 @@ export type NoticeTone = (typeof NoticeTone)[keyof typeof NoticeTone];
 export interface Notice {
   tone: NoticeTone;
   message: string;
+  action: string;
 }
 
 const REFUSALS: Readonly<Record<AuditCodeValue, string>> = {
@@ -342,7 +348,7 @@ export function pauseMessage(pause: StreamingPauseValue): string {
   return PAUSES[pause];
 }
 
-function noticeMessage(standing: Standing, pause: StreamingPauseValue): string {
+function pausedMessage(standing: Standing, pause: StreamingPauseValue): string {
   if (pause !== StreamingPause.Edition) {
     return pauseMessage(pause);
   }
@@ -352,7 +358,25 @@ function noticeMessage(standing: Standing, pause: StreamingPauseValue): string {
   return standing.export ? EDITION_NOTICE : ENTERPRISE_NOTICE;
 }
 
-export function standingNotice(standing: Standing): Notice | null {
+function noticeAction(upgrade: boolean, pause: StreamingPauseValue): string {
+  if (upgrade) {
+    return LICENSE_LINK_LABEL;
+  }
+  return pause === StreamingPause.Unverified ? PASTE_KEY_LINK_LABEL : RENEW_LINK_LABEL;
+}
+
+function noticeMessage(
+  standing: Standing,
+  pause: StreamingPauseValue,
+  upgrade: boolean,
+  days: number | null
+): string {
+  const message = pausedMessage(standing, pause);
+  const retained = !upgrade && standing.applies && days !== null;
+  return retained ? `${message} ${RETENTION_STILL_APPLIED}` : message;
+}
+
+export function standingNotice(standing: Standing, days: number | null): Notice | null {
   const { pause } = standing;
   if (pause === null) {
     return null;
@@ -360,7 +384,8 @@ export function standingNotice(standing: Standing): Notice | null {
   const upgrade = UPGRADES.has(pause) && standing.status !== LicenseStatus.Lapsed;
   return {
     tone: upgrade ? NoticeTone.Upgrade : NoticeTone.Warning,
-    message: noticeMessage(standing, pause),
+    message: noticeMessage(standing, pause, upgrade, days),
+    action: noticeAction(upgrade, pause),
   };
 }
 
@@ -369,7 +394,7 @@ export function readOnlyMessage(standing: Standing, feature: LicensedFeature): s
     return null;
   }
   if (feature === LicensedFeature.Export) {
-    return DOWNLOAD_READ_ONLY;
+    return standing.pause === StreamingPause.Unverified ? DOWNLOAD_UNVERIFIED : DOWNLOAD_READ_ONLY;
   }
   return READ_ONLY[standing.pause ?? StreamingPause.Lapsed];
 }

@@ -18,13 +18,15 @@ export const ENTERPRISE_NOTICE =
   'Streaming to a SIEM and retention need Zone Enterprise, so destinations stay paused until you upgrade.';
 
 export const LAPSED_NOTICE =
-  'Your Zone license has lapsed. Streaming is paused and its backlog is kept until you renew; the retention period already set is still applied, and downloads are unavailable.';
+  'Your Zone license has lapsed. Streaming is paused and its backlog is kept until you renew, and downloads are unavailable.';
 
 export const LAPSED_TEAM_NOTICE =
-  'Your Zone Team license has lapsed, so downloads are unavailable until you renew. The retention period already set is still applied. Streaming to a SIEM and changing retention also need Zone Enterprise.';
+  'Your Zone Team license has lapsed, so downloads are unavailable until you renew. Streaming to a SIEM and changing retention also need Zone Enterprise.';
 
 export const UNVERIFIED_NOTICE =
-  "Zone can't verify the stored license key, so streaming is paused and downloads are unavailable. The retention period already set is still applied. Paste the license key again to resume.";
+  "Zone can't verify the stored license key, so streaming is paused and downloads are unavailable.";
+
+export const RETENTION_STILL_APPLIED = 'The retention period already set is still applied.';
 
 export const READ_ONLY_UNLICENSED =
   'You can see these settings, but changing them needs a Zone Enterprise license.';
@@ -37,6 +39,8 @@ export const READ_ONLY_LAPSED = 'Renew your Zone license to change these setting
 export const READ_ONLY_UNVERIFIED = 'Paste the license key again to change these settings.';
 
 export const DOWNLOAD_READ_ONLY = 'Downloads need an active Team or Enterprise license.';
+
+export const DOWNLOAD_UNVERIFIED = 'Paste the license key again to download the audit log.';
 
 export const DESTINATIONS_TITLE = 'Streaming destinations';
 
@@ -219,6 +223,8 @@ export const RETRY_LABEL = 'Retry';
 export const LICENSE_LINK_LABEL = 'Go to License';
 
 export const RENEW_LINK_LABEL = 'Renew on the License page';
+
+export const PASTE_KEY_LINK_LABEL = 'Paste the key on the License page';
 
 export const NO_DESTINATIONS_READ_ONLY = 'No destinations are set up.';
 

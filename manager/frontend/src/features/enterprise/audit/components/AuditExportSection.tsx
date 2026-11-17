@@ -11,22 +11,27 @@ import {
 import { NoticeTone, standingNotice } from '../messages';
 import { AuditScopeKind } from '../schemas';
 import type { AuditScope, Standing } from '../types';
-import { AuditLapsedNotice } from './AuditLapsedNotice';
+import { AuditLicenseWarning } from './AuditLicenseWarning';
 import { AuditUpgradeNotice } from './AuditUpgradeNotice';
 import { DestinationList } from './DestinationList';
 import { ExportPanel } from './ExportPanel';
 import { RetentionPanel } from './RetentionPanel';
 import './AuditExportSection.css';
 
-function StandingNotice({ standing }: { standing: Standing }) {
-  const notice = standingNotice(standing);
+interface StandingNoticeProps {
+  standing: Standing;
+  days: number | null;
+}
+
+function StandingNotice({ standing, days }: StandingNoticeProps) {
+  const notice = standingNotice(standing, days);
   if (notice === null) {
     return null;
   }
   return notice.tone === NoticeTone.Upgrade ? (
-    <AuditUpgradeNotice message={notice.message} />
+    <AuditUpgradeNotice message={notice.message} action={notice.action} />
   ) : (
-    <AuditLapsedNotice message={notice.message} />
+    <AuditLicenseWarning message={notice.message} action={notice.action} />
   );
 }
 
@@ -72,7 +77,7 @@ export function AuditExportSection({ scope }: AuditExportSectionProps) {
           </p>
         </div>
       </div>
-      {standing && <StandingNotice standing={standing} />}
+      {standing && <StandingNotice standing={standing} days={retention.retention?.days ?? null} />}
       {destinations.error && (
         <LoadFailure error={destinations.error} onRetry={() => void destinations.refresh()} />
       )}

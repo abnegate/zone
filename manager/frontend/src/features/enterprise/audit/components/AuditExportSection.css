@@ -38,7 +38,7 @@
 .audit-hint,
 .audit-summary,
 .audit-notice p,
-.audit-lapsed p,
+.audit-license-warning p,
 .audit-dialog p {
   margin: 0;
   font-size: var(--ui-text-sm);
@@ -56,7 +56,7 @@
 }
 
 .audit-notice,
-.audit-lapsed {
+.audit-license-warning {
   display: flex;
   flex-direction: column;
   align-items: flex-start;

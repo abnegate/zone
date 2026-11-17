@@ -19,15 +19,20 @@ import {
 } from './fixtures';
 import {
   DOWNLOAD_READ_ONLY,
+  DOWNLOAD_UNVERIFIED,
   EDITION_NOTICE,
   ENTERPRISE_NOTICE,
   KEPT_FOREVER,
   LAPSED_NOTICE,
   LAPSED_TEAM_NOTICE,
+  LICENSE_LINK_LABEL,
+  PASTE_KEY_LINK_LABEL,
   READ_ONLY_EDITION,
   READ_ONLY_LAPSED,
   READ_ONLY_UNLICENSED,
   READ_ONLY_UNVERIFIED,
+  RENEW_LINK_LABEL,
+  RETENTION_STILL_APPLIED,
   TEST_DELIVERED,
   UNENCRYPTED_ENDPOINT_WARNING,
   UNENCRYPTED_HTTP_WARNING,
@@ -229,42 +234,81 @@ describe('delivery copy', () => {
   });
 });
 
+const RETAINED_DAYS = 90;
+
 describe('standing copy', () => {
   it('gives every pause its own notice', () => {
     distinct(STREAMING_PAUSES.map(pauseMessage));
   });
 
-  it('shows the notice that matches the license', () => {
-    const upgrade = (message: string) => ({ tone: NoticeTone.Upgrade, message });
-    const warning = (message: string) => ({ tone: NoticeTone.Warning, message });
-    expect(standingNotice(ENTERPRISE_STANDING)).toBeNull();
-    expect(standingNotice(GRACE_STANDING)).toBeNull();
-    expect(standingNotice(COMMUNITY_STANDING)).toEqual(upgrade(UPGRADE_NOTICE));
-    expect(standingNotice(TEAM_STANDING)).toEqual(upgrade(EDITION_NOTICE));
-    expect(standingNotice(LAPSED_STANDING)).toEqual(warning(LAPSED_NOTICE));
-    expect(standingNotice(UNVERIFIED_STANDING)).toEqual(warning(UNVERIFIED_NOTICE));
+  it('shows the notice and link that match the license', () => {
+    const upgrade = (message: string) => ({
+      tone: NoticeTone.Upgrade,
+      message,
+      action: LICENSE_LINK_LABEL,
+    });
+    const renew = (message: string) => ({
+      tone: NoticeTone.Warning,
+      message,
+      action: RENEW_LINK_LABEL,
+    });
+    expect(standingNotice(ENTERPRISE_STANDING, null)).toBeNull();
+    expect(standingNotice(GRACE_STANDING, null)).toBeNull();
+    expect(standingNotice(COMMUNITY_STANDING, null)).toEqual(upgrade(UPGRADE_NOTICE));
+    expect(standingNotice(TEAM_STANDING, null)).toEqual(upgrade(EDITION_NOTICE));
+    expect(standingNotice(LAPSED_STANDING, null)).toEqual(renew(LAPSED_NOTICE));
+  });
+
+  it('asks for the key again, not a renewal, when the stored key cannot be verified', () => {
+    expect(standingNotice(UNVERIFIED_STANDING, null)).toEqual({
+      tone: NoticeTone.Warning,
+      message: UNVERIFIED_NOTICE,
+      action: PASTE_KEY_LINK_LABEL,
+    });
+    expect(PASTE_KEY_LINK_LABEL).not.toContain('Renew');
   });
 
   it('warns a lapsed Team license that downloads stopped instead of offering them', () => {
-    expect(standingNotice(LAPSED_TEAM_STANDING)).toEqual({
+    expect(standingNotice(LAPSED_TEAM_STANDING, null)).toEqual({
       tone: NoticeTone.Warning,
       message: LAPSED_TEAM_NOTICE,
+      action: RENEW_LINK_LABEL,
     });
     expect(LAPSED_TEAM_NOTICE).toContain('downloads are unavailable');
     expect(LAPSED_TEAM_NOTICE).toContain('Enterprise');
   });
 
   it('claims downloads only when the license covers them', () => {
-    expect(standingNotice({ ...TEAM_STANDING, export: false })).toEqual({
+    expect(standingNotice({ ...TEAM_STANDING, export: false }, null)).toEqual({
       tone: NoticeTone.Upgrade,
       message: ENTERPRISE_NOTICE,
+      action: LICENSE_LINK_LABEL,
     });
     expect(ENTERPRISE_NOTICE).not.toContain('download');
   });
 
-  it('tells a lapsed admin that the backlog is kept and retention still applies', () => {
+  it('tells a lapsed admin that the backlog is kept', () => {
     expect(LAPSED_NOTICE).toContain('backlog is kept');
-    expect(LAPSED_NOTICE).toContain('still applied');
+  });
+
+  it('says the retention period is still applied only when one is set', () => {
+    for (const standing of [LAPSED_STANDING, LAPSED_TEAM_STANDING, UNVERIFIED_STANDING]) {
+      const kept = standingNotice(standing, null)?.message;
+      const retained = standingNotice(standing, RETAINED_DAYS)?.message;
+      expect(kept).not.toContain(RETENTION_STILL_APPLIED);
+      expect(retained).toBe(`${kept} ${RETENTION_STILL_APPLIED}`);
+    }
+  });
+
+  it('never claims retention is applied where it does not apply', () => {
+    for (const standing of [COMMUNITY_STANDING, TEAM_STANDING]) {
+      expect(standingNotice(standing, RETAINED_DAYS)?.message).not.toContain(
+        RETENTION_STILL_APPLIED
+      );
+    }
+    expect(standingNotice({ ...LAPSED_STANDING, applies: false }, RETAINED_DAYS)?.message).toBe(
+      LAPSED_NOTICE
+    );
   });
 });
 
@@ -287,14 +331,13 @@ describe('readOnlyMessage', () => {
   });
 
   it('gives downloads their own wording', () => {
-    for (const standing of [
-      COMMUNITY_STANDING,
-      LAPSED_STANDING,
-      LAPSED_TEAM_STANDING,
-      UNVERIFIED_STANDING,
-    ]) {
+    for (const standing of [COMMUNITY_STANDING, LAPSED_STANDING, LAPSED_TEAM_STANDING]) {
       expect(readOnlyMessage(standing, LicensedFeature.Export)).toBe(DOWNLOAD_READ_ONLY);
     }
+  });
+
+  it('asks for the key again to download when the stored key cannot be verified', () => {
+    expect(readOnlyMessage(UNVERIFIED_STANDING, LicensedFeature.Export)).toBe(DOWNLOAD_UNVERIFIED);
   });
 });
 

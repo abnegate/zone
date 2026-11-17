@@ -28,7 +28,8 @@ import {
   STALLED_DESTINATIONS,
   TEAM_DESTINATIONS,
   TEAM_RETENTION,
-  UNVERIFIED_STANDING,
+  UNVERIFIED_DESTINATIONS,
+  UNVERIFIED_RETENTION,
   WAITING_RETENTION,
 } from '../fixtures';
 import {
@@ -38,9 +39,11 @@ import {
   DOWNLOAD_LABEL,
   DOWNLOAD_READ_ONLY,
   DOWNLOAD_TITLE,
+  DOWNLOAD_UNVERIFIED,
   EDIT_DESTINATION_TITLE,
   EDITION_NOTICE,
   HOLDERS_LABEL,
+  KEPT_FOREVER,
   LAPSED_NOTICE,
   LAPSED_TEAM_NOTICE,
   LICENSE_LINK_LABEL,
@@ -49,11 +52,14 @@ import {
   NO_DESTINATIONS,
   NO_DESTINATIONS_READ_ONLY,
   ORGANIZATION_DESCRIPTION,
+  PASTE_KEY_LINK_LABEL,
   READ_ONLY_EDITION,
   READ_ONLY_LAPSED,
   READ_ONLY_UNLICENSED,
+  READ_ONLY_UNVERIFIED,
   RENEW_LINK_LABEL,
   RETENTION_NOT_APPLIED,
+  RETENTION_STILL_APPLIED,
   RETENTION_TITLE,
   SAVE_RETENTION_LABEL,
   SECTION_TITLE,
@@ -216,6 +222,8 @@ describe('AuditExportSection', () => {
       const warning = screen.getByRole('status', { name: '' });
       expect(warning).toHaveClass('alert-warning');
       expect(warning).toHaveTextContent(LAPSED_TEAM_NOTICE);
+      expect(warning).not.toHaveTextContent(RETENTION_STILL_APPLIED);
+      expect(within(card(RETENTION_TITLE)).getByText(KEPT_FOREVER)).toBeInTheDocument();
       expect(within(warning).getByRole('link', { name: RENEW_LINK_LABEL })).toBeInTheDocument();
       expect(screen.queryByRole('note')).not.toBeInTheDocument();
       expect(screen.queryByText(EDITION_NOTICE)).not.toBeInTheDocument();
@@ -229,7 +237,7 @@ describe('AuditExportSection', () => {
 
       const warning = screen.getByRole('status', { name: '' });
       expect(warning).toHaveClass('alert-warning');
-      expect(warning).toHaveTextContent(LAPSED_NOTICE);
+      expect(warning).toHaveTextContent(`${LAPSED_NOTICE} ${RETENTION_STILL_APPLIED}`);
       expect(within(warning).getByRole('link', { name: RENEW_LINK_LABEL })).toHaveAttribute(
         'href',
         '/settings/server/license'
@@ -251,13 +259,22 @@ describe('AuditExportSection', () => {
       expect(screen.getByRole('button', { name: DOWNLOAD_LABEL })).toBeDisabled();
     });
 
-    it('explains an unverified license key', async () => {
-      await loaded(
-        { ...COMMUNITY_DESTINATIONS, standing: UNVERIFIED_STANDING },
-        { ...ENTERPRISE_RETENTION, standing: UNVERIFIED_STANDING }
-      );
+    it('asks for the license key again when it cannot be verified, not for a renewal', async () => {
+      await loaded(UNVERIFIED_DESTINATIONS, UNVERIFIED_RETENTION);
 
-      expect(screen.getByText(UNVERIFIED_NOTICE)).toBeInTheDocument();
+      const warning = screen.getByRole('status', { name: '' });
+      expect(warning).toHaveClass('alert-warning');
+      expect(warning).toHaveTextContent(UNVERIFIED_NOTICE);
+      expect(within(warning).getByRole('link', { name: PASTE_KEY_LINK_LABEL })).toHaveAttribute(
+        'href',
+        '/settings/server/license'
+      );
+      expect(screen.queryByRole('link', { name: RENEW_LINK_LABEL })).not.toBeInTheDocument();
+      expect(screen.queryByRole('note')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: DOWNLOAD_LABEL })).toBeDisabled();
+      expect(within(card(DOWNLOAD_TITLE)).getByText(DOWNLOAD_UNVERIFIED)).toBeInTheDocument();
+      expect(screen.queryByText(DOWNLOAD_READ_ONLY)).not.toBeInTheDocument();
+      expect(within(card(RETENTION_TITLE)).getByText(READ_ONLY_UNVERIFIED)).toBeInTheDocument();
       expect(screen.queryByText(RETENTION_NOT_APPLIED)).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: SAVE_RETENTION_LABEL })).not.toBeInTheDocument();
     });
