@@ -9744,6 +9744,8 @@ dependencies = [
  "chrono",
  "dashmap",
  "ed25519-dalek",
+ "hex",
+ "hmac",
  "jsonwebtoken",
  "rand 0.10.2",
  "reqwest 0.13.5",
