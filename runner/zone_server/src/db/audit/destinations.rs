@@ -12,15 +12,13 @@ use abnegate_secret::{MasterKey, SecretValue, encrypt_value};
 use sqlx::{PgConnection, PgExecutor, Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use super::position::Position;
+use super::events;
 use super::scope::Scope;
 use crate::db::DbResult;
 
 pub const DUPLICATE_KEY: &str = "audit_destinations_name_idx";
 
 const COLUMNS: &str = "id, organization_id, kind, name, enabled, settings, secrets AS sealed_secrets, created_by, created_at, updated_at";
-
-const HORIZON: &str = "SELECT ((pg_snapshot_xmin(pg_current_snapshot()))::text)::bigint - 1";
 
 fn seal(secrets: &SecretValue, key: &MasterKey) -> DestinationResult<String> {
     encrypt_value(secrets, key).map_err(DestinationError::Unsealable)
@@ -99,12 +97,7 @@ pub async fn create(
     new: &NewDestination,
 ) -> DestinationResult<DestinationRecord> {
     let sealed = seal(&new.secrets, key)?;
-    let start = Position {
-        transaction_id: sqlx::query_scalar(HORIZON)
-            .fetch_one(&mut *connection)
-            .await?,
-        sequence: i64::MAX,
-    };
+    let start = events::start(&mut *connection).await?;
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "WITH destination AS ( \
              INSERT INTO audit_destinations (organization_id, kind, name, enabled, settings, secrets, created_by) \
