@@ -28,6 +28,7 @@ export const SettingsSection = {
   Mcp: 'mcp',
   Features: 'features',
   Connect: 'connect',
+  License: 'license',
   Sessions: 'sessions',
 } as const;
 
@@ -40,6 +41,7 @@ export interface SettingsAccess {
   workspaceRole: WorkspaceRole | undefined;
   installsModels: boolean;
   readsSources: boolean;
+  administersServer: boolean;
 }
 
 export interface SectionDefinition {
@@ -81,6 +83,8 @@ const installsModels = (access: SettingsAccess): boolean => access.installsModel
 
 const readsWorkspaceSources = (access: SettingsAccess): boolean =>
   inWorkspace(access) && access.readsSources;
+
+const administersServer = (access: SettingsAccess): boolean => access.administersServer;
 
 const always = (): boolean => true;
 
@@ -168,6 +172,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     section: SettingsSection.Connect,
     label: 'Connect a device',
     visible: always,
+  },
+  {
+    group: SettingsGroup.Server,
+    section: SettingsSection.License,
+    label: 'License',
+    visible: administersServer,
   },
   {
     group: SettingsGroup.You,

@@ -21,7 +21,8 @@ allow = [
     "Unicode-DFS-2016",
 ]
 confidence-threshold = 0.8
-# Reviewed versions already present in Cargo.lock; future versions need review.
+# Reviewed third-party versions already present in Cargo.lock; future versions
+# need review. The first-party zone_enterprise entry follows the workspace version.
 # License provenance and dependency paths are recorded in docs/DEPENDENCIES.md.
 exceptions = [
     { crate = "cssparser@0.36.0", allow = ["MPL-2.0"] },
@@ -40,6 +41,7 @@ exceptions = [
     { crate = "webpki-roots@0.26.11", allow = ["CDLA-Permissive-2.0"] },
     { crate = "webpki-roots@1.0.11", allow = ["CDLA-Permissive-2.0"] },
     { crate = "xxhash-rust@0.8.18", allow = ["BSL-1.0"] },
+    { crate = "zone_enterprise", allow = ["LicenseRef-Zone-Enterprise"] },
 ]
 
 [bans]

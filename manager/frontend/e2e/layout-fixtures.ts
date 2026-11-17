@@ -1,5 +1,7 @@
 import type { Page } from '@playwright/test';
 import type { Overview } from '../src/features/analytics/types';
+import { Edition, LicenseStatus } from '../src/features/enterprise/schemas';
+import type { LicenseResponse } from '../src/features/enterprise/types';
 import type { SourceStatus } from '../src/features/github/sourceStatus';
 import type { PullRequest } from '../src/features/pull-requests/types';
 import type {
@@ -27,6 +29,14 @@ const mockOrganization = {
   is_active: true,
   created_at: '2024-01-01T00:00:00Z',
   updated_at: '2024-01-01T00:00:00Z',
+};
+
+const communityLicense: LicenseResponse = {
+  edition: Edition.Community,
+  status: LicenseStatus.Community,
+  license: null,
+  seats: { used: 1, licensed: null, over: false },
+  unverified: null,
 };
 
 const mockWorkspace = {
@@ -1280,6 +1290,7 @@ export async function setupCommonRoutes(page: Page, populated = false): Promise<
     else if (path === '/api/knowledge') body = { entries: populated ? mockKnowledge : [] };
     else if (path === '/api/auth/sessions') body = { sessions: populated ? mockSessions : [] };
     else if (path === '/api/context/search') body = { results: [], total: 0 };
+    else if (path === '/api/license') body = communityLicense;
     else {
       await route.fallback();
       return;

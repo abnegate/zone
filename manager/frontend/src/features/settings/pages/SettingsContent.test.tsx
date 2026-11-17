@@ -48,6 +48,10 @@ mock.module('../server/components', () => ({
   FeaturesSection: marker('features-section'),
 }));
 
+mock.module('../../enterprise', () => ({
+  LicenseSection: marker('license-section'),
+}));
+
 mock.module('../../auth/components', () => ({
   SessionsSection: marker('sessions-section'),
 }));
@@ -77,6 +81,7 @@ function access(
     workspaceRole,
     installsModels: true,
     readsSources: true,
+    administersServer: false,
   };
 }
 
@@ -302,6 +307,25 @@ describe('SettingsContent', () => {
         expect(screen.queryByTestId('features-section') !== null).toBe(shown);
       });
     }
+
+    it('shows the license to a server admin', () => {
+      renderSection(SettingsGroup.Server, SettingsSection.License, {
+        ...access('viewer', 'member'),
+        administersServer: true,
+      });
+      expect(propsOf('license-section')).toEqual({});
+    });
+
+    it('renders no license for anyone who does not administer the server', () => {
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Server}
+          section={SettingsSection.License}
+          access={access('admin', 'owner')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
 
     it('lets an organization member connect a device', () => {
       renderSection(SettingsGroup.Server, SettingsSection.Connect, access('viewer', 'member'));

@@ -208,4 +208,5 @@ See [API Documentation](./docs/api.md) for full endpoint reference.
 
 ## License
 
-MIT License - See [LICENSE](./LICENSE) for details.
+MIT, except `zone_enterprise/`, which is under the Zone Enterprise License in
+`zone_enterprise/LICENSE`. See [LICENSE](../LICENSE) for details.

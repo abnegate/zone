@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use chrono::Utc;
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -17,6 +18,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use zone_context::context::ContextService;
+use zone_enterprise::{Edition, status};
 use zone_server::cache::Cache;
 use zone_server::config::Config;
 use zone_server::db::reminders::Sweep;
@@ -203,6 +205,16 @@ async fn main() {
     } else {
         AppState::new_with_mail(config.clone(), db, Some(cache), mail)
     };
+    match state.licenses().load(state.db()).await {
+        Ok(stored) => tracing::info!(
+            edition = %Edition::from(stored.license()),
+            status = %status(stored.license(), Utc::now()),
+            "License loaded"
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "Could not load the license; running as Community until it loads")
+        }
+    }
     state.mcp().configured().await;
     state.network_denial().await.announce();
 

@@ -18,6 +18,7 @@ pub mod github;
 pub mod health;
 pub mod host_mounts;
 pub mod invitations;
+pub mod license;
 pub mod mcp_servers;
 pub mod models;
 pub mod organizations;
@@ -250,6 +251,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/workspaces/{workspace_id}/members/{user_id}",
             patch(workspaces::update_member_role).delete(workspaces::remove_member),
+        )
+        .route(
+            "/api/license",
+            get(license::get).put(license::set).delete(license::remove),
         )
         .route("/api/host-mounts", get(host_mounts::instance))
         .route(

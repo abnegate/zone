@@ -30,6 +30,7 @@ const ALL_SECTIONS = [
   { group: SettingsGroup.Organization, section: SettingsSection.Mcp, label: 'MCP servers' },
   { group: SettingsGroup.Server, section: SettingsSection.Features, label: 'Features' },
   { group: SettingsGroup.Server, section: SettingsSection.Connect, label: 'Connect a device' },
+  { group: SettingsGroup.Server, section: SettingsSection.License, label: 'License' },
   { group: SettingsGroup.You, section: SettingsSection.Sessions, label: 'Sessions' },
 ] as const;
 
@@ -46,6 +47,7 @@ const ORGANIZATION_GITHUB = settingsPath(SettingsGroup.Organization, SettingsSec
 const ORGANIZATION_MCP = settingsPath(SettingsGroup.Organization, SettingsSection.Mcp);
 const FEATURES = settingsPath(SettingsGroup.Server, SettingsSection.Features);
 const CONNECT = settingsPath(SettingsGroup.Server, SettingsSection.Connect);
+const LICENSE = settingsPath(SettingsGroup.Server, SettingsSection.License);
 const SESSIONS = settingsPath(SettingsGroup.You, SettingsSection.Sessions);
 const SOURCES = settingsPath(SettingsGroup.Workspace, SettingsSection.Sources);
 
@@ -74,6 +76,7 @@ describe('settings constants', () => {
       Mcp: 'mcp',
       Features: 'features',
       Connect: 'connect',
+      License: 'license',
       Sessions: 'sessions',
     });
   });
@@ -172,6 +175,7 @@ describe('visibleSections', () => {
         workspaceRole: 'viewer',
         installsModels: false,
         readsSources: true,
+        administersServer: false,
       })
     ).toEqual([
       ...pathsOf(SettingsGroup.Workspace),
@@ -192,11 +196,12 @@ describe('visibleSections', () => {
         workspaceRole: undefined,
         installsModels: true,
         readsSources: true,
+        administersServer: true,
       })
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
 
-  it('shows all fifteen sections to an organization owner who administers the workspace', () => {
+  it('shows all sixteen sections to a server admin who owns the organization and administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -204,9 +209,10 @@ describe('visibleSections', () => {
       workspaceRole: 'admin',
       installsModels: true,
       readsSources: true,
+      administersServer: true,
     });
 
-    expect(visible).toHaveLength(15);
+    expect(visible).toHaveLength(16);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 
@@ -219,6 +225,7 @@ describe('visibleSections', () => {
         workspaceRole: undefined,
         installsModels: true,
         readsSources: true,
+        administersServer: true,
       })
     ).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
@@ -232,6 +239,7 @@ describe('visibleSections', () => {
         workspaceRole: undefined,
         installsModels: false,
         readsSources: false,
+        administersServer: false,
       })
     ).toEqual([CONNECT, SESSIONS]);
   });
@@ -248,6 +256,7 @@ describe('visibleSections', () => {
         workspaceRole: 'member',
         installsModels,
         readsSources: true,
+        administersServer: false,
       }).includes(FEATURES);
 
     for (const organizationRole of ['owner', 'admin', 'member', undefined] as const) {
@@ -265,6 +274,7 @@ describe('visibleSections', () => {
         workspaceRole: undefined,
         installsModels: true,
         readsSources: false,
+        administersServer: false,
       })
     ).toEqual([FEATURES, CONNECT, SESSIONS]);
   });
@@ -279,6 +289,7 @@ describe('visibleSections', () => {
           workspaceRole: undefined,
           installsModels: false,
           readsSources: false,
+          administersServer: false,
         }),
         String(organizationRole)
       ).toContain(CONNECT);
@@ -295,6 +306,7 @@ describe('visibleSections', () => {
           workspaceRole,
           installsModels: false,
           readsSources: true,
+          administersServer: false,
         }).filter((path) => path.startsWith(`${SETTINGS_ROOT}/${SettingsGroup.Workspace}/`)),
         workspaceRole
       ).toEqual(pathsOf(SettingsGroup.Workspace));
@@ -311,6 +323,7 @@ describe('visibleSections', () => {
           workspaceRole,
           installsModels: false,
           readsSources: true,
+          administersServer: false,
         }),
         workspaceRole
       ).toContain(SOURCES);
@@ -325,6 +338,7 @@ describe('visibleSections', () => {
       workspaceRole: 'admin',
       installsModels: true,
       readsSources: false,
+      administersServer: false,
     });
 
     expect(visible).not.toContain(SOURCES);
@@ -342,8 +356,50 @@ describe('visibleSections', () => {
         workspaceRole: undefined,
         installsModels: true,
         readsSources: true,
+        administersServer: false,
       })
     ).not.toContain(SOURCES);
+  });
+
+  it('shows License under This server only to a server admin', () => {
+    const license = (administersServer: boolean) =>
+      paths({
+        organization: true,
+        organizationRole: 'owner',
+        workspace: true,
+        workspaceRole: 'admin',
+        installsModels: true,
+        readsSources: true,
+        administersServer,
+      }).includes(LICENSE);
+
+    expect(license(true)).toBe(true);
+    expect(license(false)).toBe(false);
+  });
+
+  it('shows License to a server admin outside any organization, after Connect a device', () => {
+    expect(
+      paths({
+        organization: false,
+        organizationRole: undefined,
+        workspace: false,
+        workspaceRole: undefined,
+        installsModels: false,
+        readsSources: false,
+        administersServer: true,
+      })
+    ).toEqual([CONNECT, LICENSE, SESSIONS]);
+  });
+
+  it('finds the License section in the server group', () => {
+    expect(findSection(SettingsGroup.Server, SettingsSection.License)).toMatchObject({
+      group: SettingsGroup.Server,
+      section: SettingsSection.License,
+      label: 'License',
+    });
+    expect(settingsPath(SettingsGroup.Server, SettingsSection.License)).toBe(
+      '/settings/server/license'
+    );
   });
 
   it('finds the Sources section in the workspace group', () => {

@@ -18,6 +18,8 @@ RUN cargo install cargo-watch --version 8.5.3 --locked
 COPY runner/Cargo.toml runner/Cargo.lock ./runner/
 COPY runner/zone_runner/Cargo.toml ./runner/zone_runner/
 COPY runner/zone_core/Cargo.toml ./runner/zone_core/
+COPY runner/zone_routing/Cargo.toml ./runner/zone_routing/
+COPY runner/zone_enterprise/Cargo.toml ./runner/zone_enterprise/
 COPY runner/zone_context/Cargo.toml ./runner/zone_context/
 COPY runner/zone_server/Cargo.toml ./runner/zone_server/
 COPY runner/zone_cli/Cargo.toml ./runner/zone_cli/
@@ -26,10 +28,13 @@ COPY runner/zone_desktop/Cargo.toml ./runner/zone_desktop/
 
 # Create dummy source files for dependency compilation
 RUN mkdir -p runner/zone_runner/src runner/zone_core/src \
+    runner/zone_routing/src runner/zone_enterprise/src \
     runner/zone_context/src runner/zone_server/src runner/zone_cli/src \
     runner/zone_installer/src runner/zone_desktop/src && \
     echo "fn main() {}" > runner/zone_runner/src/main.rs && \
     echo "fn main() {}" > runner/zone_core/src/lib.rs && \
+    echo "fn main() {}" > runner/zone_routing/src/lib.rs && \
+    echo "fn main() {}" > runner/zone_enterprise/src/lib.rs && \
     echo "fn main() {}" > runner/zone_context/src/lib.rs && \
     echo "fn main() {}" > runner/zone_server/src/lib.rs && \
     echo "fn main() {}" > runner/zone_server/src/main.rs && \
@@ -54,4 +59,4 @@ EXPOSE 8000
 # -w: watch specific directories
 # -x: execute cargo run
 # NOTE: Clean internal crates first since they were compiled with dummy sources
-CMD ["sh", "-c", "cargo clean -p zone_context -p zone_core -p zone_server 2>/dev/null; exec cargo watch --poll -w zone_server/src -w zone_core/src -w zone_context/src -x 'run --package zone_server'"]
+CMD ["sh", "-c", "cargo clean -p zone_context -p zone_core -p zone_routing -p zone_enterprise -p zone_server 2>/dev/null; exec cargo watch --poll -w zone_server/src -w zone_core/src -w zone_routing/src -w zone_enterprise/src -w zone_context/src -x 'run --package zone_server'"]

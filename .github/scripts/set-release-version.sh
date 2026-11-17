@@ -62,8 +62,10 @@ cd "$root/runner"
 cargo update \
   -p zone_cli \
   -p zone_core \
+  -p zone_routing \
   -p zone_server \
   -p zone_runner \
   -p zone_installer \
   -p zone_desktop \
-  -p zone_context
+  -p zone_context \
+  -p zone_enterprise
