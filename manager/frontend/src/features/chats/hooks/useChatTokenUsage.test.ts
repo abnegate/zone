@@ -207,6 +207,31 @@ describe('useChatTokenUsage', () => {
       expect(readsOf('chat-2')).toBe(1);
     });
 
+    it('settles a chat that finished unobserved from when it is reopened', async () => {
+      mockGetChatTokenTotals.mockResolvedValue(totals(30_000));
+      const { result, rerender } = renderHook(
+        ({ chatId, streaming }) => useChatTokenUsage(chatId, streaming),
+        { initialProps: { chatId: 'chat-1', streaming: true } }
+      );
+      await advance(0);
+
+      rerender({ chatId: 'chat-2', streaming: false });
+      await advance(LATE_RECORDING_DELAY * 2);
+      expect(readsOf('chat-1')).toBe(1);
+
+      rerender({ chatId: 'chat-1', streaming: false });
+      await advance(0);
+      expect(readsOf('chat-1')).toBe(2);
+      expect(result.current?.total_tokens).toBe(30_000);
+
+      mockGetChatTokenTotals.mockResolvedValue(totals(45_000));
+      await advance(RECORDING_SETTLE_DELAY);
+      expect(readsOf('chat-1')).toBe(3);
+      await advance(LATE_RECORDING_DELAY - RECORDING_SETTLE_DELAY);
+      expect(readsOf('chat-1')).toBe(4);
+      expect(result.current?.total_tokens).toBe(45_000);
+    });
+
     it('reads the chat that was streaming when it is reopened before its write has landed', async () => {
       mockGetChatTokenTotals.mockResolvedValue(totals(30_000));
       const { rerender } = renderHook(
@@ -221,7 +246,7 @@ describe('useChatTokenUsage', () => {
       await advance(0);
       expect(readsOf('chat-1')).toBe(2);
 
-      await advance(RECORDING_SETTLE_DELAY - 1_000);
+      await advance(RECORDING_SETTLE_DELAY);
       expect(readsOf('chat-1')).toBe(3);
       expect(readsOf('chat-2')).toBe(1);
     });

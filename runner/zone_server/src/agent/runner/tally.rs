@@ -1,16 +1,22 @@
 use abnegate_llm::Usage;
 
 /// A provider may restate a finished turn's usage after its finish, so a turn
-/// only gives way to the next once the stream carries content again.
+/// only gives way to the next once the stream carries content again, or
+/// reports less than the finished turn did, which a restatement never does.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Tally {
     finished: Option<Usage>,
     current: Option<Usage>,
+    latest: Option<Usage>,
     closed: bool,
 }
 
 impl Tally {
     pub(super) fn observe(&mut self, usage: Usage) {
+        if self.closed && self.latest.is_some_and(|latest| !restates(latest, usage)) {
+            self.content();
+        }
+        self.latest = Some(usage);
         self.current = Some(self.finished.map_or(usage, |finished| finished.plus(usage)));
     }
 
@@ -21,6 +27,7 @@ impl Tally {
     pub(super) fn content(&mut self) {
         if self.closed {
             self.finished = self.current;
+            self.latest = None;
             self.closed = false;
         }
     }
@@ -28,6 +35,11 @@ impl Tally {
     pub(super) fn total(&self) -> Option<Usage> {
         self.current
     }
+}
+
+fn restates(latest: Usage, usage: Usage) -> bool {
+    usage.prompt_tokens >= latest.prompt_tokens
+        && usage.completion_tokens >= latest.completion_tokens
 }
 
 #[cfg(test)]
@@ -69,6 +81,19 @@ mod tests {
         tally.observe(Usage::new(7, 3));
 
         assert_eq!(tally.total(), Some(Usage::new(7, 3)));
+    }
+
+    #[test]
+    fn usage_from_a_next_message_that_writes_nothing_first_does_not_replace_the_finished_turn() {
+        let mut tally = Tally::default();
+        tally.content();
+        tally.observe(Usage::new(10, 1));
+        tally.finish();
+        tally.observe(Usage::new(4, 0));
+        tally.content();
+        tally.observe(Usage::new(4, 2));
+
+        assert_eq!(tally.total(), Some(Usage::new(14, 3)));
     }
 
     #[test]

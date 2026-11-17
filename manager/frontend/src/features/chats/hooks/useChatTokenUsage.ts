@@ -20,13 +20,15 @@ const LAST_READ = Math.max(...RECORDING_READS);
  * finishes. A turn's spend is stored just after its stream ends, so it is read
  * once the write has had time to land and once more later for a slow one, even
  * when the chat is left and reopened meanwhile. A failed read keeps the last
- * totals.
+ * totals. Leaving a chat mid-stream does not end its turn, which the server
+ * finishes unobserved, so reopening such a chat starts the same reads from then.
  */
 export function useChatTokenUsage(chatId: string | null, streaming: boolean): TokenTotals | null {
   const [reading, setReading] = useState<Reading>(NOTHING_READ);
   const read = useRef(0);
   const streamingChat = useRef<string | null>(streaming ? chatId : null);
   const endings = useRef(new Map<string, number>());
+  const departed = useRef(new Set<string>());
 
   const refresh = useCallback(async () => {
     const attempt = ++read.current;
@@ -52,7 +54,9 @@ export function useChatTokenUsage(chatId: string | null, streaming: boolean): To
     const now = Date.now();
     const streamed = streamingChat.current;
     streamingChat.current = streaming ? chatId : null;
-    if (streamed && (!streaming || streamed !== chatId)) endings.current.set(streamed, now);
+    if (streamed && streamed !== chatId) departed.current.add(streamed);
+    else if (streamed && !streaming) endings.current.set(streamed, now);
+    if (chatId && departed.current.delete(chatId)) endings.current.set(chatId, now);
     for (const [ended, at] of endings.current) {
       if (now - at >= LAST_READ) endings.current.delete(ended);
     }

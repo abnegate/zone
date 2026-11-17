@@ -4447,6 +4447,7 @@ async fn handle_chat_generation(
     let spent_tokens = ledger.total();
     let mut pending = tokens::Pending::new(
         state.db().clone(),
+        state.background().clone(),
         tokens::Spent {
             message: assistant_message_id,
             chat: chat_id,

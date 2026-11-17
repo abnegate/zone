@@ -278,7 +278,7 @@ async fn the_limit_counts_turns_so_a_handed_over_turn_is_listed_whole() {
     successful(&harness.turn("Spend something").await);
     recorded(&harness, 1).await;
     let handed = Uuid::new_v4();
-    let share = |model: &str| chat_token_usage::Share {
+    let share = |model: &str| chat_token_usage::NewShare {
         model: model.to_string(),
         reported: Some(chat_token_usage::Reported {
             prompt_tokens: 3,

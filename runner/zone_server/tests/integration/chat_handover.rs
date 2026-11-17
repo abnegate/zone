@@ -233,7 +233,8 @@ enum Run<'a> {
     Answers(&'a str),
     /// It streams `partial`, then [`FOLLOWING`] as a second message, and says nothing more.
     Streams(&'a str),
-    /// It reports what a request took without having written any of its answer.
+    /// It reports what a request took without having written any of its answer, then fails as
+    /// a login whose sign-in was revoked.
     Silent,
     /// It streams `partial`, then refuses the rest as an account past its
     /// five-hour window, which resets at `resets_at`.
@@ -265,13 +266,16 @@ impl Run<'_> {
                 .into_iter()
                 .chain([json!({"type": "assistant", "message": {"content": [{"type": "text", "text": FOLLOWING}]}})])
                 .collect(),
-            Self::Silent => vec![json!({
-                "type": "assistant",
-                "message": {
-                    "content": [],
-                    "usage": {"input_tokens": PARTIAL_INPUT_TOKENS, "output_tokens": PARTIAL_OUTPUT_TOKENS},
-                },
-            })],
+            Self::Silent => vec![
+                json!({
+                    "type": "assistant",
+                    "message": {
+                        "content": [],
+                        "usage": {"input_tokens": PARTIAL_INPUT_TOKENS, "output_tokens": PARTIAL_OUTPUT_TOKENS},
+                    },
+                }),
+                json!({"type": "result", "subtype": "success", "is_error": true, "result": INVALID_KEY}),
+            ],
             Self::Limited { partial, resets_at } => streamed(partial)
                 .into_iter()
                 .chain([
@@ -1324,24 +1328,14 @@ async fn a_turn_stopped_after_its_agent_reported_usage_records_that_usage_once()
 }
 
 #[tokio::test]
-async fn a_turn_stopped_before_any_content_still_records_what_its_agent_reported() {
+async fn a_turn_that_fails_before_any_content_still_records_what_its_agent_reported() {
     let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
     harness.sign_in(ALICE).await;
     harness.claude.plan(ALICE, 0, Run::Silent);
-    std::fs::write(harness.claude.plans.join(STALL), "").expect("the stall");
 
-    let mut socket = harness.connect().await;
-    send(&mut socket, json!({"type": "send", "content": QUESTION})).await;
-    let prompt = harness.claude.runs.join("0").join("prompt");
-    assert!(
-        eventually(|| async { prompt.exists() }).await,
-        "the agent never started"
-    );
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    send(&mut socket, json!({"type": "cancel"})).await;
-    let frames = finish(&mut socket).await;
-    std::fs::remove_file(harness.claude.plans.join(STALL)).expect("the stall to be lifted");
+    let frames = harness.turn(QUESTION).await;
 
+    assert_eq!(kinds(&frames, ERROR).len(), 1, "{frames:?}");
     assert!(
         kinds(&frames, CHUNK).is_empty(),
         "the turn never wrote anything: {frames:?}"
@@ -1374,19 +1368,29 @@ async fn usage_reported_before_a_stop_is_counted_for_the_model_that_ran_the_roun
             resets_at: reset_in(TimeDelta::hours(2)),
         },
     );
+    std::fs::write(
+        harness.codex.plans.join("default.jsonl"),
+        jsonl(&[
+            json!({"type": "turn.started"}),
+            json!({"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": CODEX_ANSWER}}),
+            json!({"type": "turn.completed", "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1}}),
+            json!({"type": "turn.started"}),
+            json!({"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": FOLLOWING}}),
+        ]),
+    )
+    .expect("the stand-in's plan");
     std::fs::write(harness.codex.plans.join(STALL), "").expect("the stall");
 
     let mut socket = harness.connect().await;
     send(&mut socket, json!({"type": "send", "content": QUESTION})).await;
     let mut streamed = String::new();
-    while !streamed.contains(CODEX_ANSWER) {
+    while !streamed.contains(FOLLOWING) {
         let frame = next(&mut socket).await;
         assert_ne!(frame["type"], ERROR, "{frame}");
         if frame["type"] == CHUNK {
             streamed.push_str(frame["content"].as_str().unwrap_or_default());
         }
     }
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     send(&mut socket, json!({"type": "cancel"})).await;
     let frames = finish(&mut socket).await;
     std::fs::remove_file(harness.codex.plans.join(STALL)).expect("the stall to be lifted");

@@ -243,6 +243,7 @@ async fn main() {
     // router tests cover. A second CORS layer here answered every preflight
     // twice and under a different policy, and its wildcard header list could
     // not be combined with credentials at all.
+    let background = state.background().clone();
     let app = routes::create_router(state);
 
     // Start server
@@ -255,6 +256,8 @@ async fn main() {
     let listener = TcpListener::bind(addr).await.expect("Failed to bind");
 
     let result = axum::serve(listener, app).await;
+    background.close();
+    let _ = tokio::time::timeout(BACKGROUND_DRAIN, background.wait()).await;
     recovery.abort();
     let _ = recovery.await;
     training.abort();
@@ -288,6 +291,7 @@ const FLAG_PREFIX: &str = "--";
 const UNKNOWN_ARGUMENTS: &str = "Unknown server arguments";
 const SEALING_CONNECTIONS: u32 = 2;
 const FAILURE: i32 = 1;
+const BACKGROUND_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
 const SUCCESS: i32 = 0;
 const DIMENSION_LEARNED_ON_FIRST_EMBED: &str = "learned on the first embed";
 

@@ -33,7 +33,7 @@ pub struct Breakdown {
 /// one share per model, and only the share of the model it ended on carries
 /// the closing context.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Share {
+pub struct NewShare {
     pub model: String,
     pub reported: Option<Reported>,
     pub rounds: i32,
@@ -49,7 +49,7 @@ pub struct Turn {
     pub chat_id: Uuid,
     pub workspace_id: Uuid,
     pub reasoning_effort: String,
-    pub shares: Vec<Share>,
+    pub shares: Vec<NewShare>,
 }
 
 /// Storing a turn again adds nothing. A message or chat deleted while the write
@@ -205,20 +205,40 @@ pub async fn chat_totals(pool: &PgPool, chat: Uuid) -> DbResult<Totals> {
     .await
 }
 
-/// The shares of the chat's `limit` newest turns, newest first.
-pub async fn chat_turns(pool: &PgPool, chat: Uuid, limit: i64) -> DbResult<Vec<TurnRow>> {
-    sqlx::query_as(turn_query!(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnPage {
+    pub rows: Vec<TurnRow>,
+    /// Whether older turns were left out, judged by the same read as the rows.
+    pub truncated: bool,
+}
+
+/// The shares of the chat's `limit` newest turns, newest first. One more turn
+/// is read than is returned, to know whether it was cut.
+pub async fn chat_turns(pool: &PgPool, chat: Uuid, limit: i64) -> DbResult<TurnPage> {
+    let mut rows: Vec<TurnRow> = sqlx::query_as(turn_query!(
         "FROM chat_token_usage \
          WHERE chat_id = $1 AND turn_id IN ( \
              SELECT turn_id FROM chat_token_usage WHERE chat_id = $1 \
-             GROUP BY turn_id ORDER BY max(recorded_at) DESC, turn_id LIMIT $2 \
+             GROUP BY turn_id ORDER BY max(recorded_at) DESC, turn_id LIMIT $2 + 1 \
          ) \
          ORDER BY recorded_at DESC, turn_id, model"
     ))
     .bind(chat)
     .bind(limit)
     .fetch_all(pool)
-    .await
+    .await?;
+    let mut turns: Vec<Uuid> = Vec::new();
+    for row in &rows {
+        if !turns.contains(&row.turn_id) {
+            turns.push(row.turn_id);
+        }
+    }
+    let truncated = turns.len() as i64 > limit;
+    if truncated {
+        let extra = turns[limit as usize];
+        rows.retain(|row| row.turn_id != extra);
+    }
+    Ok(TurnPage { rows, truncated })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
@@ -296,8 +316,8 @@ mod tests {
         estimated: true,
     };
 
-    fn share(model: &str, context: Option<Breakdown>) -> Share {
-        Share {
+    fn share(model: &str, context: Option<Breakdown>) -> NewShare {
+        NewShare {
             model: model.to_string(),
             reported: Some(Reported {
                 prompt_tokens: 1_200,
@@ -469,7 +489,7 @@ mod tests {
         assert_eq!(totals.total_tokens, 0);
         assert_eq!(totals.instructions_tokens, 4_000);
 
-        let turns = chat_turns(&pool, chat, 10).await.expect("the turns");
+        let turns = chat_turns(&pool, chat, 10).await.expect("the turns").rows;
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].total_tokens, None);
         assert_eq!(turns[0].instructions_tokens, Some(4_000));
@@ -561,7 +581,7 @@ mod tests {
         assert_eq!(models[0].totals.total_tokens, 1_500);
         let totals = chat_totals(&pool, chat).await.expect("totals");
         assert_eq!(totals.total_tokens, 1_500, "the chat still counts it");
-        let turns = chat_turns(&pool, chat, 10).await.expect("the turns");
+        let turns = chat_turns(&pool, chat, 10).await.expect("the turns").rows;
         assert_eq!(turns[0].turn_id, only);
         assert_eq!(turns[0].message_id, None);
     }
@@ -603,7 +623,7 @@ mod tests {
             .await
             .expect("a deleted message does not refuse the write");
 
-        let turns = chat_turns(&pool, chat, 10).await.expect("the turns");
+        let turns = chat_turns(&pool, chat, 10).await.expect("the turns").rows;
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].turn_id, gone);
         assert_eq!(turns[0].message_id, None);
@@ -624,17 +644,27 @@ mod tests {
             .await
             .expect("the message is deleted, not yet committed");
 
+        let writer_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+            .await
+            .expect("a pool of one connection");
+        let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&writer_pool)
+            .await
+            .expect("the writer's backend");
         let writer = {
-            let pool = pool.clone();
             let spent = turn(doomed, chat, workspace);
-            tokio::spawn(async move { record(&pool, &spent).await })
+            tokio::spawn(async move { record(&writer_pool, &spent).await })
         };
         let mut blocked = false;
         for _ in 0..100 {
             blocked = sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
-                 WHERE wait_event_type = 'Lock' AND query LIKE 'INSERT INTO chat_token_usage%')",
+                 WHERE pid = $1 AND wait_event_type = 'Lock' \
+                 AND query LIKE 'INSERT INTO chat_token_usage%')",
             )
+            .bind(writer_pid)
             .fetch_one(&pool)
             .await
             .expect("the activity");
@@ -653,7 +683,7 @@ mod tests {
             .await
             .expect("the writer finishes")
             .expect("the foreign key violation is retried, not raised");
-        let turns = chat_turns(&pool, chat, 10).await.expect("the turns");
+        let turns = chat_turns(&pool, chat, 10).await.expect("the turns").rows;
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].turn_id, doomed);
         assert_eq!(turns[0].message_id, None);
@@ -677,7 +707,11 @@ mod tests {
         assert_eq!(totals.turns, 1);
         assert_eq!(totals.total_tokens, 3_000, "the repeat counted nothing");
         assert_eq!(
-            chat_turns(&pool, chat, 10).await.expect("the turns").len(),
+            chat_turns(&pool, chat, 10)
+                .await
+                .expect("the turns")
+                .rows
+                .len(),
             2
         );
     }
@@ -698,14 +732,17 @@ mod tests {
         handed.shares = vec![share("sonnet", None), share("gpt-5", Some(CONTEXT))];
         record(&pool, &handed).await.expect("the newer turn");
 
-        let turns = chat_turns(&pool, chat, 1).await.expect("the turns");
+        let page = chat_turns(&pool, chat, 1).await.expect("the turns");
+        let turns = page.rows;
 
         let models: Vec<_> = turns.iter().map(|row| row.model.as_str()).collect();
         assert_eq!(models, ["gpt-5", "sonnet"], "{turns:?}");
         assert!(turns.iter().all(|row| row.turn_id == newer), "{turns:?}");
-        assert_eq!(
-            chat_turns(&pool, chat, 2).await.expect("the turns").len(),
-            3
-        );
+        assert!(page.truncated, "the older turn was left out");
+        let whole = chat_turns(&pool, chat, 2).await.expect("the turns");
+        assert_eq!(whole.rows.len(), 3);
+        assert!(!whole.truncated, "every turn is listed");
+        let none = chat_turns(&pool, chat, 0).await.expect("the turns");
+        assert!(none.rows.is_empty() && none.truncated);
     }
 }

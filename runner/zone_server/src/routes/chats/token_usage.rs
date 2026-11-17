@@ -55,11 +55,8 @@ pub async fn chat(
     let chat = get_chat_with_access(&state, &auth, id).await?;
     let limit = bounded(LIMIT_PARAMETER, query.limit, DEFAULT_TURNS, TURNS)?;
     let totals = chat_token_usage::chat_totals(state.db(), chat.id).await?;
-    let turns = match limit {
-        0 => Vec::new(),
-        _ => chat_token_usage::chat_turns(state.db(), chat.id, limit).await?,
-    };
-    let truncated = totals.turns > limit;
+    let page = chat_token_usage::chat_turns(state.db(), chat.id, limit).await?;
+    let (turns, truncated) = (page.rows, page.truncated);
     Ok(Json(ChatUsageResponse {
         chat_id: chat.id.to_string(),
         totals: totals.into(),

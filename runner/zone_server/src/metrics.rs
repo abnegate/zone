@@ -162,7 +162,7 @@ fn handle() -> PrometheusHandle {
             );
             describe_histogram!(
                 CHAT_TURN_TOKENS,
-                "Tokens one model spent in all on its part of a chat turn"
+                "Tokens one chat turn spent in all, by the model it ended on"
             );
             describe_histogram!(CHAT_TURN_ROUNDS, "Model rounds one chat turn took");
             describe_histogram!(CHAT_TURN_TOOL_CALLS, "Tool calls one chat turn made");
@@ -613,27 +613,30 @@ pub fn record_citation_markers(status: &'static str, count: usize) {
 pub struct BilledTokens {
     pub prompt: u64,
     pub completion: u64,
-    /// What was spent in all, which can exceed the other two together once
-    /// cache writes and reads are counted, so it is carried rather than summed.
-    pub total: u64,
 }
 
-/// Rounds and tool calls are zone's own counts, so a turn records them whether
-/// or not its provider reported any tokens.
-pub fn record_chat_turn(rounds: u64, tool_calls: u64) {
+/// `total` is the provider's own figure for the whole turn, which can exceed
+/// prompt and completion together once cache writes and reads are counted.
+pub fn record_chat_turn(model: &str, total: Option<u64>, rounds: u64, tool_calls: u64) {
     init();
     histogram!(CHAT_TURN_ROUNDS).record(rounds as f64);
     histogram!(CHAT_TURN_TOOL_CALLS).record(tool_calls as f64);
+    if let Some(total) = total {
+        histogram!(CHAT_TURN_TOKENS, "model" => model.to_string()).record(total as f64);
+    }
 }
 
-/// Record the tokens `model` spent on its part of one chat turn.
 pub fn record_chat_tokens(model: &str, tokens: BilledTokens) {
     init();
     counter!(CHAT_TOKENS, "model" => model.to_string(), "kind" => TOKENS_PROMPT)
         .increment(tokens.prompt);
     counter!(CHAT_TOKENS, "model" => model.to_string(), "kind" => TOKENS_COMPLETION)
         .increment(tokens.completion);
-    histogram!(CHAT_TURN_TOKENS, "model" => model.to_string()).record(tokens.total as f64);
+}
+
+#[cfg(test)]
+pub(crate) fn rendered() -> String {
+    handle().render()
 }
 
 /// Record where one turn's final context went, a category at a time.

@@ -1,23 +1,37 @@
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use abnegate_agent::context::ContextUsage;
 use sqlx::PgPool;
 use tokio::runtime::Handle;
+use tokio_util::task::TaskTracker;
 
 use super::spent::Spent;
 
-/// A turn's spend, recorded when this is dropped, so every way out of the
-/// generation records it exactly once, whether the answer was stored, the
-/// store failed, or no answer was kept. A turn that spent nothing records
-/// nothing unless its answer was stored.
+type Recording = Pin<Box<dyn Future<Output = ()> + Send>>;
+type Recorder = Arc<dyn Fn(Spent) -> Recording + Send + Sync>;
+
 pub struct Pending {
-    pool: PgPool,
+    recorder: Recorder,
+    tasks: TaskTracker,
     spent: Spent,
     stored: bool,
 }
 
 impl Pending {
-    pub fn new(pool: PgPool, spent: Spent) -> Self {
+    pub fn new(pool: PgPool, tasks: TaskTracker, spent: Spent) -> Self {
+        let recorder: Recorder = Arc::new(move |spent| {
+            let pool = pool.clone();
+            Box::pin(async move { super::record(&pool, &spent).await })
+        });
+        Self::with(recorder, tasks, spent)
+    }
+
+    fn with(recorder: Recorder, tasks: TaskTracker, spent: Spent) -> Self {
         Self {
-            pool,
+            recorder,
+            tasks,
             spent,
             stored: false,
         }
@@ -41,13 +55,14 @@ impl Drop for Pending {
             tracing::warn!(
                 chat = %self.spent.chat,
                 message = %self.spent.message,
+                model = %self.spent.model,
+                ledger = ?self.spent.ledger.shares(),
                 "No runtime to record what this turn spent"
             );
             return;
         };
-        let pool = self.pool.clone();
-        let spent = self.spent.clone();
-        runtime.spawn(async move { super::record(&pool, &spent).await });
+        self.tasks
+            .spawn_on((self.recorder)(self.spent.clone()), &runtime);
     }
 }
 
@@ -56,38 +71,14 @@ mod tests {
     use super::*;
     use crate::services::chat::tokens::Ledger;
     use abnegate_llm::{ReasoningEffort, Usage};
+    use std::sync::Mutex;
     use uuid::Uuid;
 
-    async fn pool() -> PgPool {
-        PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
-            .await
-            .expect("the test database accepts connections")
-    }
-
-    async fn workspace(pool: &PgPool) -> Uuid {
-        let organization = Uuid::new_v4();
-        let workspace = Uuid::new_v4();
-        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Pending', $1::text)")
-            .bind(organization)
-            .execute(pool)
-            .await
-            .expect("an organization");
-        sqlx::query(
-            "INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, 'Pending', $1::text)",
-        )
-        .bind(workspace)
-        .bind(organization)
-        .execute(pool)
-        .await
-        .expect("a workspace");
-        workspace
-    }
-
-    fn spent(workspace: Uuid, ledger: Ledger) -> Spent {
+    fn spent(ledger: Ledger) -> Spent {
         Spent {
             message: Uuid::new_v4(),
             chat: Uuid::new_v4(),
-            workspace,
+            workspace: Uuid::new_v4(),
             model: "llama3".to_string(),
             effort: ReasoningEffort::Medium,
             ledger,
@@ -102,52 +93,72 @@ mod tests {
         ledger
     }
 
-    async fn rows(pool: &PgPool, turn: Uuid) -> i64 {
-        sqlx::query_scalar("SELECT count(*) FROM chat_token_usage WHERE turn_id = $1")
-            .bind(turn)
-            .fetch_one(pool)
-            .await
-            .expect("the turn's rows")
+    fn recording() -> (Recorder, Arc<Mutex<Vec<Spent>>>) {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded.clone();
+        let recorder: Recorder = Arc::new(move |spent| {
+            let sink = sink.clone();
+            Box::pin(async move { sink.lock().expect("the recorded turns").push(spent) })
+        });
+        (recorder, recorded)
     }
 
-    async fn settled(pool: &PgPool, turn: Uuid) -> bool {
-        for _ in 0..100 {
-            if rows(pool, turn).await > 0 {
-                return true;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    async fn dropped(spent: Spent, stored: bool) -> Vec<Spent> {
+        let (recorder, recorded) = recording();
+        let tasks = TaskTracker::new();
+        let mut pending = Pending::with(recorder, tasks.clone(), spent);
+        if stored {
+            pending.stored();
         }
-        false
+        drop(pending);
+        tasks.close();
+        tasks.wait().await;
+        recorded.lock().expect("the recorded turns").clone()
     }
 
     #[tokio::test]
-    async fn a_turn_that_ends_early_is_recorded_once_when_it_is_dropped() {
-        let pool = pool().await;
-        let workspace = workspace(&pool).await;
-        let spent = spent(workspace, ledger());
+    async fn a_turn_that_spent_tokens_is_recorded_once_when_it_is_dropped() {
+        let spent = spent(ledger());
         let turn = spent.message;
 
-        let pending = Pending::new(pool.clone(), spent);
-        drop(pending);
+        let recorded = dropped(spent, false).await;
 
-        assert!(
-            settled(&pool, turn).await,
-            "a turn dropped before its answer was stored is still recorded"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert_eq!(rows(&pool, turn).await, 1);
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+        assert_eq!(recorded[0].message, turn);
+    }
+
+    #[tokio::test]
+    async fn a_stored_answer_is_recorded_even_when_nothing_was_spent() {
+        let recorded = dropped(spent(Ledger::default()), true).await;
+
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stored_answer_that_spent_tokens_is_still_recorded_once() {
+        let recorded = dropped(spent(ledger()), true).await;
+
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
     }
 
     #[tokio::test]
     async fn a_turn_that_spent_nothing_and_stored_nothing_records_nothing() {
-        let pool = pool().await;
-        let workspace = workspace(&pool).await;
-        let spent = spent(workspace, Ledger::default());
-        let turn = spent.message;
+        let recorded = dropped(spent(Ledger::default()), false).await;
 
-        drop(Pending::new(pool.clone(), spent));
+        assert!(recorded.is_empty(), "{recorded:?}");
+    }
 
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert_eq!(rows(&pool, turn).await, 0);
+    #[tokio::test]
+    async fn a_known_context_rides_with_the_recorded_turn() {
+        let (recorder, recorded) = recording();
+        let tasks = TaskTracker::new();
+        let mut pending = Pending::with(recorder, tasks.clone(), spent(ledger()));
+        pending.context(ContextUsage::default());
+        drop(pending);
+        tasks.close();
+        tasks.wait().await;
+
+        let recorded = recorded.lock().expect("the recorded turns");
+        assert!(recorded[0].context.is_some());
     }
 }

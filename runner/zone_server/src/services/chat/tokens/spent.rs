@@ -20,7 +20,6 @@ pub struct Spent {
     pub message: Uuid,
     pub chat: Uuid,
     pub workspace: Uuid,
-    /// The model the turn ended on, whose share carries the closing context.
     pub model: String,
     pub effort: ReasoningEffort,
     pub ledger: Ledger,
@@ -29,7 +28,7 @@ pub struct Spent {
 
 impl Spent {
     pub(super) fn turn(&self) -> Turn {
-        let mut shares: Vec<chat_token_usage::Share> =
+        let mut shares: Vec<chat_token_usage::NewShare> =
             self.ledger.shares().iter().map(stored).collect();
         if let Some(context) = &self.context {
             let closing = match shares.iter().position(|share| share.model == self.model) {
@@ -89,12 +88,11 @@ pub(super) fn counted(usage: Usage) -> BilledTokens {
     BilledTokens {
         prompt: u64::from(usage.prompt_tokens),
         completion: u64::from(usage.completion_tokens),
-        total: u64::from(usage.total_tokens),
     }
 }
 
-fn stored(share: &Share) -> chat_token_usage::Share {
-    chat_token_usage::Share {
+fn stored(share: &Share) -> chat_token_usage::NewShare {
+    chat_token_usage::NewShare {
         model: share.model.clone(),
         reported: share.reported.map(|usage| Reported {
             prompt_tokens: i64::from(usage.prompt_tokens),
