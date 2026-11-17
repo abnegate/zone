@@ -120,7 +120,7 @@ async fn download(
     query: &ExportQuery,
 ) -> Result<Response, Refusal> {
     entitled(state).await?;
-    let export = Export::parse(query).map_err(rejected)?;
+    let export = Export::parse(query)?;
     if let Err(error) = record(state, scope, actor, export).await {
         tracing::error!(%error, "Refused an audit export whose own audit row could not be written");
         return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
@@ -177,10 +177,6 @@ async fn record(state: &AppState, scope: Scope, actor: &Actor, export: Export) -
         })),
     )
     .await
-}
-
-fn rejected(error: Error) -> Refusal {
-    Refusal::rejected(error.status(), error.to_string(), error.code())
 }
 
 #[cfg(test)]
@@ -261,7 +257,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_refusal_carries_the_enterprise_status_and_code() {
-        let response = rejected(Error::ExportRangeInvalid).into_response();
+        let response = Refusal::from(Error::ExportRangeInvalid).into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

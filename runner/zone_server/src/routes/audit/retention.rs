@@ -196,8 +196,7 @@ fn requested(
         return Err(Unentitled(Feature::AuditRetention).into());
     }
     let Json(request) = body.map_err(Refusal::Body)?;
-    retention::period(request.days.as_ref())
-        .map_err(|error| Refusal::rejected(error.status(), error.to_string(), error.code()))
+    Ok(retention::period(request.days.as_ref())?)
 }
 
 async fn settled(
