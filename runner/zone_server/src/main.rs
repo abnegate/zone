@@ -21,10 +21,12 @@ use zone_context::context::ContextService;
 use zone_enterprise::{Edition, status};
 use zone_server::cache::Cache;
 use zone_server::config::Config;
+use zone_server::db::audit::events;
 use zone_server::db::reminders::Sweep;
 use zone_server::db::sealing::Options;
 use zone_server::db::sealing::Sealer;
 use zone_server::routes;
+use zone_server::services::audit::transport::open::Transports;
 use zone_server::services::embedding::create_embedding_service;
 use zone_server::services::embedding::default_embedding_model;
 use zone_server::services::embedding::embedding_engine_from_env;
@@ -218,10 +220,23 @@ async fn main() {
     }
     state.mcp().configured().await;
     state.network_denial().await.announce();
+    match events::rebase(state.db()).await {
+        Ok(true) => tracing::info!("Rebased audit delivery positions left behind by a restore"),
+        Ok(false) => {}
+        Err(error) => {
+            tracing::error!(%error, "Could not rebase audit delivery positions; retrying on the next delivery tick")
+        }
+    }
 
-    // Start background workers
     zone_server::workers::housekeeping::spawn(state.clone());
     zone_server::workers::reminders::spawn(state.clone(), Sweep::All);
+    zone_server::workers::audit::spawn(
+        state.clone(),
+        Arc::new(Transports::new(
+            Arc::clone(state.master_key()),
+            state.config().endpoint_hosts.clone(),
+        )),
+    );
     if state.config().auto.enabled {
         zone_server::workers::auto_project::spawn(state.clone());
     }
