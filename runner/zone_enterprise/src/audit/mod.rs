@@ -1,11 +1,16 @@
+pub mod csv;
 pub mod delivery;
 pub mod destination;
 mod error;
+mod event;
+mod export;
 mod failure;
 mod health;
 mod kind;
+pub mod ndjson;
 pub mod retention;
 mod standing;
+pub mod syslog;
 mod url_reason;
 
 pub use error::{
@@ -14,6 +19,8 @@ pub use error::{
     HOSTNAME_INVALID, KIND_INVALID, NAME_INVALID, PORT_INVALID, PREFIX_INVALID, REGION_INVALID,
     RETENTION_INVALID, SECRET_INVALID, URL_INVALID,
 };
+pub use event::{Event, VERSION};
+pub use export::Format;
 pub use failure::FailureCode;
 pub use health::Health;
 pub use kind::Kind;
