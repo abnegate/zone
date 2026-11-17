@@ -1,25 +1,26 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { act, renderHook, waitFor } from '@testing-library/react';
-import type { ChatTokenUsage, TokenTotals } from '../types';
+import type { TokenTotals } from '../types';
 
-const mockGetChatTokenUsage = mock();
+const mockGetChatTokenTotals = mock();
 
 mock.module('../../../api/chats', () => ({
-  chatsApi: { getChatTokenUsage: mockGetChatTokenUsage },
+  chatsApi: { getChatTokenTotals: mockGetChatTokenTotals },
 }));
 
 let useChatTokenUsage: typeof import('./useChatTokenUsage').useChatTokenUsage;
-let TOKEN_TURNS: number;
+let RECORDING_SETTLE_DELAY: number;
 
 beforeAll(async () => {
-  ({ useChatTokenUsage, TOKEN_TURNS } = await import('./useChatTokenUsage'));
+  ({ useChatTokenUsage } = await import('./useChatTokenUsage'));
+  ({ RECORDING_SETTLE_DELAY } = await import('./useChatPullRequests'));
 });
 
 afterAll(() => {
   mock.restore();
 });
 
-const totals: TokenTotals = {
+const TOTALS: TokenTotals = {
   turns: 3,
   reported_turns: 3,
   prompt_tokens: 29_000,
@@ -39,83 +40,77 @@ const totals: TokenTotals = {
   last_at: '2026-11-16T01:00:00Z',
 };
 
-function usage(chatId: string, total: number): ChatTokenUsage {
-  return {
-    chat_id: chatId,
-    totals: { ...totals, total_tokens: total },
-    turns: [],
-    truncated: false,
-  };
+function totals(total: number): TokenTotals {
+  return { ...TOTALS, total_tokens: total };
 }
 
 describe('useChatTokenUsage', () => {
   beforeEach(() => {
-    mockGetChatTokenUsage.mockReset();
+    mockGetChatTokenTotals.mockReset();
   });
 
-  it('reads the chat it was given, bounded to the turns the panel shows', async () => {
-    mockGetChatTokenUsage.mockResolvedValue(usage('chat-1', 30_000));
+  it('reads the totals of the chat it was given', async () => {
+    mockGetChatTokenTotals.mockResolvedValue(totals(30_000));
 
     const { result } = renderHook(() => useChatTokenUsage('chat-1', false));
 
-    await waitFor(() => expect(result.current.usage?.totals.total_tokens).toBe(30_000));
-    expect(mockGetChatTokenUsage).toHaveBeenCalledWith('chat-1', TOKEN_TURNS);
+    await waitFor(() => expect(result.current?.total_tokens).toBe(30_000));
+    expect(mockGetChatTokenTotals).toHaveBeenCalledWith('chat-1');
   });
 
   it('reads nothing and reports nothing without a chat', async () => {
     const { result } = renderHook(() => useChatTokenUsage(null, false));
 
-    await waitFor(() => expect(result.current.usage).toBeNull());
-    expect(mockGetChatTokenUsage).not.toHaveBeenCalled();
+    await waitFor(() => expect(result.current).toBeNull());
+    expect(mockGetChatTokenTotals).not.toHaveBeenCalled();
   });
 
   it('does not show one chat total against another while the new read is in flight', async () => {
-    mockGetChatTokenUsage.mockImplementation(async (chatId: string) =>
-      usage(chatId, chatId === 'chat-1' ? 30_000 : 90_000)
+    mockGetChatTokenTotals.mockImplementation(async (chatId: string) =>
+      totals(chatId === 'chat-1' ? 30_000 : 90_000)
     );
 
     const { result, rerender } = renderHook(({ chatId }) => useChatTokenUsage(chatId, false), {
       initialProps: { chatId: 'chat-1' as string | null },
     });
-    await waitFor(() => expect(result.current.usage?.chat_id).toBe('chat-1'));
+    await waitFor(() => expect(result.current?.total_tokens).toBe(30_000));
 
     rerender({ chatId: 'chat-2' });
-    expect(result.current.usage).toBeNull();
-    await waitFor(() => expect(result.current.usage?.chat_id).toBe('chat-2'));
-    expect(result.current.usage?.totals.total_tokens).toBe(90_000);
+    expect(result.current).toBeNull();
+    await waitFor(() => expect(result.current?.total_tokens).toBe(90_000));
   });
 
-  it('reads again once a turn has finished streaming, because the row lands as it closes', async () => {
-    mockGetChatTokenUsage.mockResolvedValue(usage('chat-1', 30_000));
-
+  it('reads again once the turn that just ended has had time to be recorded', async () => {
+    mockGetChatTokenTotals.mockResolvedValue(totals(30_000));
     const { result, rerender } = renderHook(
       ({ streaming }) => useChatTokenUsage('chat-1', streaming),
-      {
-        initialProps: { streaming: true },
-      }
+      { initialProps: { streaming: true } }
     );
-    await waitFor(() => expect(result.current.usage?.chat_id).toBe('chat-1'));
-    const reads = mockGetChatTokenUsage.mock.calls.length;
+    await waitFor(() => expect(result.current?.total_tokens).toBe(30_000));
 
-    mockGetChatTokenUsage.mockResolvedValue(usage('chat-1', 45_000));
+    mockGetChatTokenTotals.mockResolvedValue(totals(45_000));
     rerender({ streaming: false });
 
-    await waitFor(() => expect(result.current.usage?.totals.total_tokens).toBe(45_000));
-    expect(mockGetChatTokenUsage.mock.calls.length).toBeGreaterThan(reads);
+    await waitFor(() => expect(result.current?.total_tokens).toBe(45_000), {
+      timeout: RECORDING_SETTLE_DELAY + 2_000,
+    });
+    expect(mockGetChatTokenTotals).toHaveBeenCalledTimes(2);
   });
 
-  it('keeps the last total and reports the failure when a read fails', async () => {
-    mockGetChatTokenUsage.mockResolvedValue(usage('chat-1', 30_000));
+  it('keeps the last totals when a read fails', async () => {
+    mockGetChatTokenTotals.mockResolvedValue(totals(30_000));
+    const { result, rerender } = renderHook(
+      ({ streaming }) => useChatTokenUsage('chat-1', streaming),
+      { initialProps: { streaming: true } }
+    );
+    await waitFor(() => expect(result.current?.total_tokens).toBe(30_000));
 
-    const { result } = renderHook(() => useChatTokenUsage('chat-1', false));
-    await waitFor(() => expect(result.current.usage?.totals.total_tokens).toBe(30_000));
+    mockGetChatTokenTotals.mockRejectedValue(new Error('Failed to load token usage'));
+    await act(async () => rerender({ streaming: false }));
 
-    mockGetChatTokenUsage.mockRejectedValue(new Error('Failed to load token usage'));
-    await act(async () => {
-      await result.current.refresh();
+    await waitFor(() => expect(mockGetChatTokenTotals).toHaveBeenCalledTimes(2), {
+      timeout: RECORDING_SETTLE_DELAY + 2_000,
     });
-
-    await waitFor(() => expect(result.current.error).toBe('Failed to load token usage'));
-    expect(result.current.usage?.totals.total_tokens).toBe(30_000);
+    expect(result.current?.total_tokens).toBe(30_000);
   });
 });

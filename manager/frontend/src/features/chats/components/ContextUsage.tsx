@@ -8,12 +8,7 @@ interface Props {
   error?: string | null;
   previewing?: boolean;
   capacity?: number | null;
-  /**
-   * What the chat has spent across every turn so far, or null when nothing has
-   * been recorded. The context above is a snapshot of one request; this is the
-   * running bill, which is what a change meant to cut token use is read
-   * against.
-   */
+  /** What the chat has spent across every turn so far. */
   spend?: TokenTotals | null;
 }
 const labels: Record<keyof Usage['breakdown'], string> = {
@@ -34,14 +29,7 @@ function positive(value?: number | null): number | null {
   return value && value > 0 ? value : null;
 }
 
-/**
- * `total` over `turns`, rounded, or null when there is nothing to divide.
- *
- * The denominator is the turns a provider actually reported, not every
- * recorded turn: several coding-agent backends report no usage at all, and
- * dividing by those too would report a cheaper average than anything that
- * happened.
- */
+/** Divided by the turns a provider reported, since a turn it did not report is not a free one. */
 function perTurn(total: number, turns: number): number | null {
   return turns > 0 ? Math.round(total / turns) : null;
 }

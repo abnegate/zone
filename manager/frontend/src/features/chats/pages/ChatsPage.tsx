@@ -2124,7 +2124,7 @@ export default function ChatsPage() {
                       error={contextError}
                       previewing={previewing}
                       capacity={meterCapacity}
-                      spend={spend.usage?.totals ?? null}
+                      spend={spend}
                     />
                   </div>
                 </div>
