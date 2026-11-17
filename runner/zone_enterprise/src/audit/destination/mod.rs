@@ -14,7 +14,7 @@ pub use s3::{Addressing, S3Secrets, S3Settings};
 pub use syslog::{Facility, Protocol, SyslogSecrets, SyslogSettings};
 pub use webhook::{WebhookSecrets, WebhookSettings};
 
-const REDACTED: &str = "<redacted>";
+pub(crate) const REDACTED: &str = "<redacted>";
 const SCHEMES: [&str; 2] = ["http", "https"];
 
 pub fn name(value: &str) -> Result<String, Error> {
