@@ -429,7 +429,6 @@ async fn fetch(
     previous: Option<Arc<Listing>>,
     now: DateTime<Utc>,
 ) -> Result<Listing, Fault> {
-    let limit = state.config().github.open_pull_request_limit;
     let repository = &Repository::of(source, &state.config().github_web_url);
     let permits = &state.github_snapshots().throttle.credential(&source.source);
     let previous = previous.as_deref();
@@ -448,7 +447,7 @@ async fn fetch(
                 GRAPHQL_LIMIT,
                 deadline,
             )
-            .listing(limit)
+            .listing()
             .await
         },
     )

@@ -24,10 +24,26 @@ use crate::services::github::testing::mock;
 use crate::services::github::testing::mocked;
 
 const HEAD: &str = "dddddddddddddddddddddddddddddddddddddddd";
+/// Long enough that no listing in these tests runs out of time.
+const PATIENCE: Duration = Duration::from_secs(60);
 const REPOSITORY_URL: &str = "https://github.com/owner/repository";
 const DIFF_MEDIA_TYPE: &str = "application/vnd.github.diff";
 const JOB: u64 = 77;
 const RUN: u64 = 99;
+
+/// Longer than any deadline here, so a page answered this late is never
+/// waited out.
+const LATE: Duration = Duration::from_secs(3);
+
+/// A deadline no listing here will reach.
+fn unhurried() -> Instant {
+    Instant::now() + PATIENCE
+}
+
+/// A deadline that passes while a late page is outstanding.
+fn hurried() -> Instant {
+    Instant::now() + Duration::from_millis(300)
+}
 
 fn revision() -> diff::Revision<'static> {
     diff::Revision {
@@ -64,7 +80,7 @@ async fn requested(server: &MockServer, endpoint: &str) -> usize {
 }
 
 #[tokio::test]
-async fn open_pull_requests_are_read_up_to_the_limit_and_say_whether_that_was_all() {
+async fn open_pull_requests_are_read_to_the_last_page_and_say_that_was_all() {
     let server = MockServer::start().await;
     mock(
         &server,
@@ -74,26 +90,33 @@ async fn open_pull_requests_are_read_up_to_the_limit_and_say_whether_that_was_al
     .await;
     let github = mocked(&server);
 
-    let (every, complete) = github.open_pulls(5).await.unwrap();
+    let (every, complete) = github.open_pulls(unhurried()).await.unwrap();
+
     assert_eq!(every.len(), 3);
     assert!(complete);
     assert_eq!(every[0].author_login.as_deref(), Some("octocat"));
-
-    let (some, complete) = github.open_pulls(2).await.unwrap();
-    let numbers: Vec<u64> = some
-        .iter()
-        .map(|row| row.reference.number().get())
-        .collect();
-    assert_eq!(numbers, [1, 2]);
-    assert!(!complete);
 }
 
 async fn rest_page(server: &MockServer, page: u32, numbers: impl IntoIterator<Item = u64>) {
+    rest_page_answered(server, page, numbers, Duration::ZERO).await;
+}
+
+/// A REST page of open pull requests answered `delay` late.
+async fn rest_page_answered(
+    server: &MockServer,
+    page: u32,
+    numbers: impl IntoIterator<Item = u64>,
+    delay: Duration,
+) {
     let rows: Vec<Value> = numbers.into_iter().map(listed_pull).collect();
     Mock::given(method("GET"))
         .and(path("/repos/owner/repository/pulls"))
         .and(query_param("page", page.to_string()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!(rows)))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!(rows))
+                .set_delay(delay),
+        )
         .mount(server)
         .await;
 }
@@ -122,26 +145,52 @@ async fn a_pull_request_updated_onto_a_later_page_is_listed_once_and_the_listing
     rest_page(&server, 2, 100..=102).await;
     let github = mocked(&server);
 
-    let (pulls, complete) = github.open_pulls(102).await.unwrap();
+    let (pulls, complete) = github.open_pulls(unhurried()).await.unwrap();
 
     assert_eq!(numbers(&pulls), (1..=102).collect::<Vec<u64>>());
-    assert!(complete, "a repeat is not a pull request past the limit");
+    assert!(complete, "a repeat does not cut the listing short");
     assert_eq!(pages_read(&server).await, ["1", "2"]);
 }
 
 #[tokio::test]
-async fn a_repeat_does_not_count_toward_the_limit_and_paging_goes_on() {
+async fn paging_goes_on_past_any_count_until_github_has_no_more_to_give() {
     let server = MockServer::start().await;
     rest_page(&server, 1, 1..=100).await;
     rest_page(&server, 2, 100..=199).await;
     rest_page(&server, 3, 200..=201).await;
     let github = mocked(&server);
 
-    let (pulls, complete) = github.open_pulls(200).await.unwrap();
+    let (pulls, complete) = github.open_pulls(unhurried()).await.unwrap();
 
-    assert_eq!(numbers(&pulls), (1..=200).collect::<Vec<u64>>());
-    assert!(!complete, "pull request 201 is past the limit");
+    assert_eq!(numbers(&pulls), (1..=201).collect::<Vec<u64>>());
+    assert!(complete, "every open pull request was read");
     assert_eq!(pages_read(&server).await, ["1", "2", "3"]);
+}
+
+#[tokio::test]
+async fn a_rest_listing_out_of_time_keeps_its_pages_and_says_it_is_not_all() {
+    let server = MockServer::start().await;
+    rest_page(&server, 1, 1..=100).await;
+    rest_page_answered(&server, 2, 101..=200, LATE).await;
+    let github = mocked(&server);
+    let started = Instant::now();
+
+    let (pulls, complete) = github.open_pulls(hurried()).await.unwrap();
+
+    assert!(started.elapsed() < LATE, "{:?}", started.elapsed());
+    assert_eq!(numbers(&pulls), (1..=100).collect::<Vec<u64>>());
+    assert!(!complete, "a page GitHub still has to give is not all");
+}
+
+#[tokio::test]
+async fn a_rest_listing_whose_first_page_is_late_has_read_nothing_to_stand_on() {
+    let server = MockServer::start().await;
+    rest_page_answered(&server, 1, 1..=100, LATE).await;
+    let github = mocked(&server);
+
+    let late = github.open_pulls(hurried()).await;
+
+    assert_eq!(late.err(), Some(Fault::upstream(LATE_LISTING)));
 }
 
 #[tokio::test]
@@ -382,21 +431,38 @@ async fn open_page(
     numbers: std::ops::RangeInclusive<u64>,
     next: Option<&str>,
 ) {
+    open_page_answered(server, id, first, after, numbers, next, Duration::ZERO).await;
+}
+
+/// The same page, answered `delay` late.
+async fn open_page_answered(
+    server: &MockServer,
+    id: &str,
+    first: u64,
+    after: Option<&str>,
+    numbers: std::ops::RangeInclusive<u64>,
+    next: Option<&str>,
+    delay: Duration,
+) {
     let rows: Vec<Value> = numbers.map(open_row).collect();
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .and(body_partial_json(
             json!({"variables": {"first": first, "after": after}}),
         ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
-            "repository": {
-                "id": id,
-                "pullRequests": {
-                    "pageInfo": {"hasNextPage": next.is_some(), "endCursor": next},
-                    "nodes": rows,
-                },
-            },
-        }})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": {
+                    "repository": {
+                        "id": id,
+                        "pullRequests": {
+                            "pageInfo": {"hasNextPage": next.is_some(), "endCursor": next},
+                            "nodes": rows,
+                        },
+                    },
+                }}))
+                .set_delay(delay),
+        )
         .expect(1)
         .mount(server)
         .await;
@@ -409,22 +475,17 @@ fn numbers(rows: &[ListedPullRequest]) -> Vec<u64> {
 }
 
 #[tokio::test]
-async fn a_second_page_asks_for_what_the_limit_leaves_after_the_first_cursor() {
+async fn every_page_asks_for_a_whole_page_after_the_cursor_before_it() {
     let server = MockServer::start().await;
     open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
-    open_page(
-        &server,
-        REPOSITORY_ID,
-        20,
-        Some(CURSOR),
-        100..=120,
-        Some(LATER),
-    )
-    .await;
+    open_page(&server, REPOSITORY_ID, 100, Some(CURSOR), 100..=120, None).await;
     let github = mocked(&server);
     let permits = Semaphore::new(1);
 
-    let (repository, rows, complete) = github.open_pull_requests(&permits, 120).await.unwrap();
+    let (repository, rows, complete) = github
+        .open_pull_requests(&permits, unhurried())
+        .await
+        .unwrap();
 
     assert_eq!(repository, RepositoryId::new(REPOSITORY_ID));
     assert_eq!(
@@ -432,25 +493,67 @@ async fn a_second_page_asks_for_what_the_limit_leaves_after_the_first_cursor() {
         (1..=120).collect::<Vec<u64>>(),
         "a pull request listed on both pages is listed once"
     );
-    assert!(!complete, "more pages follow the limit");
+    assert!(complete);
     assert_eq!(permits.available_permits(), 1);
     server.verify().await;
 }
 
 #[tokio::test]
-async fn a_last_page_inside_the_limit_is_every_open_pull_request() {
+async fn a_last_page_is_every_open_pull_request_however_many_there_are() {
     let server = MockServer::start().await;
     open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
-    open_page(&server, REPOSITORY_ID, 50, Some(CURSOR), 101..=130, None).await;
+    open_page(&server, REPOSITORY_ID, 100, Some(CURSOR), 101..=200, None).await;
     let github = mocked(&server);
 
     let (_, rows, complete) = github
-        .open_pull_requests(&Semaphore::new(1), 150)
+        .open_pull_requests(&Semaphore::new(1), unhurried())
         .await
         .unwrap();
 
-    assert_eq!(numbers(&rows), (1..=130).collect::<Vec<u64>>());
-    assert!(complete);
+    assert_eq!(numbers(&rows), (1..=200).collect::<Vec<u64>>());
+    assert!(complete, "no count of Zone's own cuts the listing short");
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_listing_out_of_time_keeps_the_pages_it_read_and_says_it_is_not_all() {
+    let server = paged().await;
+    open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
+    open_page_answered(
+        &server,
+        REPOSITORY_ID,
+        100,
+        Some(CURSOR),
+        101..=200,
+        None,
+        LATE,
+    )
+    .await;
+    let github = mocked(&server);
+    let started = Instant::now();
+
+    let (_, rows, complete) = github
+        .open_pull_requests(&Semaphore::new(1), hurried())
+        .await
+        .unwrap();
+
+    assert!(started.elapsed() < LATE, "{:?}", started.elapsed());
+    assert_eq!(numbers(&rows), (1..=100).collect::<Vec<u64>>());
+    assert!(!complete, "the page GitHub still had to give is missing");
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_listing_whose_first_page_is_late_has_read_nothing_to_stand_on() {
+    let server = paged().await;
+    open_page_answered(&server, REPOSITORY_ID, 100, None, 1..=100, None, LATE).await;
+    let github = mocked(&server);
+
+    let late = github
+        .open_pull_requests(&Semaphore::new(1), hurried())
+        .await;
+
+    assert_eq!(late.err(), Some(Fault::upstream(LATE_LISTING)));
     server.verify().await;
 }
 
@@ -458,10 +561,12 @@ async fn a_last_page_inside_the_limit_is_every_open_pull_request() {
 async fn pages_of_another_repository_part_way_through_are_refused() {
     let server = MockServer::start().await;
     open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
-    open_page(&server, "R_elsewhere", 50, Some(CURSOR), 101..=130, None).await;
+    open_page(&server, "R_elsewhere", 100, Some(CURSOR), 101..=130, None).await;
     let github = mocked(&server);
 
-    let refused = github.open_pull_requests(&Semaphore::new(1), 150).await;
+    let refused = github
+        .open_pull_requests(&Semaphore::new(1), unhurried())
+        .await;
 
     assert_eq!(refused.err(), Some(Fault::upstream(MOVED_REPOSITORY)));
     server.verify().await;
@@ -579,10 +684,12 @@ async fn a_page_that_lists_nothing_new_but_says_more_follow_stops_the_listing() 
     for (name, rows) in [("an empty page", empty), ("a page listed before", 1..=100)] {
         let server = paged().await;
         open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
-        open_page(&server, REPOSITORY_ID, 50, Some(CURSOR), rows, Some(LATER)).await;
+        open_page(&server, REPOSITORY_ID, 100, Some(CURSOR), rows, Some(LATER)).await;
         let github = mocked(&server);
 
-        let stalled = github.open_pull_requests(&Semaphore::new(1), 150).await;
+        let stalled = github
+            .open_pull_requests(&Semaphore::new(1), unhurried())
+            .await;
 
         assert_eq!(
             stalled.err(),
@@ -600,7 +707,7 @@ async fn a_page_that_names_the_cursor_it_was_read_after_stops_the_listing() {
     open_page(
         &server,
         REPOSITORY_ID,
-        50,
+        100,
         Some(CURSOR),
         101..=110,
         Some(CURSOR),
@@ -608,7 +715,9 @@ async fn a_page_that_names_the_cursor_it_was_read_after_stops_the_listing() {
     .await;
     let github = mocked(&server);
 
-    let stalled = github.open_pull_requests(&Semaphore::new(1), 150).await;
+    let stalled = github
+        .open_pull_requests(&Semaphore::new(1), unhurried())
+        .await;
 
     assert_eq!(
         stalled.err(),
@@ -634,7 +743,7 @@ async fn a_page_that_points_back_to_a_cursor_already_read_after_stops_the_listin
     open_page(
         &server,
         REPOSITORY_ID,
-        50,
+        100,
         Some(LATER),
         201..=210,
         Some(CURSOR),
@@ -642,7 +751,9 @@ async fn a_page_that_points_back_to_a_cursor_already_read_after_stops_the_listin
     .await;
     let github = mocked(&server);
 
-    let stalled = github.open_pull_requests(&Semaphore::new(1), 250).await;
+    let stalled = github
+        .open_pull_requests(&Semaphore::new(1), unhurried())
+        .await;
 
     assert_eq!(stalled.err(), Some(Fault::upstream(STALLED_CURSOR)));
     server.verify().await;

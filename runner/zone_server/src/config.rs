@@ -908,7 +908,6 @@ impl AutoProjectConfig {
 const GITHUB_PULL_REQUEST_TTL: &str = "ZONE_GITHUB_PULL_REQUEST_TTL_SECONDS";
 const GITHUB_RELEASE_TTL: &str = "ZONE_GITHUB_RELEASE_TTL_SECONDS";
 const GITHUB_RELEASE_WINDOW_DAYS: &str = "ZONE_GITHUB_RELEASE_WINDOW_DAYS";
-const GITHUB_OPEN_PULL_REQUEST_LIMIT: &str = "ZONE_GITHUB_OPEN_PULL_REQUEST_LIMIT";
 const GITHUB_ADMIN_MERGE: &str = "ZONE_GITHUB_ADMIN_MERGE";
 
 const DEFAULT_PULL_REQUEST_TTL_SECONDS: u64 = 45;
@@ -920,16 +919,12 @@ const MINIMUM_RELEASE_WINDOW_DAYS: u64 = 1;
 pub const MAXIMUM_RELEASE_WINDOW_DAYS: u64 = 90;
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 const MINIMUM_PIPELINE_HORIZON: Duration = DAY;
-const DEFAULT_OPEN_PULL_REQUEST_LIMIT: u64 = 50;
-const MINIMUM_OPEN_PULL_REQUEST_LIMIT: u64 = 1;
-const MAXIMUM_OPEN_PULL_REQUEST_LIMIT: u64 = 200;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GithubConfig {
     pub pull_request_ttl: Duration,
     pub release_ttl: Duration,
     pub release_window_days: u32,
-    pub open_pull_request_limit: u32,
     pub admin_merge: bool,
 }
 
@@ -939,7 +934,6 @@ impl Default for GithubConfig {
             pull_request_ttl: Duration::from_secs(DEFAULT_PULL_REQUEST_TTL_SECONDS),
             release_ttl: Duration::from_secs(DEFAULT_RELEASE_TTL_SECONDS),
             release_window_days: DEFAULT_RELEASE_WINDOW_DAYS as u32,
-            open_pull_request_limit: DEFAULT_OPEN_PULL_REQUEST_LIMIT as u32,
             admin_merge: false,
         }
     }
@@ -965,12 +959,6 @@ impl GithubConfig {
                 DEFAULT_RELEASE_WINDOW_DAYS,
                 MINIMUM_RELEASE_WINDOW_DAYS,
                 MAXIMUM_RELEASE_WINDOW_DAYS,
-            ) as u32,
-            open_pull_request_limit: env_u64(
-                GITHUB_OPEN_PULL_REQUEST_LIMIT,
-                DEFAULT_OPEN_PULL_REQUEST_LIMIT,
-                MINIMUM_OPEN_PULL_REQUEST_LIMIT,
-                MAXIMUM_OPEN_PULL_REQUEST_LIMIT,
             ) as u32,
             admin_merge: env_truthy(GITHUB_ADMIN_MERGE, false),
         }
@@ -1605,11 +1593,10 @@ mod tests {
         evaluation::TOOL_TIMEOUT_VARIABLE,
         evaluation::BUDGET_VARIABLE,
     ];
-    const GITHUB_SETTINGS: [&str; 5] = [
+    const GITHUB_SETTINGS: [&str; 4] = [
         GITHUB_PULL_REQUEST_TTL,
         GITHUB_RELEASE_TTL,
         GITHUB_RELEASE_WINDOW_DAYS,
-        GITHUB_OPEN_PULL_REQUEST_LIMIT,
         GITHUB_ADMIN_MERGE,
     ];
     const INSTANCE_SERVERS: &str = "ZONE_MCP_SERVERS";
@@ -2317,7 +2304,6 @@ mod tests {
                 pull_request_ttl: Duration::from_secs(45),
                 release_ttl: Duration::from_secs(120),
                 release_window_days: 7,
-                open_pull_request_limit: 50,
                 admin_merge: false,
             }
         );
@@ -2339,7 +2325,6 @@ mod tests {
         environment.set(GITHUB_PULL_REQUEST_TTL, "1");
         environment.set(GITHUB_RELEASE_TTL, "999999");
         environment.set(GITHUB_RELEASE_WINDOW_DAYS, "0");
-        environment.set(GITHUB_OPEN_PULL_REQUEST_LIMIT, "5000");
         environment.set(GITHUB_ADMIN_MERGE, "off");
         assert_eq!(
             GithubConfig::from_env(),
@@ -2347,7 +2332,6 @@ mod tests {
                 pull_request_ttl: Duration::from_secs(10),
                 release_ttl: Duration::from_secs(3600),
                 release_window_days: 1,
-                open_pull_request_limit: 200,
                 admin_merge: false,
             }
         );
@@ -2355,7 +2339,6 @@ mod tests {
         environment.set(GITHUB_PULL_REQUEST_TTL, "60");
         environment.set(GITHUB_RELEASE_TTL, "300");
         environment.set(GITHUB_RELEASE_WINDOW_DAYS, "500");
-        environment.set(GITHUB_OPEN_PULL_REQUEST_LIMIT, "0");
         environment.set(GITHUB_ADMIN_MERGE, "yes");
         assert_eq!(
             GithubConfig::from_env(),
@@ -2363,7 +2346,6 @@ mod tests {
                 pull_request_ttl: Duration::from_secs(60),
                 release_ttl: Duration::from_secs(300),
                 release_window_days: 90,
-                open_pull_request_limit: 1,
                 admin_merge: true,
             }
         );

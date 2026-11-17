@@ -29,7 +29,6 @@ use crate::services::github::throttle::CREDENTIAL_PERMITS;
 type Verdict = (Origin, Result<PullRequest, Fault>);
 
 const LATE: &str = "GitHub was not read in time to assess this pull request again.";
-const LATE_LISTING: &str = "GitHub did not list this repository's open pull requests in time.";
 
 pub(super) struct Survey<'a> {
     github: Github,
@@ -62,13 +61,15 @@ impl<'a> Survey<'a> {
         }
     }
 
-    pub(super) async fn listing(&self, limit: u32) -> Result<Listing, Fault> {
-        let opened = timeout_at(
-            self.deadline,
-            self.github.open_pull_requests(self.permits, limit),
-        )
-        .await
-        .map_err(|_| Fault::upstream(LATE_LISTING))?;
+    /// The listing pages until GitHub has no more open pull requests to
+    /// give, so the deadline is what ends a long one rather than a count.
+    /// It is handed down because each page is bounded by it: a listing out
+    /// of time keeps the pages it read and says it is not every one.
+    pub(super) async fn listing(&self) -> Result<Listing, Fault> {
+        let opened = self
+            .github
+            .open_pull_requests(self.permits, self.deadline)
+            .await;
         match opened {
             Ok((repository, rows, complete)) => self.batched(&repository, rows, complete).await,
             Err(fault) if fault.halts() => Err(fault),
@@ -78,9 +79,7 @@ impl<'a> Survey<'a> {
                     %fault,
                     "Listing open pull requests through REST after GitHub refused the GraphQL listing"
                 );
-                let (rows, complete) = timeout_at(self.deadline, self.github.open_pulls(limit))
-                    .await
-                    .map_err(|_| Fault::upstream(LATE_LISTING))??;
+                let (rows, complete) = self.github.open_pulls(self.deadline).await?;
                 self.through_rest(rows, complete).await
             }
         }
