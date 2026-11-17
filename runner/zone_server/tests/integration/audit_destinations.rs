@@ -1314,9 +1314,7 @@ async fn a_host_the_operator_no_longer_allows_is_refused_when_sending() {
     );
 
     settle(pool).await;
-    drain(&restricted, Uuid::new_v4(), CADENCE, &transports)
-        .await
-        .unwrap();
+    drain(&restricted, CADENCE, &transports).await.unwrap();
     assert_eq!(
         last_error_code(pool, siem).await.as_deref(),
         Some("configuration")

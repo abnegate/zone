@@ -3,6 +3,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use sqlx::PgExecutor;
 use uuid::Uuid;
+use zone_enterprise::audit::FailureCode;
 
 use super::position::Position;
 use super::predicate::scoped;
@@ -26,9 +27,27 @@ pub struct Delivery {
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub last_success_at: Option<DateTime<Utc>>,
     pub last_failure_at: Option<DateTime<Utc>>,
-    pub last_error_code: Option<String>,
+    pub last_error_code: Option<FailureCode>,
     pub last_error: Option<String>,
     pub delivered_count: i64,
+}
+
+/// A claimed delivery. `token` is fresh for every claim and is the only key that pins, advances,
+/// fails or releases it, so a task that outlived its lease can't record a result over a later
+/// claim, even one made by the same process. `claimed_at` is the database's clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lease {
+    pub token: Uuid,
+    pub delivery: Delivery,
+    pub claimed_at: DateTime<Utc>,
+}
+
+/// When a released delivery is next due: after a delay on the database's clock, or at a time
+/// read from the database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resume {
+    After(Duration),
+    At(DateTime<Utc>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
@@ -56,6 +75,13 @@ struct Row {
     delivered_count: i64,
 }
 
+#[derive(sqlx::FromRow)]
+struct Claimed {
+    #[sqlx(flatten)]
+    row: Row,
+    claimed_at: DateTime<Utc>,
+}
+
 impl From<Row> for Delivery {
     fn from(row: Row) -> Self {
         let batch =
@@ -78,19 +104,16 @@ impl From<Row> for Delivery {
             lease_expires_at: row.lease_expires_at,
             last_success_at: row.last_success_at,
             last_failure_at: row.last_failure_at,
-            last_error_code: row.last_error_code,
+            last_error_code: row.last_error_code.as_deref().and_then(FailureCode::parse),
             last_error: row.last_error,
             delivered_count: row.delivered_count,
         }
     }
 }
 
-pub async fn claim(
-    executor: impl PgExecutor<'_>,
-    owner: Uuid,
-    lease: Duration,
-) -> DbResult<Option<Delivery>> {
-    let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+pub async fn claim(executor: impl PgExecutor<'_>, lease: Duration) -> DbResult<Option<Lease>> {
+    let token = Uuid::new_v4();
+    let claimed: Option<Claimed> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "UPDATE audit_deliveries AS delivery \
          SET lease_owner = $1, \
              lease_expires_at = statement_timestamp() + make_interval(secs => $2) \
@@ -104,19 +127,23 @@ pub async fn claim(
              ORDER BY candidate.next_attempt_at, candidate.destination_id \
              LIMIT 1 \
              FOR UPDATE OF candidate SKIP LOCKED) \
-         RETURNING {COLUMNS}"
+         RETURNING {COLUMNS}, statement_timestamp() AS claimed_at"
     )))
-    .bind(owner)
+    .bind(token)
     .bind(lease.as_secs_f64())
     .fetch_optional(executor)
     .await?;
-    Ok(row.map(Delivery::from))
+    Ok(claimed.map(|claimed| Lease {
+        token,
+        delivery: Delivery::from(claimed.row),
+        claimed_at: claimed.claimed_at,
+    }))
 }
 
 pub async fn pin(
     executor: impl PgExecutor<'_>,
     id: Uuid,
-    owner: Uuid,
+    token: Uuid,
     through: Position,
 ) -> DbResult<bool> {
     let result = sqlx::query(
@@ -124,7 +151,7 @@ pub async fn pin(
          WHERE destination_id = $1 AND lease_owner = $2",
     )
     .bind(id)
-    .bind(owner)
+    .bind(token)
     .bind(through.transaction_id)
     .bind(through.sequence)
     .execute(executor)
@@ -132,10 +159,12 @@ pub async fn pin(
     Ok(result.rows_affected() == 1)
 }
 
+/// Due again at once, but behind every destination already waiting, so a deep backlog takes
+/// turns with the rest.
 pub async fn advance(
     executor: impl PgExecutor<'_>,
     id: Uuid,
-    owner: Uuid,
+    token: Uuid,
     through: Position,
     count: i64,
 ) -> DbResult<bool> {
@@ -143,11 +172,11 @@ pub async fn advance(
         "UPDATE audit_deliveries SET transaction_id = $3, sequence = $4, \
              batch_transaction_id = NULL, batch_sequence = NULL, attempts = 0, \
              last_success_at = statement_timestamp(), delivered_count = delivered_count + $5, \
-             lease_owner = NULL, lease_expires_at = NULL \
+             next_attempt_at = statement_timestamp(), lease_owner = NULL, lease_expires_at = NULL \
          WHERE destination_id = $1 AND lease_owner = $2",
     )
     .bind(id)
-    .bind(owner)
+    .bind(token)
     .bind(through.transaction_id)
     .bind(through.sequence)
     .bind(count)
@@ -156,51 +185,59 @@ pub async fn advance(
     Ok(result.rows_affected() == 1)
 }
 
+/// Returns when the retry is due, or `None` when the lease was lost.
 pub async fn fail(
     executor: impl PgExecutor<'_>,
     id: Uuid,
-    owner: Uuid,
-    code: &str,
+    token: Uuid,
+    code: FailureCode,
     message: &str,
-    retry_at: DateTime<Utc>,
-) -> DbResult<bool> {
-    let result = sqlx::query(
+    delay: Duration,
+) -> DbResult<Option<DateTime<Utc>>> {
+    sqlx::query_scalar(
         "UPDATE audit_deliveries SET attempts = attempts + 1, \
              last_failure_at = statement_timestamp(), last_error_code = $3, last_error = $4, \
-             next_attempt_at = $5, lease_owner = NULL, lease_expires_at = NULL \
-         WHERE destination_id = $1 AND lease_owner = $2",
+             next_attempt_at = statement_timestamp() + make_interval(secs => $5), \
+             lease_owner = NULL, lease_expires_at = NULL \
+         WHERE destination_id = $1 AND lease_owner = $2 \
+         RETURNING next_attempt_at",
     )
     .bind(id)
-    .bind(owner)
-    .bind(code)
+    .bind(token)
+    .bind(code.as_str())
     .bind(message)
-    .bind(retry_at)
-    .execute(executor)
-    .await?;
-    Ok(result.rows_affected() == 1)
+    .bind(delay.as_secs_f64())
+    .fetch_optional(executor)
+    .await
 }
 
 pub async fn release(
     executor: impl PgExecutor<'_>,
     id: Uuid,
-    owner: Uuid,
-    next_attempt_at: DateTime<Utc>,
+    token: Uuid,
+    resume: Resume,
 ) -> DbResult<bool> {
+    let (delay, at) = match resume {
+        Resume::After(delay) => (Some(delay.as_secs_f64()), None),
+        Resume::At(at) => (None, Some(at)),
+    };
     let result = sqlx::query(
-        "UPDATE audit_deliveries SET next_attempt_at = $3, \
+        "UPDATE audit_deliveries \
+         SET next_attempt_at = COALESCE($4, statement_timestamp() + make_interval(secs => $3)), \
              lease_owner = NULL, lease_expires_at = NULL \
          WHERE destination_id = $1 AND lease_owner = $2",
     )
     .bind(id)
-    .bind(owner)
-    .bind(next_attempt_at)
+    .bind(token)
+    .bind(delay)
+    .bind(at)
     .execute(executor)
     .await?;
     Ok(result.rows_affected() == 1)
 }
 
 /// A lease in flight is left alone: its holder still sends and advances or fails under its own
-/// owner check, and the next claim repins from the cursor with the new settings.
+/// token check, and the next claim repins from the cursor with the new settings.
 pub async fn reset(executor: impl PgExecutor<'_>, id: Uuid) -> DbResult<()> {
     sqlx::query(
         "UPDATE audit_deliveries SET batch_transaction_id = NULL, batch_sequence = NULL, \
@@ -277,4 +314,44 @@ pub async fn holding(
     .bind(scope.organization_id())
     .fetch_all(executor)
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(last_error_code: Option<&str>) -> Row {
+        Row {
+            destination_id: Uuid::nil(),
+            transaction_id: 1,
+            sequence: 2,
+            batch_transaction_id: None,
+            batch_sequence: None,
+            attempts: 1,
+            next_attempt_at: DateTime::UNIX_EPOCH,
+            lease_owner: None,
+            lease_expires_at: None,
+            last_success_at: None,
+            last_failure_at: None,
+            last_error_code: last_error_code.map(str::to_owned),
+            last_error: None,
+            delivered_count: 0,
+        }
+    }
+
+    #[test]
+    fn a_stored_failure_code_is_read_back_typed() {
+        for code in FailureCode::ALL {
+            assert_eq!(
+                Delivery::from(row(Some(code.as_str()))).last_error_code,
+                Some(code)
+            );
+        }
+        assert_eq!(Delivery::from(row(None)).last_error_code, None);
+    }
+
+    #[test]
+    fn an_unknown_stored_failure_code_is_dropped() {
+        assert_eq!(Delivery::from(row(Some("gone"))).last_error_code, None);
+    }
 }

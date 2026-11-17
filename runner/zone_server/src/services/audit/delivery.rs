@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use abnegate_http::Backoff;
 use async_trait::async_trait;
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::Utc;
 use sqlx::PgPool;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -11,7 +11,7 @@ use zone_enterprise::audit::{FailureCode, Kind, Pause, Standing};
 
 use super::events::event;
 use super::transport::{Batch, Failure, Transport};
-use crate::db::audit::deliveries::{self, Delivery};
+use crate::db::audit::deliveries::{self, Lease, Resume};
 use crate::db::audit::destinations::{self, DestinationRecord};
 use crate::db::audit::events;
 use crate::db::audit::position::Position;
@@ -27,7 +27,7 @@ const BACKOFF: Backoff = Backoff::new(
     Backoff::DEFAULT_JITTER,
 );
 const UNKNOWN_KIND: &str = "The destination's kind is not one this server can deliver to";
-const OUTLASTED: &str = "The delivery outlasted its lease and was abandoned";
+const OUTLASTED: &str = "The send ran into the end of its lease and was abandoned";
 
 #[async_trait]
 pub trait Open: Send + Sync {
@@ -54,18 +54,17 @@ impl Default for Cadence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Delivered(usize),
-    Waiting,
+    Waiting(Uuid),
     Failed(FailureCode),
     Paused(Pause),
-    Idle,
+    Idle(Uuid),
     Lost,
     Unclaimed,
 }
 
 struct Claim<'a> {
     pool: &'a PgPool,
-    owner: Uuid,
-    delivery: Delivery,
+    lease: Lease,
     cadence: Cadence,
     deadline: Instant,
 }
@@ -75,11 +74,12 @@ struct Claim<'a> {
 /// Rows are read on the pool rather than in a transaction: a transaction that has written holds
 /// the snapshot horizon back behind its own xid, and nothing here holds a transaction open across
 /// a send. A standing pause claims nothing, so the backlog stays where it is until the license
-/// allows streaming again. The send is abandoned when the lease would run out, before another
-/// worker can claim the same batch.
+/// allows streaming again. The send is abandoned a tick before the lease runs out, before another
+/// worker can claim the same batch. Every due time is computed on the database's clock, the
+/// clock claims are judged by, so a server whose clock lags never releases a destination already
+/// due again.
 pub async fn deliver(
     state: &AppState,
-    owner: Uuid,
     cadence: Cadence,
     open: &dyn Open,
 ) -> Result<Outcome, sqlx::Error> {
@@ -89,14 +89,13 @@ pub async fn deliver(
         return Ok(Outcome::Paused(pause));
     }
     let pool = state.db();
-    let deadline = Instant::now() + cadence.lease;
-    let Some(delivery) = deliveries::claim(pool, owner, cadence.lease).await? else {
+    let deadline = Instant::now() + budget(cadence);
+    let Some(lease) = deliveries::claim(pool, cadence.lease).await? else {
         return Ok(Outcome::Unclaimed);
     };
     let claim = Claim {
         pool,
-        owner,
-        delivery,
+        lease,
         cadence,
         deadline,
     };
@@ -105,7 +104,7 @@ pub async fn deliver(
     };
     if !destination.enabled {
         return claim
-            .release(later(Utc::now(), cadence.tick), Outcome::Idle)
+            .release(Resume::After(cadence.tick), Outcome::Idle(claim.id()))
             .await;
     }
     let Some(kind) = Kind::parse(&destination.kind) else {
@@ -124,28 +123,31 @@ impl Claim<'_> {
         open: &dyn Open,
     ) -> Result<Outcome, sqlx::Error> {
         let scope = destination.scope();
-        let delivered = self.delivery.delivered;
-        let rows = match self.delivery.batch {
+        let delivery = &self.lease.delivery;
+        let delivered = delivery.delivered;
+        let rows = match delivery.batch {
             Some(pinned) => events::after(self.pool, scope, delivered, Some(pinned), i64::MAX),
             None => events::after(self.pool, scope, delivered, None, limit(kind)),
         }
         .await?;
-        let now = Utc::now();
-        let through = match (self.delivery.batch, rows.last()) {
+        let now = self.lease.claimed_at;
+        let through = match (delivery.batch, rows.last()) {
             (Some(pinned), _) => pinned,
             (None, None) => {
                 return self
-                    .release(later(now, self.cadence.tick), Outcome::Idle)
+                    .release(Resume::After(self.cadence.tick), Outcome::Idle(self.id()))
                     .await;
             }
             (None, Some(last)) => {
                 let oldest = rows.first().map(|row| row.created_at);
                 if !kind.ready(rows.len(), oldest, now) {
                     let flush = oldest.map_or(now, |oldest| oldest + S3_FLUSH_AGE);
-                    return self.release(flush, Outcome::Waiting).await;
+                    return self
+                        .release(Resume::At(flush), Outcome::Waiting(self.id()))
+                        .await;
                 }
                 let through = last.position();
-                if !deliveries::pin(self.pool, self.id(), self.owner, through).await? {
+                if !deliveries::pin(self.pool, self.id(), self.lease.token, through).await? {
                     return Ok(self.lost());
                 }
                 through
@@ -170,44 +172,39 @@ impl Claim<'_> {
     }
 
     fn id(&self) -> Uuid {
-        self.delivery.destination_id
+        self.lease.delivery.destination_id
     }
 
     async fn advance(&self, through: Position, count: usize) -> Result<Outcome, sqlx::Error> {
         let counted = i64::try_from(count).unwrap_or(i64::MAX);
-        if !deliveries::advance(self.pool, self.id(), self.owner, through, counted).await? {
+        if !deliveries::advance(self.pool, self.id(), self.lease.token, through, counted).await? {
             return Ok(self.lost());
         }
         tracing::debug!(destination_id = %self.id(), count, "Audit events delivered");
         Ok(Outcome::Delivered(count))
     }
 
-    async fn release(
-        &self,
-        next_attempt_at: DateTime<Utc>,
-        outcome: Outcome,
-    ) -> Result<Outcome, sqlx::Error> {
-        if !deliveries::release(self.pool, self.id(), self.owner, next_attempt_at).await? {
+    async fn release(&self, resume: Resume, outcome: Outcome) -> Result<Outcome, sqlx::Error> {
+        if !deliveries::release(self.pool, self.id(), self.lease.token, resume).await? {
             return Ok(self.lost());
         }
         Ok(outcome)
     }
 
     async fn fail(&self, failure: Failure) -> Result<Outcome, sqlx::Error> {
-        let attempts = self.delivery.attempts;
-        let retry_at = later(Utc::now(), delay(attempts, failure.retry_after));
+        let attempts = self.lease.delivery.attempts;
         let failed = deliveries::fail(
             self.pool,
             self.id(),
-            self.owner,
-            failure.code.as_str(),
+            self.lease.token,
+            failure.code,
             &failure.message,
-            retry_at,
+            delay(attempts, failure.retry_after),
         )
         .await?;
-        if !failed {
+        let Some(retry_at) = failed else {
             return Ok(self.lost());
-        }
+        };
         tracing::warn!(
             destination_id = %self.id(),
             code = %failure.code,
@@ -222,7 +219,7 @@ impl Claim<'_> {
     fn lost(&self) -> Outcome {
         tracing::warn!(
             destination_id = %self.id(),
-            owner = %self.owner,
+            token = %self.lease.token,
             "An audit delivery lost its lease; its result is discarded and the next claim resends the batch"
         );
         Outcome::Lost
@@ -252,11 +249,12 @@ fn wait(backoff: Duration, retry_after: Option<Duration>) -> Duration {
         .min(RETRY_MAXIMUM)
 }
 
-fn later(now: DateTime<Utc>, delay: Duration) -> DateTime<Utc> {
-    TimeDelta::from_std(delay)
-        .ok()
-        .and_then(|delay| now.checked_add_signed(delay))
-        .unwrap_or(DateTime::<Utc>::MAX_UTC)
+fn budget(cadence: Cadence) -> Duration {
+    cadence
+        .lease
+        .checked_sub(cadence.tick)
+        .filter(|budget| !budget.is_zero())
+        .unwrap_or(cadence.lease / 2)
 }
 
 #[cfg(test)]
@@ -305,12 +303,25 @@ mod tests {
     }
 
     #[test]
-    fn later_saturates_instead_of_overflowing() {
-        let now = Utc::now();
-        assert_eq!(later(now, Duration::MAX), DateTime::<Utc>::MAX_UTC);
-        assert_eq!(
-            later(now, Duration::from_secs(5)),
-            now + TimeDelta::seconds(5)
-        );
+    fn a_send_stops_a_tick_before_its_lease_runs_out() {
+        assert_eq!(budget(Cadence::default()), Duration::from_secs(115));
+        let cadence = Cadence {
+            tick: Duration::from_millis(50),
+            lease: Duration::from_secs(30),
+            concurrency: 1,
+        };
+        assert_eq!(budget(cadence), Duration::from_millis(29_950));
+    }
+
+    #[test]
+    fn a_tick_as_long_as_the_lease_still_leaves_the_send_some_of_it() {
+        for tick in [Duration::from_secs(30), Duration::from_secs(60)] {
+            let cadence = Cadence {
+                tick,
+                lease: Duration::from_secs(30),
+                concurrency: 1,
+            };
+            assert_eq!(budget(cadence), Duration::from_secs(15), "{tick:?}");
+        }
     }
 }

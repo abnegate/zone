@@ -48,6 +48,7 @@ struct Receiver {
     overlaps: AtomicUsize,
     hang: AtomicBool,
     hung: Notify,
+    resume: Notify,
     pause: AtomicU64,
 }
 
@@ -69,6 +70,15 @@ impl Receiver {
     fn received(&self, destination: Uuid) -> Vec<Uuid> {
         self.sent(destination).concat()
     }
+
+    fn order(&self) -> Vec<Uuid> {
+        self.batches
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|batch| batch.destination_id)
+            .collect()
+    }
 }
 
 struct Sending(Arc<Receiver>);
@@ -88,7 +98,7 @@ impl Transport for Sending {
         receiver.batches.lock().unwrap().push(batch.clone());
         if receiver.hang.load(Ordering::SeqCst) {
             receiver.hung.notify_one();
-            std::future::pending::<()>().await;
+            receiver.resume.notified().await;
         }
         tokio::time::sleep(Duration::from_millis(receiver.pause.load(Ordering::SeqCst))).await;
         receiver
@@ -117,7 +127,6 @@ struct Engine {
     state: AppState,
     receiver: Arc<Receiver>,
     open: Fake,
-    owner: Uuid,
 }
 
 impl Engine {
@@ -132,7 +141,6 @@ impl Engine {
             state,
             open: Fake(receiver.clone()),
             receiver,
-            owner: Uuid::new_v4(),
         }
     }
 
@@ -236,6 +244,47 @@ impl Engine {
             .unwrap();
     }
 
+    async fn clock(&self) -> DateTime<Utc> {
+        sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(self.pool())
+            .await
+            .unwrap()
+    }
+
+    async fn schedule(&self, destination: Uuid, seconds_ago: i32) {
+        sqlx::query(
+            "UPDATE audit_deliveries SET next_attempt_at = now() - make_interval(secs => $2) \
+             WHERE destination_id = $1",
+        )
+        .bind(destination)
+        .bind(f64::from(seconds_ago))
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn shift(&self, destination: Uuid) {
+        sqlx::query(
+            "UPDATE audit_deliveries SET transaction_id = transaction_id + $2 \
+             WHERE destination_id = $1",
+        )
+        .bind(destination)
+        .bind(RESTORED)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn hung(&self) -> impl Future<Output = usize> + '_ {
+        self.receiver.hang.store(true, Ordering::SeqCst);
+        let mut stale = Box::pin(self.drain());
+        tokio::select! {
+            _ = &mut stale => panic!("a hung send never finishes its drain"),
+            () = self.receiver.hung.notified() => {}
+        }
+        stale
+    }
+
     async fn delivery(&self, destination: Uuid) -> Delivery {
         deliveries::get(self.pool(), destination)
             .await
@@ -244,11 +293,11 @@ impl Engine {
     }
 
     async fn drain(&self) -> usize {
-        self.drain_as(self.owner).await
+        self.drain_with(CADENCE).await
     }
 
-    async fn drain_as(&self, owner: Uuid) -> usize {
-        drain(&self.state, owner, CADENCE, &self.open)
+    async fn drain_with(&self, cadence: Cadence) -> usize {
+        drain(&self.state, cadence, &self.open)
             .await
             .expect("the tick drains")
     }
@@ -283,12 +332,12 @@ async fn a_failing_destination_is_retried_with_backoff_until_every_event_is_deli
     engine.receiver.fail(unavailable(None));
 
     for (attempt, wait) in (1..).zip(waits) {
-        let before = Utc::now();
+        let before = engine.clock().await;
         assert_eq!(engine.drain().await, 0, "attempt {attempt} failed");
-        let after = Utc::now();
+        let after = engine.clock().await;
         let delivery = engine.delivery(destination).await;
         assert_eq!(delivery.attempts, attempt);
-        assert_eq!(delivery.last_error_code.as_deref(), Some("status"));
+        assert_eq!(delivery.last_error_code, Some(FailureCode::Status));
         assert_eq!(delivery.last_error.as_deref(), Some(UNAVAILABLE));
         assert_eq!(
             delivery.batch,
@@ -314,8 +363,8 @@ async fn a_failing_destination_is_retried_with_backoff_until_every_event_is_deli
     assert_eq!(delivery.delivered_count, 3);
     assert!(delivery.last_success_at.is_some());
     assert_eq!(
-        delivery.last_error_code.as_deref(),
-        Some("status"),
+        delivery.last_error_code,
+        Some(FailureCode::Status),
         "the last failure stays in the history"
     );
     assert_eq!(
@@ -333,16 +382,13 @@ async fn a_new_owner_resends_the_identical_pinned_batch_after_the_lease_expires(
     let destination = engine.destination(scope, Kind::Webhook).await;
     let first = engine.written(scope, 3).await;
     settle(engine.pool()).await;
-    let crashed = Uuid::new_v4();
 
-    engine.receiver.hang.store(true, Ordering::SeqCst);
-    tokio::select! {
-        _ = engine.drain_as(crashed) => panic!("the crashed owner never finishes a hung send"),
-        () = engine.receiver.hung.notified() => {}
-    }
+    drop(engine.hung().await);
     engine.receiver.hang.store(false, Ordering::SeqCst);
     let stranded = engine.delivery(destination).await;
-    assert_eq!(stranded.lease_owner, Some(crashed));
+    let crashed = stranded
+        .lease_owner
+        .expect("the crashed send holds the lease");
     assert_eq!(stranded.batch, Some(engine.position(first[2]).await));
 
     let second = engine.written(scope, 2).await;
@@ -393,9 +439,7 @@ async fn streaming_pauses_without_claiming_until_an_enterprise_license_is_renewe
             engine.license(&key).await;
         }
         assert_eq!(
-            deliver(&engine.state, engine.owner, CADENCE, &engine.open)
-                .await
-                .unwrap(),
+            deliver(&engine.state, CADENCE, &engine.open).await.unwrap(),
             Outcome::Paused(pause)
         );
         assert_eq!(engine.drain().await, 0, "{pause} streams nothing");
@@ -482,12 +526,14 @@ async fn s3_waits_for_a_full_batch_or_its_oldest_event_to_age() {
     settle(engine.pool()).await;
     engine.due(destination).await;
     assert_eq!(engine.drain().await, 0);
-    sqlx::query("UPDATE audit_logs SET created_at = $2 WHERE id = $1")
-        .bind(late)
-        .bind(Utc::now() - S3_FLUSH_AGE - TimeDelta::seconds(1))
-        .execute(engine.pool())
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE audit_logs SET created_at = now() - make_interval(secs => $2) WHERE id = $1",
+    )
+    .bind(late)
+    .bind((S3_FLUSH_AGE + TimeDelta::seconds(1)).as_seconds_f64())
+    .execute(engine.pool())
+    .await
+    .unwrap();
     engine.due(destination).await;
     assert_eq!(engine.drain().await, 1, "an aged event flushes alone");
     assert_eq!(engine.receiver.sent(destination).len(), 2);
@@ -509,8 +555,7 @@ async fn concurrent_drains_never_send_one_destination_two_batches_at_once() {
     settle(engine.pool()).await;
     engine.receiver.pause.store(5, Ordering::SeqCst);
 
-    let owners: Vec<Uuid> = (0..DRAINS).map(|_| Uuid::new_v4()).collect();
-    let delivered: usize = join_all(owners.iter().map(|owner| engine.drain_as(*owner)))
+    let delivered: usize = join_all((0..DRAINS).map(|_| engine.drain()))
         .await
         .into_iter()
         .sum();
@@ -543,15 +588,7 @@ async fn a_tick_rebases_a_restore_before_delivering() {
     settle(engine.pool()).await;
 
     engine.restore().await;
-    sqlx::query(
-        "UPDATE audit_deliveries SET transaction_id = transaction_id + $2 \
-         WHERE destination_id = $1",
-    )
-    .bind(destination)
-    .bind(RESTORED)
-    .execute(engine.pool())
-    .await
-    .unwrap();
+    engine.shift(destination).await;
     let new = engine.write(scope).await;
 
     engine.drain().await;
@@ -598,9 +635,7 @@ async fn a_failed_rebase_aborts_the_tick() {
         .unwrap();
 
     assert!(
-        drain(&engine.state, engine.owner, CADENCE, &engine.open)
-            .await
-            .is_err(),
+        drain(&engine.state, CADENCE, &engine.open).await.is_err(),
         "a rebase error aborts the tick"
     );
     assert_eq!(
@@ -623,6 +658,160 @@ async fn a_failed_rebase_aborts_the_tick() {
         engine.receiver.received(destination),
         ids,
         "the next tick rebases and delivers"
+    );
+    engine.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_send_that_outlived_its_lease_cannot_record_over_the_same_process_reclaiming_it() {
+    let engine = Engine::licensed(Tier::Enterprise).await;
+    let scope = engine.organization().await;
+    let destination = engine.destination(scope, Kind::Webhook).await;
+    let first = engine.written(scope, 3).await;
+    settle(engine.pool()).await;
+
+    let stale = engine.hung().await;
+    let second = engine.written(scope, 2).await;
+    settle(engine.pool()).await;
+    engine.expire(destination).await;
+    let reclaimed = engine.hung().await;
+    engine.receiver.hang.store(false, Ordering::SeqCst);
+    let reclaim = engine.delivery(destination).await;
+    engine.receiver.resume.notify_waiters();
+
+    assert_eq!(
+        stale.await,
+        0,
+        "the stale send's result is discarded while the reclaim still holds the lease"
+    );
+    let held = engine.delivery(destination).await;
+    assert_eq!(held.lease_owner, reclaim.lease_owner);
+    assert_eq!(
+        held.delivered, reclaim.delivered,
+        "the stale send moved the cursor"
+    );
+    assert_eq!(held.delivered_count, 0);
+
+    assert_eq!(reclaimed.await, 5);
+    let delivery = engine.delivery(destination).await;
+    assert_eq!(delivery.delivered, engine.position(second[1]).await);
+    assert_eq!(delivery.delivered_count, 5);
+    assert_eq!(
+        engine.receiver.sent(destination),
+        vec![first.clone(), first, second],
+        "the reclaim resends the pinned batch, then the rest"
+    );
+    engine.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_send_in_flight_across_a_rebase_cannot_move_the_cursor() {
+    let engine = Engine::licensed(Tier::Enterprise).await;
+    let scope = engine.organization().await;
+    let destination = engine.destination(scope, Kind::Webhook).await;
+    let ids = engine.written(scope, 3).await;
+    settle(engine.pool()).await;
+
+    let stale = engine.hung().await;
+    engine.restore().await;
+    engine.shift(destination).await;
+    let rebased = engine.hung().await;
+    engine.receiver.hang.store(false, Ordering::SeqCst);
+    let reclaim = engine.delivery(destination).await;
+    assert_eq!(
+        reclaim.delivered.transaction_id, 0,
+        "the reclaim follows the rebase"
+    );
+    engine.receiver.resume.notify_waiters();
+
+    assert_eq!(stale.await, 0, "a pre-rebase send's result is discarded");
+    let held = engine.delivery(destination).await;
+    assert_eq!(
+        held.delivered, reclaim.delivered,
+        "a pre-rebase advance moved the cursor"
+    );
+    assert_eq!(held.lease_owner, reclaim.lease_owner);
+
+    assert_eq!(rebased.await, 3);
+    let delivery = engine.delivery(destination).await;
+    assert_eq!(delivery.delivered, engine.position(ids[2]).await);
+    assert_eq!(delivery.delivered_count, 3);
+    engine.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_tick_ends_even_when_an_idle_destination_is_released_already_due() {
+    let engine = Engine::licensed(Tier::Enterprise).await;
+    let scope = engine.organization().await;
+    let s3 = engine.destination(scope, Kind::S3).await;
+    let busy = engine.destination(scope, Kind::Webhook).await;
+    engine.written(scope, 2).await;
+    let idle = engine.destination(scope, Kind::Webhook).await;
+    settle(engine.pool()).await;
+    let skewed = Cadence {
+        tick: Duration::ZERO,
+        ..CADENCE
+    };
+
+    let delivered = tokio::time::timeout(Duration::from_secs(30), engine.drain_with(skewed))
+        .await
+        .expect("a destination due again at once does not spin the tick");
+    assert_eq!(delivered, 2, "the busy destination is still drained");
+    assert_eq!(engine.receiver.received(busy).len(), 2);
+    assert!(engine.receiver.received(idle).is_empty());
+    assert!(engine.receiver.received(s3).is_empty());
+    engine.cleanup().await;
+}
+
+#[tokio::test]
+async fn idle_and_failed_deliveries_are_due_again_on_the_database_clock() {
+    let engine = Engine::licensed(Tier::Enterprise).await;
+    let scope = engine.organization().await;
+    let idle = engine.destination(scope, Kind::Webhook).await;
+    settle(engine.pool()).await;
+
+    let before = engine.clock().await;
+    assert_eq!(engine.drain().await, 0);
+    let after = engine.clock().await;
+    let tick = TimeDelta::from_std(CADENCE.tick).unwrap();
+    let released = engine.delivery(idle).await;
+    assert!(
+        released.next_attempt_at >= before + tick && released.next_attempt_at <= after + tick,
+        "an idle destination is due a tick after its release, between {} and {}, not {}",
+        before + tick,
+        after + tick,
+        released.next_attempt_at
+    );
+    assert_eq!(released.lease_owner, None);
+    engine.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_deep_backlog_takes_turns_with_other_destinations() {
+    const EVENTS: usize = 250;
+    let engine = Engine::licensed(Tier::Enterprise).await;
+    let scope = engine.organization().await;
+    let mut destinations = Vec::new();
+    for _ in 0..3 {
+        destinations.push(engine.destination(scope, Kind::Webhook).await);
+    }
+    for (destination, seconds_ago) in destinations.iter().zip([3, 2, 1]) {
+        engine.schedule(*destination, seconds_ago).await;
+    }
+    engine.written(scope, EVENTS).await;
+    settle(engine.pool()).await;
+    let single = Cadence {
+        concurrency: 1,
+        ..CADENCE
+    };
+
+    assert_eq!(engine.drain_with(single).await, 3 * EVENTS);
+    let order = engine.receiver.order();
+    assert_eq!(order.len(), 9, "each backlog is three batches");
+    assert_eq!(
+        order,
+        [destinations.as_slice(); 3].concat(),
+        "one slot serves the destinations in turn, not one backlog to the end"
     );
     engine.cleanup().await;
 }

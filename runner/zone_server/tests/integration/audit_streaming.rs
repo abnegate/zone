@@ -218,7 +218,6 @@ impl Collector {
 struct Stream {
     fixture: Fixture,
     open: Transports,
-    owner: Uuid,
 }
 
 impl Stream {
@@ -229,11 +228,7 @@ impl Stream {
             Arc::clone(fixture.state().master_key()),
             fixture.state().config().endpoint_hosts.clone(),
         );
-        Self {
-            fixture,
-            open,
-            owner: Uuid::new_v4(),
-        }
+        Self { fixture, open }
     }
 
     fn pool(&self) -> &PgPool {
@@ -379,11 +374,7 @@ impl Stream {
     }
 
     async fn drain(&self) -> usize {
-        self.drain_as(self.owner).await
-    }
-
-    async fn drain_as(&self, owner: Uuid) -> usize {
-        drain(self.fixture.state(), owner, CADENCE, &self.open)
+        drain(self.fixture.state(), CADENCE, &self.open)
             .await
             .expect("the tick drains")
     }
@@ -571,11 +562,10 @@ async fn a_restarted_owner_resends_a_stranded_batch_and_loses_nothing() {
     let start = stream.delivery(destination).await.delivered;
     stream.written(scope, 150).await;
     settle(stream.pool()).await;
-    let crashed = Uuid::new_v4();
 
     receiver.hook.stalled.store(true, Ordering::SeqCst);
     {
-        let crash = stream.drain_as(crashed);
+        let crash = stream.drain();
         tokio::pin!(crash);
         tokio::select! {
             _ = &mut crash => panic!("a stalled receiver never answers the crashed owner"),
@@ -584,7 +574,9 @@ async fn a_restarted_owner_resends_a_stranded_batch_and_loses_nothing() {
     }
     receiver.hook.stalled.store(false, Ordering::SeqCst);
     let stranded = stream.delivery(destination).await;
-    assert_eq!(stranded.lease_owner, Some(crashed));
+    let crashed = stranded
+        .lease_owner
+        .expect("the crashed owner holds the lease");
     let pinned = stranded.batch.expect("the crashed owner pinned its batch");
 
     assert_eq!(
