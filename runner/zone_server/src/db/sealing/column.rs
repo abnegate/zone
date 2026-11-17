@@ -249,7 +249,12 @@ mod tests {
     fn every_column_is_listed_once() {
         let distinct: BTreeSet<Column> = Column::ALL.iter().copied().collect();
         assert_eq!(distinct.len(), Column::ALL.len());
-        assert_eq!(Column::ALL.len(), 25);
+        let places: BTreeSet<String> = Column::ALL.iter().map(Column::to_string).collect();
+        assert_eq!(
+            places.len(),
+            Column::ALL.len(),
+            "two columns read the same stored value"
+        );
         assert_eq!(
             Column::ALL
                 .iter()

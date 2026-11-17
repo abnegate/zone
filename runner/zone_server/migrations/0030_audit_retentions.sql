@@ -16,3 +16,5 @@ CREATE TABLE public.audit_retentions (
 );
 
 CREATE UNIQUE INDEX audit_retentions_scope_idx ON public.audit_retentions USING btree ((COALESCE(organization_id, '00000000-0000-0000-0000-000000000000'::uuid)));
+
+CREATE INDEX audit_retentions_organization_idx ON public.audit_retentions USING btree (organization_id);

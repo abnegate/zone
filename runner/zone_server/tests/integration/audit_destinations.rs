@@ -16,6 +16,7 @@ use zone_enterprise::audit::{
 };
 use zone_server::config::Config;
 use zone_server::db::audit::actions;
+use zone_server::db::audit::position::Position;
 use zone_server::db::organization_members::OrgRole;
 use zone_server::routes::audit::refusal::BODY_INVALID;
 use zone_server::services::audit::delivery::Cadence;
@@ -25,7 +26,7 @@ use zone_server::services::hosts::Hosts;
 use zone_server::state::AppState;
 use zone_server::workers::audit::drain;
 
-use crate::common::audit::{UNVERIFIABLE, header, refused, settle};
+use crate::common::audit::{Destination, UNVERIFIABLE, header, refused, settle};
 use crate::common::policy::Fixture;
 use crate::common::sso::{self, Account};
 use crate::common::{TestClient, TestResponse, test_config};
@@ -1338,6 +1339,64 @@ async fn a_host_the_operator_no_longer_allows_is_refused_when_sending() {
     assert!(
         received(&server, "/hook").await.is_empty(),
         "nothing reaches a host the operator no longer allows"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_destination_is_refused_until_positions_left_by_a_restore_are_rebased() {
+    let fixture = Fixture::new(PREFIX).await;
+    let client = &fixture.sso.client;
+    let pool = fixture.pool();
+    let path = destinations(fixture.organization);
+    let owner = &fixture.owner;
+    fixture.license(Tier::Enterprise).await;
+    let restored = Destination::new(Some(fixture.organization))
+        .create(
+            pool,
+            Position {
+                transaction_id: i64::MAX - 1,
+                sequence: i64::MAX,
+            },
+        )
+        .await;
+    sqlx::raw_sql(
+        "CREATE FUNCTION refuse() RETURNS trigger LANGUAGE plpgsql AS \
+         $$ BEGIN RAISE EXCEPTION 'refused'; END $$; \
+         CREATE TRIGGER refuse BEFORE UPDATE ON audit_deliveries \
+         FOR EACH ROW EXECUTE FUNCTION refuse();",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    let siem = webhook("SIEM", "http://10.0.0.5/hook");
+
+    post(client, &path, owner, &siem)
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    let named: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_destinations WHERE name = $1")
+        .bind("SIEM")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(named, 0, "nothing starts below the restored rows");
+
+    sqlx::raw_sql("DROP TRIGGER refuse ON audit_deliveries")
+        .execute(pool)
+        .await
+        .unwrap();
+    post(client, &path, owner, &siem)
+        .await
+        .assert_status(StatusCode::CREATED);
+    let cursor: i64 =
+        sqlx::query_scalar("SELECT transaction_id FROM audit_deliveries WHERE destination_id = $1")
+            .bind(restored)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        cursor, 0,
+        "the restore was rebased before the destination was added"
     );
     fixture.cleanup().await;
 }

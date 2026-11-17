@@ -545,3 +545,54 @@ async fn a_failed_rebase_aborts_the_sweep_before_anything_is_deleted() {
     );
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn a_sweep_while_another_instance_sweeps_deletes_and_records_nothing() {
+    let fixture = Fixture::new(PREFIX).await;
+    let pool = fixture.pool();
+    let scope = Scope::Organization(fixture.organization);
+    fixture.license(Tier::Enterprise).await;
+    let expired = row(pool, Some(fixture.organization), EXPIRED_DAYS).await;
+    retentions::set(pool, scope, PERIOD, fixture.owner.id)
+        .await
+        .unwrap();
+    settle(pool).await;
+    let mut other = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(retention::SWEEP_LOCK)
+        .execute(&mut *other)
+        .await
+        .unwrap();
+
+    assert_eq!(retention::sweep(fixture.state()).await.unwrap(), 0);
+    assert!(
+        exists(pool, expired).await,
+        "the other instance owns the sweep"
+    );
+    assert_eq!(
+        retentions::get(pool, scope)
+            .await
+            .unwrap()
+            .unwrap()
+            .swept_at,
+        None,
+        "only the sweeping instance records a sweep"
+    );
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(retention::SWEEP_LOCK)
+        .execute(&mut *other)
+        .await
+        .unwrap();
+    assert_eq!(retention::sweep(fixture.state()).await.unwrap(), 1);
+    assert!(!exists(pool, expired).await);
+    let free: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_lock($1) AND pg_advisory_unlock($1)")
+            .bind(retention::SWEEP_LOCK)
+            .fetch_one(&mut *other)
+            .await
+            .unwrap();
+    assert!(free, "a finished sweep releases the lock");
+    drop(other);
+    fixture.cleanup().await;
+}

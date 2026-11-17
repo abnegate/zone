@@ -408,10 +408,7 @@ fn apply_audit_retention(schedule: Schedule, state: AppState) -> Sweep {
             match retention::sweep(&state).await {
                 Ok(0) => Ok(()),
                 Ok(deleted) => {
-                    tracing::info!(
-                        "Deleted {} audit row(s) past their retention period",
-                        deleted
-                    );
+                    tracing::info!(deleted, "Deleted audit rows past their retention period");
                     Ok(())
                 }
                 Err(error) => Err(Failure::new(error)),

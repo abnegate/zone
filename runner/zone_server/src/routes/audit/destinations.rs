@@ -87,6 +87,7 @@ impl DestinationResponse {
 pub struct DeliveryResponse {
     pub health: Health,
     pub backlog: i64,
+    pub backlog_capped: bool,
     pub oldest_pending_at: Option<DateTime<Utc>>,
     pub attempts: i32,
     pub next_attempt_at: Option<DateTime<Utc>>,
@@ -109,6 +110,7 @@ impl DeliveryResponse {
         Self {
             health,
             backlog: view.backlog.count,
+            backlog_capped: view.backlog.capped,
             oldest_pending_at: view.backlog.oldest,
             attempts: delivery.attempts,
             next_attempt_at: proceeding.then_some(delivery.next_attempt_at),
@@ -580,6 +582,7 @@ mod tests {
             },
             backlog: Backlog {
                 count: 3,
+                capped: false,
                 oldest: Some(at - TimeDelta::minutes(1)),
             },
             created_at: at,
@@ -602,6 +605,7 @@ mod tests {
                 "delivery": {
                     "health": "failing",
                     "backlog": 3,
+                    "backlog_capped": false,
                     "oldest_pending_at": "2026-10-31T23:59:00Z",
                     "attempts": 2,
                     "next_attempt_at": "2026-11-01T00:00:00Z",

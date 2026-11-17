@@ -378,8 +378,9 @@ Each destination's `delivery`:
 | Field | Meaning |
 |---|---|
 | `health` | `healthy`; `failing`, when the last attempt failed; `paused`, when the license [pauses streaming](#licensing); or `disabled`. |
-| `backlog` | Events written after the last delivered one, final or not. |
-| `oldest_pending_at` | `created_at` of the oldest of those, or `null`. |
+| `backlog` | Events written after the last delivered one, final or not, counted up to 10,000. |
+| `backlog_capped` | `true` when there are more than 10,000 of them; show the count as 10,000+. |
+| `oldest_pending_at` | `created_at` of the next of them to deliver, or `null`. |
 | `attempts` | Failed attempts since the last success. |
 | `next_attempt_at` | When Zone tries next. `null` while paused or disabled. |
 | `last_success_at` | When a batch was last delivered. |
@@ -441,7 +442,11 @@ The sweep runs hourly, as the `audit-retention` housekeeping sweep, starting
 an hour after the server starts; a run missed while the server was down isn't
 made up. It deletes in batches of 5,000 until nothing more is due, and records
 an `audit_retention.applied` event for each scope it deleted from. It applies
-a period whenever [`applies`](#licensing) is true.
+a period whenever [`applies`](#licensing) is true. With several servers on one
+database, one sweeps at a time: a server that finds another sweeping skips its
+turn and records nothing. Like delivery, retention leaves an event alone while
+a transaction that could still commit ahead of it is open, so a destination
+added after a sweep began starts after every event that sweep can delete.
 
 The retention response:
 
@@ -449,8 +454,10 @@ The retention response:
 |---|---|
 | `days` | The period, or `null` to keep forever. |
 | `cutoff` | Events written before this are past the period. `null` without a period. |
-| `expired` | Events past the period that are still stored. |
-| `held` | Of those, how many an enabled destination hasn't delivered yet. |
+| `expired` | Events past the period that are still stored, counted up to 10,000. |
+| `expired_capped` | `true` when more than 10,000 are; show the count as 10,000+. |
+| `held` | Of those, how many an enabled destination hasn't delivered yet, counted up to 10,000. |
+| `held_capped` | `true` when more than 10,000 are held. |
 | `holders` | The enabled destinations holding them, each with `destination_id`, `name` and `wait`: `backlog` (catching up), `failing` (its last attempt failed) or `paused` (the license pauses streaming). |
 | `swept_at` | When the sweep last ran for this scope. |
 | `deleted_count` | How many events that latest sweep deleted. The `audit_retention.applied` events record every sweep's count. |
@@ -609,6 +616,7 @@ one element of `destinations`:
       "delivery": {
         "health": "healthy",
         "backlog": 0,
+        "backlog_capped": false,
         "oldest_pending_at": null,
         "attempts": 0,
         "next_attempt_at": "2026-11-17T09:30:05Z",
@@ -642,7 +650,9 @@ Content-Type: application/json
   "days": 365,
   "cutoff": "2025-11-17T09:30:00Z",
   "expired": 120,
+  "expired_capped": false,
   "held": 20,
+  "held_capped": false,
   "holders": [{"destination_id": "c1d2e3f4-0a1b-4c2d-8e3f-405162738495", "name": "SIEM", "wait": "failing"}],
   "swept_at": "2026-11-17T09:00:00Z",
   "deleted_count": 0,
@@ -704,16 +714,17 @@ pass and before every retention sweep: it rebases when any stored event, a
 destination's place or a stored batch is at or above the server's next
 transaction ID, and otherwise does nothing.
 
-The rebase runs in one transaction. It sets every event's transaction ID to 0,
-keeping its sequence number, and restarts each destination just before the
-first event it may still owe: the first event after its old place, or the
-first event written on the restored server before the rebase ran. Zone tells
-those new events apart from old ones by a sequence number above every restored
-event still at or above the new counter. When no restored event is, or the
-sequence lags (below), it counts every event with a transaction ID below the
-counter as new instead, which re-sends restored events that were already
-delivered. The rebase also drops stored batches and leases, so a send in
-flight when it ran can't move a destination's place.
+The rebase waits for any retention batch in flight, and for any other rebase,
+before it reads anything, then runs in one transaction. It sets every event's
+transaction ID to 0, keeping its sequence number, and restarts each destination
+just before the first event it may still owe: the first event after its old
+place, or the first event written on the restored server before the rebase
+ran. Zone tells those new events apart from old ones by a sequence number
+above every restored event still at or above the new counter. When no
+restored event is, or the sequence lags (below), it counts every event with a
+transaction ID below the counter as new instead, which re-sends restored
+events that were already delivered. The rebase also drops stored batches and
+leases, so a send in flight when it ran can't move a destination's place.
 
 **A rebase can deliver events twice.** Undelivered events are always sent;
 some delivered ones are sent again. An S3 batch can land under a new key, so
@@ -721,15 +732,21 @@ the same events can appear in two objects. Deduplicate on `id`.
 
 **A lagging sequence.** Logical replication doesn't copy sequences, so the
 restored server can hand out sequence numbers already in use. When the
-`audit_logs` sequence is behind the highest number stored, the rebase moves it
-past that number and renumbers every event with a transaction ID below the new
-counter: the events written on the new server before the rebase, and any
-restored events whose old transaction ID happens to be that low. All of those
-events are sent again, in no particular order.
+`audit_logs` sequence is behind the highest number stored, or has already
+handed out a number a restored event holds, so two events share it, the rebase
+renumbers every event with a transaction ID below the new counter, first moving
+the sequence past the highest number stored if it's behind. That covers the
+events written on the new server before the rebase, and any restored events
+whose old transaction ID happens to be that low. All of those events are sent
+again, in no particular order. One case goes undetected: a new event whose
+number falls among the restored events' without matching any of them, which
+needs every restored number in that range to be one the new server skipped
+(a rolled-back write). Such an event isn't sent.
 
 **The first start after a logical restore takes longer.** Setting every
 event's transaction ID to 0 rewrites every row of `audit_logs` once, and the
 startup rebase runs before the server accepts requests, so startup waits in
 proportion to the table's size. If the startup rebase fails, the server logs
 the error and starts, and the next delivery pass tries again; nothing is
-delivered and no retention sweep runs until a rebase succeeds.
+delivered, no retention sweep runs and adding a destination is refused with
+`500` until a rebase succeeds.

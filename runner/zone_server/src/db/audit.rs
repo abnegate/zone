@@ -7,6 +7,7 @@
 pub mod deliveries;
 pub mod destinations;
 pub mod events;
+pub mod lock;
 pub mod position;
 mod predicate;
 pub mod retentions;

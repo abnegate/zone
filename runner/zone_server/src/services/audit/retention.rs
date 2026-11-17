@@ -10,6 +10,7 @@ use zone_enterprise::audit::{Error, Standing, Wait};
 
 use super::standing;
 use crate::db::DbResult;
+use crate::db::audit::lock::Lock;
 use crate::db::audit::retentions::{self, RetentionRecord};
 use crate::db::audit::scope::Scope;
 use crate::db::audit::{AuditContext, actions, deliveries, events, log_action, resources};
@@ -17,9 +18,11 @@ use crate::state::AppState;
 
 pub const SWEEP_INTERVAL_SECONDS: u64 = 60 * 60;
 pub const BATCH: i64 = 5_000;
+/// Held for a whole sweep, so one instance sweeps at a time.
+pub const SWEEP_LOCK: i64 = 0x7A6F_6E65_5245_544E;
 
-/// Keeps a delivery-tick rebase from renumbering positions between reading the floor and
-/// deleting at or below it.
+/// Keeps a rebase from moving positions while a batch compares rows with the floor: a row a
+/// rebase moved mid-delete would be checked again against a floor read before the move.
 const HOLD_POSITIONS: &str = "SELECT pg_advisory_xact_lock_shared($1)";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +37,9 @@ pub struct Status {
     pub days: Option<i32>,
     pub cutoff: Option<DateTime<Utc>>,
     pub expired: i64,
+    pub expired_capped: bool,
     pub held: i64,
+    pub held_capped: bool,
     pub holders: Vec<Holder>,
     pub swept_at: Option<DateTime<Utc>>,
     pub deleted_count: i64,
@@ -89,7 +94,9 @@ pub async fn status(
         days: Some(record.days),
         cutoff: Some(before),
         expired: expired.total,
+        expired_capped: expired.total_capped,
         held: expired.held,
+        held_capped: expired.held_capped,
         holders,
         swept_at: record.swept_at,
         deleted_count: record.deleted_count,
@@ -128,7 +135,20 @@ pub async fn update(
 /// returns how many rows it deleted. A configured period keeps applying under any installed
 /// license, lapsed or not, and under an unverified key; only removing the license stops it.
 /// A scope that fails is logged and the others are still swept; the first failure is returned.
+/// While another instance sweeps, this one deletes and records nothing.
 pub async fn sweep(state: &AppState) -> Result<u64, sqlx::Error> {
+    let Some(lock) = Lock::attempt(state.db(), SWEEP_LOCK).await? else {
+        tracing::debug!("Another instance is applying the audit retention periods");
+        return Ok(0);
+    };
+    let outcome = swept(state).await;
+    let released = lock.release().await;
+    let deleted = outcome?;
+    released?;
+    Ok(deleted)
+}
+
+async fn swept(state: &AppState) -> Result<u64, sqlx::Error> {
     let pool = state.db();
     events::rebase(pool).await?;
     let standing = standing(state).await?;
@@ -195,8 +215,7 @@ async fn prune(pool: &PgPool, scope: Scope, before: DateTime<Utc>) -> DbResult<u
         .bind(events::REBASE_LOCK)
         .execute(&mut *transaction)
         .await?;
-    let floor = deliveries::floor(&mut *transaction, scope).await?;
-    let pruned = events::prune(&mut *transaction, scope, before, floor, BATCH).await?;
+    let pruned = events::prune(&mut *transaction, scope, before, BATCH).await?;
     transaction.commit().await?;
     Ok(pruned)
 }
@@ -204,6 +223,13 @@ async fn prune(pool: &PgPool, scope: Scope, before: DateTime<Utc>) -> DbResult<u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::reminders;
+
+    #[test]
+    fn the_sweep_lock_differs_from_every_other_advisory_lock() {
+        assert_ne!(SWEEP_LOCK, events::REBASE_LOCK);
+        assert_ne!(SWEEP_LOCK, reminders::CLAIM_LOCK);
+    }
 
     fn number(value: serde_json::Value) -> Number {
         match value {
