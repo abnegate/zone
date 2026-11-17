@@ -1620,11 +1620,15 @@ async fn train_is_a_background_job_that_survives_the_request() {
             "bytes_base64": TINY_PNG
         }]
     });
+    let release = models_directory.join("release");
     let (idle, token) = router_with(
         &ollama,
         &catalog,
         models_directory.clone(),
-        Some("sleep 1; printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+        Some(format!(
+            "until [ -e '{}' ]; do sleep 0.05; done; printf trained > \"$ZONE_TRAIN_OUTPUT\"",
+            release.display()
+        )),
     )
     .await;
     let (status, none) = get_json(idle.clone(), &token, "/api/models/train").await;
@@ -1640,6 +1644,7 @@ async fn train_is_a_background_job_that_survives_the_request() {
     assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
     assert_eq!(conflict["error"], "a training job is already running");
 
+    fs::write(&release, "").unwrap();
     let job = wait_train_job(&idle, &token).await;
     assert_eq!(job["status"], "succeeded", "{job}");
     assert_eq!(job["filename"], "studio-style.safetensors");
