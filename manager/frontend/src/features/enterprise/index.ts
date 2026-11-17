@@ -1,3 +1,10 @@
+export {
+  AUDIT_LOG_LINK,
+  AuditExportSection,
+  type AuditScope,
+  organizationScope,
+  SERVER_SCOPE,
+} from './audit';
 export { LicenseSection } from './components';
 export * from './hooks';
 export { LicenseRefusal } from './LicenseRefusal';

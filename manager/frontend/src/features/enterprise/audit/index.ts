@@ -1,5 +1,6 @@
 export { AuditRefusal } from './AuditRefusal';
 export { auditApi } from './api';
+export { AuditExportSection } from './components';
 export { dispositionFilename, exportExtension, exportFilename } from './filename';
 export * from './hooks';
 export * from './labels';
