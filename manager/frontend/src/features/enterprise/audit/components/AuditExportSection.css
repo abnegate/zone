@@ -216,6 +216,7 @@
   align-items: center;
   gap: var(--ui-space-1);
   min-width: 0;
+  margin-inline-end: calc(-1 * var(--ui-space-2-5));
 }
 
 .audit-holders {

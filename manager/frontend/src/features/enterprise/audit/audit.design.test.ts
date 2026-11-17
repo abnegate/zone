@@ -98,6 +98,12 @@ describe('audit export section surfaces', () => {
     expect(warning).toContain('padding: var(--ui-space-2) var(--ui-space-3)');
   });
 
+  it('lines the ghost row actions up with the edge of the enabled switch above them', () => {
+    expect(rule(css, '.audit-destination-actions')).toContain(
+      'margin-inline-end: calc(-1 * var(--ui-space-2-5))'
+    );
+  });
+
   it('keeps the retention period field narrow above its keep-forever checkbox', () => {
     expect(rule(css, '.audit-retention-fields')).toContain('flex-direction: column');
     expect(rule(css, '.audit-retention-fields .ui-input-wrapper')).toContain(
