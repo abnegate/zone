@@ -12,8 +12,8 @@ use abnegate_agent::context::{self, ContextStatus, ContextUsage, Entry, Summary}
 use abnegate_agent::tool::{Session, is_vision_url};
 use abnegate_agent_cli::CUT_SHORT;
 use abnegate_llm::{
-    Error, Limit, Message as LlmMessage, RequestOptions, Role as LlmRole, StreamToolCall,
-    ToolCall as LlmToolCall, Usage, Window,
+    Error, Limit, Message as LlmMessage, RequestOptions, Role as LlmRole, StreamDelta,
+    StreamToolCall, ToolCall as LlmToolCall, Usage, Window,
 };
 use futures::{Stream, StreamExt};
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,7 +31,10 @@ use super::trace::content_lines;
 use super::wait::{self, Waiting};
 use crate::services::chat::session::RunContext;
 use sha2::{Digest, Sha256};
+use tally::Tally;
 use uuid::Uuid;
+
+mod tally;
 
 /// What the calls queued behind a turn-ending question are told.
 ///
@@ -128,6 +131,9 @@ pub enum AgentEvent {
         summary: Summary,
     },
     Context(ContextUsage),
+    /// A completion request went out to the model.
+    Round,
+    /// What one round was billed, when the provider said.
     Usage(Usage),
     Finalizing(String),
     /// The model asked for a tool and we are about to run it.
@@ -351,6 +357,7 @@ pub fn run_with_context(
                     return;
                 }
             };
+            yield AgentEvent::Round;
             let consumed = context.consume();
             if !consumed.is_empty() {
                 yield AgentEvent::Consumed(consumed);
@@ -363,16 +370,23 @@ pub fn run_with_context(
             let mut pending = ToolCallAccumulator::default();
             let mut images = Vec::new();
             let mut cut_short = false;
+            let mut tally = Tally::default();
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
                     Err(error) => {
+                        if let Some(usage) = tally.total() {
+                            yield AgentEvent::Usage(usage);
+                        }
                         yield halted(error);
                         return;
                     }
                 };
+                if chunk.choices.first().is_some_and(|choice| writes(&choice.delta)) {
+                    tally.wrote();
+                }
                 if let Some(usage) = chunk.usage {
-                    yield AgentEvent::Usage(usage);
+                    tally.observe(usage);
                 }
                 if let Some(window) = chunk.window {
                     yield AgentEvent::Window(window);
@@ -384,6 +398,7 @@ pub fn run_with_context(
                     continue;
                 };
                 if let Some(reason) = &choice.finish_reason {
+                    tally.finish();
                     cut_short = reason == CUT_SHORT;
                 }
                 if let Some(content) = &choice.delta.content {
@@ -426,6 +441,9 @@ pub fn run_with_context(
                 }
                 // A usage-only SSE frame, or the window a coding agent reports once it has
                 // exited, may follow finish_reason; drain through the stream's end.
+            }
+            if let Some(usage) = tally.total() {
+                yield AgentEvent::Usage(usage);
             }
             let mut requested = pending.finish();
             let parsed = if agentic && !text.is_empty() {
@@ -726,6 +744,23 @@ impl Parked {
         };
         Some((self.id.clone(), park))
     }
+}
+
+fn writes(delta: &StreamDelta) -> bool {
+    delta
+        .content
+        .as_ref()
+        .is_some_and(|content| !content.is_empty())
+        || delta
+            .reasoning_content
+            .as_ref()
+            .is_some_and(|reasoning| !reasoning.is_empty())
+        || delta
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+        || !delta.thinking_blocks.is_empty()
+        || !delta.generated_images.is_empty()
 }
 
 /// The event a stream that broke off with `error` ends the turn on.
@@ -2376,6 +2411,116 @@ mod tests {
                 .filter_map(|tool| tool["function"]["name"].as_str())
                 .collect::<Vec<_>>();
             assert_eq!(offered, [plan::SUBMIT_PLAN]);
+        }
+
+        /// A stand-in agent that reports what each of its messages took, then
+        /// the whole turn in its result, as `claude` does.
+        fn itemizing(directory: &TempDir) -> PathBuf {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+
+            let message = |text: &str, input: u64, output: u64| {
+                json!({
+                    "type": "assistant",
+                    "message": {
+                        "content": [{"type": "text", "text": text}],
+                        "usage": {"input_tokens": input, "output_tokens": output},
+                    },
+                })
+            };
+            let lines = [
+                message("Reading. ", 10, 1),
+                message(ANSWER, 20, 2),
+                json!({
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": false,
+                    "usage": {"input_tokens": 30, "output_tokens": 3},
+                }),
+            ]
+            .map(|line| line.to_string());
+            let recording = directory.path().join("recording.jsonl");
+            std::fs::write(&recording, format!("{}\n", lines.join("\n"))).expect("the recording");
+            let path = directory.path().join("agent");
+            let mut file = std::fs::File::create(&path).expect("the fake agent");
+            writeln!(
+                file,
+                "#!/bin/sh\ncat > /dev/null\ncat '{}'",
+                recording.display()
+            )
+            .expect("the fake agent body");
+            drop(file);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the fake agent to be executable");
+            path
+        }
+
+        fn billed(events: &[AgentEvent]) -> Vec<Usage> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::Usage(usage) => Some(*usage),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn requested(events: &[AgentEvent]) -> usize {
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::Round))
+                .count()
+        }
+
+        #[tokio::test]
+        async fn a_turns_result_is_billed_instead_of_on_top_of_its_messages() {
+            let directory = TempDir::new().expect("a temporary directory");
+
+            let events = turn(cli(itemizing(&directory)), ChatTools::empty()).await;
+
+            assert!(failures(&events).is_empty(), "{:?}", failures(&events));
+            assert_eq!(
+                billed(&events),
+                [Usage::new(30, 3)],
+                "the result restates the turn, so its messages are not added to it"
+            );
+            assert_eq!(requested(&events), 1);
+        }
+
+        #[tokio::test]
+        async fn every_request_is_a_round_when_the_provider_reports_no_usage() {
+            let provider = MockServer::start().await;
+            let sent = Arc::new(Mutex::new(0usize));
+            let counter = sent.clone();
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(move |_: &Request| {
+                    let mut sent = counter.lock().expect("the request count");
+                    *sent += 1;
+                    let content = match *sent {
+                        1 => format!(r#"{{"name":"{}"}}"#, plan::SUBMIT_PLAN),
+                        _ => ANSWER.to_string(),
+                    };
+                    let chunk = json!({
+                        "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": null}],
+                    });
+                    let end = json!({
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    });
+                    ResponseTemplate::new(200)
+                        .insert_header("Content-Type", "text/event-stream")
+                        .set_body_string(format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"))
+                })
+                .mount(&provider)
+                .await;
+            let llm = LlmClient::new(LlmConfig::new(provider.uri(), "gpt-4", ""));
+
+            let events = turn(llm, ChatTools::empty().with_plan_approval()).await;
+
+            assert!(failures(&events).is_empty(), "{:?}", failures(&events));
+            assert_eq!(*sent.lock().expect("the request count"), 2);
+            assert_eq!(requested(&events), 2, "{events:?}");
+            assert!(billed(&events).is_empty(), "{events:?}");
         }
     }
 }

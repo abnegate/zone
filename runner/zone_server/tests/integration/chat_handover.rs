@@ -13,6 +13,7 @@
 //! under which home and MCP token, and what it read on stdin.
 
 use crate::common::context::{finish, next, send, successful};
+use crate::common::eventually::eventually;
 use crate::common::stand_in::MCP_TOKEN;
 use crate::common::transcript::{self, Speaker};
 use crate::common::{
@@ -1173,6 +1174,71 @@ async fn a_chat_whose_agent_is_spent_continues_on_the_other_agent() {
     assert_eq!(session.agent, AgentKind::Codex, "{session:?}");
     assert_eq!(session.login, Some(carol), "{session:?}");
     assert_eq!(session.id, harness.thread, "{session:?}");
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct Spent {
+    model: String,
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+    context_tokens: Option<i64>,
+}
+
+#[tokio::test]
+async fn a_turn_handed_to_another_model_bills_each_model_for_its_own_part() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    harness.sign_in_codex(CAROL).await;
+    harness.claude.plan(
+        ALICE,
+        0,
+        Run::Limited {
+            partial: Some(PARTIAL),
+            resets_at: reset_in(TimeDelta::hours(2)),
+        },
+    );
+
+    let frames = harness.turn(QUESTION).await;
+    answered(&frames);
+
+    let spent = || async {
+        sqlx::query_as::<_, Spent>(
+            "SELECT model, prompt_tokens, completion_tokens, context_tokens \
+             FROM chat_token_usage WHERE chat_id = $1 ORDER BY context_tokens NULLS FIRST",
+        )
+        .bind(harness.chat)
+        .fetch_all(&harness.pool)
+        .await
+        .expect("the turn's recorded spend")
+    };
+    assert!(
+        eventually(|| async { spent().await.len() == 2 }).await,
+        "the turn is recorded as one share per model: {:?}",
+        spent().await
+    );
+    let rows = spent().await;
+    let [claude, codex] = rows.as_slice() else {
+        panic!("{rows:?}");
+    };
+    assert_ne!(claude.model, codex.model, "{rows:?}");
+    assert_eq!(
+        (claude.prompt_tokens, claude.completion_tokens),
+        (
+            Some(i64::from(PARTIAL_INPUT_TOKENS)),
+            Some(i64::from(PARTIAL_OUTPUT_TOKENS))
+        ),
+        "Claude is billed for what it streamed before its limit: {rows:?}"
+    );
+    assert_eq!(claude.context_tokens, None, "{rows:?}");
+    assert_eq!(
+        (codex.prompt_tokens, codex.completion_tokens),
+        (Some(1), Some(1)),
+        "codex is billed only for its own part: {rows:?}"
+    );
+    assert!(
+        codex.context_tokens.is_some(),
+        "the model the turn ended on carries its closing context: {rows:?}"
+    );
 }
 
 #[tokio::test]

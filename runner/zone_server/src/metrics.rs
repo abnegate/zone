@@ -51,20 +51,13 @@ const WS_CHAT_ACTIVE: &str = "zone_ws_chat_connections_active";
 
 const CITATION_MARKERS: &str = "zone_chat_citation_markers_total";
 
-/// Tokens a chat turn was billed, by model and by whether they were prompt or
-/// completion. Deliberately carries no chat label: one series per chat would
-/// grow without bound, and per-chat totals live in `chat_token_usage` where a
-/// query can group them. Prometheus answers "is the fleet getting cheaper",
-/// the table answers "which chat cost that".
+/// No chat label: one series per chat would grow without bound.
 const CHAT_TOKENS: &str = "zone_chat_tokens_total";
 pub const TOKENS_PROMPT: &str = "prompt";
 pub const TOKENS_COMPLETION: &str = "completion";
 const CHAT_TURN_TOKENS: &str = "zone_chat_turn_tokens";
 const CHAT_TURN_ROUNDS: &str = "zone_chat_turn_rounds";
 const CHAT_TURN_TOOL_CALLS: &str = "zone_chat_turn_tool_calls";
-/// Where a turn's final context went, by category. This is the series a
-/// token-reduction experiment is read from: cutting the system prompt should
-/// move `instructions` and nothing else.
 const CHAT_CONTEXT_TOKENS: &str = "zone_chat_context_tokens";
 pub const MARKER_RESOLVED: &str = "resolved";
 pub const MARKER_UNRESOLVED: &str = "unresolved";
@@ -167,7 +160,10 @@ fn handle() -> PrometheusHandle {
                 CHAT_TOKENS,
                 "Tokens chat turns were billed, by model and prompt/completion"
             );
-            describe_histogram!(CHAT_TURN_TOKENS, "Tokens one chat turn was billed in all");
+            describe_histogram!(
+                CHAT_TURN_TOKENS,
+                "Tokens one model was billed in all for its part of a chat turn"
+            );
             describe_histogram!(CHAT_TURN_ROUNDS, "Model rounds one chat turn took");
             describe_histogram!(CHAT_TURN_TOOL_CALLS, "Tool calls one chat turn made");
             describe_histogram!(
@@ -613,7 +609,6 @@ pub fn record_citation_markers(status: &'static str, count: usize) {
     counter!(CITATION_MARKERS, "status" => status).increment(count as u64);
 }
 
-/// What a provider said one turn cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BilledTokens {
     pub prompt: u64,
@@ -623,20 +618,17 @@ pub struct BilledTokens {
     pub total: u64,
 }
 
-/// Record what one finished chat turn cost.
-///
-/// `billed` is the provider's own figure and is absent when it reported none,
-/// which several coding-agent backends do. Those turns still count their
-/// rounds and tool calls, because both are observed by zone and both drive the
-/// bill, but they contribute nothing to the token counters: a zero there would
-/// read as a free turn rather than an unreported one.
-pub fn record_chat_turn(model: &str, billed: Option<BilledTokens>, rounds: u64, tool_calls: u64) {
+/// Rounds and tool calls are zone's own counts, so a turn records them whether
+/// or not its provider reported any tokens.
+pub fn record_chat_turn(rounds: u64, tool_calls: u64) {
     init();
     histogram!(CHAT_TURN_ROUNDS).record(rounds as f64);
     histogram!(CHAT_TURN_TOOL_CALLS).record(tool_calls as f64);
-    let Some(billed) = billed else {
-        return;
-    };
+}
+
+/// Record what `model` was billed for its part of one chat turn.
+pub fn record_chat_tokens(model: &str, billed: BilledTokens) {
+    init();
     counter!(CHAT_TOKENS, "model" => model.to_string(), "kind" => TOKENS_PROMPT)
         .increment(billed.prompt);
     counter!(CHAT_TOKENS, "model" => model.to_string(), "kind" => TOKENS_COMPLETION)

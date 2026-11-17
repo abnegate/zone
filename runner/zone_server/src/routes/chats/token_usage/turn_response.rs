@@ -2,15 +2,15 @@ use serde::Serialize;
 
 use crate::db::chat_token_usage::TurnRow;
 
-/// One assistant turn's spend.
-///
-/// The three billed counts are null, not zero, when the provider reported
-/// nothing: several coding-agent backends do, and a zero would read as a free
-/// turn. The breakdown is always present because zone estimates it itself, and
-/// `estimated` says whether that estimate came from a tokenizer.
+/// One model's share of one assistant turn. A turn handed over to another
+/// model lists one share per model under the same `turn_id`, and only the
+/// model it ended on carries the context breakdown. The billed counts are
+/// null, not zero, when the provider reported nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TurnResponse {
-    pub message_id: String,
+    pub turn_id: String,
+    /// Null once the message is deleted.
+    pub message_id: Option<String>,
     pub model: String,
     pub reasoning_effort: String,
     pub prompt_tokens: Option<i64>,
@@ -18,22 +18,23 @@ pub struct TurnResponse {
     pub total_tokens: Option<i64>,
     pub rounds: i32,
     pub tool_calls: i32,
-    pub context_tokens: i64,
-    pub instructions_tokens: i64,
-    pub conversation_tokens: i64,
-    pub tools_tokens: i64,
-    pub results_tokens: i64,
-    pub summary_tokens: i64,
+    pub context_tokens: Option<i64>,
+    pub instructions_tokens: Option<i64>,
+    pub conversation_tokens: Option<i64>,
+    pub tools_tokens: Option<i64>,
+    pub results_tokens: Option<i64>,
+    pub summary_tokens: Option<i64>,
     pub attachments_tokens: Option<i64>,
-    pub overhead_tokens: i64,
-    pub estimated: bool,
+    pub overhead_tokens: Option<i64>,
+    pub estimated: Option<bool>,
     pub recorded_at: String,
 }
 
 impl From<TurnRow> for TurnResponse {
     fn from(row: TurnRow) -> Self {
         Self {
-            message_id: row.message_id.to_string(),
+            turn_id: row.turn_id.to_string(),
+            message_id: row.message_id.map(|id| id.to_string()),
             model: row.model,
             reasoning_effort: row.reasoning_effort,
             prompt_tokens: row.prompt_tokens,

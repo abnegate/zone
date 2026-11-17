@@ -2,11 +2,8 @@ use serde::Serialize;
 
 use crate::db::chat_token_usage::Totals;
 
-/// What a set of turns added up to.
-///
-/// `turns` counts every recorded turn and `reported_turns` only those the
-/// provider gave a figure for, so a client dividing tokens by turns can see
-/// which denominator it should be using instead of guessing.
+/// What a set of turns added up to. `reported_turns` counts only the turns a
+/// provider gave a figure for, the denominator of a per-turn average.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TotalsResponse {
     pub turns: i64,
@@ -16,9 +13,7 @@ pub struct TotalsResponse {
     pub total_tokens: i64,
     pub rounds: i64,
     pub tool_calls: i64,
-    /// The largest context any one turn ended on. This is a maximum, not a
-    /// sum: it is what the window has to hold, and adding it up across turns
-    /// would mean nothing.
+    /// The largest context any one turn ended on, not a sum.
     pub peak_context_tokens: i64,
     pub instructions_tokens: i64,
     pub conversation_tokens: i64,
