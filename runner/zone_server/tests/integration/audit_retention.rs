@@ -6,8 +6,8 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
-use zone_enterprise::Tier;
-use zone_enterprise::audit::{Kind, RETENTION_INVALID, Wait};
+use zone_enterprise::audit::{RETENTION_INVALID, Wait};
+use zone_enterprise::{LICENSE_REQUIRED, Tier};
 use zone_server::db::audit::position::Position;
 use zone_server::db::audit::retentions;
 use zone_server::db::audit::scope::Scope;
@@ -18,17 +18,14 @@ use zone_server::routes::audit::refusal::BODY_INVALID;
 use zone_server::services::audit::retention;
 
 use crate::common::TestResponse;
-use crate::common::audit::settle;
+use crate::common::audit::{Destination, UNVERIFIABLE, position, refused, settle};
 use crate::common::policy::Fixture;
 use crate::common::sso::{active, lapsed};
 
 const PREFIX: &str = "audit_retention";
 const SERVER: &str = "/api/audit-retention";
-const LICENSE_REQUIRED: &str = "license_required";
-const UNVERIFIABLE: &str = "not a license key";
 const EXPIRED_DAYS: i32 = 60;
 const PERIOD: i32 = 30;
-const SECRETS: &str = "sealed";
 const UNDELIVERED: Position = Position {
     transaction_id: 0,
     sequence: 0,
@@ -51,16 +48,6 @@ fn ok(response: TestResponse) -> Value {
     response.json_value()
 }
 
-fn refused(response: &TestResponse, status: StatusCode, code: &str) {
-    response.assert_status(status);
-    assert_eq!(
-        response.json_value()["code"],
-        code,
-        "{}",
-        response.json_value()
-    );
-}
-
 async fn row(pool: &PgPool, organization: Option<Uuid>, age_days: i32) -> Uuid {
     sqlx::query_scalar(
         "INSERT INTO audit_logs (organization_id, action, resource_type, created_at) \
@@ -75,19 +62,6 @@ async fn row(pool: &PgPool, organization: Option<Uuid>, age_days: i32) -> Uuid {
     .unwrap()
 }
 
-async fn position(pool: &PgPool, id: Uuid) -> Position {
-    let (transaction_id, sequence) =
-        sqlx::query_as("SELECT transaction_id, sequence FROM audit_logs WHERE id = $1")
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .unwrap();
-    Position {
-        transaction_id,
-        sequence,
-    }
-}
-
 async fn exists(pool: &PgPool, id: Uuid) -> bool {
     sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM audit_logs WHERE id = $1)")
         .bind(id)
@@ -96,7 +70,6 @@ async fn exists(pool: &PgPool, id: Uuid) -> bool {
         .unwrap()
 }
 
-/// A destination whose delivery cursor stands at `delivered`.
 async fn destination(
     pool: &PgPool,
     organization: Option<Uuid>,
@@ -104,29 +77,13 @@ async fn destination(
     enabled: bool,
     delivered: Position,
 ) -> Uuid {
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO audit_destinations (organization_id, kind, name, enabled, settings, secrets) \
-         VALUES ($1, $2, $3, $4, '{}'::jsonb, $5) RETURNING id",
-    )
-    .bind(organization)
-    .bind(Kind::Webhook.as_str())
-    .bind(name)
-    .bind(enabled)
-    .bind(SECRETS)
-    .fetch_one(pool)
+    Destination {
+        name: name.to_owned(),
+        enabled,
+        ..Destination::new(organization)
+    }
+    .create(pool, delivered)
     .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO audit_deliveries (destination_id, transaction_id, sequence) \
-         VALUES ($1, $2, $3)",
-    )
-    .bind(id)
-    .bind(delivered.transaction_id)
-    .bind(delivered.sequence)
-    .execute(pool)
-    .await
-    .unwrap();
-    id
 }
 
 async fn deliver(pool: &PgPool, destination: Uuid, delivered: Position) {

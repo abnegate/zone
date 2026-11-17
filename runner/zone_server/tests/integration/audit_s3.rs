@@ -9,7 +9,7 @@ use zone_server::db::audit::scope::Scope;
 use zone_server::services::audit::transport::s3::{HOST_HEADER, S3};
 use zone_server::services::audit::transport::{Batch, Failure, Transport, client};
 
-use crate::common::audit::batch;
+use crate::common::audit::{batch, header};
 
 const BUCKET: &str = "audit-bucket";
 const REGION: &str = "eu-west-1";
@@ -60,15 +60,6 @@ fn key(batch: &Batch) -> String {
         first.created_at,
         first.id,
     )
-}
-
-fn header<'a>(request: &'a Request, name: &str) -> &'a str {
-    request
-        .headers
-        .get(name)
-        .unwrap_or_else(|| panic!("the request carries {name}"))
-        .to_str()
-        .unwrap()
 }
 
 fn recomputed(request: &Request) -> String {

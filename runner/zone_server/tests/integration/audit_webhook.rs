@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_enterprise::audit::destination::{WebhookSecrets, WebhookSettings};
 use zone_enterprise::audit::signature::{SIGNATURE_HEADER, TIMESTAMP_HEADER, verify};
 use zone_enterprise::audit::{Event, FailureCode};
@@ -12,7 +12,7 @@ use zone_server::db::audit::scope::Scope;
 use zone_server::services::audit::transport::webhook::{CONTENT, Webhook};
 use zone_server::services::audit::transport::{Failure, Transport, client};
 
-use crate::common::audit::batch;
+use crate::common::audit::{batch, header};
 
 const SECRET: &str = "whsec-audit-test";
 const HOOK: &str = "/hook";
@@ -67,15 +67,6 @@ async fn refused(response: ResponseTemplate) -> Failure {
         .deliver(&batch(Scope::Server, 1))
         .await
         .expect_err("a non-2xx response is a failure")
-}
-
-fn header<'a>(request: &'a Request, name: &str) -> &'a str {
-    request
-        .headers
-        .get(name)
-        .unwrap_or_else(|| panic!("the request carries {name}"))
-        .to_str()
-        .unwrap()
 }
 
 fn closed_port() -> u16 {

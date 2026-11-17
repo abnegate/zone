@@ -17,7 +17,7 @@ use zone_server::routes::audit::refusal::BODY_INVALID;
 use zone_server::services::hosts::Hosts;
 use zone_server::state::AppState;
 
-use crate::common::audit::settle;
+use crate::common::audit::{UNVERIFIABLE, refused, settle};
 use crate::common::policy::Fixture;
 use crate::common::sso::{self, Account};
 use crate::common::{TestClient, TestResponse, test_config};
@@ -28,7 +28,6 @@ const SIGNING_SECRET: &str = "whsec-0123456789abcdef";
 const ACCESS_KEY_ID: &str = "AKIAEXAMPLESECRETID";
 const SECRET_ACCESS_KEY: &str = "wJalrXUtnFEMI-secret-access-key";
 const CERTIFICATE: &str = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
-const UNVERIFIABLE: &str = "not a license key";
 
 fn destinations(organization: Uuid) -> String {
     format!("/api/organizations/{organization}/audit-destinations")
@@ -69,11 +68,6 @@ fn id(response: &TestResponse) -> Uuid {
         .unwrap()
         .parse()
         .unwrap()
-}
-
-fn refused(response: &TestResponse, status: StatusCode, code: &str) {
-    response.assert_status(status);
-    assert_eq!(response.json_value()["code"], code, "{}", response.text());
 }
 
 async fn post(client: &TestClient, uri: &str, account: &Account, body: &Value) -> TestResponse {

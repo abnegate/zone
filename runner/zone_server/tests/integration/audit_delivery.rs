@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::future::join_all;
-use sqlx::{Executor, PgPool, Postgres};
+use sqlx::{Executor, PgPool};
 use uuid::Uuid;
 use zone_enterprise::Tier;
 use zone_enterprise::audit::delivery::{RETRY_BASE, S3_BATCH, S3_FLUSH_AGE};
@@ -17,13 +17,15 @@ use zone_server::db::audit::events;
 use zone_server::db::audit::position::Position;
 use zone_server::db::audit::scope::Scope;
 use zone_server::db::audit::{actions, resources};
-use zone_server::db::{licenses, organizations};
+use zone_server::db::licenses;
 use zone_server::services::audit::delivery::{Cadence, Open, Outcome, deliver};
 use zone_server::services::audit::transport::{Batch, Failure, Transport};
 use zone_server::state::AppState;
 use zone_server::workers::audit::drain;
 
-use crate::common::audit::{database, settle};
+use crate::common::audit::{
+    Destination, UNVERIFIABLE, created_at, database, organization, position, settle, write,
+};
 use crate::common::sso::{active, keyring, lapsed};
 use crate::common::{Database, test_config};
 
@@ -36,7 +38,6 @@ const CADENCE: Cadence = Cadence {
 const RESTORED: i64 = 1 << 40;
 const CRASH: Duration = Duration::from_millis(200);
 const UNAVAILABLE: &str = "HTTP 503";
-const UNVERIFIABLE: &str = "not a license key";
 const JITTER: f64 = 0.75;
 
 #[derive(Default)]
@@ -149,40 +150,21 @@ impl Engine {
     }
 
     async fn organization(&self) -> Scope {
-        let slug = format!("audit-delivery-{}", Uuid::new_v4().simple());
-        let organization = organizations::create_organization(self.pool(), &slug, &slug, None)
-            .await
-            .expect("the organization is created");
-        Scope::Organization(organization.id)
+        Scope::Organization(organization(self.pool()).await)
     }
 
     async fn destination(&self, scope: Scope, kind: Kind) -> Uuid {
         let start = events::start(self.pool()).await.unwrap();
-        let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO audit_destinations (organization_id, kind, name, settings, secrets) \
-             VALUES ($1, $2, $3, '{}'::jsonb, '') RETURNING id",
-        )
-        .bind(scope.organization_id())
-        .bind(kind.as_str())
-        .bind(Uuid::new_v4().to_string())
-        .fetch_one(self.pool())
+        Destination {
+            kind,
+            ..Destination::new(scope.organization_id())
+        }
+        .create(self.pool(), start)
         .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO audit_deliveries (destination_id, transaction_id, sequence) \
-             VALUES ($1, $2, $3)",
-        )
-        .bind(id)
-        .bind(start.transaction_id)
-        .bind(start.sequence)
-        .execute(self.pool())
-        .await
-        .unwrap();
-        id
     }
 
     async fn write(&self, scope: Scope) -> Uuid {
-        write(self.pool(), scope).await
+        write(self.pool(), scope.organization_id()).await
     }
 
     async fn written(&self, scope: Scope, count: usize) -> Vec<Uuid> {
@@ -203,24 +185,11 @@ impl Engine {
     }
 
     async fn position(&self, id: Uuid) -> Position {
-        let (transaction_id, sequence): (i64, i64) =
-            sqlx::query_as("SELECT transaction_id, sequence FROM audit_logs WHERE id = $1")
-                .bind(id)
-                .fetch_one(self.pool())
-                .await
-                .unwrap();
-        Position {
-            transaction_id,
-            sequence,
-        }
+        position(self.pool(), id).await
     }
 
     async fn created_at(&self, id: Uuid) -> DateTime<Utc> {
-        sqlx::query_scalar("SELECT created_at FROM audit_logs WHERE id = $1")
-            .bind(id)
-            .fetch_one(self.pool())
-            .await
-            .unwrap()
+        created_at(self.pool(), id).await
     }
 
     async fn due(&self, destination: Uuid) {
@@ -285,22 +254,6 @@ impl Engine {
     async fn cleanup(self) {
         self.database.cleanup().await;
     }
-}
-
-async fn write<'e, E>(executor: E, scope: Scope) -> Uuid
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    sqlx::query_scalar(
-        "INSERT INTO audit_logs (organization_id, action, resource_type) VALUES ($1, $2, $3) \
-         RETURNING id",
-    )
-    .bind(scope.organization_id())
-    .bind(actions::SETTINGS_UPDATED)
-    .bind(resources::ORGANIZATION)
-    .fetch_one(executor)
-    .await
-    .unwrap()
 }
 
 fn unavailable(retry_after: Option<Duration>) -> Failure {
@@ -469,7 +422,7 @@ async fn an_open_transaction_delays_its_row_but_never_lets_the_cursor_skip_it() 
     settle(engine.pool()).await;
 
     let mut open = engine.pool().begin().await.unwrap();
-    let held = write(&mut *open, scope).await;
+    let held = write(&mut *open, scope.organization_id()).await;
     let later = engine.write(scope).await;
     engine.drain().await;
     let early = engine.receiver.received(destination);

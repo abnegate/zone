@@ -1,18 +1,18 @@
 use chrono::{DateTime, Duration, Utc};
-use sqlx::{Executor, PgPool, Postgres};
+use sqlx::PgPool;
 use uuid::Uuid;
 use zone_server::db::audit::events::{self, Bookmark, Expired, Range};
 use zone_server::db::audit::position::Position;
 use zone_server::db::audit::scope::Scope;
 use zone_server::db::audit::{AuditContext, actions, log_action, resources};
-use zone_server::db::organizations;
 
-use crate::common::audit::{database, settle};
+use crate::common::audit::{
+    Destination, created_at, database, organization, position, settle, write,
+};
 use crate::common::create_test_pool;
 
 const BATCH: i64 = 2;
 const RESTORED: i64 = 1 << 40;
-const KIND: &str = "webhook";
 const ORIGIN: Position = Position {
     transaction_id: 0,
     sequence: 0,
@@ -44,57 +44,12 @@ struct Stored {
     sequence: i64,
 }
 
-async fn organization(pool: &PgPool) -> Uuid {
-    let slug = format!("audit-events-{}", Uuid::new_v4().simple());
-    organizations::create_organization(pool, &slug, &slug, None)
-        .await
-        .expect("the organization is created")
-        .id
-}
-
-async fn write<'e, E>(executor: E, organization: Option<Uuid>) -> Uuid
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    sqlx::query_scalar(
-        "INSERT INTO audit_logs (organization_id, action, resource_type) VALUES ($1, $2, $3) \
-         RETURNING id",
-    )
-    .bind(organization)
-    .bind(actions::SETTINGS_UPDATED)
-    .bind(resources::ORGANIZATION)
-    .fetch_one(executor)
-    .await
-    .expect("the audit row is written")
-}
-
 async fn written(pool: &PgPool, organization: Option<Uuid>, count: usize) -> Vec<Uuid> {
     let mut ids = Vec::with_capacity(count);
     for _ in 0..count {
         ids.push(write(pool, organization).await);
     }
     ids
-}
-
-async fn position(pool: &PgPool, id: Uuid) -> Position {
-    let (transaction_id, sequence): (i64, i64) =
-        sqlx::query_as("SELECT transaction_id, sequence FROM audit_logs WHERE id = $1")
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .expect("the audit row exists");
-    Position {
-        transaction_id,
-        sequence,
-    }
-}
-
-async fn created_at(pool: &PgPool, id: Uuid) -> DateTime<Utc> {
-    sqlx::query_scalar("SELECT created_at FROM audit_logs WHERE id = $1")
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .expect("the audit row exists")
 }
 
 async fn age(pool: &PgPool, ids: &[Uuid], created_at: DateTime<Utc>) {
@@ -152,30 +107,6 @@ fn restored(position: Position) -> Position {
         transaction_id: position.transaction_id + RESTORED,
         sequence: position.sequence,
     }
-}
-
-async fn destination(pool: &PgPool, organization: Option<Uuid>, delivered: Position) -> Uuid {
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO audit_destinations (organization_id, kind, name, settings, secrets) \
-         VALUES ($1, $2, $3, '{}'::jsonb, '') RETURNING id",
-    )
-    .bind(organization)
-    .bind(KIND)
-    .bind(format!("destination-{}", Uuid::new_v4().simple()))
-    .fetch_one(pool)
-    .await
-    .expect("the destination is created");
-    sqlx::query(
-        "INSERT INTO audit_deliveries (destination_id, transaction_id, sequence) \
-         VALUES ($1, $2, $3)",
-    )
-    .bind(id)
-    .bind(delivered.transaction_id)
-    .bind(delivered.sequence)
-    .execute(pool)
-    .await
-    .expect("the delivery is created");
-    id
 }
 
 async fn lease(pool: &PgPool, destination: Uuid, batch: Position, owner: Uuid) {
@@ -532,10 +463,14 @@ async fn rebase_after_a_restore_keeps_every_undelivered_row_after_its_cursor() {
     let batch = position(pool, old[2]).await;
     let server_delivered = position(pool, server_old[0]).await;
     restore(pool, &[old.as_slice(), server_old.as_slice()].concat()).await;
-    let ours = destination(pool, Some(organization), restored(delivered)).await;
+    let ours = Destination::new(Some(organization))
+        .create(pool, restored(delivered))
+        .await;
     let owner = Uuid::new_v4();
     lease(pool, ours, restored(batch), owner).await;
-    let server = destination(pool, None, restored(server_delivered)).await;
+    let server = Destination::new(None)
+        .create(pool, restored(server_delivered))
+        .await;
     let new = write(pool, Some(organization)).await;
     let server_new = write(pool, None).await;
 
@@ -612,7 +547,9 @@ async fn rebase_does_not_resend_rows_delivered_below_the_new_horizon() {
     settle(pool).await;
     let delivered = position(pool, old[0]).await;
     restore(pool, &old).await;
-    let ours = destination(pool, Some(organization), restored(delivered)).await;
+    let ours = Destination::new(Some(organization))
+        .create(pool, restored(delivered))
+        .await;
     let new = write(pool, Some(organization)).await;
 
     assert!(rebase(pool).await);
@@ -637,7 +574,9 @@ async fn rebase_renumbers_rows_written_while_the_identity_lagged() {
     settle(pool).await;
     let delivered = position(pool, old[2]).await;
     restore(pool, &old).await;
-    let ours = destination(pool, Some(organization), restored(delivered)).await;
+    let ours = Destination::new(Some(organization))
+        .create(pool, restored(delivered))
+        .await;
     sqlx::query("SELECT setval(pg_get_serial_sequence('public.audit_logs', 'sequence'), 1, false)")
         .execute(pool)
         .await
@@ -672,7 +611,9 @@ async fn a_second_rebase_finds_nothing() {
     assert!(!rebase(pool).await, "rows below the horizon need no rebase");
     let delivered = position(pool, old[0]).await;
     restore(pool, &old).await;
-    destination(pool, Some(organization), restored(delivered)).await;
+    Destination::new(Some(organization))
+        .create(pool, restored(delivered))
+        .await;
     write(pool, Some(organization)).await;
 
     assert!(rebase(pool).await);
@@ -686,15 +627,15 @@ async fn a_cursor_alone_above_the_horizon_is_rebased() {
     let pool = &database.pool;
     let organization = organization(pool).await;
     let scope = Scope::Organization(organization);
-    let ours = destination(
-        pool,
-        Some(organization),
-        Position {
-            transaction_id: RESTORED,
-            sequence: i64::MAX,
-        },
-    )
-    .await;
+    let ours = Destination::new(Some(organization))
+        .create(
+            pool,
+            Position {
+                transaction_id: RESTORED,
+                sequence: i64::MAX,
+            },
+        )
+        .await;
     let new = write(pool, Some(organization)).await;
 
     assert!(rebase(pool).await);
@@ -713,7 +654,9 @@ async fn the_old_owner_cannot_advance_after_a_rebase() {
     let delivered = position(pool, old[0]).await;
     let batch = position(pool, old[2]).await;
     restore(pool, &old).await;
-    let ours = destination(pool, Some(organization), restored(delivered)).await;
+    let ours = Destination::new(Some(organization))
+        .create(pool, restored(delivered))
+        .await;
     let owner = Uuid::new_v4();
     lease(pool, ours, restored(batch), owner).await;
 
@@ -749,7 +692,9 @@ async fn a_failed_rebase_changes_nothing() {
     let delivered = position(pool, old[0]).await;
     let batch = position(pool, old[1]).await;
     restore(pool, &old).await;
-    let ours = destination(pool, Some(organization), restored(delivered)).await;
+    let ours = Destination::new(Some(organization))
+        .create(pool, restored(delivered))
+        .await;
     lease(pool, ours, restored(batch), Uuid::new_v4()).await;
     write(pool, Some(organization)).await;
     sqlx::raw_sql(
@@ -792,7 +737,9 @@ async fn concurrent_rebases_rebase_once() {
     settle(pool).await;
     let delivered = position(pool, old[0]).await;
     restore(pool, &old).await;
-    let ours = destination(pool, Some(organization), restored(delivered)).await;
+    let ours = Destination::new(Some(organization))
+        .create(pool, restored(delivered))
+        .await;
     let new = write(pool, Some(organization)).await;
 
     let (first, second) = tokio::join!(events::rebase(pool), events::rebase(pool));
