@@ -17,6 +17,8 @@ import {
   HEALTHY_S3,
   LAPSED_DESTINATIONS,
   LAPSED_RETENTION,
+  LAPSED_TEAM_DESTINATIONS,
+  LAPSED_TEAM_RETENTION,
   ORGANIZATION_SCOPE,
   PAUSED_SYSLOG,
   PLAIN_HTTP_WEBHOOK,
@@ -34,26 +36,28 @@ import {
   DELETE_CONFIRM_LABEL,
   DESTINATIONS_TITLE,
   DOWNLOAD_LABEL,
+  DOWNLOAD_READ_ONLY,
   DOWNLOAD_TITLE,
   EDIT_DESTINATION_TITLE,
   EDITION_NOTICE,
-  ENABLED_LABEL,
   HOLDERS_LABEL,
   LAPSED_NOTICE,
+  LAPSED_TEAM_NOTICE,
   LICENSE_LINK_LABEL,
   LOADING_LABEL,
   NEVER_DELIVERED,
   NO_DESTINATIONS,
   NO_DESTINATIONS_READ_ONLY,
   ORGANIZATION_DESCRIPTION,
-  READ_ONLY_NOTICE,
+  READ_ONLY_EDITION,
+  READ_ONLY_LAPSED,
+  READ_ONLY_UNLICENSED,
   RENEW_LINK_LABEL,
   RETENTION_NOT_APPLIED,
   RETENTION_TITLE,
   SAVE_RETENTION_LABEL,
   SECTION_TITLE,
   SERVER_DESCRIPTION,
-  TEST_LABEL,
   UNENCRYPTED_LABEL,
   UNVERIFIED_NOTICE,
   UP_TO_DATE,
@@ -63,8 +67,10 @@ import {
   backlogText,
   deleteMessage,
   deliveryError,
+  enabledLabel,
   refusalMessage,
   stalledMessage,
+  testLabel,
   testResultMessage,
   waitMessage,
 } from '../messages';
@@ -185,7 +191,8 @@ describe('AuditExportSection', () => {
       expect(screen.getByText(RETENTION_NOT_APPLIED)).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: SAVE_RETENTION_LABEL })).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: DOWNLOAD_LABEL })).toBeDisabled();
-      expect(within(card(DOWNLOAD_TITLE)).getByText(READ_ONLY_NOTICE)).toBeInTheDocument();
+      expect(within(card(RETENTION_TITLE)).getByText(READ_ONLY_UNLICENSED)).toBeInTheDocument();
+      expect(within(card(DOWNLOAD_TITLE)).getByText(DOWNLOAD_READ_ONLY)).toBeInTheDocument();
     });
 
     it('lets Team download but keeps streaming and retention behind the Enterprise upgrade', async () => {
@@ -195,9 +202,26 @@ describe('AuditExportSection', () => {
       expect(screen.queryByRole('button', { name: ADD_DESTINATION_LABEL })).not.toBeInTheDocument();
       const syslog = row(PAUSED_SYSLOG.name);
       expect(within(syslog).getByText('Paused')).toBeInTheDocument();
-      expect(within(syslog).queryByRole('button', { name: TEST_LABEL })).not.toBeInTheDocument();
+      expect(
+        within(syslog).queryByRole('button', { name: testLabel(PAUSED_SYSLOG.name) })
+      ).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: SAVE_RETENTION_LABEL })).not.toBeInTheDocument();
+      expect(within(card(RETENTION_TITLE)).getByText(READ_ONLY_EDITION)).toBeInTheDocument();
       expect(screen.getByRole('button', { name: DOWNLOAD_LABEL })).toBeEnabled();
+    });
+
+    it('warns a lapsed Team license that downloads stopped, without offering them', async () => {
+      await loaded(LAPSED_TEAM_DESTINATIONS, LAPSED_TEAM_RETENTION);
+
+      const warning = screen.getByRole('status', { name: '' });
+      expect(warning).toHaveClass('alert-warning');
+      expect(warning).toHaveTextContent(LAPSED_TEAM_NOTICE);
+      expect(within(warning).getByRole('link', { name: RENEW_LINK_LABEL })).toBeInTheDocument();
+      expect(screen.queryByRole('note')).not.toBeInTheDocument();
+      expect(screen.queryByText(EDITION_NOTICE)).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: DOWNLOAD_LABEL })).toBeDisabled();
+      expect(within(card(DOWNLOAD_TITLE)).getByText(DOWNLOAD_READ_ONLY)).toBeInTheDocument();
+      expect(within(card(RETENTION_TITLE)).getByText(READ_ONLY_EDITION)).toBeInTheDocument();
     });
 
     it('warns that a lapsed license pauses streaming and keeps the backlog, read-only', async () => {
@@ -219,8 +243,11 @@ describe('AuditExportSection', () => {
       expect(
         within(syslog).getByRole('button', { name: `Delete ${PAUSED_SYSLOG.name}` })
       ).toBeEnabled();
-      expect(within(syslog).getByRole('switch', { name: ENABLED_LABEL })).toBeEnabled();
-      expect(screen.getByText(waitMessage(RetentionWait.Paused))).toBeInTheDocument();
+      expect(
+        within(syslog).getByRole('switch', { name: enabledLabel(PAUSED_SYSLOG.name) })
+      ).toBeEnabled();
+      expect(screen.getAllByText(waitMessage(RetentionWait.Paused))).toHaveLength(2);
+      expect(within(card(RETENTION_TITLE)).getByText(READ_ONLY_LAPSED)).toBeInTheDocument();
       expect(screen.getByRole('button', { name: DOWNLOAD_LABEL })).toBeDisabled();
     });
 
@@ -283,10 +310,9 @@ describe('AuditExportSection', () => {
       expect(within(legacy).getByText('Disabled')).toBeInTheDocument();
       expect(within(legacy).getByText(UNENCRYPTED_LABEL)).toBeInTheDocument();
       expect(within(legacy).getByText('10.0.0.5:514 · UDP')).toBeInTheDocument();
-      expect(within(legacy).getByRole('switch', { name: ENABLED_LABEL })).toHaveAttribute(
-        'aria-checked',
-        'false'
-      );
+      expect(
+        within(legacy).getByRole('switch', { name: enabledLabel(DISABLED_UDP_SYSLOG.name) })
+      ).toHaveAttribute('aria-checked', 'false');
     });
 
     it('says when a destination has delivered nothing yet', async () => {
@@ -317,9 +343,7 @@ describe('AuditExportSection', () => {
       updateDestination.mockResolvedValue({ ...FAILING_WEBHOOK, enabled: false });
       await loaded(ENTERPRISE_DESTINATIONS, ENTERPRISE_RETENTION);
 
-      fireEvent.click(
-        within(row(FAILING_WEBHOOK.name)).getByRole('switch', { name: ENABLED_LABEL })
-      );
+      fireEvent.click(screen.getByRole('switch', { name: enabledLabel(FAILING_WEBHOOK.name) }));
 
       await waitFor(() =>
         expect(updateDestination).toHaveBeenCalledWith(ORGANIZATION_SCOPE, FAILING_WEBHOOK.id, {
@@ -335,7 +359,9 @@ describe('AuditExportSection', () => {
       await loaded(ENTERPRISE_DESTINATIONS, ENTERPRISE_RETENTION);
 
       const legacy = row(DISABLED_UDP_SYSLOG.name);
-      fireEvent.click(within(legacy).getByRole('switch', { name: ENABLED_LABEL }));
+      fireEvent.click(
+        within(legacy).getByRole('switch', { name: enabledLabel(DISABLED_UDP_SYSLOG.name) })
+      );
 
       expect(await within(legacy).findByRole('alert')).toHaveTextContent(
         refusalMessage(AuditCode.LicenseRequired)
@@ -351,11 +377,9 @@ describe('AuditExportSection', () => {
         LAPSED_RETENTION
       );
 
+      expect(screen.getByRole('switch', { name: enabledLabel(PAUSED_SYSLOG.name) })).toBeEnabled();
       expect(
-        within(row(PAUSED_SYSLOG.name)).getByRole('switch', { name: ENABLED_LABEL })
-      ).toBeEnabled();
-      expect(
-        within(row(DISABLED_UDP_SYSLOG.name)).getByRole('switch', { name: ENABLED_LABEL })
+        screen.getByRole('switch', { name: enabledLabel(DISABLED_UDP_SYSLOG.name) })
       ).toBeDisabled();
     });
 
@@ -364,7 +388,7 @@ describe('AuditExportSection', () => {
       await loaded(ENTERPRISE_DESTINATIONS, ENTERPRISE_RETENTION);
 
       const archive = row(HEALTHY_S3.name);
-      fireEvent.click(within(archive).getByRole('button', { name: TEST_LABEL }));
+      fireEvent.click(within(archive).getByRole('button', { name: testLabel(HEALTHY_S3.name) }));
 
       expect(
         await within(archive).findByText(testResultMessage(DELIVERED_TEST))
@@ -378,7 +402,9 @@ describe('AuditExportSection', () => {
       await loaded(ENTERPRISE_DESTINATIONS, ENTERPRISE_RETENTION);
 
       const failing = row(FAILING_WEBHOOK.name);
-      fireEvent.click(within(failing).getByRole('button', { name: TEST_LABEL }));
+      fireEvent.click(
+        within(failing).getByRole('button', { name: testLabel(FAILING_WEBHOOK.name) })
+      );
 
       const result = await within(failing).findByText(testResultMessage(FAILED_TEST));
       expect(result).toHaveClass('audit-test-failed');

@@ -60,8 +60,9 @@ Without the license a change needs, it's refused with `license_required`.
 Disabling and deleting stay open so that you can always stop events leaving
 and remove credentials you can no longer edit. Clearing the retention period
 doesn't: it loosens a compliance control, so a lapsed admin can neither clear
-nor change it until the license is renewed. The console keeps the **Enabled**
-switch and **Delete** available without a license.
+nor change it until the license is renewed. Without a license, the console's
+**Enabled** switch can only turn a destination off, and **Delete** stays
+available.
 
 Every response carries the license as `standing`:
 

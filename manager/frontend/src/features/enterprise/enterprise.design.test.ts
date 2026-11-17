@@ -62,3 +62,39 @@ describe('license section surfaces', () => {
     expect(rule(phone, '.license-key-actions')).toContain('flex-wrap: wrap');
   });
 });
+
+describe('enterprise switch surfaces', () => {
+  const switchCss = read(join(import.meta.dir, 'components', 'Switch.css'));
+
+  it('draws only from the design tokens and has no color literals', () => {
+    const variables = [...switchCss.matchAll(/var\((--[\w-]+)/g)].map((match) => match[1]);
+    expect(variables.length).toBeGreaterThan(0);
+    for (const variable of variables) {
+      expect(variable).toStartWith('--ui-');
+    }
+    expect(switchCss).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    expect(switchCss).not.toMatch(/\b(?:rgb|rgba|hsl|hsla|oklch|color-mix)\(/i);
+  });
+
+  it('lets the switch and its text shrink below their content', () => {
+    for (const selector of ['.enterprise-switch', '.enterprise-switch-text']) {
+      expect(rule(switchCss, selector), selector).toContain('min-width: 0');
+    }
+  });
+
+  it('colors the switch from the accent only when it is on', () => {
+    expect(rule(switchCss, '.enterprise-switch-control')).toContain(
+      'background-color: var(--ui-bg-active)'
+    );
+    expect(rule(switchCss, ".enterprise-switch-control[aria-checked='true']")).toContain(
+      'background-color: var(--ui-accent)'
+    );
+    expect(
+      rule(switchCss, ".enterprise-switch-control[aria-checked='true'] .enterprise-switch-thumb")
+    ).toContain('transform: translateX(0.875rem)');
+    expect(rule(switchCss, '.enterprise-switch-control:focus-visible')).toContain(
+      'outline: 2px solid var(--ui-accent)'
+    );
+    expect(rule(switchCss, '.enterprise-switch-control:disabled')).toContain('cursor: not-allowed');
+  });
+});

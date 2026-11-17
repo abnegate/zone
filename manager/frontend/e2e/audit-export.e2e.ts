@@ -5,6 +5,7 @@ import { exportFilename } from '../src/features/enterprise/audit/filename';
 import {
   COMMUNITY_DESTINATIONS,
   COMMUNITY_RETENTION,
+  COMMUNITY_SAVED_RETENTION,
   DELIVERED_TEST,
   ENTERPRISE_DESTINATIONS,
   ENTERPRISE_EMPTY_DESTINATIONS,
@@ -15,6 +16,8 @@ import {
   HEALTHY_S3,
   LAPSED_DESTINATIONS,
   LAPSED_RETENTION,
+  LAPSED_TEAM_DESTINATIONS,
+  LAPSED_TEAM_RETENTION,
   NOW,
   PAUSED_SYSLOG,
   SERVER_DESTINATIONS,
@@ -31,23 +34,26 @@ import {
   DELETE_LABEL,
   DELETE_TITLE,
   DOWNLOAD_LABEL,
+  DOWNLOAD_READ_ONLY,
   DOWNLOADED_LABEL,
   EDIT_DESTINATION_TITLE,
   EDIT_LABEL,
   EDITION_NOTICE,
-  ENABLED_LABEL,
   END_DATE_LABEL,
   FORMAT_LABEL,
+  GENERATE_SECRET_LABEL,
   HOLDERS_LABEL,
   KEEP_FOREVER_LABEL,
   KEPT_FOREVER,
   LAPSED_NOTICE,
+  LAPSED_TEAM_NOTICE,
   NAME_LABEL,
   NEW_DESTINATION_TITLE,
   NO_DESTINATIONS,
   NO_DESTINATIONS_READ_ONLY,
   ORGANIZATION_DESCRIPTION,
-  READ_ONLY_NOTICE,
+  READ_ONLY_EDITION,
+  READ_ONLY_UNLICENSED,
   RETENTION_DAYS_LABEL,
   RETENTION_SAVED,
   SAVE_DESTINATION_LABEL,
@@ -56,17 +62,19 @@ import {
   SECTION_TITLE,
   SERVER_DESCRIPTION,
   START_DATE_LABEL,
-  TEST_LABEL,
   UNENCRYPTED_HTTP_WARNING,
   UPGRADE_NOTICE,
   URL_LABEL,
 } from '../src/features/enterprise/audit/labels';
 import {
   deleteMessage,
+  enabledLabel,
   formatLabel,
   healthLabel,
+  retentionSummary,
   retentionText,
   secretLabel,
+  testLabel,
   testResultMessage,
   waitMessage,
 } from '../src/features/enterprise/audit/messages';
@@ -116,7 +124,6 @@ const AUDIT_PATH =
 const AUDIT_LOGS_API = /\/api\/organizations\/[^/]+\/audit-logs(?:\?|$)/;
 
 const NEW_DESTINATION_ID = '6e7f8a9b-0c1d-4e2f-9a3b-4c5d6e7f8a9b';
-const GENERATE_LABEL = 'Generate';
 const WEBHOOK_NAME = 'Splunk';
 const RENAMED_WEBHOOK = 'Splunk Cloud';
 const PLAIN_URL = 'http://splunk:8088/services/collector';
@@ -543,7 +550,7 @@ test.describe('Organization audit export', () => {
     await expect(form.getByRole('status')).toHaveText(UNENCRYPTED_HTTP_WARNING);
     await form.getByRole('textbox', { name: URL_LABEL }).fill(SECURE_URL);
     await expect(form.getByText(UNENCRYPTED_HTTP_WARNING)).toHaveCount(0);
-    await form.getByRole('button', { name: GENERATE_LABEL }).click();
+    await form.getByRole('button', { name: GENERATE_SECRET_LABEL }).click();
     const secret = form.getByRole('textbox', { name: secretLabel(SecretName.SigningSecret) });
     await expect(secret).not.toHaveValue('');
     const signingSecret = await secret.inputValue();
@@ -577,7 +584,7 @@ test.describe('Organization audit export', () => {
     ]);
 
     const renamed = row(page, RENAMED_WEBHOOK);
-    const enabled = renamed.getByRole('switch', { name: ENABLED_LABEL });
+    const enabled = renamed.getByRole('switch', { name: enabledLabel(RENAMED_WEBHOOK) });
     await expect(enabled).toHaveAttribute('aria-checked', 'true');
     await enabled.click();
     await expect(enabled).toHaveAttribute('aria-checked', 'false');
@@ -603,11 +610,11 @@ test.describe('Organization audit export', () => {
     });
 
     const archive = row(page, HEALTHY_S3.name);
-    await archive.getByRole('button', { name: TEST_LABEL }).click();
+    await archive.getByRole('button', { name: testLabel(HEALTHY_S3.name) }).click();
     await expect(archive.getByRole('status')).toHaveText(testResultMessage(DELIVERED_TEST));
 
     const failing = row(page, FAILING_WEBHOOK.name);
-    await failing.getByRole('button', { name: TEST_LABEL }).click();
+    await failing.getByRole('button', { name: testLabel(FAILING_WEBHOOK.name) }).click();
     await expect(failing.getByRole('status')).toHaveText(testResultMessage(FAILED_TEST));
     await expect(archive.getByRole('status')).toHaveCount(0);
 
@@ -680,8 +687,24 @@ test.describe('Organization audit export', () => {
     await expect(page.getByRole('button', { name: ADD_DESTINATION_LABEL })).toHaveCount(0);
     await expect(page.getByRole('button', { name: SAVE_RETENTION_LABEL })).toHaveCount(0);
     await expect(page.getByRole('button', { name: DOWNLOAD_LABEL, exact: true })).toBeDisabled();
-    await expect(page.getByText(READ_ONLY_NOTICE)).toHaveCount(2);
-    await shoot(page, 'community-light-1280');
+    await expect(retentionCard(page).getByText(READ_ONLY_UNLICENSED)).toBeVisible();
+    await expect(page.getByText(DOWNLOAD_READ_ONLY)).toBeVisible();
+  });
+
+  test('says a retention period saved before the license was removed resumes later', async ({
+    page,
+  }) => {
+    await openOrganization(page, {
+      destinations: COMMUNITY_DESTINATIONS,
+      retention: COMMUNITY_SAVED_RETENTION,
+    });
+
+    const retention = retentionCard(page);
+    await expect(
+      retention.getByText(retentionSummary(COMMUNITY_SAVED_RETENTION.days, false))
+    ).toBeVisible();
+    await expect(retention.getByText(KEPT_FOREVER, { exact: true })).toHaveCount(0);
+    await expect(retention.getByText(READ_ONLY_UNLICENSED)).toBeVisible();
   });
 
   test('pauses streaming on a lapsed license and says why events are held', async ({ page }) => {
@@ -693,14 +716,32 @@ test.describe('Organization audit export', () => {
     await expect(page.getByRole('status').filter({ hasText: LAPSED_NOTICE })).toBeVisible();
     const paused = row(page, PAUSED_SYSLOG.name);
     await expect(paused.getByText(healthLabel(DeliveryHealth.Paused))).toBeVisible();
-    await expect(paused.getByRole('button', { name: TEST_LABEL })).toHaveCount(0);
-    const holder = retentionCard(page).getByRole('listitem');
-    await expect(holder).toContainText(PAUSED_SYSLOG.name);
-    await expect(holder).toContainText(waitMessage(RetentionWait.Paused));
+    await expect(paused.getByRole('button', { name: testLabel(PAUSED_SYSLOG.name) })).toHaveCount(
+      0
+    );
+    const holders = retentionCard(page).getByRole('listitem');
+    await expect(holders).toHaveCount(LAPSED_DESTINATIONS.destinations.length);
+    for (const destination of LAPSED_DESTINATIONS.destinations) {
+      await expect(holders.filter({ hasText: destination.name })).toContainText(
+        waitMessage(RetentionWait.Paused)
+      );
+    }
     await expect(page.getByRole('button', { name: ADD_DESTINATION_LABEL })).toHaveCount(0);
     await expect(page.getByRole('button', { name: SAVE_RETENTION_LABEL })).toHaveCount(0);
     await expect(page.getByRole('button', { name: DOWNLOAD_LABEL, exact: true })).toBeDisabled();
-    await shoot(page, 'lapsed-light-1280');
+  });
+
+  test('warns a lapsed Team license that downloads stopped', async ({ page }) => {
+    await openOrganization(page, {
+      destinations: LAPSED_TEAM_DESTINATIONS,
+      retention: LAPSED_TEAM_RETENTION,
+    });
+
+    await expect(page.getByRole('status').filter({ hasText: LAPSED_TEAM_NOTICE })).toBeVisible();
+    await expect(page.getByText(EDITION_NOTICE)).toHaveCount(0);
+    await expect(page.getByRole('button', { name: DOWNLOAD_LABEL, exact: true })).toBeDisabled();
+    await expect(page.getByText(DOWNLOAD_READ_ONLY)).toBeVisible();
+    await expect(retentionCard(page).getByText(READ_ONLY_EDITION)).toBeVisible();
   });
 
   test('lets Team download but keeps streaming behind the upgrade', async ({ page }) => {
@@ -712,7 +753,7 @@ test.describe('Organization audit export', () => {
     await expect(page.getByRole('note').filter({ hasText: EDITION_NOTICE })).toBeVisible();
     await expect(page.getByRole('button', { name: ADD_DESTINATION_LABEL })).toHaveCount(0);
     await expect(page.getByRole('button', { name: SAVE_RETENTION_LABEL })).toHaveCount(0);
-    await shoot(page, 'team-light-1280');
+    await expect(retentionCard(page).getByText(READ_ONLY_EDITION)).toBeVisible();
 
     const saved = await download(page, EXPORT_QUERY);
     expect(server.exports.map((request) => request.query)).toEqual([EXPORT_QUERY]);
@@ -797,22 +838,30 @@ test.describe('Audit export layout', () => {
     }
   }
 
-  for (const scheme of SCHEMES) {
-    test(`lays the license states out on a phone in ${scheme}`, async ({ page }) => {
-      const states: readonly (readonly [string, AuditSetup])[] = [
-        ['community', { destinations: COMMUNITY_DESTINATIONS, retention: COMMUNITY_RETENTION }],
-        ['lapsed', { destinations: LAPSED_DESTINATIONS, retention: LAPSED_RETENTION }],
-        ['team', { destinations: TEAM_DESTINATIONS, retention: TEAM_RETENTION }],
-      ];
-      await page.setViewportSize(PHONE);
-      await signIn(page, { scheme });
-      for (const [name, setup] of states) {
-        await page.unroute(ORGANIZATION_API);
-        await serveAudit(page, ORGANIZATION_API, setup);
-        await page.goto(ORGANIZATION_PATH, { waitUntil: 'domcontentloaded' });
-        await expect(page.getByRole('heading', { name: SECTION_TITLE, level: 2 })).toBeVisible();
-        await shoot(page, `${name}-${scheme}-${PHONE.width}`);
-      }
-    });
+  const states: readonly (readonly [string, AuditSetup])[] = [
+    ['community', { destinations: COMMUNITY_DESTINATIONS, retention: COMMUNITY_RETENTION }],
+    [
+      'community-saved',
+      { destinations: COMMUNITY_DESTINATIONS, retention: COMMUNITY_SAVED_RETENTION },
+    ],
+    ['lapsed', { destinations: LAPSED_DESTINATIONS, retention: LAPSED_RETENTION }],
+    ['lapsed-team', { destinations: LAPSED_TEAM_DESTINATIONS, retention: LAPSED_TEAM_RETENTION }],
+    ['team', { destinations: TEAM_DESTINATIONS, retention: TEAM_RETENTION }],
+  ];
+
+  for (const viewport of WIDTHS) {
+    for (const scheme of SCHEMES) {
+      test(`lays the license states out at ${viewport.width}px in ${scheme}`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        await signIn(page, { scheme });
+        for (const [name, setup] of states) {
+          await page.unroute(ORGANIZATION_API);
+          await serveAudit(page, ORGANIZATION_API, setup);
+          await page.goto(ORGANIZATION_PATH, { waitUntil: 'domcontentloaded' });
+          await expect(page.getByRole('heading', { name: SECTION_TITLE, level: 2 })).toBeVisible();
+          await shoot(page, `${name}-${scheme}-${viewport.width}`);
+        }
+      });
+    }
   }
 });

@@ -79,6 +79,12 @@ export const TEAM_STANDING: Standing = {
   pause: StreamingPause.Edition,
 };
 
+export const LAPSED_TEAM_STANDING: Standing = {
+  ...TEAM_STANDING,
+  status: LicenseStatus.Lapsed,
+  export: false,
+};
+
 export const UNVERIFIED_STANDING: Standing = {
   edition: Edition.Community,
   status: LicenseStatus.Community,
@@ -118,7 +124,7 @@ export const FAILING_WEBHOOK: DestinationResponse = {
     last_success_at: '2026-11-17T09:11:58Z',
     last_failure_at: '2026-11-17T11:52:00Z',
     last_error_code: DeliveryFailure.Status,
-    last_error: 'The receiver answered 503 Service Unavailable.',
+    last_error: 'HTTP 503',
     delivered_count: 9_120,
   },
   created_at: CREATED_AT,
@@ -227,16 +233,23 @@ export const ENTERPRISE_EMPTY_DESTINATIONS: DestinationsResponse = {
   destinations: [],
 };
 
+export const PAUSED_S3: DestinationResponse = { ...HEALTHY_S3, delivery: PAUSED_SYSLOG.delivery };
+
 export const LAPSED_DESTINATIONS: DestinationsResponse = {
   standing: LAPSED_STANDING,
   stalled_since: null,
-  destinations: [PAUSED_SYSLOG, { ...HEALTHY_S3, delivery: PAUSED_SYSLOG.delivery }],
+  destinations: [PAUSED_SYSLOG, PAUSED_S3],
 };
 
 export const TEAM_DESTINATIONS: DestinationsResponse = {
   standing: TEAM_STANDING,
   stalled_since: null,
   destinations: [PAUSED_SYSLOG],
+};
+
+export const LAPSED_TEAM_DESTINATIONS: DestinationsResponse = {
+  ...TEAM_DESTINATIONS,
+  standing: LAPSED_TEAM_STANDING,
 };
 
 export const STALLED_DESTINATIONS: DestinationsResponse = {
@@ -304,17 +317,29 @@ export const WAITING_RETENTION: RetentionResponse = {
 export const LAPSED_RETENTION: RetentionResponse = {
   ...ENTERPRISE_RETENTION,
   standing: LAPSED_STANDING,
-  held: 57,
-  expired: 57,
-  holders: [
-    { destination_id: PAUSED_SYSLOG.id, name: PAUSED_SYSLOG.name, wait: RetentionWait.Paused },
-  ],
+  held: PAUSED_SYSLOG.delivery.backlog + PAUSED_S3.delivery.backlog,
+  expired: PAUSED_SYSLOG.delivery.backlog + PAUSED_S3.delivery.backlog,
+  holders: LAPSED_DESTINATIONS.destinations.map((destination) => ({
+    destination_id: destination.id,
+    name: destination.name,
+    wait: RetentionWait.Paused,
+  })),
   deleted_count: 0,
+};
+
+export const COMMUNITY_SAVED_RETENTION: RetentionResponse = {
+  ...ENTERPRISE_RETENTION,
+  standing: COMMUNITY_STANDING,
 };
 
 export const TEAM_RETENTION: RetentionResponse = {
   ...COMMUNITY_RETENTION,
   standing: TEAM_STANDING,
+};
+
+export const LAPSED_TEAM_RETENTION: RetentionResponse = {
+  ...TEAM_RETENTION,
+  standing: LAPSED_TEAM_STANDING,
 };
 
 export const SERVER_RETENTION: RetentionResponse = {
@@ -333,7 +358,7 @@ export const DELIVERED_TEST: TestResponse = {
 export const FAILED_TEST: TestResponse = {
   delivered: false,
   error_code: DeliveryFailure.Status,
-  error: 'The receiver answered 500 Internal Server Error.',
+  error: 'HTTP 500',
 };
 
 export const EXPORT_QUERY: ExportQuery = {

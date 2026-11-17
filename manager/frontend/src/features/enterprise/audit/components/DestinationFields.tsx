@@ -1,11 +1,12 @@
 import { Button, Input, Label, Select } from '@zone/ui';
 import { useId } from 'react';
-import { Switch } from '../../sso/components/Switch';
+import { Switch } from '../../components/Switch';
 import {
   clearable,
   type DestinationDraft,
   draftSecrets,
   generateSecret,
+  removesCertificates,
   settingsOf,
   withProtocol,
 } from '../draft';
@@ -14,6 +15,7 @@ import {
   BUCKET_LABEL,
   BUCKET_PLACEHOLDER,
   CERTIFICATES_HINT,
+  CERTIFICATES_REMOVED,
   ENABLED_DESCRIPTION,
   ENABLED_LABEL,
   ENDPOINT_HINT,
@@ -352,6 +354,11 @@ export function DestinationFields({
             error={error(DestinationField.Hostname)}
             onChange={(event) => set('hostname', event.target.value)}
           />
+          {removesCertificates(draft, saved) && (
+            <p className="audit-hint" role="status">
+              {CERTIFICATES_REMOVED}
+            </p>
+          )}
         </>
       )}
       {warning && (

@@ -1,5 +1,6 @@
 import { Button, Input, Modal } from '@zone/ui';
 import { type FormEvent, useId, useState } from 'react';
+import { Switch } from '../../components/Switch';
 import {
   changed,
   createRequest,
@@ -16,7 +17,6 @@ import { ProviderField, refusalField, refusalMessage } from '../messages';
 import { SsoAdminCode } from '../schemas';
 import type { ProviderResponse } from '../types';
 import { SsoUpgradeNotice } from './SsoUpgradeNotice';
-import { Switch } from './Switch';
 
 export const KEEP_SECRET_PLACEHOLDER = 'Leave blank to keep the current secret';
 

@@ -7,8 +7,10 @@ import {
   ENTERPRISE_STANDING,
   FAILED_TEST,
   FAILING_WEBHOOK,
+  GRACE_STANDING,
   HEALTHY_S3,
   LAPSED_STANDING,
+  LAPSED_TEAM_STANDING,
   PAUSED_SYSLOG,
   PLAIN_HTTP_WEBHOOK,
   STALLED_DESTINATIONS,
@@ -16,9 +18,16 @@ import {
   UNVERIFIED_STANDING,
 } from './fixtures';
 import {
+  DOWNLOAD_READ_ONLY,
   EDITION_NOTICE,
+  ENTERPRISE_NOTICE,
   KEPT_FOREVER,
   LAPSED_NOTICE,
+  LAPSED_TEAM_NOTICE,
+  READ_ONLY_EDITION,
+  READ_ONLY_LAPSED,
+  READ_ONLY_UNLICENSED,
+  READ_ONLY_UNVERIFIED,
   TEST_DELIVERED,
   UNENCRYPTED_ENDPOINT_WARNING,
   UNENCRYPTED_HTTP_WARNING,
@@ -33,6 +42,7 @@ import {
   DestinationField,
   deleteMessage,
   deliveryError,
+  enabledLabel,
   facilityLabel,
   failureMessage,
   failureText,
@@ -42,14 +52,19 @@ import {
   heldText,
   isAuditCode,
   kindLabel,
+  LicensedFeature,
+  NoticeTone,
   pauseMessage,
   protocolLabel,
+  readOnlyMessage,
   refusalField,
   refusalMessage,
+  retentionSummary,
   retentionText,
   secretLabel,
   stalledMessage,
   standingNotice,
+  testLabel,
   testResultMessage,
   unencryptedWarning,
   waitMessage,
@@ -154,7 +169,7 @@ describe('delivery copy', () => {
 
   it('describes the last error of a failing destination, and nothing for a healthy one', () => {
     expect(deliveryError(FAILING_WEBHOOK.delivery)).toBe(
-      `${failureMessage(DeliveryFailure.Status)} The receiver answered 503 Service Unavailable.`
+      `${failureMessage(DeliveryFailure.Status)} HTTP 503`
     );
     expect(deliveryError(HEALTHY_S3.delivery)).toBeNull();
   });
@@ -179,7 +194,7 @@ describe('delivery copy', () => {
   it('reports a test result', () => {
     expect(testResultMessage(DELIVERED_TEST)).toBe(TEST_DELIVERED);
     expect(testResultMessage(FAILED_TEST)).toBe(
-      `The test event wasn't delivered. ${failureMessage(DeliveryFailure.Status)} The receiver answered 500 Internal Server Error.`
+      `The test event wasn't delivered. ${failureMessage(DeliveryFailure.Status)} HTTP 500`
     );
   });
 
@@ -192,6 +207,15 @@ describe('delivery copy', () => {
   it('names the destination being deleted', () => {
     expect(deleteMessage('Graylog')).toStartWith('Delete Graylog?');
   });
+
+  it('keeps a destination name with replacement patterns as typed', () => {
+    expect(deleteMessage("$& $' $1")).toStartWith("Delete $& $' $1?");
+  });
+
+  it('names the destination on its test button and enabled switch', () => {
+    expect(testLabel('Graylog')).toBe('Send test event to Graylog');
+    expect(enabledLabel('Graylog')).toBe('Enabled for Graylog');
+  });
 });
 
 describe('standing copy', () => {
@@ -200,16 +224,66 @@ describe('standing copy', () => {
   });
 
   it('shows the notice that matches the license', () => {
+    const upgrade = (message: string) => ({ tone: NoticeTone.Upgrade, message });
+    const warning = (message: string) => ({ tone: NoticeTone.Warning, message });
     expect(standingNotice(ENTERPRISE_STANDING)).toBeNull();
-    expect(standingNotice(COMMUNITY_STANDING)).toBe(UPGRADE_NOTICE);
-    expect(standingNotice(TEAM_STANDING)).toBe(EDITION_NOTICE);
-    expect(standingNotice(LAPSED_STANDING)).toBe(LAPSED_NOTICE);
-    expect(standingNotice(UNVERIFIED_STANDING)).toBe(UNVERIFIED_NOTICE);
+    expect(standingNotice(GRACE_STANDING)).toBeNull();
+    expect(standingNotice(COMMUNITY_STANDING)).toEqual(upgrade(UPGRADE_NOTICE));
+    expect(standingNotice(TEAM_STANDING)).toEqual(upgrade(EDITION_NOTICE));
+    expect(standingNotice(LAPSED_STANDING)).toEqual(warning(LAPSED_NOTICE));
+    expect(standingNotice(UNVERIFIED_STANDING)).toEqual(warning(UNVERIFIED_NOTICE));
+  });
+
+  it('warns a lapsed Team license that downloads stopped instead of offering them', () => {
+    expect(standingNotice(LAPSED_TEAM_STANDING)).toEqual({
+      tone: NoticeTone.Warning,
+      message: LAPSED_TEAM_NOTICE,
+    });
+    expect(LAPSED_TEAM_NOTICE).toContain('downloads are unavailable');
+    expect(LAPSED_TEAM_NOTICE).toContain('Enterprise');
+  });
+
+  it('claims downloads only when the license covers them', () => {
+    expect(standingNotice({ ...TEAM_STANDING, export: false })).toEqual({
+      tone: NoticeTone.Upgrade,
+      message: ENTERPRISE_NOTICE,
+    });
+    expect(ENTERPRISE_NOTICE).not.toContain('download');
   });
 
   it('tells a lapsed admin that the backlog is kept and retention still applies', () => {
     expect(LAPSED_NOTICE).toContain('backlog is kept');
     expect(LAPSED_NOTICE).toContain('still applied');
+  });
+});
+
+describe('readOnlyMessage', () => {
+  it('says nothing when the license covers the feature', () => {
+    for (const feature of Object.values(LicensedFeature)) {
+      expect(readOnlyMessage(ENTERPRISE_STANDING, feature)).toBeNull();
+    }
+    expect(readOnlyMessage(TEAM_STANDING, LicensedFeature.Export)).toBeNull();
+  });
+
+  it('says what would let each license change streaming and retention', () => {
+    for (const feature of [LicensedFeature.Streaming, LicensedFeature.Retention]) {
+      expect(readOnlyMessage(COMMUNITY_STANDING, feature)).toBe(READ_ONLY_UNLICENSED);
+      expect(readOnlyMessage(TEAM_STANDING, feature)).toBe(READ_ONLY_EDITION);
+      expect(readOnlyMessage(LAPSED_TEAM_STANDING, feature)).toBe(READ_ONLY_EDITION);
+      expect(readOnlyMessage(LAPSED_STANDING, feature)).toBe(READ_ONLY_LAPSED);
+      expect(readOnlyMessage(UNVERIFIED_STANDING, feature)).toBe(READ_ONLY_UNVERIFIED);
+    }
+  });
+
+  it('gives downloads their own wording', () => {
+    for (const standing of [
+      COMMUNITY_STANDING,
+      LAPSED_STANDING,
+      LAPSED_TEAM_STANDING,
+      UNVERIFIED_STANDING,
+    ]) {
+      expect(readOnlyMessage(standing, LicensedFeature.Export)).toBe(DOWNLOAD_READ_ONLY);
+    }
   });
 });
 
@@ -222,6 +296,19 @@ describe('retention copy', () => {
     expect(retentionText(null)).toBe(KEPT_FOREVER);
     expect(retentionText(1)).toStartWith('Events older than 1 day are deleted');
     expect(retentionText(90)).toStartWith('Events older than 90 days are deleted');
+  });
+
+  it('summarizes a period the license applies like any other', () => {
+    expect(retentionSummary(90, true)).toBe(retentionText(90));
+    expect(retentionSummary(null, true)).toBe(KEPT_FOREVER);
+    expect(retentionSummary(null, false)).toBe(KEPT_FOREVER);
+  });
+
+  it('says a saved period resumes once a license is installed', () => {
+    const summary = retentionSummary(90, false);
+    expect(summary).toContain('90 days is saved');
+    expect(summary).toContain('once a Zone license is installed');
+    expect(summary).not.toContain('are deleted once');
   });
 
   it('counts the held events', () => {

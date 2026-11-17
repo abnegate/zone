@@ -11,6 +11,6 @@ export function saveDownload({ blob, filename }: ExportDownload): void {
     anchor.click();
   } finally {
     anchor.remove();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 }

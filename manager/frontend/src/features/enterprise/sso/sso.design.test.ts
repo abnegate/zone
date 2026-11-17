@@ -39,26 +39,10 @@ describe('single sign-on section surfaces', () => {
       '.sso-provider-identity',
       '.sso-provider-heading',
       '.sso-provider-fields',
-      '.sso-switch',
-      '.sso-switch-text',
     ]) {
       expect(rule(css, selector), selector).toContain('min-width: 0');
     }
     expect(rule(css, '.sso-provider')).toContain('grid-template-columns: minmax(0, 1fr) auto');
-  });
-
-  it('colors the switch from the accent only when it is on', () => {
-    expect(rule(css, '.sso-switch-control')).toContain('background-color: var(--ui-bg-active)');
-    expect(rule(css, ".sso-switch-control[aria-checked='true']")).toContain(
-      'background-color: var(--ui-accent)'
-    );
-    expect(rule(css, ".sso-switch-control[aria-checked='true'] .sso-switch-thumb")).toContain(
-      'transform: translateX(0.875rem)'
-    );
-    expect(rule(css, '.sso-switch-control:focus-visible')).toContain(
-      'outline: 2px solid var(--ui-accent)'
-    );
-    expect(rule(css, '.sso-switch-control:disabled')).toContain('cursor: not-allowed');
   });
 
   it('stacks provider actions under each provider and wraps headers on a phone', () => {

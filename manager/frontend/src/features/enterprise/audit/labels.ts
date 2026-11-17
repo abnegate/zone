@@ -14,13 +14,29 @@ export const UPGRADE_NOTICE =
 export const EDITION_NOTICE =
   'Your Team license covers downloading the audit log. Streaming to a SIEM and retention need Zone Enterprise, so destinations stay paused until you upgrade.';
 
+export const ENTERPRISE_NOTICE =
+  'Streaming to a SIEM and retention need Zone Enterprise, so destinations stay paused until you upgrade.';
+
 export const LAPSED_NOTICE =
   'Your Zone license has lapsed. Streaming is paused and its backlog is kept until you renew; the retention period already set is still applied, and downloads are unavailable.';
+
+export const LAPSED_TEAM_NOTICE =
+  'Your Zone Team license has lapsed, so downloads are unavailable until you renew. The retention period already set is still applied. Streaming to a SIEM and changing retention also need Zone Enterprise.';
 
 export const UNVERIFIED_NOTICE =
   "Zone can't verify the stored license key, so streaming is paused and downloads are unavailable. The retention period already set is still applied. Paste the license key again to resume.";
 
-export const READ_ONLY_NOTICE = 'You can see these settings, but changing them needs a license.';
+export const READ_ONLY_UNLICENSED =
+  'You can see these settings, but changing them needs a Zone Enterprise license.';
+
+export const READ_ONLY_EDITION =
+  "Changing these settings needs Zone Enterprise; a Team license doesn't include them.";
+
+export const READ_ONLY_LAPSED = 'Renew your Zone license to change these settings.';
+
+export const READ_ONLY_UNVERIFIED = 'Paste the license key again to change these settings.';
+
+export const DOWNLOAD_READ_ONLY = 'Downloads need an active Team or Enterprise license.';
 
 export const DESTINATIONS_TITLE = 'Streaming destinations';
 
@@ -46,7 +62,11 @@ export const DELETE_LABEL = 'Delete';
 
 export const TEST_LABEL = 'Send test event';
 
+export const TEST_DESTINATION_LABEL = `${TEST_LABEL} to {}`;
+
 export const ENABLED_LABEL = 'Enabled';
+
+export const ENABLED_DESTINATION_LABEL = `${ENABLED_LABEL} for {}`;
 
 export const DELETE_TITLE = 'Delete destination';
 
@@ -115,6 +135,24 @@ export const DELIVERED_COUNT_LABEL = 'Delivered';
 
 export const TEST_DELIVERED = 'The test event was delivered.';
 
+export const TEST_NOT_DELIVERED = "The test event wasn't delivered. {}";
+
+export const STALLED_NOTICE =
+  'Delivery is waiting behind a database transaction that has been open since {}. Events written after it are sent once it finishes; nothing is lost.';
+
+export const EVENT_SINGULAR = 'event';
+
+export const EVENT_PLURAL = 'events';
+
+export const DAY_SINGULAR = 'day';
+
+export const DAY_PLURAL = 'days';
+
+export const BACKLOG_WAITING = '{} waiting';
+
+export const DELETE_CONFIRMATION =
+  "Delete {}? Zone stops sending audit events to it and forgets its secrets. Events it hasn't received are no longer held back from retention.";
+
 export const RETENTION_TITLE = 'Retention';
 
 export const RETENTION_DESCRIPTION =
@@ -128,8 +166,19 @@ export const SAVE_RETENTION_LABEL = 'Save retention';
 
 export const KEPT_FOREVER = 'Audit events are kept forever.';
 
-export const RETENTION_NOT_APPLIED =
-  'Retention applies only while a Zone license is installed. Without one, audit events are kept forever.';
+export const RETENTION_PERIOD =
+  'Events older than {} are deleted once every enabled destination has delivered them.';
+
+export const RETENTION_PERIOD_SAVED =
+  'A period of {} is saved and applies again once a Zone license is installed. Until then, audit events are kept forever.';
+
+export const RETENTION_NOT_APPLIED = 'Retention applies only while a Zone license is installed.';
+
+export const EXPIRED_COUNT = '{} past the retention period';
+
+export const HELD_COUNT = '{} kept until delivered';
+
+export const DELETED_COUNT = '{} deleted';
 
 export const CUTOFF_LABEL = 'Deleting events before';
 
@@ -147,6 +196,8 @@ export const DOWNLOAD_TITLE = 'Download';
 
 export const DOWNLOAD_DESCRIPTION =
   'Download the audit log for a date range as NDJSON, one event per line, or as CSV. Dates are in UTC and include the whole end day.';
+
+export const DOWNLOAD_INTERRUPTED = 'The download stopped part way. Try again.';
 
 export const DOWNLOAD_MEMORY_NOTE =
   'Your browser holds the whole file in memory until the download finishes. For very large ranges, use the API with curl.';
@@ -186,6 +237,8 @@ export const ENDPOINT_PLACEHOLDER = 'https://minio.internal:9000';
 export const PREFIX_PLACEHOLDER = 'zone/audit/';
 
 export const HOST_PLACEHOLDER = 'siem.internal';
+
+export const CERTIFICATES_REMOVED = 'Saving removes the saved certificates.';
 
 export const CERTIFICATES_HINT =
   'Optional PEM text. Add a CA certificate to trust a private CA, and a client certificate and key together for mutual TLS.';

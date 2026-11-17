@@ -3,18 +3,25 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { chooseSelect } from '../../../../test/select';
 import { AuditRefusal } from '../AuditRefusal';
-import { EXPORT_FILENAME, ORGANIZATION_SCOPE } from '../fixtures';
+import {
+  COMMUNITY_STANDING,
+  ENTERPRISE_STANDING,
+  EXPORT_FILENAME,
+  LAPSED_TEAM_STANDING,
+  ORGANIZATION_SCOPE,
+} from '../fixtures';
 import {
   DOWNLOAD_LABEL,
   DOWNLOAD_MEMORY_NOTE,
+  DOWNLOAD_READ_ONLY,
   DOWNLOADED_LABEL,
   END_DATE_LABEL,
   FORMAT_LABEL,
-  READ_ONLY_NOTICE,
   START_DATE_LABEL,
 } from '../labels';
 import { refusalMessage } from '../messages';
 import { AuditCode, ExportFormat } from '../schemas';
+import type { Standing } from '../types';
 
 const download = mock();
 const saveDownload = mock();
@@ -45,11 +52,11 @@ afterAll(() => {
   mock.restore();
 });
 
-function renderPanel(entitled = true) {
+function renderPanel(standing: Standing = ENTERPRISE_STANDING) {
   const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
   return render(
     <QueryClientProvider client={queryClient}>
-      <ExportPanel scope={ORGANIZATION_SCOPE} entitled={entitled} />
+      <ExportPanel scope={ORGANIZATION_SCOPE} standing={standing} />
     </QueryClientProvider>
   );
 }
@@ -99,8 +106,23 @@ describe('ExportPanel', () => {
     dates('2026-11-15', '2026-11-01');
     fireEvent.click(screen.getByRole('button', { name: DOWNLOAD_LABEL }));
 
-    expect(screen.getByText(refusalMessage(AuditCode.ExportRangeInvalid))).toBeInTheDocument();
+    const error = screen.getByText(refusalMessage(AuditCode.ExportRangeInvalid));
+    for (const label of [START_DATE_LABEL, END_DATE_LABEL]) {
+      const input = screen.getByLabelText(label);
+      expect(input, label).toHaveAttribute('aria-invalid', 'true');
+      expect(input.getAttribute('aria-describedby'), label).toBe(error.id);
+    }
     expect(download).not.toHaveBeenCalled();
+  });
+
+  it('marks neither date invalid before a bad range is submitted', () => {
+    renderPanel();
+
+    dates('2026-11-15', '2026-11-01');
+
+    for (const label of [START_DATE_LABEL, END_DATE_LABEL]) {
+      expect(screen.getByLabelText(label), label).toHaveAttribute('aria-invalid', 'false');
+    }
   });
 
   it('shows a refused download', async () => {
@@ -117,11 +139,14 @@ describe('ExportPanel', () => {
   });
 
   it('is read-only without a license that covers downloads', () => {
-    renderPanel(false);
+    for (const standing of [COMMUNITY_STANDING, LAPSED_TEAM_STANDING]) {
+      const { unmount } = renderPanel(standing);
 
-    expect(screen.getByRole('button', { name: DOWNLOAD_LABEL })).toBeDisabled();
-    expect(screen.getByLabelText(START_DATE_LABEL)).toBeDisabled();
-    expect(screen.getByText(READ_ONLY_NOTICE)).toBeInTheDocument();
-    expect(screen.queryByText(DOWNLOAD_MEMORY_NOTE)).toBeNull();
+      expect(screen.getByRole('button', { name: DOWNLOAD_LABEL })).toBeDisabled();
+      expect(screen.getByLabelText(START_DATE_LABEL)).toBeDisabled();
+      expect(screen.getByText(DOWNLOAD_READ_ONLY)).toBeInTheDocument();
+      expect(screen.queryByText(DOWNLOAD_MEMORY_NOTE)).toBeNull();
+      unmount();
+    }
   });
 });

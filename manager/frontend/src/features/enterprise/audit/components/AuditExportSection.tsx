@@ -8,8 +8,8 @@ import {
   SECTION_TITLE,
   SERVER_DESCRIPTION,
 } from '../labels';
-import { pauseMessage } from '../messages';
-import { AuditScopeKind, StreamingPause } from '../schemas';
+import { NoticeTone, standingNotice } from '../messages';
+import { AuditScopeKind } from '../schemas';
 import type { AuditScope, Standing } from '../types';
 import { AuditLapsedNotice } from './AuditLapsedNotice';
 import { AuditUpgradeNotice } from './AuditUpgradeNotice';
@@ -18,17 +18,15 @@ import { ExportPanel } from './ExportPanel';
 import { RetentionPanel } from './RetentionPanel';
 import './AuditExportSection.css';
 
-const UPGRADES: ReadonlySet<string> = new Set([StreamingPause.Unlicensed, StreamingPause.Edition]);
-
 function StandingNotice({ standing }: { standing: Standing }) {
-  if (standing.pause === null) {
+  const notice = standingNotice(standing);
+  if (notice === null) {
     return null;
   }
-  const message = pauseMessage(standing.pause);
-  return UPGRADES.has(standing.pause) ? (
-    <AuditUpgradeNotice message={message} />
+  return notice.tone === NoticeTone.Upgrade ? (
+    <AuditUpgradeNotice message={notice.message} />
   ) : (
-    <AuditLapsedNotice message={message} />
+    <AuditLapsedNotice message={notice.message} />
   );
 }
 
@@ -85,7 +83,7 @@ export function AuditExportSection({ scope }: AuditExportSectionProps) {
         <LoadFailure error={retention.error} onRetry={() => void retention.refresh()} />
       )}
       {retention.retention && <RetentionPanel scope={scope} retention={retention.retention} />}
-      {standing && <ExportPanel scope={scope} entitled={standing.export} />}
+      {standing && <ExportPanel scope={scope} standing={standing} />}
     </section>
   );
 }
