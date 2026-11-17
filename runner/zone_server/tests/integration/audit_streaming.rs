@@ -5,8 +5,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use abnegate_secret::MasterKey;
-use async_trait::async_trait;
 use axum::http::StatusCode;
 use rustls::ServerConfig;
 use rustls::crypto::aws_lc_rs;
@@ -24,23 +22,15 @@ use uuid::Uuid;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 use zone_enterprise::Tier;
-use zone_enterprise::audit::destination::{Secrets, Settings};
 use zone_enterprise::audit::signature::{SIGNATURE_HEADER, TIMESTAMP_HEADER, verify};
-use zone_enterprise::audit::{Event, FailureCode, Format, object_key};
+use zone_enterprise::audit::{Event, Format, object_key};
 use zone_server::db::audit::deliveries::{self, Delivery};
-use zone_server::db::audit::destinations::DestinationRecord;
 use zone_server::db::audit::position::Position;
 use zone_server::db::audit::scope::Scope;
 use zone_server::db::audit::{actions, resources};
-use zone_server::services::audit::delivery::{Cadence, Open};
-use zone_server::services::audit::destinations;
+use zone_server::services::audit::delivery::Cadence;
 use zone_server::services::audit::retention;
-use zone_server::services::audit::transport::s3::S3;
-use zone_server::services::audit::transport::syslog::Syslog;
-use zone_server::services::audit::transport::webhook::Webhook;
-use zone_server::services::audit::transport::{Failure, Transport, client};
-use zone_server::services::hosts::Hosts;
-use zone_server::state::AppState;
+use zone_server::services::audit::transport::open::Transports;
 use zone_server::workers::audit::drain;
 
 use crate::common::audit::{header, settle};
@@ -70,43 +60,6 @@ const POLL: Duration = Duration::from_millis(20);
 const STALL: Duration = Duration::from_secs(60);
 const OUTAGE: i32 = 3;
 const RESTORED: i64 = 1 << 40;
-const MISMATCHED: &str = "The destination's settings and secrets are of different kinds";
-
-struct Transports {
-    client: reqwest::Client,
-    key: Arc<MasterKey>,
-    hosts: Hosts,
-}
-
-impl Transports {
-    fn of(state: &AppState) -> Self {
-        Self {
-            client: client::client(),
-            key: state.master_key().clone(),
-            hosts: state.config().endpoint_hosts.clone(),
-        }
-    }
-}
-
-#[async_trait]
-impl Open for Transports {
-    async fn open(&self, destination: &DestinationRecord) -> Result<Box<dyn Transport>, Failure> {
-        match destinations::open(destination, &self.key, &self.hosts)? {
-            (Settings::Webhook(settings), Secrets::Webhook(secrets)) => Ok(Box::new(Webhook::new(
-                &settings,
-                &secrets,
-                self.client.clone(),
-            ))),
-            (Settings::S3(settings), Secrets::S3(secrets)) => {
-                Ok(Box::new(S3::new(&settings, &secrets, self.client.clone())))
-            }
-            (Settings::Syslog(settings), Secrets::Syslog(secrets)) => {
-                Ok(Box::new(Syslog::new(&settings, &secrets)?))
-            }
-            _ => Err(Failure::new(FailureCode::Configuration, MISMATCHED)),
-        }
-    }
-}
 
 #[derive(Deserialize)]
 struct Payload {
@@ -272,7 +225,10 @@ impl Stream {
     async fn new() -> Self {
         let fixture = Fixture::new(PREFIX).await;
         fixture.license(Tier::Enterprise).await;
-        let open = Transports::of(fixture.state());
+        let open = Transports::new(
+            Arc::clone(fixture.state().master_key()),
+            fixture.state().config().endpoint_hosts.clone(),
+        );
         Self {
             fixture,
             open,
