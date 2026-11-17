@@ -14,6 +14,7 @@ mod audit_delivery_store;
 mod audit_destination_store;
 mod audit_events;
 mod audit_retention_store;
+mod audit_syslog;
 mod auth_console_contract;
 mod auth_session_revocation;
 mod authz_ai_settings_role;

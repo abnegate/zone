@@ -6,6 +6,7 @@ pub mod account;
 pub mod agent;
 pub mod artifact_access;
 pub mod artifacts;
+pub mod audit;
 pub mod backend;
 pub mod character;
 pub mod chat;
