@@ -31,7 +31,10 @@ use super::trace::content_lines;
 use super::wait::{self, Waiting};
 use crate::services::chat::session::RunContext;
 use sha2::{Digest, Sha256};
+use tally::Tally;
 use uuid::Uuid;
+
+mod tally;
 
 /// What the calls queued behind a turn-ending question are told.
 ///
@@ -128,6 +131,7 @@ pub enum AgentEvent {
         summary: Summary,
     },
     Context(ContextUsage),
+    Round,
     Usage(Usage),
     Finalizing(String),
     /// The model asked for a tool and we are about to run it.
@@ -351,6 +355,7 @@ pub fn run_with_context(
                     return;
                 }
             };
+            yield AgentEvent::Round;
             let consumed = context.consume();
             if !consumed.is_empty() {
                 yield AgentEvent::Consumed(consumed);
@@ -363,16 +368,25 @@ pub fn run_with_context(
             let mut pending = ToolCallAccumulator::default();
             let mut images = Vec::new();
             let mut cut_short = false;
+            let mut tally = match runs_own_loop(&llm) {
+                true => Tally::agent(),
+                false => Tally::request(),
+            };
+            context.pending_usage = None;
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
                     Err(error) => {
+                        if let Some(usage) = context.pending_usage.take() {
+                            yield AgentEvent::Usage(usage);
+                        }
                         yield halted(error);
                         return;
                     }
                 };
                 if let Some(usage) = chunk.usage {
-                    yield AgentEvent::Usage(usage);
+                    tally.observe(usage);
+                    context.pending_usage = tally.total();
                 }
                 if let Some(window) = chunk.window {
                     yield AgentEvent::Window(window);
@@ -384,6 +398,7 @@ pub fn run_with_context(
                     continue;
                 };
                 if let Some(reason) = &choice.finish_reason {
+                    tally.finish();
                     cut_short = reason == CUT_SHORT;
                 }
                 if let Some(content) = &choice.delta.content {
@@ -426,6 +441,9 @@ pub fn run_with_context(
                 }
                 // A usage-only SSE frame, or the window a coding agent reports once it has
                 // exited, may follow finish_reason; drain through the stream's end.
+            }
+            if let Some(usage) = context.pending_usage.take() {
+                yield AgentEvent::Usage(usage);
             }
             let mut requested = pending.finish();
             let parsed = if agentic && !text.is_empty() {
@@ -2378,6 +2396,173 @@ mod tests {
                 .filter_map(|tool| tool["function"]["name"].as_str())
                 .collect::<Vec<_>>();
             assert_eq!(offered, [plan::SUBMIT_PLAN]);
+        }
+
+        fn itemizing(directory: &TempDir) -> PathBuf {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+
+            let message = |text: &str, input: u64, output: u64| {
+                json!({
+                    "type": "assistant",
+                    "message": {
+                        "content": [{"type": "text", "text": text}],
+                        "usage": {"input_tokens": input, "output_tokens": output},
+                    },
+                })
+            };
+            let lines = [
+                message("Reading. ", 10, 1),
+                message(ANSWER, 20, 2),
+                json!({
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": false,
+                    "usage": {"input_tokens": 30, "output_tokens": 3},
+                }),
+            ]
+            .map(|line| line.to_string());
+            let recording = directory.path().join("recording.jsonl");
+            std::fs::write(&recording, format!("{}\n", lines.join("\n"))).expect("the recording");
+            let path = directory.path().join("agent");
+            let mut file = std::fs::File::create(&path).expect("the fake agent");
+            writeln!(
+                file,
+                "#!/bin/sh\ncat > /dev/null\ncat '{}'",
+                recording.display()
+            )
+            .expect("the fake agent body");
+            drop(file);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the fake agent to be executable");
+            path
+        }
+
+        fn counted(events: &[AgentEvent]) -> Vec<Usage> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::Usage(usage) => Some(*usage),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn requested(events: &[AgentEvent]) -> usize {
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::Round))
+                .count()
+        }
+
+        #[tokio::test]
+        async fn a_turns_result_is_counted_instead_of_on_top_of_its_messages() {
+            let directory = TempDir::new().expect("a temporary directory");
+
+            let events = turn(cli(itemizing(&directory)), ChatTools::empty()).await;
+
+            assert!(failures(&events).is_empty(), "{:?}", failures(&events));
+            assert_eq!(
+                counted(&events),
+                [Usage::new(30, 3)],
+                "the result restates the turn, so its messages are not added to it"
+            );
+            assert_eq!(requested(&events), 1);
+        }
+
+        #[tokio::test]
+        async fn every_request_is_a_round_when_the_provider_reports_no_usage() {
+            let provider = MockServer::start().await;
+            let sent = Arc::new(Mutex::new(0usize));
+            let counter = sent.clone();
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(move |_: &Request| {
+                    let mut sent = counter.lock().expect("the request count");
+                    *sent += 1;
+                    let content = match *sent {
+                        1 => format!(r#"{{"name":"{}"}}"#, plan::SUBMIT_PLAN),
+                        _ => ANSWER.to_string(),
+                    };
+                    let chunk = json!({
+                        "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": null}],
+                    });
+                    let end = json!({
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    });
+                    ResponseTemplate::new(200)
+                        .insert_header("Content-Type", "text/event-stream")
+                        .set_body_string(format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"))
+                })
+                .mount(&provider)
+                .await;
+            let llm = LlmClient::new(LlmConfig::new(provider.uri(), "gpt-4", ""));
+
+            let events = turn(llm, ChatTools::empty().with_plan_approval()).await;
+
+            assert!(failures(&events).is_empty(), "{:?}", failures(&events));
+            assert_eq!(*sent.lock().expect("the request count"), 2);
+            assert_eq!(requested(&events), 2, "{events:?}");
+            assert!(counted(&events).is_empty(), "{events:?}");
+        }
+
+        fn stalling(directory: &TempDir) -> PathBuf {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+
+            let message = json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "Reading. "}],
+                    "usage": {"input_tokens": 10, "output_tokens": 1},
+                },
+            });
+            let path = directory.path().join("agent");
+            let mut file = std::fs::File::create(&path).expect("the fake agent");
+            writeln!(
+                file,
+                "#!/bin/sh\ncat > /dev/null\necho '{message}'\nexec sleep 30"
+            )
+            .expect("the fake agent body");
+            drop(file);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the fake agent to be executable");
+            path
+        }
+
+        #[tokio::test]
+        async fn a_round_stopped_after_it_reported_usage_leaves_that_usage_to_take_once() {
+            let directory = TempDir::new().expect("a temporary directory");
+            let run = AgentRun {
+                llm: cli(stalling(&directory)),
+                model: "sonnet".into(),
+                tools: ChatTools::empty(),
+                messages: vec![LlmMessage::user("Plan the release.")],
+                budget: LoopBudget::chat(),
+                approval: ApprovalPolicy::auto(),
+            };
+            let mut context = RunContext::from_messages(run.messages.clone());
+            let mut seen = Vec::new();
+            {
+                let events = run_with_context(run, &mut context, true);
+                futures::pin_mut!(events);
+                while let Some(event) = events.next().await {
+                    let chunk = matches!(event, AgentEvent::Chunk(_));
+                    seen.push(event);
+                    if chunk {
+                        break;
+                    }
+                }
+                if let Ok(Some(event)) =
+                    tokio::time::timeout(Duration::from_millis(200), events.next()).await
+                {
+                    seen.push(event);
+                }
+            }
+
+            assert!(counted(&seen).is_empty(), "{seen:?}");
+            assert_eq!(context.pending_usage.take(), Some(Usage::new(10, 1)));
+            assert_eq!(context.pending_usage, None, "the round is counted once");
         }
     }
 }

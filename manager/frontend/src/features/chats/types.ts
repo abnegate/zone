@@ -329,6 +329,9 @@ export interface MessageMetadata {
   handovers?: Handover[];
   source?: string;
   reminder_id?: string;
+  task_id?: string;
+  run_id?: string;
+  status?: string;
 }
 
 export interface Message {
@@ -708,4 +711,26 @@ export interface ChatTask {
   updated_at: string | null;
   run: ChatTaskRun | null;
   pull_request: ChatTaskPublication | null;
+}
+
+export interface TokenTotals {
+  turns: number;
+  /** Turns a provider gave a token figure for: the denominator of a per-turn average. */
+  reported_turns: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  rounds: number;
+  tool_calls: number;
+  /** One turn's context at its largest, not a sum across turns. */
+  peak_context_tokens: number;
+  instructions_tokens: number;
+  conversation_tokens: number;
+  tools_tokens: number;
+  results_tokens: number;
+  summary_tokens: number;
+  attachments_tokens: number;
+  overhead_tokens: number;
+  first_at: string | null;
+  last_at: string | null;
 }

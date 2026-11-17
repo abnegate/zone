@@ -61,6 +61,7 @@ use crate::services::chat::observers::Observers;
 use crate::services::chat::pull_request::Recorder;
 use crate::services::chat::session::{self, Session};
 use crate::services::chat::subagent::{Announcer, ChatSubagent, Tracker};
+use crate::services::chat::tokens;
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
 use crate::services::endpoint::{Endpoint, Origin};
 use crate::services::login::router;
@@ -885,36 +886,6 @@ impl Drop for ConnectionCleanupGuard {
             }
         });
     }
-}
-
-/// Pull provider-safe image URLs out of a message's stored metadata.
-///
-/// Images ride in `metadata.attachments[]` rather than in `content`, so the
-/// text of a message stays readable and the images survive a reload. Protected
-/// relative artifact URLs require Zone authentication, which LiteLLM does not
-/// receive, so they must never be forwarded on later turns.
-fn image_urls_from_metadata(metadata: Option<&serde_json::Value>) -> Vec<String> {
-    metadata
-        .and_then(|m| m.get("attachments"))
-        .and_then(|a| a.as_array())
-        .map(|attachments| {
-            attachments
-                .iter()
-                .filter(|a| {
-                    a.get("mime")
-                        .and_then(|m| m.as_str())
-                        .is_some_and(|m| m.starts_with("image/"))
-                })
-                .filter_map(|a| a.get("url").and_then(|u| u.as_str()))
-                .filter(|url| {
-                    url.starts_with("data:")
-                        || url.starts_with("https://")
-                        || url.starts_with("http://")
-                })
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn generated_media_attachment(url: &str, mime: &str, index: usize) -> Option<ChatImageAttachment> {
@@ -3855,7 +3826,7 @@ async fn handle_chat_generation(
     generation.started = true;
 
     let mut handovers: Vec<Notice> = Vec::new();
-    let mut usage: Option<Usage> = None;
+    let mut ledger = tokens::Ledger::default();
     let mut logins: Vec<Uuid> = handover.iter().map(Handover::login).collect();
     let mut observed = router::Observed::default();
     if let Some(notice) = handover.as_mut().and_then(Handover::opened) {
@@ -3991,8 +3962,9 @@ async fn handle_chat_generation(
                         }
                         Some(AgentEvent::Usage(observed)) => {
                             tracing::debug!(prompt_tokens=observed.prompt_tokens,completion_tokens=observed.completion_tokens,"Observed provider usage");
-                            usage = Some(usage.map_or(observed, |spent| spent.plus(observed)));
+                            ledger.add(&model, observed);
                         }
+                        Some(AgentEvent::Round) => ledger.round(&model),
                         Some(AgentEvent::Window(window)) => {
                             tracing::debug!(window=%window.name,used_percent=?window.used_percent,"Observed agent usage window");
                             if let Some(handover) = &handover {
@@ -4083,6 +4055,7 @@ async fn handle_chat_generation(
                                 thought,
                             );
                             tool_calls.push(record);
+                            ledger.tool_call(&model);
                             publish(stream, tool_msg).await;
                             persist_now = true;
                         }
@@ -4240,7 +4213,7 @@ async fn handle_chat_generation(
                             &generated_images,
                             &round_reasoning,
                             &handovers,
-                            usage,
+                            ledger.total(),
                         )
                         .await
                         {
@@ -4264,6 +4237,9 @@ async fn handle_chat_generation(
         // Drop the producer before acknowledging cancellation so it cannot emit
         // more events after the terminal frame.
         drop(events);
+        if let Some(usage) = context.pending_usage.take() {
+            ledger.add(&model, usage);
+        }
 
         if refused
             && !cancelled
@@ -4408,7 +4384,7 @@ async fn handle_chat_generation(
                 &generated_images,
                 &round_reasoning,
                 &handovers,
-                usage,
+                ledger.total(),
             )
             .await
             {
@@ -4489,7 +4465,7 @@ async fn handle_chat_generation(
             &generated_images,
             &round_reasoning,
             &handovers,
-            usage,
+            ledger.total(),
         )
         .await
         {
@@ -4548,6 +4524,21 @@ async fn handle_chat_generation(
     }
     leave_unfinished(&mut tool_calls);
 
+    let spent_tokens = ledger.total();
+    let mut pending = tokens::Pending::new(
+        state.db().clone(),
+        state.background().clone(),
+        tokens::Spent {
+            message: assistant_message_id,
+            chat: chat_id,
+            workspace: workspace_id,
+            model: model.clone(),
+            effort,
+            ledger,
+            context: None,
+        },
+    );
+
     // Nothing generated yet: there is no reply worth keeping. A turn that ran
     // tools or produced an image before it broke is worth keeping even with no
     // prose, because both show the reader what was attempted.
@@ -4563,13 +4554,15 @@ async fn handle_chat_generation(
             }
             Err(error) => return Err(error.into()),
         }
+        let usage = blocked.unwrap_or_else(|| replay.usage(&model, definitions.as_deref()));
+        pending.context(usage.clone());
         session.close().await?;
         publish(
             stream,
             ServerMessage::Context {
                 chat_id,
                 message_id: Some(assistant_message_id),
-                usage: blocked.unwrap_or_else(|| replay.usage(&model, definitions.as_deref())),
+                usage,
             },
         )
         .await;
@@ -4621,7 +4614,7 @@ async fn handle_chat_generation(
         &action_receipts,
         Some(&round_reasoning),
         &handovers,
-        usage,
+        spent_tokens,
     );
 
     let partial = if !pending_content.is_empty() || !pending_images.is_empty() {
@@ -4644,6 +4637,7 @@ async fn handle_chat_generation(
         .await
     {
         Ok(msg) => {
+            pending.stored();
             if let Some(pinned) = &pinned {
                 let entry = session.store.latest().await.unwrap_or_else(|error| {
                     tracing::warn!(%chat_id, %error, "Could not read how far the chat has run; the agent session keeps its place");
@@ -4664,6 +4658,7 @@ async fn handle_chat_generation(
             replay.summary = history.summary.map(session::core_summary);
             replay.search(&SearchContext::new(&state.config().web_search));
             let usage = blocked.unwrap_or_else(|| replay.usage(&model, definitions.as_deref()));
+            pending.context(usage.clone());
             publish(
                 stream,
                 ServerMessage::Context {
@@ -8434,45 +8429,6 @@ cat 'DIR/reply.jsonl'
         assert!(json.contains("\"metadata\""));
         assert!(json.contains("shot.png"));
         assert!(json.contains("image/png"));
-    }
-
-    #[test]
-    fn test_image_urls_from_metadata() {
-        let metadata = serde_json::json!({
-            "attachments": [
-                {
-                    "name": "shot.png",
-                    "mime": "image/png",
-                    "url": "data:image/png;base64,xx"
-                },
-                {
-                    "name": "notes.md",
-                    "mime": "text/markdown",
-                    "url": "https://example.test/notes.md"
-                },
-                {
-                    "name": "protected.png",
-                    "mime": "image/png",
-                    "url": "/api/artifacts/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002/00000000-0000-0000-0000-000000000003/image.png"
-                }
-            ]
-        });
-        assert_eq!(
-            image_urls_from_metadata(Some(&metadata)),
-            vec!["data:image/png;base64,xx".to_string()]
-        );
-        let public = serde_json::json!({
-            "attachments": [{
-                "name": "remote.png",
-                "mime": "image/png",
-                "url": "https://example.test/remote.png"
-            }]
-        });
-        assert_eq!(
-            image_urls_from_metadata(Some(&public)),
-            vec!["https://example.test/remote.png".to_string()]
-        );
-        assert!(image_urls_from_metadata(None).is_empty());
     }
 
     #[test]

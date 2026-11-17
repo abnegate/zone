@@ -345,6 +345,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/chats/indicators", get(chats::indicators))
         .route("/api/chats/activity", get(chats::activity))
         .route(
+            "/api/chats/token-usage",
+            get(chats::token_usage::workspace),
+        )
+        .route(
             "/api/chats/{id}",
             get(chats::get).put(chats::update).delete(chats::delete),
         )
@@ -432,6 +436,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/workspaces/{workspace_id}/releases/{source_id}/{release_id}/pipeline",
             get(releases::pipeline),
+        )
+        .route(
+            "/api/chats/{id}/token-usage",
+            get(chats::token_usage::chat),
         )
         .route("/api/chats/{id}/tasks", get(chats::tasks::list))
         .route("/api/chats/{id}/subagents", get(chats::subagents::list))

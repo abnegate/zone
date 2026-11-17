@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::OnceCell;
 use tokio::sync::Semaphore;
+use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 use zone_context::adapters::{
     AdapterRegistry, FilesystemAdapter, GitHubAdapter, GitLabAdapter, TextAdapter, WebAdapter,
@@ -140,6 +141,7 @@ struct AppStateInner {
     pub device_connections: DashMap<Uuid, u32>,
     pub pull_request_statuses: StatusCache,
     pub github_snapshots: Snapshots,
+    pub background: TaskTracker,
 }
 
 impl AppState {
@@ -267,8 +269,15 @@ impl AppState {
                 device_connections: DashMap::new(),
                 pull_request_statuses: StatusCache::default(),
                 github_snapshots,
+                background: TaskTracker::new(),
             }),
         }
+    }
+
+    /// Writes that finish off work already delivered, which the server waits
+    /// for when it stops serving.
+    pub fn background(&self) -> &TaskTracker {
+        &self.inner.background
     }
 
     /// What GitHub last said of each pull request a chat opened.

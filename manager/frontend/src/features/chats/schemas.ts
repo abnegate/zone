@@ -593,3 +593,28 @@ export const PullRequestDiffSchema = z.object({
   diff: z.string(),
   truncated: z.boolean(),
 });
+
+/** `peak_context_tokens` is one turn's context at its largest, not a sum. */
+export const TokenTotalsSchema = z.object({
+  turns: z.number(),
+  reported_turns: z.number(),
+  prompt_tokens: z.number(),
+  completion_tokens: z.number(),
+  total_tokens: z.number(),
+  rounds: z.number(),
+  tool_calls: z.number(),
+  peak_context_tokens: z.number(),
+  instructions_tokens: z.number(),
+  conversation_tokens: z.number(),
+  tools_tokens: z.number(),
+  results_tokens: z.number(),
+  summary_tokens: z.number(),
+  attachments_tokens: z.number(),
+  overhead_tokens: z.number(),
+  first_at: z.string().nullable(),
+  last_at: z.string().nullable(),
+});
+
+export const ChatTokenTotalsResponseSchema = z.object({
+  totals: TokenTotalsSchema,
+});

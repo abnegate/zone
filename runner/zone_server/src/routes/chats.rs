@@ -5,6 +5,7 @@ pub(super) mod pull_requests;
 mod snippet;
 pub(super) mod subagents;
 pub(super) mod tasks;
+pub(super) mod token_usage;
 
 use axum::{
     Json,

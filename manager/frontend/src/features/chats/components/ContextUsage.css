@@ -103,14 +103,16 @@
 }
 
 .context-usage-breakdown,
-.context-usage-budget {
+.context-usage-budget,
+.context-usage-spend {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--ui-space-1) var(--ui-space-4);
   margin: var(--ui-space-2) 0;
 }
 
-.context-usage-budget {
+.context-usage-budget,
+.context-usage-spend {
   padding-top: var(--ui-space-2);
   border-top: 1px solid var(--ui-border);
 }
@@ -133,7 +135,8 @@
 
 @media (max-width: 480px) {
   .context-usage-breakdown,
-  .context-usage-budget {
+  .context-usage-budget,
+  .context-usage-spend {
     grid-template-columns: minmax(0, 1fr);
   }
 }

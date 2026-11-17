@@ -168,31 +168,6 @@ sealed with a key derived from `ENCRYPTION_KEY`, and a restored instance needs
 the same `ENCRYPTION_KEY` to use them: under another key, every Claude Code
 sign-in shows as expired until an organization admin signs in again.
 
-## Upgrading to the v1 baseline
-
-The numbered migrations `001_initial_schema.sql` to `024_chat_subagents.sql`
-are squashed into one baseline, `0001_v1.sql`, whose schema is identical to
-theirs. A fresh database applies the baseline and every later migration.
-
-A database migrated through 024 moves onto the baseline at the first start of
-a server that includes it: under the migration lock, its 23 rows in
-`_sqlx_migrations` become the baseline's one row, and any index an
-interrupted `CREATE INDEX CONCURRENTLY` left invalid is rebuilt. No table,
-column or row is changed.
-
-A database stopped short of 024, or with a migration recorded that `main`
-never had, cannot be moved: the server stops with
-`Failed to run migrations: while resolving migrations: this database stopped
-partway through the migrations from before the v1 baseline` and names the missing, failed and unrecognised
-versions, writing nothing. Start a build from commit `218739e7` against it
-once to finish the old migrations, then upgrade. A disposable development
-database holding a branch's own migration is quicker to recreate.
-
-Run `make backup` before the upgrade. An image built before the baseline
-cannot start against the moved database: it stops with
-`Failed to run migrations: VersionMismatch(1)`. Going back to an older image
-means restoring that backup, and losing whatever changed after it was taken.
-
 ## Failed reviewer rounds
 
 An auto-project reviewer model that errors now records a failed round: the
