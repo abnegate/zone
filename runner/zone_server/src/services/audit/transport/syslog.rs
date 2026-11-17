@@ -14,7 +14,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::sign::{CertifiedKey, SingleCertAndKey};
 use rustls::{ClientConfig, InconsistentKeys, RootCertStore};
 use rustls_platform_verifier::BuilderVerifierExt;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket, lookup_host};
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
@@ -130,7 +130,9 @@ impl Syslog {
             tls.shutdown().await
         })
         .await?
-        .map_err(|error| transfer(authority, error))
+        .map_err(|error| transfer(authority, error))?;
+        let _ = timeout(TIMEOUT, closed(&mut tls)).await;
+        Ok(())
     }
 
     async fn send(
@@ -265,6 +267,15 @@ fn certificates(pem: &str, name: SecretName) -> Result<Vec<CertificateDer<'stati
         return Err(Error::CertificateInvalid(name));
     }
     Ok(certificates)
+}
+
+/// Reads until the receiver closes. Closing a socket that still holds unread
+/// data, such as the session tickets a TLS 1.3 server sends after the
+/// handshake, resets the connection, and the reset discards every frame the
+/// receiver has not read yet.
+async fn closed(stream: &mut (impl AsyncRead + Unpin)) {
+    let mut discarded = [0; 1024];
+    while matches!(stream.read(&mut discarded).await, Ok(read) if read > 0) {}
 }
 
 async fn connect(authority: &str, addresses: &[SocketAddr]) -> Result<TcpStream, Failure> {

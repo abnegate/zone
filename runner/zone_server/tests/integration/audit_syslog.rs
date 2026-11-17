@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
@@ -30,6 +31,7 @@ const LOCALHOST: &str = "localhost";
 const HOSTNAME: &str = "zone-test";
 const BOM: char = '\u{FEFF}';
 const WAIT: Duration = Duration::from_secs(15);
+const SLOW_READ: Duration = Duration::from_millis(500);
 const PRIORITIES: [&str; 3] = ["<110>", "<109>", "<108>"];
 const GARBAGE: &str =
     "-----BEGIN CERTIFICATE-----\nnot base64 at all!\n-----END CERTIFICATE-----\n";
@@ -126,6 +128,16 @@ fn batch(events: Vec<Event>) -> Batch {
 }
 
 async fn receiver(clients: Option<Arc<RootCertStore>>) -> (u16, JoinHandle<io::Result<Received>>) {
+    let (port, handle, _) = pausing(clients, Duration::ZERO).await;
+    (port, handle)
+}
+
+/// A receiver that waits `pause` after the handshake before it reads, and
+/// marks `read` once it has read the stream to its end.
+async fn pausing(
+    clients: Option<Arc<RootCertStore>>,
+    pause: Duration,
+) -> (u16, JoinHandle<io::Result<Received>>, Arc<AtomicBool>) {
     let builder = ServerConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()
         .expect("the provider supports the default versions");
@@ -147,6 +159,8 @@ async fn receiver(clients: Option<Arc<RootCertStore>>) -> (u16, JoinHandle<io::R
         .await
         .expect("a loopback port");
     let port = listener.local_addr().unwrap().port();
+    let read = Arc::new(AtomicBool::new(false));
+    let reading = read.clone();
     let handle = tokio::spawn(async move {
         let (connection, _) = listener.accept().await?;
         let mut stream = acceptor.accept(connection).await?;
@@ -155,11 +169,13 @@ async fn receiver(clients: Option<Arc<RootCertStore>>) -> (u16, JoinHandle<io::R
             .1
             .peer_certificates()
             .map(<[CertificateDer<'static>]>::to_vec);
+        tokio::time::sleep(pause).await;
         let mut bytes = Vec::new();
         stream.read_to_end(&mut bytes).await?;
+        reading.store(true, Ordering::SeqCst);
         Ok(Received { bytes, peer })
     });
-    (port, handle)
+    (port, handle, read)
 }
 
 async fn received(handle: JoinHandle<io::Result<Received>>) -> io::Result<Received> {
@@ -233,6 +249,29 @@ async fn tls_frames_every_event_with_its_octet_count() {
 
     let received = received(handle).await.expect("the stream closes cleanly");
     assert!(received.peer.is_none());
+    assert_messages(&frames(&received.bytes), &events);
+}
+
+#[tokio::test]
+async fn tls_frames_reach_a_receiver_that_reads_after_the_sender_is_done() {
+    let (port, handle, read) = pausing(None, SLOW_READ).await;
+    let events = events();
+    Syslog::new(
+        &settings(LOOPBACK, port, Protocol::Tls),
+        &trusting("ca.pem"),
+    )
+    .expect("the transport builds")
+    .deliver(&batch(events.clone()))
+    .await
+    .expect("the receiver accepts the batch");
+
+    assert!(
+        read.load(Ordering::SeqCst),
+        "the sender holds the connection until the receiver has read every frame"
+    );
+    let received = received(handle)
+        .await
+        .expect("the stream closes cleanly instead of being reset");
     assert_messages(&frames(&received.bytes), &events);
 }
 
