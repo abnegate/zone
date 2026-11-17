@@ -19,3 +19,5 @@ CREATE TABLE public.audit_destinations (
 );
 
 CREATE UNIQUE INDEX audit_destinations_name_idx ON public.audit_destinations USING btree ((COALESCE(organization_id, '00000000-0000-0000-0000-000000000000'::uuid)), name);
+
+CREATE INDEX audit_destinations_organization_idx ON public.audit_destinations USING btree (organization_id);

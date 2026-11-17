@@ -29,7 +29,9 @@ pub struct RetentionResponse {
     pub days: Option<i32>,
     pub cutoff: Option<DateTime<Utc>>,
     pub expired: i64,
+    pub expired_capped: bool,
     pub held: i64,
+    pub held_capped: bool,
     pub holders: Vec<HolderResponse>,
     pub swept_at: Option<DateTime<Utc>>,
     pub deleted_count: i64,
@@ -43,7 +45,9 @@ impl RetentionResponse {
             days: status.days,
             cutoff: status.cutoff,
             expired: status.expired,
+            expired_capped: status.expired_capped,
             held: status.held,
+            held_capped: status.held_capped,
             holders: status
                 .holders
                 .into_iter()

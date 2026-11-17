@@ -1,5 +1,8 @@
+use std::time::Duration as StdDuration;
+
 use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
+use tokio::time::Instant;
 use uuid::Uuid;
 use zone_server::db::audit::events::{self, Bookmark, Expired, Range};
 use zone_server::db::audit::position::Position;
@@ -12,6 +15,8 @@ use crate::common::audit::{
 use crate::common::create_test_pool;
 
 const BATCH: i64 = 2;
+const LOCK_WAIT: StdDuration = StdDuration::from_secs(30);
+const LOCK_POLL: StdDuration = StdDuration::from_millis(20);
 const RESTORED: i64 = 1 << 40;
 const ORIGIN: Position = Position {
     transaction_id: 0,
@@ -142,6 +147,38 @@ async fn pending(pool: &PgPool, scope: Scope, destination: Uuid) -> Vec<Uuid> {
 
 async fn rebase(pool: &PgPool) -> bool {
     events::rebase(pool).await.expect("the rebase succeeds")
+}
+
+fn counted(total: i64, held: i64) -> Expired {
+    Expired {
+        total,
+        total_capped: false,
+        held,
+        held_capped: false,
+    }
+}
+
+async fn waiting_for_rebase_lock(pool: &PgPool) {
+    let deadline = Instant::now() + LOCK_WAIT;
+    loop {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+             AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+             AND (classid::bigint << 32 | objid::bigint) = $1)",
+        )
+        .bind(events::REBASE_LOCK)
+        .fetch_one(pool)
+        .await
+        .expect("the locks are readable");
+        if waiting {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "nothing waited on the rebase lock within {LOCK_WAIT:?}"
+        );
+        tokio::time::sleep(LOCK_POLL).await;
+    }
 }
 
 #[tokio::test]
@@ -307,21 +344,25 @@ async fn prune_deletes_only_expired_rows_at_or_below_the_floor() {
     let scope = Scope::Organization(organization);
     let before = Utc::now() - Duration::days(1);
     let floor = position(pool, old[1]).await;
+    let ours = Destination::new(Some(organization))
+        .create(pool, floor)
+        .await;
+    Destination::new(Some(other)).create(pool, ORIGIN).await;
 
     assert_eq!(
         events::expired(pool, scope, before, Some(floor))
             .await
             .expect("expired is readable"),
-        Expired { total: 3, held: 1 }
+        counted(3, 1)
     );
     assert_eq!(
         events::expired(pool, scope, before, None)
             .await
             .expect("expired is readable"),
-        Expired { total: 3, held: 0 },
+        counted(3, 0),
         "with no enabled destination nothing is held"
     );
-    let deleted = events::prune(pool, scope, before, Some(floor), 100)
+    let deleted = events::prune(pool, scope, before, 100)
         .await
         .expect("the prune succeeds");
     assert_eq!(deleted, 2);
@@ -335,10 +376,15 @@ async fn prune_deletes_only_expired_rows_at_or_below_the_floor() {
         "another organization's rows are never pruned"
     );
 
-    let deleted = events::prune(pool, scope, before, None, 100)
+    sqlx::query("UPDATE audit_destinations SET enabled = false WHERE id = $1")
+        .bind(ours)
+        .execute(pool)
+        .await
+        .expect("the destination is disabled");
+    let deleted = events::prune(pool, scope, before, 100)
         .await
         .expect("the prune succeeds");
-    assert_eq!(deleted, 1);
+    assert_eq!(deleted, 1, "a disabled destination holds nothing back");
     assert_eq!(remaining(pool, Some(organization)).await, vec![fresh]);
     database.cleanup().await;
 }
@@ -356,7 +402,7 @@ async fn prune_respects_its_limit() {
 
     let mut batches = Vec::new();
     loop {
-        let deleted = events::prune(pool, scope, before, None, BATCH)
+        let deleted = events::prune(pool, scope, before, BATCH)
             .await
             .expect("the prune succeeds");
         if deleted == 0 {
@@ -514,10 +560,10 @@ async fn rebase_after_a_restore_keeps_every_undelivered_row_after_its_cursor() {
         events::expired(pool, scope, future, Some(floor))
             .await
             .expect("expired is readable"),
-        Expired { total: 5, held: 3 },
+        counted(5, 3),
         "the floor covers only rows delivered under the old order"
     );
-    let deleted = events::prune(pool, scope, future, Some(floor), 100)
+    let deleted = events::prune(pool, scope, future, 100)
         .await
         .expect("the prune succeeds");
     assert_eq!(deleted, 2);
@@ -754,5 +800,265 @@ async fn concurrent_rebases_rebase_once() {
     );
     settle(pool).await;
     assert_eq!(pending(pool, scope, ours).await, vec![old[1], old[2], new]);
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn rebase_renumbers_rows_that_reuse_restored_sequences_after_the_identity_caught_up() {
+    let database = database("audit_events_collided").await;
+    let pool = &database.pool;
+    let organization = organization(pool).await;
+    let scope = Scope::Organization(organization);
+    let old = written(pool, Some(organization), 3).await;
+    settle(pool).await;
+    let delivered = position(pool, old[2]).await;
+    restore(pool, &old).await;
+    let ours = Destination::new(Some(organization))
+        .create(pool, restored(delivered))
+        .await;
+    let restored_highest: i64 = sqlx::query_scalar("SELECT max(sequence) FROM audit_logs")
+        .fetch_one(pool)
+        .await
+        .expect("the sequences are readable");
+    sqlx::query("SELECT setval(pg_get_serial_sequence('public.audit_logs', 'sequence'), 1, false)")
+        .execute(pool)
+        .await
+        .expect("the identity is reset like a logical replica's");
+    let count = usize::try_from(restored_highest + 2).expect("a small sequence");
+    let mut new = written(pool, Some(organization), count).await;
+    let issued: i64 = sqlx::query_scalar(
+        "SELECT pg_sequence_last_value(pg_get_serial_sequence('public.audit_logs', 'sequence')::regclass)",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("the identity is readable");
+    assert!(
+        issued > restored_highest,
+        "the identity issued past every restored row before the rebase"
+    );
+
+    assert!(rebase(pool).await);
+    settle(pool).await;
+
+    let mut resent = pending(pool, scope, ours).await;
+    resent.sort();
+    new.sort();
+    assert_eq!(
+        resent, new,
+        "every row written before the rebase is sent, including those that reused a restored sequence"
+    );
+    let (rows, distinct): (i64, i64) =
+        sqlx::query_as("SELECT count(*), count(DISTINCT sequence) FROM audit_logs")
+            .fetch_one(pool)
+            .await
+            .expect("the sequences are readable");
+    assert_eq!(rows, distinct, "no two rows share a sequence");
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_rebase_waits_for_a_prune_batch_in_flight_and_sees_what_it_deleted() {
+    let database = database("audit_events_prune_lock").await;
+    let pool = &database.pool;
+    let organization = organization(pool).await;
+    let scope = Scope::Organization(organization);
+    let old = written(pool, Some(organization), 3).await;
+    age(pool, &old[..1], Utc::now() - Duration::days(10)).await;
+    settle(pool).await;
+    let delivered = position(pool, old[0]).await;
+    let ours = Destination::new(Some(organization))
+        .create(pool, delivered)
+        .await;
+    let mut batch = pool.begin().await.expect("the batch begins");
+    sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+        .bind(events::REBASE_LOCK)
+        .execute(&mut *batch)
+        .await
+        .expect("the batch holds positions");
+    let pruned = events::prune(&mut *batch, scope, Utc::now() - Duration::days(1), 100)
+        .await
+        .expect("the prune succeeds");
+    assert_eq!(pruned, 1);
+    restore(pool, &old[1..]).await;
+    sqlx::query("UPDATE audit_deliveries SET transaction_id = $2 WHERE destination_id = $1")
+        .bind(ours)
+        .bind(restored(delivered).transaction_id)
+        .execute(pool)
+        .await
+        .expect("the cursor is restored");
+
+    let rebasing = tokio::spawn({
+        let pool = pool.clone();
+        async move { events::rebase(&pool).await }
+    });
+    waiting_for_rebase_lock(pool).await;
+    assert!(!rebasing.is_finished(), "the rebase waits for the batch");
+    assert_eq!(delivery(pool, ours).await.position(), restored(delivered));
+    batch.commit().await.expect("the batch commits");
+
+    assert!(
+        rebasing
+            .await
+            .expect("the rebase task finishes")
+            .expect("the rebase succeeds"),
+        "the rebase runs once the batch is done"
+    );
+    settle(pool).await;
+    assert_eq!(remaining(pool, Some(organization)).await, old[1..].to_vec());
+    assert_eq!(
+        pending(pool, scope, ours).await,
+        old[1..].to_vec(),
+        "the rows after the cursor are still owed"
+    );
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_prune_batch_waits_for_a_rebase_in_flight() {
+    let database = database("audit_events_rebase_lock").await;
+    let pool = &database.pool;
+    let organization = organization(pool).await;
+    let scope = Scope::Organization(organization);
+    let old = written(pool, Some(organization), 2).await;
+    age(pool, &old, Utc::now() - Duration::days(10)).await;
+    settle(pool).await;
+    let mut rebase = pool.acquire().await.expect("a connection");
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(events::REBASE_LOCK)
+        .execute(&mut *rebase)
+        .await
+        .expect("the rebase holds the lock");
+
+    let pruning = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            let mut batch = pool.begin().await?;
+            sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+                .bind(events::REBASE_LOCK)
+                .execute(&mut *batch)
+                .await?;
+            let pruned =
+                events::prune(&mut *batch, scope, Utc::now() - Duration::days(1), 100).await?;
+            batch.commit().await?;
+            Ok::<u64, sqlx::Error>(pruned)
+        }
+    });
+    waiting_for_rebase_lock(pool).await;
+    assert!(!pruning.is_finished(), "the batch waits for the rebase");
+    assert_eq!(remaining(pool, Some(organization)).await, old);
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(events::REBASE_LOCK)
+        .execute(&mut *rebase)
+        .await
+        .expect("the rebase ends");
+    drop(rebase);
+
+    assert_eq!(
+        pruning
+            .await
+            .expect("the batch task finishes")
+            .expect("the batch succeeds"),
+        2
+    );
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_prune_never_deletes_a_row_a_destination_created_after_it_starts_below() {
+    let database = database("audit_events_prune_horizon").await;
+    let pool = &database.pool;
+    let organization = organization(pool).await;
+    let scope = Scope::Organization(organization);
+    let before = Utc::now() - Duration::days(1);
+    let mut open = pool.begin().await.expect("a transaction begins");
+    sqlx::query("SELECT pg_current_xact_id()")
+        .execute(&mut *open)
+        .await
+        .expect("the open transaction holds an xid");
+    let row = write(pool, Some(organization)).await;
+    age(pool, &[row], Utc::now() - Duration::days(10)).await;
+
+    assert_eq!(
+        events::prune(pool, scope, before, 100)
+            .await
+            .expect("the prune succeeds"),
+        0,
+        "a row above the horizon is not final, so it is not pruned"
+    );
+    let start = events::start(pool).await.expect("the start is readable");
+    assert!(position(pool, row).await > start);
+    let ours = Destination::new(Some(organization))
+        .create(pool, start)
+        .await;
+    open.commit().await.expect("the open transaction ends");
+    settle(pool).await;
+
+    assert_eq!(
+        events::prune(pool, scope, before, 100)
+            .await
+            .expect("the prune succeeds"),
+        0,
+        "the new destination holds the row it starts below"
+    );
+    assert_eq!(pending(pool, scope, ours).await, vec![row]);
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn counts_stop_at_the_cap_and_say_there_are_more() {
+    let database = database("audit_events_cap").await;
+    let pool = &database.pool;
+    let organization = organization(pool).await;
+    let scope = Scope::Organization(organization);
+    let rows = usize::try_from(events::COUNT_CAP + 1).expect("the cap fits");
+    sqlx::query(
+        "INSERT INTO audit_logs (organization_id, action, resource_type, created_at) \
+         SELECT $1, $2, $3, now() - interval '10 days' FROM generate_series(1, $4)",
+    )
+    .bind(organization)
+    .bind(actions::SETTINGS_UPDATED)
+    .bind(resources::ORGANIZATION)
+    .bind(i64::try_from(rows).expect("the cap fits"))
+    .execute(pool)
+    .await
+    .expect("the rows are written");
+    settle(pool).await;
+    let before = Utc::now() - Duration::days(1);
+
+    let backlog = events::backlog(pool, scope, ORIGIN)
+        .await
+        .expect("the backlog is readable");
+    assert_eq!((backlog.count, backlog.capped), (events::COUNT_CAP, true));
+    assert!(backlog.oldest.is_some());
+    assert_eq!(
+        events::expired(pool, scope, before, Some(ORIGIN))
+            .await
+            .expect("expired is readable"),
+        Expired {
+            total: events::COUNT_CAP,
+            total_capped: true,
+            held: events::COUNT_CAP,
+            held_capped: true,
+        }
+    );
+
+    sqlx::query(
+        "DELETE FROM audit_logs WHERE id = (SELECT id FROM audit_logs \
+         WHERE organization_id = $1 ORDER BY transaction_id, sequence LIMIT 1)",
+    )
+    .bind(organization)
+    .execute(pool)
+    .await
+    .expect("one row is deleted");
+    let backlog = events::backlog(pool, scope, ORIGIN)
+        .await
+        .expect("the backlog is readable");
+    assert_eq!((backlog.count, backlog.capped), (events::COUNT_CAP, false));
+    assert_eq!(
+        events::expired(pool, scope, before, Some(ORIGIN))
+            .await
+            .expect("expired is readable"),
+        counted(events::COUNT_CAP, events::COUNT_CAP)
+    );
     database.cleanup().await;
 }

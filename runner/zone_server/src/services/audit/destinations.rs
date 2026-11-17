@@ -102,7 +102,9 @@ pub async fn view(state: &AppState, scope: Scope, id: Uuid) -> Result<View, Erro
     present(pool, state.master_key(), scope, record, delivery).await
 }
 
-/// `transaction` is the caller's, with access to `scope` already checked inside it.
+/// `transaction` is the caller's, with access to `scope` already checked inside it. Positions
+/// left behind by a logical restore are rebased first: a destination created before the rebase
+/// would start below the restored rows and be sent all of them, so a failed rebase refuses it.
 pub async fn create(
     state: &AppState,
     mut transaction: Transaction<'_, Postgres>,
@@ -116,6 +118,7 @@ pub async fn create(
     settings.admits(&secrets)?;
     certified(&secrets)?;
     check(&settings, &state.config().endpoint_hosts)?;
+    events::rebase(state.db()).await?;
 
     let record = store::create(
         &mut transaction,
