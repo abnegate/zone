@@ -19,6 +19,7 @@ mod audit_exports;
 mod audit_retention;
 mod audit_retention_store;
 mod audit_s3;
+mod audit_settle;
 mod audit_syslog;
 mod audit_webhook;
 mod auth_console_contract;

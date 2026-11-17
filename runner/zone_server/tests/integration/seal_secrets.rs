@@ -33,6 +33,8 @@ use zone_server::db::sealing::Sealer;
 use zone_server::db::sealing::SealingError;
 use zone_server::db::sealing::Table;
 
+use crate::common::database::dropping;
+
 /// Every test replays the whole migration chain into an empty database and dumps it.
 static DATABASES: Semaphore = Semaphore::const_new(4);
 
@@ -384,11 +386,13 @@ impl Scratch {
 
     async fn cleanup(self) {
         self.pool.close().await;
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE {} WITH (FORCE)",
-            self.name
-        )))
-        .execute(&self.admin)
+        dropping(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE {} WITH (FORCE)",
+                self.name
+            )))
+            .execute(&self.admin),
+        )
         .await
         .unwrap();
         self.admin.close().await;
