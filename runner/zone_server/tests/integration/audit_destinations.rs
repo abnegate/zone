@@ -890,6 +890,94 @@ async fn zone_endpoint_hosts_restricts_where_destinations_send() {
     fixture.cleanup().await;
 }
 
+async fn listing(fixture: &Fixture, hosts: &str) -> TestClient {
+    let state = AppState::new_with_mail(
+        Config {
+            endpoint_hosts: Hosts::parse(hosts),
+            ..test_config()
+        },
+        fixture.pool().clone(),
+        None,
+        None,
+    );
+    state.disable_mcp();
+    state.install_keyring(sso::keyring());
+    state.licenses().load(fixture.pool()).await.unwrap();
+    TestClient::with_state(state)
+}
+
+fn bucket(name: &str, endpoint: &str, addressing: &str) -> Value {
+    json!({
+        "name": name,
+        "settings": {
+            "kind": "s3", "bucket": "zone-audit", "region": "us-east-1",
+            "endpoint": endpoint, "addressing": addressing
+        },
+        "secrets": {"access_key_id": ACCESS_KEY_ID, "secret_access_key": SECRET_ACCESS_KEY}
+    })
+}
+
+#[tokio::test]
+async fn virtual_host_s3_is_allowed_by_its_bucket_host_and_never_on_an_ip_endpoint() {
+    let fixture = Fixture::new(PREFIX).await;
+    fixture.license(Tier::Enterprise).await;
+    let path = destinations(fixture.organization);
+    let owner = &fixture.owner;
+
+    for (name, endpoint) in [
+        ("IPv4", "http://10.0.0.5:9000"),
+        ("IPv6", "http://[fd00::5]:9000"),
+    ] {
+        let response = post(
+            &fixture.sso.client,
+            &path,
+            owner,
+            &bucket(name, endpoint, "virtual_host"),
+        )
+        .await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(response.json_value()["code"], URL_INVALID, "{endpoint}");
+        post(
+            &fixture.sso.client,
+            &path,
+            owner,
+            &bucket(&format!("{name} path"), endpoint, "path"),
+        )
+        .await
+        .assert_status(StatusCode::CREATED);
+    }
+
+    let endpoint = "http://minio.lan:9000";
+    for (listed, allowed, refused) in [
+        ("zone-audit.minio.lan", "virtual_host", "path"),
+        ("minio.lan", "path", "virtual_host"),
+    ] {
+        let client = listing(&fixture, listed).await;
+        post(
+            &client,
+            &path,
+            owner,
+            &bucket(&format!("{listed} {allowed}"), endpoint, allowed),
+        )
+        .await
+        .assert_status(StatusCode::CREATED);
+        let unlisted = post(
+            &client,
+            &path,
+            owner,
+            &bucket(&format!("{listed} {refused}"), endpoint, refused),
+        )
+        .await;
+        unlisted.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(
+            unlisted.json_value()["code"],
+            URL_INVALID,
+            "{listed} {refused}"
+        );
+    }
+    fixture.cleanup().await;
+}
+
 #[tokio::test]
 async fn health_reports_failures_resets_on_change_and_reports_a_stall() {
     let fixture = Fixture::new(PREFIX).await;

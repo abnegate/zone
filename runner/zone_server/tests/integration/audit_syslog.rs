@@ -22,7 +22,7 @@ use zone_enterprise::audit::destination::{
 use zone_enterprise::audit::{Error, Event, FailureCode, VERSION};
 use zone_server::db::audit::scope::Scope;
 use zone_server::services::audit::transport::syslog::{Syslog, check};
-use zone_server::services::audit::transport::{Batch, Transport};
+use zone_server::services::audit::transport::{Batch, Failure, Transport};
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/audit");
 const LOOPBACK: &str = "127.0.0.1";
@@ -205,12 +205,17 @@ fn assert_messages(messages: &[String], events: &[Event]) {
 }
 
 async fn failure(settings: &SyslogSettings, secrets: &SyslogSecrets) -> FailureCode {
-    Syslog::new(settings, secrets)
+    let failure = Syslog::new(settings, secrets)
         .expect("the transport builds")
         .deliver(&batch(events()))
         .await
-        .expect_err("the delivery fails")
-        .code
+        .expect_err("the delivery fails");
+    assert_eq!(
+        failure,
+        Failure::of(failure.code),
+        "the message is the code's fixed sentence, naming no address or port"
+    );
+    failure.code
 }
 
 #[tokio::test]
@@ -423,7 +428,7 @@ fn check_refuses_a_client_identity_that_does_not_parse_or_match() {
                 client_key: Some(fixture("server.key")),
                 ..identified()
             },
-            Error::CertificateInvalid(SecretName::ClientKey),
+            Error::CertificateMismatched,
         ),
         (
             SyslogSecrets {

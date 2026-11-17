@@ -2,9 +2,10 @@ use chrono::NaiveDateTime;
 use uuid::Uuid;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+use zone_enterprise::audit::checksum::{self, ALGORITHM_HEADER, MD5_HEADER, SHA256, SHA256_HEADER};
 use zone_enterprise::audit::destination::{Addressing, S3Secrets, S3Settings};
 use zone_enterprise::audit::sigv4::{self, Credentials, DATE_HEADER, PAYLOAD_HASH_HEADER, SERVICE};
-use zone_enterprise::audit::{Event, FailureCode, Format, object_key};
+use zone_enterprise::audit::{Error, Event, FailureCode, Format, object_key};
 use zone_server::db::audit::scope::Scope;
 use zone_server::services::audit::transport::s3::{HOST_HEADER, S3};
 use zone_server::services::audit::transport::{Batch, Failure, Transport, client};
@@ -17,7 +18,7 @@ const PREFIX: &str = "zone/audit/";
 const ACCESS_KEY_ID: &str = "AKIDAUDITEXAMPLE";
 const SECRET_ACCESS_KEY: &str = "audit/secret+access/key";
 const VIRTUAL_DOMAIN: &str = "s3.test";
-const SIGNED_HEADERS: &str = "SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date,";
+const SIGNED_HEADERS: &str = "SignedHeaders=content-md5;content-type;host;x-amz-checksum-sha256;x-amz-content-sha256;x-amz-date;x-amz-sdk-checksum-algorithm,";
 const AMZ_DATE_FORMAT: &str = "%Y%m%dT%H%M%SZ";
 
 fn settings(endpoint: &str, addressing: Addressing) -> S3Settings {
@@ -73,6 +74,9 @@ fn recomputed(request: &Request) -> String {
         (PAYLOAD_HASH_HEADER, payload_hash),
         (DATE_HEADER, date),
         ("content-type", header(request, "content-type")),
+        (MD5_HEADER, header(request, MD5_HEADER)),
+        (ALGORITHM_HEADER, header(request, ALGORITHM_HEADER)),
+        (SHA256_HEADER, header(request, SHA256_HEADER)),
     ];
     sigv4::authorization(
         &sigv4::Request {
@@ -101,6 +105,13 @@ fn assert_signed_object(request: &Request, sent: &Batch) {
         header(request, PAYLOAD_HASH_HEADER),
         sigv4::payload_hash(&request.body)
     );
+    assert_eq!(
+        header(request, SHA256_HEADER),
+        checksum::sha256(&request.body),
+        "Object Lock buckets need an integrity checksum of the body"
+    );
+    assert_eq!(header(request, ALGORITHM_HEADER), SHA256);
+    assert_eq!(header(request, MD5_HEADER), checksum::md5(&request.body));
     let authorization = header(request, "authorization");
     assert!(authorization.contains(SIGNED_HEADERS), "{authorization}");
     assert!(!authorization.contains(SECRET_ACCESS_KEY));
@@ -127,7 +138,7 @@ async fn path_style_puts_a_signed_ndjson_object_under_the_bucket() {
     let server = store(ResponseTemplate::new(200)).await;
     let sent = batch(Scope::Organization(Uuid::new_v4()), 3);
 
-    transport(&server.uri(), Addressing::Path, client::client())
+    transport(&server.uri(), Addressing::Path, client::client().unwrap())
         .deliver(&sent)
         .await
         .expect("a 2xx response stores the object");
@@ -192,7 +203,7 @@ async fn a_retried_batch_puts_the_same_key_and_body() {
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
-    let s3 = transport(&server.uri(), Addressing::Path, client::client());
+    let s3 = transport(&server.uri(), Addressing::Path, client::client().unwrap());
     let sent = batch(Scope::Organization(Uuid::new_v4()), 4);
 
     let first = s3.deliver(&sent).await.unwrap_err();
@@ -217,7 +228,7 @@ async fn a_403_is_a_status_failure_without_the_response_body() {
     ))
     .await;
 
-    let failure = transport(&server.uri(), Addressing::Path, client::client())
+    let failure = transport(&server.uri(), Addressing::Path, client::client().unwrap())
         .deliver(&batch(Scope::Server, 1))
         .await
         .unwrap_err();
@@ -227,14 +238,30 @@ async fn a_403_is_a_status_failure_without_the_response_body() {
 
 #[tokio::test]
 async fn a_metadata_endpoint_is_a_target_failure() {
-    for addressing in Addressing::ALL {
-        let failure = transport("http://169.254.169.254", addressing, client::client())
-            .deliver(&batch(Scope::Server, 1))
-            .await
-            .unwrap_err();
+    let failure = transport(
+        "http://169.254.169.254",
+        Addressing::Path,
+        client::client().unwrap(),
+    )
+    .deliver(&batch(Scope::Server, 1))
+    .await
+    .unwrap_err();
 
-        assert_eq!(failure.code, FailureCode::Target, "{addressing:?}");
+    assert_eq!(failure, Failure::of(FailureCode::Target));
+}
+
+#[test]
+fn virtual_host_addressing_needs_an_endpoint_named_by_host() {
+    let refused = S3Settings {
+        bucket: BUCKET.to_owned(),
+        region: REGION.to_owned(),
+        endpoint: Some("http://10.0.0.5:9000".to_owned()),
+        prefix: PREFIX.to_owned(),
+        addressing: Addressing::VirtualHost,
     }
+    .validated();
+
+    assert_eq!(refused, Err(Error::VirtualHostUnaddressable));
 }
 
 #[tokio::test]
@@ -245,7 +272,7 @@ async fn path_style_on_an_endpoint_path_keeps_that_path() {
     transport(
         &format!("{}/storage/", server.uri()),
         Addressing::Path,
-        client::client(),
+        client::client().unwrap(),
     )
     .deliver(&sent)
     .await

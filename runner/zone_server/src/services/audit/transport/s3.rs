@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, Method, Url};
-use zone_enterprise::audit::destination::{Addressing, S3Secrets, S3Settings};
+use zone_enterprise::audit::checksum::{self, ALGORITHM_HEADER, MD5_HEADER, SHA256, SHA256_HEADER};
+use zone_enterprise::audit::destination::{S3Secrets, S3Settings};
 use zone_enterprise::audit::sigv4::{self, Credentials, DATE_HEADER, PAYLOAD_HASH_HEADER, Request};
 use zone_enterprise::audit::{Event, FailureCode, Format, ndjson, object_key};
 
@@ -42,23 +43,16 @@ impl S3 {
     }
 
     pub fn location(&self, key: &str) -> Result<Url, Failure> {
-        let mut url = client::target(self.settings.endpoint_url().as_str())?;
-        let base = url.path().trim_end_matches(SLASH).to_owned();
-        let object = sigv4::encode_path(key);
-        let path = match self.settings.addressing {
-            Addressing::Path => format!("{base}/{}/{object}", self.settings.bucket),
-            Addressing::VirtualHost => {
-                let host = url.host_str().unwrap_or_default();
-                let virtual_host = format!("{}.{host}", self.settings.bucket);
-                url.set_host(Some(&virtual_host)).map_err(|_| {
-                    Failure::new(
-                        FailureCode::Configuration,
-                        format!("{virtual_host} is not a valid virtual-host bucket address"),
-                    )
-                })?;
-                format!("{base}/{object}")
-            }
-        };
+        let base = self
+            .settings
+            .request_base()
+            .map_err(|error| Failure::new(FailureCode::Configuration, error.to_string()))?;
+        let mut url = client::target(base.as_str())?;
+        let path = format!(
+            "{}{SLASH}{}",
+            url.path().trim_end_matches(SLASH),
+            sigv4::encode_path(key)
+        );
         url.set_path(&path);
         client::target(url.as_str())
     }
@@ -86,12 +80,17 @@ impl Transport for S3 {
         let at = Utc::now();
         let date = sigv4::amz_date(at);
         let payload_hash = sigv4::payload_hash(&body);
+        let sha256 = checksum::sha256(&body);
+        let md5 = checksum::md5(&body);
         let host = authority(&url);
         let headers = [
             (HOST_HEADER, host.as_str()),
             (PAYLOAD_HASH_HEADER, payload_hash.as_str()),
             (DATE_HEADER, date.as_str()),
             (CONTENT_TYPE.as_str(), content),
+            (MD5_HEADER, md5.as_str()),
+            (ALGORITHM_HEADER, SHA256),
+            (SHA256_HEADER, sha256.as_str()),
         ];
         let request = Request {
             method: Method::PUT.as_str(),
@@ -117,6 +116,9 @@ impl Transport for S3 {
             .header(PAYLOAD_HASH_HEADER, &payload_hash)
             .header(DATE_HEADER, &date)
             .header(CONTENT_TYPE, content)
+            .header(MD5_HEADER, &md5)
+            .header(ALGORITHM_HEADER, SHA256)
+            .header(SHA256_HEADER, &sha256)
             .header(AUTHORIZATION, authorization)
             .body(body)
             .send()
@@ -137,8 +139,10 @@ pub fn authority(url: &Url) -> String {
 fn body(events: &[Event]) -> Result<Vec<u8>, Failure> {
     let mut body = Vec::new();
     for event in events {
-        let line = ndjson::line(event)
-            .map_err(|error| Failure::new(FailureCode::Configuration, error.to_string()))?;
+        let line = ndjson::line(event).map_err(|error| {
+            tracing::error!(%error, "Could not serialize an audit event for S3");
+            Failure::of(FailureCode::Configuration)
+        })?;
         body.extend(line);
     }
     Ok(body)
@@ -146,6 +150,8 @@ fn body(events: &[Event]) -> Result<Vec<u8>, Failure> {
 
 #[cfg(test)]
 mod tests {
+    use zone_enterprise::audit::destination::Addressing;
+
     use super::*;
 
     fn settings(endpoint: &str, addressing: Addressing) -> S3Settings {
@@ -171,7 +177,7 @@ mod tests {
         S3::new(
             &settings(endpoint, addressing),
             &secrets(),
-            client::client(),
+            client::client().unwrap(),
         )
     }
 
@@ -211,7 +217,7 @@ mod tests {
     fn the_default_endpoint_is_the_regional_amazon_endpoint() {
         let mut settings = settings("https://unused.example", Addressing::VirtualHost);
         settings.endpoint = None;
-        let url = S3::new(&settings, &secrets(), client::client())
+        let url = S3::new(&settings, &secrets(), client::client().unwrap())
             .location("key.ndjson")
             .unwrap();
         assert_eq!(
@@ -226,6 +232,33 @@ mod tests {
             .location("key.ndjson")
             .unwrap_err();
         assert_eq!(failure.code, FailureCode::Target);
+    }
+
+    #[test]
+    fn virtual_host_on_an_ip_endpoint_is_a_configuration_failure() {
+        let unvalidated = S3Settings {
+            bucket: "audit-bucket".to_owned(),
+            region: "eu-west-1".to_owned(),
+            endpoint: Some("http://10.0.0.5:9000".to_owned()),
+            prefix: String::new(),
+            addressing: Addressing::VirtualHost,
+        };
+        let failure = S3::new(&unvalidated, &secrets(), client::client().unwrap())
+            .location("key.ndjson")
+            .unwrap_err();
+        assert_eq!(failure.code, FailureCode::Configuration);
+        assert_eq!(
+            failure.message,
+            zone_enterprise::audit::Error::VirtualHostUnaddressable.to_string()
+        );
+    }
+
+    #[test]
+    fn path_style_on_an_ip_endpoint_puts_the_bucket_in_the_path() {
+        let url = transport("http://10.0.0.5:9000", Addressing::Path)
+            .location("key.ndjson")
+            .unwrap();
+        assert_eq!(url.as_str(), "http://10.0.0.5:9000/audit-bucket/key.ndjson");
     }
 
     #[test]

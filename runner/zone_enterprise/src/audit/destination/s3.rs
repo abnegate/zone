@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use std::ops::RangeInclusive;
 
 use serde::{Deserialize, Serialize};
-use url::Url;
+use url::{Host, Url};
 
 use crate::audit::destination::{REDACTED, url};
 use crate::audit::error::Error;
@@ -68,13 +68,15 @@ impl S3Settings {
             None | Some("") => None,
             Some(endpoint) => Some(url(endpoint)?),
         };
-        Ok(Self {
+        let validated = Self {
             bucket: bucket.to_owned(),
             region: region.to_owned(),
             endpoint,
             prefix: prefix(&self.prefix)?,
             addressing: self.addressing,
-        })
+        };
+        validated.request_base()?;
+        Ok(validated)
     }
 
     pub fn endpoint_url(&self) -> Url {
@@ -83,6 +85,26 @@ impl S3Settings {
             None => Url::parse(&format!("https://s3.{}.amazonaws.com", self.region)),
         }
         .expect("validated S3 settings name a parseable endpoint")
+    }
+
+    /// Where requests go, with the bucket in the host or the path: an object's URL is this with
+    /// its key appended. Its host is the one a request reaches, so endpoint rules apply to it.
+    pub fn request_base(&self) -> Result<Url, Error> {
+        let mut url = self.endpoint_url();
+        let base = url.path().trim_end_matches(SLASH).to_owned();
+        match self.addressing {
+            Addressing::Path => url.set_path(&format!("{base}/{}", self.bucket)),
+            Addressing::VirtualHost => {
+                let Some(Host::Domain(host)) = url.host() else {
+                    return Err(Error::VirtualHostUnaddressable);
+                };
+                let virtual_host = format!("{}.{host}", self.bucket);
+                url.set_host(Some(&virtual_host))
+                    .map_err(|_| Error::VirtualHostUnaddressable)?;
+                url.set_path(&base);
+            }
+        }
+        Ok(url)
     }
 }
 
@@ -343,6 +365,75 @@ mod tests {
             .as_str(),
             "http://10.0.0.7:9000/"
         );
+    }
+
+    #[test]
+    fn the_request_base_puts_the_bucket_where_the_addressing_says() {
+        for (endpoint, addressing, expected) in [
+            (
+                None,
+                Addressing::VirtualHost,
+                "https://audit-logs.s3.us-east-1.amazonaws.com/",
+            ),
+            (
+                None,
+                Addressing::Path,
+                "https://s3.us-east-1.amazonaws.com/audit-logs",
+            ),
+            (
+                Some("http://minio:9000"),
+                Addressing::VirtualHost,
+                "http://audit-logs.minio:9000/",
+            ),
+            (
+                Some("http://minio:9000/storage/"),
+                Addressing::Path,
+                "http://minio:9000/storage/audit-logs",
+            ),
+            (
+                Some("https://gateway.example/storage/"),
+                Addressing::VirtualHost,
+                "https://audit-logs.gateway.example/storage",
+            ),
+            (
+                Some("http://10.0.0.5:9000"),
+                Addressing::Path,
+                "http://10.0.0.5:9000/audit-logs",
+            ),
+        ] {
+            let validated = S3Settings {
+                endpoint: endpoint.map(Into::into),
+                addressing,
+                ..settings()
+            }
+            .validated()
+            .unwrap();
+            assert_eq!(
+                validated.request_base().unwrap().as_str(),
+                expected,
+                "{endpoint:?} {addressing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn virtual_host_addressing_refuses_an_ip_endpoint() {
+        for endpoint in [
+            "http://10.0.0.5:9000",
+            "http://[fd00::5]:9000",
+            "http://127.0.0.1",
+        ] {
+            assert_eq!(
+                S3Settings {
+                    endpoint: Some(endpoint.into()),
+                    addressing: Addressing::VirtualHost,
+                    ..settings()
+                }
+                .validated(),
+                Err(Error::VirtualHostUnaddressable),
+                "{endpoint}"
+            );
+        }
     }
 
     #[test]

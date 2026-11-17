@@ -2,6 +2,7 @@ pub mod client;
 pub mod open;
 pub mod s3;
 pub mod syslog;
+pub mod tls;
 pub mod webhook;
 
 use std::time::Duration;
@@ -27,6 +28,10 @@ pub struct Failure {
 }
 
 impl Failure {
+    pub fn of(code: FailureCode) -> Self {
+        Self::new(code, code.message())
+    }
+
     pub fn new(code: FailureCode, message: impl Into<String>) -> Self {
         Self {
             code,

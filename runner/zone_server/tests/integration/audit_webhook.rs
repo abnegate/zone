@@ -63,10 +63,13 @@ async fn receiver(response: ResponseTemplate) -> MockServer {
 
 async fn refused(response: ResponseTemplate) -> Failure {
     let server = receiver(response).await;
-    webhook(&format!("{}{HOOK}", server.uri()), client::client())
-        .deliver(&batch(Scope::Server, 1))
-        .await
-        .expect_err("a non-2xx response is a failure")
+    webhook(
+        &format!("{}{HOOK}", server.uri()),
+        client::client().unwrap(),
+    )
+    .deliver(&batch(Scope::Server, 1))
+    .await
+    .expect_err("a non-2xx response is a failure")
 }
 
 fn closed_port() -> u16 {
@@ -82,10 +85,13 @@ async fn a_loopback_receiver_gets_a_signed_batch_of_events() {
     let server = receiver(ResponseTemplate::new(204)).await;
     let sent = batch(Scope::Organization(Uuid::new_v4()), 3);
 
-    webhook(&format!("{}{HOOK}", server.uri()), client::client())
-        .deliver(&sent)
-        .await
-        .expect("a 2xx response delivers the batch");
+    webhook(
+        &format!("{}{HOOK}", server.uri()),
+        client::client().unwrap(),
+    )
+    .deliver(&sent)
+    .await
+    .expect("a 2xx response delivers the batch");
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 1);
@@ -134,10 +140,13 @@ async fn an_empty_batch_sends_nothing() {
     let server = receiver(ResponseTemplate::new(200)).await;
     let empty = batch(Scope::Server, 0);
 
-    webhook(&format!("{}{HOOK}", server.uri()), client::client())
-        .deliver(&empty)
-        .await
-        .unwrap();
+    webhook(
+        &format!("{}{HOOK}", server.uri()),
+        client::client().unwrap(),
+    )
+    .deliver(&empty)
+    .await
+    .unwrap();
 
     assert!(server.received_requests().await.unwrap().is_empty());
 }
@@ -197,10 +206,13 @@ async fn a_redirect_is_not_followed() {
         .mount(&server)
         .await;
 
-    let failure = webhook(&format!("{}{HOOK}", server.uri()), client::client())
-        .deliver(&batch(Scope::Server, 1))
-        .await
-        .unwrap_err();
+    let failure = webhook(
+        &format!("{}{HOOK}", server.uri()),
+        client::client().unwrap(),
+    )
+    .deliver(&batch(Scope::Server, 1))
+    .await
+    .unwrap_err();
 
     assert_eq!(failure, Failure::new(FailureCode::Status, "HTTP 302"));
     server.verify().await;
@@ -212,12 +224,12 @@ async fn a_metadata_address_is_a_target_failure() {
         "http://169.254.169.254/latest/meta-data",
         "http://metadata.google.internal/hook",
     ] {
-        let failure = webhook(url, client::client())
+        let failure = webhook(url, client::client().unwrap())
             .deliver(&batch(Scope::Server, 1))
             .await
             .unwrap_err();
 
-        assert_eq!(failure.code, FailureCode::Target, "{url}");
+        assert_eq!(failure, Failure::of(FailureCode::Target), "{url}");
         assert_eq!(failure.retry_after, None);
     }
 }
@@ -226,13 +238,13 @@ async fn a_metadata_address_is_a_target_failure() {
 async fn a_closed_port_is_a_connect_failure() {
     let failure = webhook(
         &format!("http://127.0.0.1:{}{HOOK}", closed_port()),
-        client::client(),
+        client::client().unwrap(),
     )
     .deliver(&batch(Scope::Server, 1))
     .await
     .unwrap_err();
 
-    assert_eq!(failure.code, FailureCode::Connect, "{failure:?}");
+    assert_eq!(failure, Failure::of(FailureCode::Connect));
 }
 
 #[tokio::test]
@@ -241,13 +253,13 @@ async fn https_to_a_plain_http_receiver_is_a_tls_failure() {
 
     let failure = webhook(
         &format!("https://{}{HOOK}", server.address()),
-        client::client(),
+        client::client().unwrap(),
     )
     .deliver(&batch(Scope::Server, 1))
     .await
     .unwrap_err();
 
-    assert_eq!(failure.code, FailureCode::Tls, "{failure:?}");
+    assert_eq!(failure, Failure::of(FailureCode::Tls));
 }
 
 #[tokio::test]
@@ -263,5 +275,5 @@ async fn a_slow_receiver_is_a_timeout_failure() {
         .await
         .unwrap_err();
 
-    assert_eq!(failure.code, FailureCode::Timeout, "{failure:?}");
+    assert_eq!(failure, Failure::of(FailureCode::Timeout));
 }

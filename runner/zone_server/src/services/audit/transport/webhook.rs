@@ -55,7 +55,10 @@ impl Transport for Webhook {
         let body = serde_json::to_vec(&Payload {
             events: &batch.events,
         })
-        .map_err(|error| Failure::new(FailureCode::Configuration, error.to_string()))?;
+        .map_err(|error| {
+            tracing::error!(%error, "Could not serialize audit events for a webhook");
+            Failure::of(FailureCode::Configuration)
+        })?;
         let timestamp = Utc::now().timestamp();
         let signature = sign(self.secret.as_bytes(), timestamp, &body);
         let response = self

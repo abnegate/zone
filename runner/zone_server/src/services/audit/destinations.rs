@@ -324,20 +324,24 @@ pub fn open(
 
 /// The endpoint rule on where validated `settings` send: http or https to any host, LAN and
 /// loopback included, never a metadata address, and only listed hosts when the operator set
-/// `ZONE_ENDPOINT_HOSTS`. S3 without an endpoint sends to AWS, which must be listed too.
+/// `ZONE_ENDPOINT_HOSTS`. The rule applies to the host a request reaches: for virtual-host S3
+/// that's `{bucket}.{endpoint host}`, and S3 without an endpoint sends to AWS.
 pub fn check(settings: &Settings, hosts: &Hosts) -> Result<(), zone_enterprise::audit::Error> {
     match settings {
         Settings::Webhook(webhook) => endpoint(&webhook.url, hosts),
-        Settings::S3(s3) => endpoint(s3.endpoint_url().as_str(), hosts),
+        Settings::S3(s3) => endpoint(s3.request_base()?.as_str(), hosts),
         Settings::Syslog(syslog) => {
-            let refused = || zone_enterprise::audit::Error::HostInvalid(syslog.host.clone());
             if metadata::is_host(&syslog.host) {
-                return Err(refused());
+                return Err(zone_enterprise::audit::Error::HostRefused(
+                    UrlReason::Metadata,
+                ));
             }
             let url = Url::parse(&format!("{SYSLOG_SCHEME}://{}", syslog.authority()))
-                .map_err(|_| refused())?;
+                .map_err(|_| zone_enterprise::audit::Error::HostInvalid(syslog.host.clone()))?;
             if !hosts.permits(&url) {
-                return Err(refused());
+                return Err(zone_enterprise::audit::Error::HostRefused(
+                    UrlReason::Unlisted,
+                ));
             }
             Ok(())
         }
@@ -636,8 +640,8 @@ mod tests {
         assert_eq!(check(&syslog("10.0.0.9"), &open), Ok(()));
         assert_eq!(
             check(&syslog("169.254.169.254"), &open),
-            Err(zone_enterprise::audit::Error::HostInvalid(
-                "169.254.169.254".into()
+            Err(zone_enterprise::audit::Error::HostRefused(
+                UrlReason::Metadata
             ))
         );
     }
@@ -654,10 +658,67 @@ mod tests {
         assert_eq!(check(&allowed, &hosts), Ok(()));
         assert_eq!(check(&unlisted, &hosts), url_invalid(UrlReason::Unlisted));
         assert_eq!(check(&syslog("siem.example.com"), &hosts), Ok(()));
-        assert!(check(&syslog("10.0.0.9"), &hosts).is_err());
+        assert_eq!(
+            check(&syslog("10.0.0.9"), &hosts),
+            Err(zone_enterprise::audit::Error::HostRefused(
+                UrlReason::Unlisted
+            ))
+        );
         let aws =
             requested(json!({"kind": "s3", "bucket": "audit", "region": "us-east-1"})).unwrap();
         assert_eq!(check(&aws, &hosts), url_invalid(UrlReason::Unlisted));
+    }
+
+    fn bucket(endpoint: &str, addressing: &str) -> Settings {
+        requested(json!({
+            "kind": "s3", "bucket": "zone-audit", "region": "us-east-1",
+            "endpoint": endpoint, "addressing": addressing
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn virtual_host_s3_is_checked_against_the_bucket_host() {
+        let bucket_host = Hosts::parse("zone-audit.minio.lan");
+        let endpoint_host = Hosts::parse("minio.lan");
+        let virtual_host = bucket("http://minio.lan:9000", "virtual_host");
+        let path = bucket("http://minio.lan:9000", "path");
+
+        assert_eq!(check(&virtual_host, &bucket_host), Ok(()));
+        assert_eq!(
+            check(&virtual_host, &endpoint_host),
+            url_invalid(UrlReason::Unlisted)
+        );
+        assert_eq!(check(&path, &endpoint_host), Ok(()));
+        assert_eq!(check(&path, &bucket_host), url_invalid(UrlReason::Unlisted));
+
+        let aws = requested(json!({"kind": "s3", "bucket": "zone-audit", "region": "us-east-1"}))
+            .unwrap();
+        assert_eq!(
+            check(&aws, &Hosts::parse("zone-audit.s3.us-east-1.amazonaws.com")),
+            Ok(())
+        );
+        assert_eq!(
+            check(&aws, &Hosts::parse("s3.us-east-1.amazonaws.com")),
+            url_invalid(UrlReason::Unlisted)
+        );
+        assert_eq!(check(&aws, &Hosts::parse(".amazonaws.com")), Ok(()));
+    }
+
+    #[test]
+    fn virtual_host_s3_on_an_ip_endpoint_is_refused_and_path_style_is_not() {
+        let refused = requested(json!({
+            "kind": "s3", "bucket": "zone-audit", "region": "us-east-1",
+            "endpoint": "http://10.0.0.5:9000"
+        }))
+        .unwrap_err();
+        assert_eq!(
+            refused,
+            zone_enterprise::audit::Error::VirtualHostUnaddressable
+        );
+        assert_eq!(refused.code(), zone_enterprise::audit::URL_INVALID);
+        let path = bucket("http://10.0.0.5:9000", "path");
+        assert_eq!(check(&path, &Hosts::parse("10.0.0.5")), Ok(()));
     }
 
     #[test]

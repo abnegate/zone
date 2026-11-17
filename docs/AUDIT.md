@@ -105,8 +105,17 @@ in AI settings:
 - never a link-local address or a cloud metadata host or address, such as
   `169.254.169.254` or `metadata.google.internal`;
 - when [`ZONE_ENDPOINT_HOSTS`](CONFIGURATION.md#zone_endpoint_hosts) is set,
-  only a host it lists. S3 without an endpoint sends to
-  `s3.{region}.amazonaws.com`, which the list must then cover.
+  only a host it lists.
+
+The rules apply to the host a request reaches. With `virtual_host` addressing
+that's `{bucket}.{endpoint host}`, so list the bucket's host
+(`zone-audit.minio.lan`) or a suffix covering it (`.minio.lan`), not the bare
+endpoint host. S3 without an endpoint sends to
+`{bucket}.s3.{region}.amazonaws.com`, or `s3.{region}.amazonaws.com` with
+`path` addressing, which the list must then cover. `virtual_host` addressing
+needs an endpoint named by host: an IP-address endpoint such as
+`http://10.0.0.5:9000` is refused with `audit_destination_url_invalid`; use
+`path` addressing for it.
 
 A syslog host is a host name or IP address and follows the same metadata and
 `ZONE_ENDPOINT_HOSTS` rules.
@@ -121,6 +130,10 @@ ignored) and never follows a redirect.
 
 Plain `http` and UDP syslog are allowed, for receivers on a network you trust.
 The console warns that events then travel unencrypted.
+
+On a server shared by organizations that don't trust each other, set
+`ZONE_ENDPOINT_HOSTS`: without it, an organization admin can point a
+destination at any host the Zone server reaches, LAN services included.
 
 ### Webhook
 
@@ -199,7 +212,7 @@ JSON. To check an implementation: the secret `whsec_test`, the timestamp
 | `region` | Lowercase letters, digits and hyphens, such as `us-east-1`. Zone signs requests for this region. |
 | `endpoint` | Optional. Leave it out for AWS (`https://s3.{region}.amazonaws.com`); set it for another S3-compatible store. |
 | `prefix` | Optional key prefix, such as `zone/audit/`. Leading slashes are dropped and a trailing one is added. |
-| `addressing` | `virtual_host` (the default) sends to `{bucket}.{endpoint host}`; `path` sends to `{endpoint}/{bucket}`. |
+| `addressing` | `virtual_host` (the default) sends to `{bucket}.{endpoint host}`, and needs an endpoint named by host; `path` sends to `{endpoint}/{bucket}`. |
 | `access_key_id`, `secret_access_key` (secrets) | Required. The key needs only `s3:PutObject` on the prefix. |
 
 Zone writes one NDJSON object (`Content-Type: application/x-ndjson`) of up to
@@ -216,7 +229,10 @@ key with the same content.
 
 Requests are `PUT`s signed with AWS Signature Version 4 (service `s3`),
 carrying `x-amz-date`, and `x-amz-content-sha256` with the SHA-256 of the
-body. Answers, retries, `Retry-After` and timeouts work as for a webhook.
+body. They also carry the body's integrity checksums, `Content-MD5` and
+`x-amz-checksum-sha256` (with `x-amz-sdk-checksum-algorithm: SHA256`), which
+buckets with Object Lock retention require; every header is signed. Answers,
+retries, `Retry-After` and timeouts work as for a webhook.
 
 | Store | `endpoint` | `region` | `addressing` |
 |---|---|---|---|
@@ -398,8 +414,13 @@ say whether it still applies.
 | `configuration` | The destination can't be used as saved: `ZONE_ENDPOINT_HOSTS` no longer allows its host, its stored settings can't be read, or its TLS settings can't build a client. |
 | `unsealable` | Its secrets don't open under this server's `ENCRYPTION_KEY`. Enter them again. |
 
-A failure message says what failed in a sentence. It never contains a
-response body, a response header or a secret.
+A failure message is a fixed sentence for its code, such as "Zone couldn't
+connect to the destination or finish sending to it." for `connect`; a
+`status` failure gives the status, such as `HTTP 403`, and a `configuration`
+failure says which setting can't be used. It never names the address or port
+Zone tried, the underlying network error, a response body or header, or a
+secret, so failures can't be used to probe the server's network. The server
+log records the cause, with the host and port, for operators.
 
 ### Testing a destination
 
@@ -657,7 +678,7 @@ Refusals are `{"error": "…", "code": "…"}`.
 | `audit_destination_duplicate` | 409 | A destination with this name already exists in the scope. |
 | `audit_destination_name_invalid` | 400 | The name is empty or has control characters. |
 | `audit_destination_kind_invalid` | 400 | `settings` has no known `kind`, has fields of another kind, or a `PATCH` changes the kind. |
-| `audit_destination_url_invalid` | 400 | The webhook URL or S3 endpoint breaks the [endpoint rule](#where-a-destination-may-send). |
+| `audit_destination_url_invalid` | 400 | The webhook URL or S3 endpoint breaks the [endpoint rule](#where-a-destination-may-send), or `virtual_host` addressing has an IP-address endpoint. |
 | `audit_destination_bucket_invalid` | 400 | The bucket name isn't a valid S3 bucket name. |
 | `audit_destination_region_invalid` | 400 | The region isn't lowercase letters, digits and hyphens. |
 | `audit_destination_prefix_invalid` | 400 | The prefix has an empty, `.` or `..` segment or control characters, or leaves no room for the object name. |

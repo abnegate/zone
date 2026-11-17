@@ -1,3 +1,4 @@
+pub mod checksum;
 pub mod csv;
 pub mod delivery;
 pub mod destination;
