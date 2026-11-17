@@ -1,0 +1,46 @@
+<section class="hero hero-compact">
+  <div class="container hero-inner narrow">
+    <p class="eyebrow">Order complete</p>
+    <h1>Thank you. Your license key is on its way.</h1>
+    <p class="lead">
+      Your Zone Enterprise license key is being emailed to the billing contact on your order.
+    </p>
+  </div>
+</section>
+
+<section class="section section-tight" aria-labelledby="activate-heading">
+  <div class="container narrow">
+    <h2 id="activate-heading">Activate Zone Enterprise</h2>
+    <ol class="steps steps-stacked">
+      <li>
+        <h3>Find the key</h3>
+        <p>Open the email with your license key and copy the whole key. It is one long string.</p>
+      </li>
+      <li>
+        <h3>Open Settings &rarr; License</h3>
+        <p>Sign in to your Zone console as an organization admin and go to <strong>Settings &rarr; License</strong>.</p>
+      </li>
+      <li>
+        <h3>Paste and save</h3>
+        <p>
+          Paste the key and save it. Zone verifies it on your server, with no call home, and unlocks
+          the Enterprise features in place. There is nothing to reinstall.
+        </p>
+      </li>
+    </ol>
+    <div class="callout">
+      <p>
+        <strong>Keep the email.</strong> When you renew or change your seat count, a new key is
+        emailed to the same contact; paste it in the same place.
+      </p>
+      <p>
+        Key not arrived? Check your spam folder first, then
+        <a href="{{ contactHref }}">email {{ contactEmail }}</a> with the email address on your order.
+      </p>
+    </div>
+    <div class="actions">
+      <a class="button button-secondary" href="{{ root }}pricing/">Back to pricing</a>
+      <a class="button button-secondary" href="{{ repository }}#quick-start">Install guide</a>
+    </div>
+  </div>
+</section>
