@@ -711,7 +711,7 @@ Refusals are `{"error": "…", "code": "…"}`.
 ## Upgrading
 
 Migration `0027_audit_logs_positions` adds the position columns to
-`audit_logs`. It rewrites the whole table and builds two indexes while holding
+`audit_logs`. It rewrites the whole table and builds three indexes while holding
 an `ACCESS EXCLUSIVE` lock, so nothing can read or write the audit log until
 it finishes, which takes time in proportion to the table's size: seconds to
 minutes at the sizes a self-hosted server reaches. If it can't take the lock

@@ -187,9 +187,11 @@ where
     })
 }
 
-/// The final rows of `scope` after `after` and up to `through`, in position order. A row is final
-/// once no transaction that could still commit behind it is open. Run on the pool, or in a
-/// transaction that has not written, because a transaction's own xid holds the horizon back.
+/// The final rows of `scope` after `after` and up to `through`, in position order, read from the
+/// scope's position index. It is planned for its parameters on each call, as are [`backlog`] and
+/// [`expired`]: a cached generic plan reads every scope's rows in transaction order instead. A row
+/// is final once no transaction that could still commit behind it is open. Run on the pool, or in
+/// a transaction that has not written, because a transaction's own xid holds the horizon back.
 pub async fn after<'e, E>(
     executor: E,
     scope: Scope,
@@ -212,6 +214,7 @@ where
             " ORDER BY transaction_id, sequence LIMIT $6"
         ),
     ))
+    .persistent(false)
     .bind(scope.organization_id())
     .bind(after.transaction_id)
     .bind(after.sequence)
@@ -223,9 +226,9 @@ where
 }
 
 /// The committed rows of `scope` after `after`, final or not, counted up to [`COUNT_CAP`], and
-/// when the next of them in position order was written. Both read the position index from
-/// `after`, so the cost does not grow with the backlog. Run on the pool, or in a transaction
-/// that has not written.
+/// when the next of them in position order was written. Both read the scope's position index
+/// from `after`, in both scopes, so the cost does not grow with the backlog. Run on the pool, or
+/// in a transaction that has not written.
 pub async fn backlog<'e, E>(executor: E, scope: Scope, after: Position) -> DbResult<Backlog>
 where
     E: Executor<'e, Database = Postgres>,
@@ -238,6 +241,7 @@ where
          WHERE {scope} AND (transaction_id, sequence) > ($2, $3) \
          ORDER BY transaction_id, sequence LIMIT 1) AS oldest",
     ))
+    .persistent(false)
     .bind(scope.organization_id())
     .bind(after.transaction_id)
     .bind(after.sequence)
@@ -343,8 +347,8 @@ where
 
 /// How many rows of `scope` were written before `before`, and how many of those sit above
 /// `floor`, still owed to a destination, each counted up to [`COUNT_CAP`]. The held rows are
-/// counted among the first rows after `floor` in position order, so the cost does not grow with
-/// the slowest destination's backlog.
+/// counted among the first rows after `floor` in the scope's position index, in both scopes, so
+/// the cost does not grow with the slowest destination's backlog.
 pub async fn expired<'e, E>(
     executor: E,
     scope: Scope,
@@ -362,6 +366,7 @@ where
          WHERE {scope} AND (transaction_id, sequence) > ($3, $4) \
          ORDER BY transaction_id, sequence LIMIT $5) pending) AS held",
     ))
+    .persistent(false)
     .bind(scope.organization_id())
     .bind(before)
     .bind(floor.map(|floor| floor.transaction_id))
@@ -438,9 +443,10 @@ async fn rebased(connection: &mut PgConnection) -> DbResult<bool> {
         .fetch_one(&mut *transaction)
         .await?;
     let cursors = sqlx::query_as::<_, Cursor>(
-        "SELECT d.destination_id, t.organization_id, d.transaction_id, d.sequence \
-         FROM audit_deliveries d JOIN audit_destinations t ON t.id = d.destination_id \
-         FOR UPDATE OF d",
+        "SELECT delivery.destination_id, destination.organization_id, delivery.transaction_id, \
+         delivery.sequence FROM audit_deliveries delivery \
+         JOIN audit_destinations destination ON destination.id = delivery.destination_id \
+         FOR UPDATE OF delivery",
     )
     .fetch_all(&mut *transaction)
     .await?;
@@ -449,9 +455,8 @@ async fn rebased(connection: &mut PgConnection) -> DbResult<bool> {
          (SELECT max(sequence) FROM audit_logs) AS highest, \
          pg_sequence_last_value(pg_get_serial_sequence('public.audit_logs', 'sequence')::regclass) \
          AS issued, \
-         EXISTS (SELECT 1 FROM audit_logs WHERE sequence = ANY (ARRAY( \
-         SELECT sequence FROM audit_logs WHERE transaction_id > 0 AND transaction_id < $1)) \
-         GROUP BY sequence HAVING count(*) > 1) AS collided",
+         EXISTS (SELECT 1 FROM audit_logs GROUP BY sequence HAVING count(*) > 1 \
+         AND bool_or(transaction_id > 0 AND transaction_id < $1)) AS collided",
     )
     .bind(horizon)
     .fetch_one(&mut *transaction)
