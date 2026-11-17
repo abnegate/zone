@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use abnegate_http::Backoff;
 use async_trait::async_trait;
-use chrono::Utc;
 use sqlx::PgPool;
 use tokio::time::Instant;
 use uuid::Uuid;
