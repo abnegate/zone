@@ -284,6 +284,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/audit-retention",
             get(audit::retention::server).put(audit::retention::update_server),
         )
+        .route("/api/audit-exports", get(audit::exports::server))
         .route("/api/host-mounts", get(host_mounts::instance))
         .route(
             "/api/workspaces/{workspace_id}/host-directories",
@@ -641,6 +642,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/organizations/{org_id}/audit-retention",
             get(audit::retention::organization).put(audit::retention::update_organization),
+        )
+        .route(
+            "/api/organizations/{org_id}/audit-exports",
+            get(audit::exports::organization),
         )
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
