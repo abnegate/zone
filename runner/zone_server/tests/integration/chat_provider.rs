@@ -1223,7 +1223,7 @@ async fn the_workspace_reports_what_the_host_probe_found() {
 }
 
 #[tokio::test]
-async fn the_workspace_reports_the_settings_of_the_chat_it_used_last() {
+async fn the_workspace_reports_the_settings_of_the_chat_created_last() {
     let tenant = Tenant::new().await;
     tenant
         .save_organization_settings(json!({ "openai_api_key": OPENAI_KEY }))
@@ -1263,7 +1263,7 @@ async fn the_workspace_reports_the_settings_of_the_chat_it_used_last() {
         "a new chat starts from the one just created: {listed}"
     );
 
-    tenant.chat(&tenant.owner.token).await;
+    let newer = tenant.chat(&tenant.owner.token).await;
     let recent = &tenant.workspace_offers().await["recent"];
     assert_eq!(recent["provider"], Value::Null, "{recent}");
     assert_eq!(recent["provider_model"], Value::Null, "{recent}");
@@ -1280,15 +1280,30 @@ async fn the_workspace_reports_the_settings_of_the_chat_it_used_last() {
     expect(&chose, StatusCode::OK, "the older chat changes its model");
     let recent = &tenant.workspace_offers().await["recent"];
     assert_eq!(
+        recent["model_name"],
+        json!("gpt-4"),
+        "changing an older chat's model never makes it the one a new chat starts from: {recent}"
+    );
+
+    let chose = tenant
+        .choose(
+            &tenant.owner.token,
+            &newer,
+            json!({ "provider": "openai", "model": "gpt-4.1" }),
+        )
+        .await;
+    expect(&chose, StatusCode::OK, "the newest chat changes its model");
+    let recent = &tenant.workspace_offers().await["recent"];
+    assert_eq!(
         (&recent["provider"], &recent["provider_model"]),
         (&json!("openai"), &json!("gpt-4.1")),
-        "changing a chat's model makes it the one a new chat starts from: {recent}"
+        "the chat created last is carried as it now reads: {recent}"
     );
 
     let updated = tenant
         .update_chat(
             &tenant.owner.token,
-            chosen,
+            &newer,
             json!({ "reasoning_effort": "low" }),
         )
         .await;
