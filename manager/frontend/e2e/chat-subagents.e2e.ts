@@ -240,7 +240,9 @@ async function mockChat(page: Page, stepReads: string[]) {
     route.fulfill(json({ subagents: [REVIEW, BENCHMARK, NOTES] }))
   );
   await routeApi(page, STEPS_PATH, (route) => {
-    const id = decodeURIComponent(STEPS_PATH.exec(new URL(route.request().url()).pathname)?.[1] ?? '');
+    const id = decodeURIComponent(
+      STEPS_PATH.exec(new URL(route.request().url()).pathname)?.[1] ?? ''
+    );
     stepReads.push(id);
     return route.fulfill(json({ steps: STEPS[id] ?? [] }));
   });

@@ -46,8 +46,7 @@ interface Account {
 const accountFile = join(evidenceDir, 'auth-account.json');
 
 function savedAccount(): Account {
-  if (!existsSync(accountFile))
-    throw new Error('row 1 has not registered an account yet');
+  if (!existsSync(accountFile)) throw new Error('row 1 has not registered an account yet');
   return JSON.parse(readFileSync(accountFile, 'utf8')) as Account;
 }
 
@@ -55,11 +54,7 @@ const port = process.env.ZONE_LIVE_PORT ?? '4179';
 const ORGANIZATION_AI = '/settings/organization/ai';
 const ORGANIZATION_MEMBERS = '/settings/organization/members';
 
-async function signInAs(
-  page: Page,
-  email: string,
-  password: string,
-): Promise<void> {
+async function signInAs(page: Page, email: string, password: string): Promise<void> {
   await page.goto('/login');
   await page.evaluate(() => {
     localStorage.removeItem('manager_access_token');
@@ -100,9 +95,7 @@ test.describe('auth and account', () => {
     await expect(page).not.toHaveURL(/\/login/);
     await shot(page, '01-registered-landing');
 
-    const rows = sql(
-      `select id, email_verified from users where email = '${fresh.email}'`,
-    );
+    const rows = sql(`select id, email_verified from users where email = '${fresh.email}'`);
     expect(rows, 'the account exists in the database').toHaveLength(1);
     const userId = rows[0].split('|')[0];
     writeFileSync(accountFile, JSON.stringify({ ...fresh, userId }, null, 2));
@@ -111,9 +104,7 @@ test.describe('auth and account', () => {
     await expect(page).toHaveURL(/\/login/, { timeout: 30_000 });
     await signInAs(page, fresh.email, fresh.password);
     await expect(page).not.toHaveURL(/\/login/, { timeout: 30_000 });
-    await page.waitForFunction(() =>
-      Boolean(localStorage.getItem('manager_access_token')),
-    );
+    await page.waitForFunction(() => Boolean(localStorage.getItem('manager_access_token')));
     await shot(page, '01-fresh-account-signed-in');
     record(1, {
       result: 'WORKS',
@@ -129,9 +120,7 @@ test.describe('auth and account', () => {
     });
   });
 
-  test('2: email verification with the token the server stored', async ({
-    page,
-  }) => {
+  test('2: email verification with the token the server stored', async ({ page }) => {
     const account = savedAccount();
 
     // Registration creates no token; the console's verification banner and its
@@ -161,12 +150,9 @@ test.describe('auth and account', () => {
     }
     await shot(page, '02-after-resend');
     const stored = sql(
-      `select id from email_verification_tokens where user_id = '${account.userId}' order by created_at desc limit 1`,
+      `select id from email_verification_tokens where user_id = '${account.userId}' order by created_at desc limit 1`
     );
-    expect(
-      stored,
-      'the server created a verification token on resend',
-    ).toHaveLength(1);
+    expect(stored, 'the server created a verification token on resend').toHaveLength(1);
 
     // The emailed link the server would have sent points at /verify, which the
     // console does not route; recorded by visiting it.
@@ -176,9 +162,7 @@ test.describe('auth and account', () => {
     await shot(page, '02-verify-path-the-mail-would-use');
 
     const { token, hash } = knownToken();
-    sql(
-      `update email_verification_tokens set token_hash = '${hash}' where id = '${stored[0]}'`,
-    );
+    sql(`update email_verification_tokens set token_hash = '${hash}' where id = '${stored[0]}'`);
     const verifyResponse = api('POST', '/api/auth/verify-email', {
       body: { token: 'peek-only-invalid' },
     });
@@ -188,13 +172,9 @@ test.describe('auth and account', () => {
       .getByRole('alert')
       .first()
       .innerText({ timeout: 15_000 })
-      .catch(async () =>
-        page.locator('.auth-page, main, body').first().innerText(),
-      );
+      .catch(async () => page.locator('.auth-page, main, body').first().innerText());
     await shot(page, '02-verify-email-outcome');
-    const verified = sql(
-      `select email_verified from users where id = '${account.userId}'`,
-    );
+    const verified = sql(`select email_verified from users where id = '${account.userId}'`);
     const consoleSaysVerified = /Email Verified|verified successfully/i.test(outcome);
     record(2, {
       result: consoleSaysVerified ? 'WORKS' : 'FAILS',
@@ -216,10 +196,7 @@ test.describe('auth and account', () => {
       ],
     });
     expect(verified[0], 'the server marked the address verified').toBe('t');
-    expect(
-      consoleSaysVerified,
-      `the console shows: ${outcome.slice(0, 200)}`,
-    ).toBe(true);
+    expect(consoleSaysVerified, `the console shows: ${outcome.slice(0, 200)}`).toBe(true);
   });
 
   test('3: login, logout, a wrong password refused, and a session that survives a reload', async ({
@@ -234,9 +211,7 @@ test.describe('auth and account', () => {
 
     await page.locator('.logout-btn').click();
     await expect(page).toHaveURL(/\/login/, { timeout: 30_000 });
-    expect(
-      await page.evaluate(() => localStorage.getItem('manager_access_token')),
-    ).toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem('manager_access_token'))).toBeNull();
     await shot(page, '03-logged-out');
 
     await signInAs(page, state.owner.email, `${state.owner.password}-wrong`);
@@ -274,13 +249,9 @@ test.describe('auth and account', () => {
     await signIn(second);
     await expect(second.locator('.logout-btn')).toBeVisible();
     const secondToken =
-      (await second.evaluate(() =>
-        localStorage.getItem('manager_access_token'),
-      )) ?? '';
+      (await second.evaluate(() => localStorage.getItem('manager_access_token'))) ?? '';
     const secondRefresh =
-      (await second.evaluate(() =>
-        localStorage.getItem('manager_refresh_token'),
-      )) ?? '';
+      (await second.evaluate(() => localStorage.getItem('manager_refresh_token'))) ?? '';
 
     await signIn(page);
     await page.goto('/settings/you/sessions');
@@ -292,21 +263,17 @@ test.describe('auth and account', () => {
     await shot(page, '04-sessions-page');
     const token = await tokenFor(state.owner);
     const raw = await api('GET', '/api/auth/sessions', { token });
-    const apiSessions = ((raw.body as { sessions?: unknown[] }).sessions ?? [])
-      .length;
+    const apiSessions = ((raw.body as { sessions?: unknown[] }).sessions ?? []).length;
 
     let revokeOutcome = '';
     if (listed && rowsListed >= 2) {
-      await page
-        .getByRole('button', { name: 'Revoke All Other Sessions' })
-        .click();
+      await page.getByRole('button', { name: 'Revoke All Other Sessions' }).click();
       const dialog = page.getByRole('dialog');
       await expect(dialog).toContainText('Revoke All Other Sessions');
       await dialog.getByRole('button', { name: 'Confirm' }).click();
-      await expect(page.locator('[data-sonner-toast]')).toContainText(
-        /revoked/i,
-        { timeout: 30_000 },
-      );
+      await expect(page.locator('[data-sonner-toast]')).toContainText(/revoked/i, {
+        timeout: 30_000,
+      });
       revokeOutcome = 'revoked from the console';
     } else {
       // The console cannot list sessions, so the revoke button has nothing to
@@ -318,7 +285,7 @@ test.describe('auth and account', () => {
     await shot(page, '04-sessions-after-revoke');
 
     const active = sql(
-      `select count(*) from sessions where user_id = '${state.owner.user.id}' and revoked_at is null`,
+      `select count(*) from sessions where user_id = '${state.owner.user.id}' and revoked_at is null`
     ).join(',');
     const withAccess = await api('GET', '/api/auth/sessions', {
       token: secondToken,
@@ -354,10 +321,7 @@ test.describe('auth and account', () => {
         '04-second-browser-after-revoke.png',
       ],
     });
-    expect(
-      listed,
-      `the sessions page lists sessions: ${pageText.slice(0, 200)}`,
-    ).toBe(true);
+    expect(listed, `the sessions page lists sessions: ${pageText.slice(0, 200)}`).toBe(true);
     expect(signedOut, 'the second browser is signed out').toBe(true);
   });
 
@@ -375,13 +339,11 @@ test.describe('auth and account', () => {
     await shot(page, '05-forgot-password-sent');
 
     const stored = sql(
-      `select id from password_reset_tokens where user_id = '${account.userId}' and used_at is null and expires_at > now() order by created_at desc limit 1`,
+      `select id from password_reset_tokens where user_id = '${account.userId}' and used_at is null and expires_at > now() order by created_at desc limit 1`
     );
     expect(stored, 'the server created a reset token').toHaveLength(1);
     const { token, hash } = knownToken();
-    sql(
-      `update password_reset_tokens set token_hash = '${hash}' where id = '${stored[0]}'`,
-    );
+    sql(`update password_reset_tokens set token_hash = '${hash}' where id = '${stored[0]}'`);
 
     const newPassword = `${account.password}-new`;
     await page.goto(`/reset-password?token=${token}`);
@@ -393,9 +355,7 @@ test.describe('auth and account', () => {
       .getByRole('alert')
       .first()
       .innerText({ timeout: 15_000 })
-      .catch(async () =>
-        page.locator('.auth-page, main, body').first().innerText(),
-      );
+      .catch(async () => page.locator('.auth-page, main, body').first().innerText());
     await shot(page, '05-reset-outcome');
 
     const oldRefused = await api('POST', '/api/auth/login', {
@@ -405,7 +365,7 @@ test.describe('auth and account', () => {
       body: { email: account.email, password: newPassword },
     });
     const used = sql(
-      `select used_at is not null from password_reset_tokens where id = '${stored[0]}'`,
+      `select used_at is not null from password_reset_tokens where id = '${stored[0]}'`
     );
     let signedIn = false;
     if (newAccepted.status === 200) {
@@ -413,19 +373,13 @@ test.describe('auth and account', () => {
       await expect(page).not.toHaveURL(/\/login/, { timeout: 30_000 });
       signedIn = true;
       await shot(page, '05-signed-in-with-new-password');
-      writeFileSync(
-        accountFile,
-        JSON.stringify({ ...account, password: newPassword }, null, 2),
-      );
+      writeFileSync(accountFile, JSON.stringify({ ...account, password: newPassword }, null, 2));
     }
     const consoleSaysSent = /Check your email/.test(forgotOutcome);
     const consoleSaysReset = /Password Reset Successful|reset successfully/i.test(outcome);
     record(5, {
       result:
-        consoleSaysSent &&
-        consoleSaysReset &&
-        signedIn &&
-        oldRefused.status === 401
+        consoleSaysSent && consoleSaysReset && signedIn && oldRefused.status === 401
           ? 'WORKS'
           : 'FAILS',
       cause:
@@ -461,20 +415,20 @@ test.describe('auth and account', () => {
     const removed = await api(
       'DELETE',
       `/api/organizations/${state.owner.organization.id}/members/${state.intruder.user.id}`,
-      { token: ownerToken },
+      { token: ownerToken }
     );
     // The API soft-deletes the row and a soft-deleted member still counts as
     // "already a member" for a new invitation, so the row is cleared outright.
     sql(
-      `delete from organization_members where organization_id = '${state.owner.organization.id}' and user_id = '${state.intruder.user.id}'`,
+      `delete from organization_members where organization_id = '${state.owner.organization.id}' and user_id = '${state.intruder.user.id}'`
     );
     sql(
-      `delete from workspace_members where workspace_id = '${state.owner.workspace.id}' and user_id = '${state.intruder.user.id}'`,
+      `delete from workspace_members where workspace_id = '${state.owner.workspace.id}' and user_id = '${state.intruder.user.id}'`
     );
     // Invitations are unique per address and organization, accepted ones
     // included, so an earlier run's row would make a new invitation a 409.
     const earlierInvitations = sql(
-      `delete from invitations where organization_id = '${state.owner.organization.id}' and email = '${state.intruder.email}' returning accepted_at is not null`,
+      `delete from invitations where organization_id = '${state.owner.organization.id}' and email = '${state.intruder.email}' returning accepted_at is not null`
     );
     await signIn(page);
     await page.goto(ORGANIZATION_MEMBERS);
@@ -493,24 +447,19 @@ test.describe('auth and account', () => {
       const list = await api(
         'GET',
         `/api/organizations/${state.owner.organization.id}/invitations`,
-        { token: ownerToken },
+        { token: ownerToken }
       );
-      const rows = Array.isArray(list.body)
-        ? (list.body as { id: string; email: string }[])
-        : [];
+      const rows = Array.isArray(list.body) ? (list.body as { id: string; email: string }[]) : [];
       for (const row of rows.filter((r) => r.email === state.intruder.email)) {
         const gone = await api(
           'DELETE',
           `/api/organizations/${state.owner.organization.id}/invitations/${row.id}`,
-          { token: ownerToken },
+          { token: ownerToken }
         );
         revokedEarlier = `console table showed no pending row; DELETE ${row.id} -> ${gone.status}`;
       }
     }
-    const tableText = (await page.locator('main').innerText()).replace(
-      /\s+/g,
-      ' ',
-    );
+    const tableText = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
     await page.getByRole('button', { name: 'Invite Member' }).click();
     const modal = page.getByRole('dialog', { name: 'Invite Member' });
     await expect(modal).toBeVisible();
@@ -521,8 +470,7 @@ test.describe('auth and account', () => {
     await shot(page, '06-invite-form');
     const created = page.waitForResponse(
       (r) =>
-        /\/api\/organizations\/[^/]+\/invitations$/.test(r.url()) &&
-        r.request().method() === 'POST',
+        /\/api\/organizations\/[^/]+\/invitations$/.test(r.url()) && r.request().method() === 'POST'
     );
     await modal.getByRole('button', { name: 'Send Invitation' }).click();
     const response = await created;
@@ -531,16 +479,10 @@ test.describe('auth and account', () => {
       id: string;
       token?: string;
     };
-    expect(
-      invitation.token,
-      'the create response carries the token the mail would',
-    ).toBeTruthy();
-    await expect(page.locator('table.invitations-table')).toContainText(
-      state.intruder.email,
-      {
-        timeout: 30_000,
-      },
-    );
+    expect(invitation.token, 'the create response carries the token the mail would').toBeTruthy();
+    await expect(page.locator('table.invitations-table')).toContainText(state.intruder.email, {
+      timeout: 30_000,
+    });
     await shot(page, '06-invitation-pending');
 
     const other = await (browser as Browser).newContext();
@@ -565,28 +507,21 @@ test.describe('auth and account', () => {
         .catch(() => false)
     ) {
       await second.getByRole('button', { name: 'Accept Invitation' }).click();
-      await expect
-        .poll(() => new URL(second.url()).pathname, { timeout: 30_000 })
-        .toBe('/');
+      await expect.poll(() => new URL(second.url()).pathname, { timeout: 30_000 }).toBe('/');
       acceptedVia = 'console-accept: Accept Invitation';
     } else {
       // The page could not render the invitation, so the server's accept is
       // called directly to give the later rows the membership they need.
-      const accepted = await api(
-        'POST',
-        `/api/invitations/${invitation.token}/accept`,
-        { token: intruderToken },
-      );
+      const accepted = await api('POST', `/api/invitations/${invitation.token}/accept`, {
+        token: intruderToken,
+      });
       acceptedVia = `console showed no Accept button; POST /api/invitations/{token}/accept -> ${accepted.status}`;
     }
     await other.close();
 
     await page.goto(ORGANIZATION_MEMBERS);
     await page.waitForTimeout(3_000);
-    const membersText = (await page.locator('main').innerText()).replace(
-      /\s+/g,
-      ' ',
-    );
+    const membersText = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
     const row = page.locator('table.members-table tbody tr', {
       hasText: state.intruder.email,
     });
@@ -597,12 +532,10 @@ test.describe('auth and account', () => {
       : (await roleSelect.count()) > 0
         ? await roleSelect.innerText()
         : await row.locator('.role-badge').innerText();
-    const memberRows = await page
-      .locator('table.members-table tbody tr')
-      .count();
+    const memberRows = await page.locator('table.members-table tbody tr').count();
     await shot(page, '06-member-listed');
     const membership = sql(
-      `select role from organization_members where organization_id = '${state.owner.organization.id}' and user_id = '${state.intruder.user.id}'`,
+      `select role from organization_members where organization_id = '${state.owner.organization.id}' and user_id = '${state.intruder.user.id}'`
     );
     const consoleAccepted = acceptedVia.startsWith('console-accept');
     record(6, {
@@ -623,9 +556,7 @@ test.describe('auth and account', () => {
       invitations_tab_before_invite: tableText.slice(0, 200),
       accept_page_text: acceptText.replace(/\s+/g, ' ').slice(0, 300),
       invitation_api_status: detail.status,
-      invitation_api_keys: Object.keys(
-        (detail.body as Record<string, unknown>) ?? {},
-      ),
+      invitation_api_keys: Object.keys((detail.body as Record<string, unknown>) ?? {}),
       accepted_via: acceptedVia,
       member_badge: badge,
       membership_role_in_db: membership.join(','),
@@ -644,11 +575,9 @@ test.describe('auth and account', () => {
     page,
   }) => {
     const membership = sql(
-      `select role from organization_members where organization_id = '${state.owner.organization.id}' and user_id = '${state.intruder.user.id}'`,
+      `select role from organization_members where organization_id = '${state.owner.organization.id}' and user_id = '${state.intruder.user.id}'`
     );
-    expect(membership, 'row 6 made the second tenant a member').toEqual([
-      'member',
-    ]);
+    expect(membership, 'row 6 made the second tenant a member').toEqual(['member']);
     const asMember: Tenant = {
       ...state.intruder,
       organization: state.owner.organization,
@@ -660,9 +589,7 @@ test.describe('auth and account', () => {
     const url = page.url();
     const landing = new URL(url).pathname;
     const navigation = page.getByRole('navigation', { name: 'Settings' });
-    const aiDefaultsListed = await navigation
-      .getByRole('link', { name: 'AI defaults' })
-      .count();
+    const aiDefaultsListed = await navigation.getByRole('link', { name: 'AI defaults' }).count();
     const keptOffAiDefaults =
       landing.startsWith('/settings/') &&
       landing !== ORGANIZATION_AI &&
@@ -680,22 +607,14 @@ test.describe('auth and account', () => {
       .click({ timeout: 15_000 })
       .catch(() => undefined);
     const membersTable = page.locator('table.members-table');
-    await membersTable
-      .waitFor({ state: 'visible', timeout: 30_000 })
-      .catch(() => undefined);
+    await membersTable.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => undefined);
     const membersUrl = page.url();
     const landedOnMembers =
-      new URL(membersUrl).pathname === ORGANIZATION_MEMBERS &&
-      (await membersTable.isVisible());
-    const addMemberButtons = await page
-      .getByRole('button', { name: 'Add Member' })
-      .count();
-    const inviteButtons = await page
-      .getByRole('button', { name: 'Invite Member' })
-      .count();
+      new URL(membersUrl).pathname === ORGANIZATION_MEMBERS && (await membersTable.isVisible());
+    const addMemberButtons = await page.getByRole('button', { name: 'Add Member' }).count();
+    const inviteButtons = await page.getByRole('button', { name: 'Invite Member' }).count();
     const roleSelects = await page.locator('.role-select').count();
-    const readOnly =
-      addMemberButtons === 0 && inviteButtons === 0 && roleSelects === 0;
+    const readOnly = addMemberButtons === 0 && inviteButtons === 0 && roleSelects === 0;
     const text = await page.locator('main, body').first().innerText();
     await shot(page, '07-member-at-org-settings');
 
@@ -703,26 +622,19 @@ test.describe('auth and account', () => {
     const settings = await api(
       'GET',
       `/api/organizations/${state.owner.organization.id}/settings/ai`,
-      { token },
+      { token }
     );
-    const rename = await api(
-      'PATCH',
-      `/api/organizations/${state.owner.organization.id}`,
-      {
-        token,
-        body: { name: 'Hijacked by a member' },
-      },
-    );
+    const rename = await api('PATCH', `/api/organizations/${state.owner.organization.id}`, {
+      token,
+      body: { name: 'Hijacked by a member' },
+    });
     const promote = await api(
       'PATCH',
       `/api/organizations/${state.owner.organization.id}/members/${state.intruder.user.id}`,
-      { token, body: { role: 'owner' } },
+      { token, body: { role: 'owner' } }
     );
-    const name = sql(
-      `select name from organizations where id = '${state.owner.organization.id}'`,
-    );
-    const apiRefused =
-      [401, 403].includes(rename.status) && [401, 403].includes(promote.status);
+    const name = sql(`select name from organizations where id = '${state.owner.organization.id}'`);
+    const apiRefused = [401, 403].includes(rename.status) && [401, 403].includes(promote.status);
     const pageGated = keptOffAiDefaults && landedOnMembers && readOnly;
     record(7, {
       result: pageGated && apiRefused ? 'WORKS' : 'FAILS',
@@ -743,22 +655,12 @@ test.describe('auth and account', () => {
       organization_name_after: name[0],
       screenshots: ['07-member-at-org-settings.png'],
     });
-    expect(
-      apiRefused,
-      `rename=${rename.status} promote=${promote.status}`,
-    ).toBe(true);
+    expect(apiRefused, `rename=${rename.status} promote=${promote.status}`).toBe(true);
     expect(name[0]).not.toContain('Hijacked');
-    expect(
-      keptOffAiDefaults,
-      `the member reached the AI defaults: ${url}`,
-    ).toBe(true);
-    expect(
-      landedOnMembers,
-      `the members list did not open: ${membersUrl}`,
-    ).toBe(true);
-    expect(
-      readOnly,
-      `add=${addMemberButtons} invite=${inviteButtons} roles=${roleSelects}`,
-    ).toBe(true);
+    expect(keptOffAiDefaults, `the member reached the AI defaults: ${url}`).toBe(true);
+    expect(landedOnMembers, `the members list did not open: ${membersUrl}`).toBe(true);
+    expect(readOnly, `add=${addMemberButtons} invite=${inviteButtons} roles=${roleSelects}`).toBe(
+      true
+    );
   });
 });

@@ -27,9 +27,7 @@ test.describe('workspace skills', () => {
   test.skip(!enabled, 'set ZONE_LIVE_REAL_PASS=1 against the real rig');
   test.describe.configure({ timeout: 1_200_000 });
 
-  test('92: a skill is offered to an agent chat and read with read_document', async ({
-    page,
-  }) => {
+  test('92: a skill is offered to an agent chat and read with read_document', async ({ page }) => {
     const s = stamp();
     const word = `harbour-${s}`;
     const token = await ownerToken();
@@ -65,24 +63,24 @@ test.describe('workspace skills', () => {
     const reply = await ask(
       page,
       "May I deploy to production this Friday at 3pm? Follow this workspace's written procedure for deploys and tell me exactly what it requires, including any code word.",
-      { replies: 1, timeout: 900_000 },
+      { replies: 1, timeout: 900_000 }
     );
     await shot(page, '92-skill-read-in-chat');
 
     const calls = sql(
-      `select c->'function'->>'name' || ' ' || left(c->'function'->>'arguments', 200) from chat_entries, jsonb_array_elements(coalesce(nullif(message->'tool_calls', 'null'::jsonb), '[]'::jsonb)) c where chat_id = '${chatId}' order by position`,
+      `select c->'function'->>'name' || ' ' || left(c->'function'->>'arguments', 200) from chat_entries, jsonb_array_elements(coalesce(nullif(message->'tool_calls', 'null'::jsonb), '[]'::jsonb)) c where chat_id = '${chatId}' order by position`
     );
     const readSkill = calls.filter(
-      (call) => call.startsWith('read_document') && call.includes(skillId),
+      (call) => call.startsWith('read_document') && call.includes(skillId)
     );
     const discovery = calls
       .slice(
         0,
-        calls.findIndex((call) => call.startsWith('read_document')),
+        calls.findIndex((call) => call.startsWith('read_document'))
       )
       .filter((call) => /^(list_documents|search_knowledge)/.test(call));
     const skillRows = sql(
-      `select category || ' | ' || is_active from knowledge_entries where id = '${skillId}'`,
+      `select category || ' | ' || is_active from knowledge_entries where id = '${skillId}'`
     );
     const ok = readSkill.length > 0 && reply.includes(word);
     record(92, {

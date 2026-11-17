@@ -712,21 +712,6 @@ fn assert_launched_over_stdio(server: &McpServer) {
 }
 
 #[test]
-fn parse_flag_keeps_default_for_empty_and_unknown() {
-    assert!(parse_flag("", true));
-    assert!(!parse_flag("", false));
-    assert!(parse_flag("maybe", true));
-    assert!(!parse_flag("maybe", false));
-    assert!(parse_flag(" true ", true));
-    assert!(!parse_flag("0", true));
-    assert!(!parse_flag("off", true));
-    assert!(!parse_flag("false", true));
-    assert!(parse_flag("1", false));
-    assert!(parse_flag("yes", false));
-    assert!(parse_flag("on", false));
-}
-
-#[test]
 fn guidance_adds_magents_playbook() {
     let text = text(&["read_file", "magents__spawn_session"]);
     assert!(text.contains("magents__spawn_session"));

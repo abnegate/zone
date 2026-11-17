@@ -8,6 +8,7 @@ mod listing;
 mod log;
 mod merged;
 mod method;
+mod origin;
 mod overview;
 mod pull_request;
 mod readiness;
@@ -15,6 +16,8 @@ mod reading;
 mod refusal;
 mod repository;
 mod squash;
+mod status;
+mod survey;
 #[cfg(test)]
 mod tests;
 mod thread;
@@ -35,6 +38,8 @@ pub use pull_request::PullRequest;
 pub use readiness::Readiness;
 pub use refusal::Refusal;
 pub use repository::Repository;
+pub use status::Status;
+use survey::Survey;
 pub use thread::Thread;
 pub use thread_comment::ThreadComment;
 
@@ -47,17 +52,17 @@ use abnegate_vcs::ListedPullRequest;
 use abnegate_vcs::PullRequestDetail;
 use abnegate_vcs::PullRequestError;
 use abnegate_vcs::PullRequestReference;
+use abnegate_vcs::PullRequestService;
 use abnegate_vcs::PullRequestState;
 use chrono::DateTime;
 use chrono::TimeDelta;
 use chrono::Utc;
-use futures::StreamExt;
 use futures::future::join_all;
-use futures::stream;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use super::authentication::credentialed;
+use super::cache::REFRESH_DEADLINE;
 use super::client::Github;
 use super::client::MEBIBYTE;
 use super::client::listed;
@@ -76,7 +81,6 @@ use super::readiness::CheckState;
 use super::readiness::CommitSha;
 use super::snapshot::Snapshot;
 use super::source_status::SourceStatus;
-use super::throttle::CREDENTIAL_PERMITS;
 use super::throttle::admitted;
 use crate::state::AppState;
 
@@ -85,6 +89,11 @@ pub const LOG_TAIL: u64 = MEBIBYTE;
 pub const FAILURE_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 pub const KEPT_LIMIT: Duration = Duration::from_secs(5 * 60);
 pub const UNRANKED: u32 = 0;
+pub const BATCH: usize = PullRequestService::EVIDENCE_BATCH;
+pub const EVIDENCE_CONCURRENCY: usize = 4;
+pub const GRAPHQL_LIMIT: Duration = Duration::from_secs(20);
+pub const DEADLINE_MARGIN: Duration = Duration::from_secs(20);
+pub const SURVEY_DEADLINE: Duration = REFRESH_DEADLINE.saturating_sub(DEADLINE_MARGIN);
 pub const FOREIGN_COMMIT: &str = "That commit is not on this pull request.";
 pub const UNRENDERED_COMMIT: &str = "GitHub would not render this commit's diff.";
 pub const INVALID_SOURCE: &str = "has a GitHub configuration Zone cannot read.";
@@ -424,47 +433,23 @@ async fn fetch(
     let repository = &Repository::of(source, &state.config().github_web_url);
     let permits = &state.github_snapshots().throttle.credential(&source.source);
     let previous = previous.as_deref();
+    let deadline = tokio::time::Instant::now() + SURVEY_DEADLINE;
     credentialed(
         state,
         &source.source,
         source.configuration.clone(),
         |github| async move {
-            let (rows, complete) = github.open_pulls(limit).await?;
-            let plan = refresh_plan(previous, &rows, now);
-            let pending: Vec<_> = rows
-                .iter()
-                .zip(plan)
-                .map(|(row, kept)| reassess(&github, permits, repository, row, kept, now))
-                .collect();
-            let mut assessed = stream::iter(pending)
-                .buffered(CREDENTIAL_PERMITS)
-                .zip(stream::iter(&rows));
-            let mut listing = Listing {
-                pull_requests: Vec::with_capacity(rows.len()),
-                complete,
-                warnings: Vec::new(),
-            };
-            while let Some((result, row)) = assessed.next().await {
-                match result {
-                    Ok(pull_request) => listing.pull_requests.push(pull_request),
-                    Err(fault) if fault.halts() => return Err(fault),
-                    Err(fault) => {
-                        let number = row.reference.number().get();
-                        listing.complete = false;
-                        listing
-                            .warnings
-                            .push(format!("{}#{number}: {fault}", repository.name));
-                        listing.pull_requests.extend(
-                            previous
-                                .into_iter()
-                                .flat_map(|previous| previous.pull_requests.iter())
-                                .find(|kept| kept.number == number)
-                                .cloned(),
-                        );
-                    }
-                }
-            }
-            Ok(listing)
+            Survey::new(
+                github,
+                permits,
+                repository,
+                previous,
+                now,
+                GRAPHQL_LIMIT,
+                deadline,
+            )
+            .listing(limit)
+            .await
         },
     )
     .await

@@ -39,10 +39,6 @@ impl TimePeriod {
         }
     }
 
-    pub fn parse(text: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|period| period.as_str() == text)
-    }
-
     pub fn days(self) -> i64 {
         match self {
             TimePeriod::Day => 1,
@@ -114,6 +110,11 @@ impl BucketSize {
                 midnight - Duration::days(since_monday)
             }
         }
+    }
+
+    /// The start of the first bucket that begins after `moment`.
+    pub fn after(self, moment: NaiveDateTime) -> NaiveDateTime {
+        self.align(moment) + self.span()
     }
 }
 
@@ -205,9 +206,16 @@ mod tests {
     #[test]
     fn periods_round_trip_through_their_names() {
         for period in TimePeriod::ALL {
-            assert_eq!(TimePeriod::parse(period.as_str()), Some(period));
+            assert_eq!(
+                serde_json::to_value(period).ok(),
+                Some(serde_json::Value::from(period.as_str()))
+            );
+            assert_eq!(
+                serde_json::from_value::<TimePeriod>(period.as_str().into()).ok(),
+                Some(period)
+            );
         }
-        assert_eq!(TimePeriod::parse("fortnight"), None);
+        assert!(serde_json::from_value::<TimePeriod>("fortnight".into()).is_err());
     }
 
     #[test]
@@ -281,6 +289,23 @@ mod tests {
             BucketSize::Week.align(wednesday),
             moment(2026, 9, 7, 0, 0),
             "aligned to the Monday of the same week"
+        );
+    }
+
+    #[test]
+    fn the_bucket_after_a_moment_starts_past_it_even_on_a_boundary() {
+        assert_eq!(
+            BucketSize::Day.after(moment(2026, 9, 7, 13, 0)),
+            moment(2026, 9, 8, 0, 0)
+        );
+        assert_eq!(
+            BucketSize::Day.after(moment(2026, 9, 7, 0, 0)),
+            moment(2026, 9, 8, 0, 0),
+            "runs sharing the boundary moment may have been cut, so its own bucket is not complete"
+        );
+        assert_eq!(
+            BucketSize::Week.after(moment(2026, 9, 9, 15, 30)),
+            moment(2026, 9, 14, 0, 0)
         );
     }
 

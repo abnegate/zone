@@ -402,7 +402,6 @@ pub(crate) async fn core_source_from_row(
         sources::GITLAB => zone_core::SourceType::GitLab,
         sources::GOOGLE_CALENDAR => zone_core::SourceType::GoogleCalendar,
         sources::GOOGLE_MAIL => zone_core::SourceType::GoogleMail,
-        sources::NOTION => zone_core::SourceType::Notion,
         sources::SLACK => zone_core::SourceType::Slack,
         sources::WEB => zone_core::SourceType::Web,
         _ => {

@@ -73,7 +73,8 @@ async function mockAgentChat(page: Page): Promise<void> {
     if (id !== entry.id) return route.fulfill({ status: 404, json: { error: 'Chat not found' } });
     if (action === 'providers') return route.fulfill({ json: providers });
     if (action === 'sources') return route.fulfill({ json: { sources: [] } });
-    if (action === 'messages') return route.fulfill({ json: { messages: withMessages().messages } });
+    if (action === 'messages')
+      return route.fulfill({ json: { messages: withMessages().messages } });
     if (action) return route.fulfill({ status: 404, json: { error: 'Not mocked' } });
     if (request.method() === 'PUT') Object.assign(entry, request.postDataJSON() as Partial<Chat>);
     return route.fulfill({ json: { chat: withMessages() } });
@@ -146,8 +147,7 @@ async function segmentShape(group: Locator) {
     const style = getComputedStyle(element);
     const border = Number.parseFloat(style.borderTopWidth);
     const inner = outer.height - 2 * border;
-    const round = (value: string, height: number) =>
-      Math.min(Number.parseFloat(value), height / 2);
+    const round = (value: string, height: number) => Math.min(Number.parseFloat(value), height / 2);
     const corner = (value: string, height: number, wanted: number) =>
       Math.abs(round(value, height) - wanted) < 0.5;
     const expected = round(style.borderTopLeftRadius, outer.height) - border;

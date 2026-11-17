@@ -58,16 +58,17 @@ use crate::services::github::client::INVALID_TAG;
 use crate::services::github::client::MEBIBYTE;
 use crate::services::github::client::PENDING_ASSESSMENT;
 use crate::services::github::client::PER_PAGE;
+use crate::services::github::client::Rows;
 use crate::services::github::client::SUCCESS_ASSESSMENT;
 use crate::services::github::client::UNAUTHORIZED;
 use crate::services::github::client::UNKNOWN_ASSESSMENT;
 use crate::services::github::client::UNPROCESSABLE_ENTITY;
-use crate::services::github::client::assessed;
 use crate::services::github::client::assessment;
 use crate::services::github::client::ci_token;
 use crate::services::github::client::conclusions;
 use crate::services::github::client::described;
 use crate::services::github::client::listed;
+use crate::services::github::client::outcome;
 use crate::services::github::client::revision;
 use crate::services::github::client::segment;
 use crate::services::github::client::status_error;
@@ -965,8 +966,13 @@ impl Github {
     }
 
     async fn build(&self, sha: &str) -> Result<Value, String> {
-        let (workflows, checks, statuses, complete) = self.ci_rows(sha).await?;
-        let state = assessed(&conclusions(&workflows, &checks, &statuses), complete);
+        let Rows {
+            workflows,
+            checks,
+            statuses,
+            complete,
+        } = self.ci_rows(sha).await?;
+        let state = outcome(&conclusions(&workflows, &checks, &statuses), complete);
         Ok(bound_build(json!({
             "state": state,
             "complete": complete,

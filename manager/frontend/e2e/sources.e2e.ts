@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
-import { test, expect } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
 
 const generateMockSource = (
@@ -117,10 +117,7 @@ test.describe('Sources Section', () => {
     });
 
     await routeApi(page, sourcesRoutePattern, (route) => {
-      if (
-        route.request().method() === 'GET' &&
-        isSourcesListRequest(route.request().url())
-      ) {
+      if (route.request().method() === 'GET' && isSourcesListRequest(route.request().url())) {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -165,13 +162,9 @@ test.describe('Sources Section', () => {
 
   test.describe('Empty State', () => {
     test('shows empty state when no sources exist', async ({ page }) => {
+      await expect(page.getByRole('heading', { name: 'No sources configured' })).toBeVisible();
       await expect(
-        page.getByRole('heading', { name: 'No sources configured' })
-      ).toBeVisible();
-      await expect(
-        page.getByText(
-          'Add code repositories, calendars, email inboxes, web URLs, or text content'
-        )
+        page.getByText('Add code repositories, calendars, email inboxes, web URLs, or text content')
       ).toBeVisible();
       await expect(
         page.locator('.sources-section .ui-empty').getByRole('button', { name: 'Add source' })
@@ -183,10 +176,7 @@ test.describe('Sources Section', () => {
     test('displays list of source cards', async ({ page }) => {
       await page.unroute(sourcesRoutePattern);
       await routeApi(page, sourcesRoutePattern, (route) => {
-        if (
-          route.request().method() === 'GET' &&
-          isSourcesListRequest(route.request().url())
-        ) {
+        if (route.request().method() === 'GET' && isSourcesListRequest(route.request().url())) {
           route.fulfill({
             status: 200,
             contentType: 'application/json',
@@ -205,10 +195,7 @@ test.describe('Sources Section', () => {
     test('displays source name and type badge', async ({ page }) => {
       await page.unroute(sourcesRoutePattern);
       await routeApi(page, sourcesRoutePattern, (route) => {
-        if (
-          route.request().method() === 'GET' &&
-          isSourcesListRequest(route.request().url())
-        ) {
+        if (route.request().method() === 'GET' && isSourcesListRequest(route.request().url())) {
           route.fulfill({
             status: 200,
             contentType: 'application/json',
@@ -229,10 +216,7 @@ test.describe('Sources Section', () => {
     test('shows verified status for verified sources', async ({ page }) => {
       await page.unroute(sourcesRoutePattern);
       await routeApi(page, sourcesRoutePattern, (route) => {
-        if (
-          route.request().method() === 'GET' &&
-          isSourcesListRequest(route.request().url())
-        ) {
+        if (route.request().method() === 'GET' && isSourcesListRequest(route.request().url())) {
           route.fulfill({
             status: 200,
             contentType: 'application/json',
@@ -253,10 +237,7 @@ test.describe('Sources Section', () => {
     test('shows inactive status for disabled sources', async ({ page }) => {
       await page.unroute(sourcesRoutePattern);
       await routeApi(page, sourcesRoutePattern, (route) => {
-        if (
-          route.request().method() === 'GET' &&
-          isSourcesListRequest(route.request().url())
-        ) {
+        if (route.request().method() === 'GET' && isSourcesListRequest(route.request().url())) {
           route.fulfill({
             status: 200,
             contentType: 'application/json',
@@ -277,10 +258,7 @@ test.describe('Sources Section', () => {
     test('shows error status for sources with errors', async ({ page }) => {
       await page.unroute(sourcesRoutePattern);
       await routeApi(page, sourcesRoutePattern, (route) => {
-        if (
-          route.request().method() === 'GET' &&
-          isSourcesListRequest(route.request().url())
-        ) {
+        if (route.request().method() === 'GET' && isSourcesListRequest(route.request().url())) {
           route.fulfill({
             status: 200,
             contentType: 'application/json',
@@ -302,10 +280,7 @@ test.describe('Sources Section', () => {
     test('displays source URL as link', async ({ page }) => {
       await page.unroute(sourcesRoutePattern);
       await routeApi(page, sourcesRoutePattern, (route) => {
-        if (
-          route.request().method() === 'GET' &&
-          isSourcesListRequest(route.request().url())
-        ) {
+        if (route.request().method() === 'GET' && isSourcesListRequest(route.request().url())) {
           route.fulfill({
             status: 200,
             contentType: 'application/json',
@@ -398,10 +373,7 @@ test.describe('Sources Section', () => {
       });
 
       await routeApi(page, sourcesRoutePattern, (route) => {
-        if (
-          route.request().method() === 'POST' &&
-          isSourcesListRequest(route.request().url())
-        ) {
+        if (route.request().method() === 'POST' && isSourcesListRequest(route.request().url())) {
           route.fulfill({
             status: 201,
             contentType: 'application/json',
@@ -429,10 +401,7 @@ test.describe('Sources Section', () => {
 
     test('shows loading state during creation', async ({ page }) => {
       await routeApi(page, sourcesRoutePattern, async (route) => {
-        if (
-          route.request().method() === 'POST' &&
-          isSourcesListRequest(route.request().url())
-        ) {
+        if (route.request().method() === 'POST' && isSourcesListRequest(route.request().url())) {
           await new Promise((resolve) => setTimeout(resolve, 500));
           route.fulfill({
             status: 201,
@@ -463,10 +432,7 @@ test.describe('Sources Section', () => {
 
     test('shows error when creation fails', async ({ page }) => {
       await routeApi(page, sourcesRoutePattern, (route) => {
-        if (
-          route.request().method() === 'POST' &&
-          isSourcesListRequest(route.request().url())
-        ) {
+        if (route.request().method() === 'POST' && isSourcesListRequest(route.request().url())) {
           route.fulfill({
             status: 400,
             contentType: 'application/json',
@@ -615,10 +581,7 @@ test.describe('Sources Section', () => {
         }
       });
 
-      const disableBtn = page
-        .locator('.source-card')
-        .first()
-        .locator('button:has-text("Disable")');
+      const disableBtn = page.locator('.source-card').first().locator('button:has-text("Disable")');
       await disableBtn.click();
 
       await expect(

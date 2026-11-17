@@ -26,8 +26,7 @@ import {
  * once the server has been up that long, not here.
  */
 
-const FACT =
-  'The Borealis build cache listens on port 7070 and keeps build artifacts for 14 days.';
+const FACT = 'The Borealis build cache listens on port 7070 and keeps build artifacts for 14 days.';
 const QUESTION =
   'Which port does the Borealis build cache listen on, and how long does it keep build artifacts?';
 const POLICY = {
@@ -62,7 +61,7 @@ interface Readiness {
   promotable: boolean;
 }
 
-const punctuation = /^[!-\/:-@\[-^`{-~]+|[!-\/:-@\[-^`{-~]+$/g;
+const punctuation = /^[!-/:-@[-^`{-~]+|[!-/:-@[-^`{-~]+$/g;
 
 function normalize(text: string): string {
   return text
@@ -93,23 +92,19 @@ function readiness(chats: string[]): Readiness {
       select json_build_object(
         'exchanges', (select coalesce(json_agg(json_build_object('id', id, 'chat', chat_id, 'answer', answer) order by created_at, id), '[]') from exchange),
         'pairs', (select coalesce(json_agg(json_build_object('left', a.id, 'right', b.id, 'question', 1 - (a.question_vector <=> b.question_vector), 'answer', case when a.answer_vector is not null and b.answer_vector is not null then 1 - (a.answer_vector <=> b.answer_vector) end)), '[]') from exchange a join exchange b on a.id <> b.id)
-      )`,
-    ).join('\n'),
+      )`
+    ).join('\n')
   ) as { exchanges: Exchange[]; pairs: Pair[] };
   const pair = (left: Exchange, right: Exchange) =>
     pairs.find((p) => p.left === left.id && p.right === right.id);
   const [leader, ...rest] = exchanges;
   const cohesion = rest.reduce(
-    (lowest, exchange) =>
-      Math.min(lowest, pair(leader, exchange)?.question ?? 0),
-    1,
+    (lowest, exchange) => Math.min(lowest, pair(leader, exchange)?.question ?? 0),
+    1
   );
   const eligible = exchanges.filter((exchange) => {
     const length = [...exchange.answer.trim()].length;
-    return (
-      length >= POLICY.minimumAnswerCharacters &&
-      length <= POLICY.maximumAnswerCharacters
-    );
+    return length >= POLICY.minimumAnswerCharacters && length <= POLICY.maximumAnswerCharacters;
   });
   const agree = (left: Exchange, right: Exchange) => {
     const similarity = pair(left, right)?.answer;
@@ -123,11 +118,9 @@ function readiness(chats: string[]): Readiness {
       : Math.max(
           ...eligible.map(
             (candidate) =>
-              eligible.filter(
-                (other) => other !== candidate && agree(candidate, other),
-              ).length /
-              (eligible.length - 1),
-          ),
+              eligible.filter((other) => other !== candidate && agree(candidate, other)).length /
+              (eligible.length - 1)
+          )
         );
   const distinct = new Set(exchanges.map((exchange) => exchange.chat)).size;
   return {
@@ -148,9 +141,7 @@ test.describe('answer promotion', () => {
   test.skip(!enabled, 'set ZONE_LIVE_REAL_PASS=1 against the real rig');
   test.describe.configure({ timeout: 1_800_000 });
 
-  test('133: a question asked in several chats is answered alike', async ({
-    page,
-  }) => {
+  test('133: a question asked in several chats is answered alike', async ({ page }) => {
     const s = stamp();
     const entry = await api('POST', '/api/knowledge', {
       token: await ownerToken(),
@@ -181,7 +172,7 @@ test.describe('answer promotion', () => {
       .then(() => true)
       .catch(() => false);
     const embeddings = sql(
-      `select count(*) from message_embeddings where chat_id in (${chats.map((c) => `'${c}'`).join(',')})`,
+      `select count(*) from message_embeddings where chat_id in (${chats.map((c) => `'${c}'`).join(',')})`
     );
     const promotion = readiness(chats);
     const answered = replies.every((r) => r.includes('7070'));

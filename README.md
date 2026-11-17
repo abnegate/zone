@@ -2,6 +2,16 @@
 
 Your AI, your data, your infrastructure—put your backlog on autopilot.
 
+Claude Code, Codex and Ollama are engines. Zone is everything around them that turns what they produce into work you can trust: it records what agents did, proves it was checked, learns from how it went, keeps its pull requests green and mergeable, and runs on hardware you own.
+
+Zone is one platform with three parts: a shared core, and Zone Code and Zone Studio built on it. The parts describe what you use Zone for, not separate installs: every feature ships in the same stack, and setup's `--features` decides which local models and media runtimes it installs and switches on.
+
+| Part | For | Adds |
+|---------|-----|------|
+| **Zone** (core) | Anyone who wants a private AI workspace | Chat, knowledge base, sources, reminders, desktop and mobile apps, optional private search |
+| **Zone Code** | Teams that want their backlog worked | Coding agents across accounts and vendors, auto projects, checked work, pull request upkeep |
+| **Zone Studio** | People making images, video and their own models | ComfyUI generation, LoRA and fine-tune training, character chats |
+
 ## Contents
 
 - [Features](#features)
@@ -22,26 +32,43 @@ Your AI, your data, your infrastructure—put your backlog on autopilot.
 
 ## Features
 
-### AI & LLM
+### Zone
 - **Local LLM Inference**: Run powerful language models locally with Ollama
 - **Intelligent Routing**: Automatic model selection based on query complexity (LiteLLM)
-- **Zone Chat**: Built-in conversations, history, web search, and agent tools
+- **Zone Chat**: Built-in conversations, history, web search, and agent tools; a tool call that writes to the host, runs a command or leaves the workspace waits for your approval unless the chat auto-approves
+- **Knowledge Base**: A wiki per workspace with semantic search, which promotes answers the workspace keeps giving into standing instructions
+- **Sources**: Index GitHub, GitLab, local folders, web pages and text for chats and tasks
+- **Reminders**: One-off and recurring reminders (hourly at most)
+- **Workspace digests**: A daily, weekly or monthly summary per workspace of its runs, success rate and trend, failures and regressions, sent through the configured Slack, Discord or email notifier; off unless `ZONE_REPORT_ENABLED` is on (`true`, `1`, `yes`, `on`) (see [Workspace digests](docs/CONFIGURATION.md#-workspace-digests))
+- **Apps**: Desktop (macOS, Linux), Android and iOS clients and the `zone` CLI, with an admin list to allow or block each device
+- **Private Web Search** (optional): VPN-protected metasearch engine; when the VPN is on, all stack internet traffic uses the same tunnel
+- **Multi-Tenant Architecture**: Organizations and workspaces for team collaboration, with email invitations
+- **Role-Based Access Control**: Fine-grained permissions with users, roles, policies and an audit log
+- **Theme Customization**: Workspace-specific theming
+
+### Zone Code
 - **Coding Agent Providers**: An organization can run its chats and tasks on the Claude Code or Codex CLI in the manager image, signed in with its own Claude or ChatGPT subscription (see Model Backend in [docs/CONFIGURATION.md](docs/CONFIGURATION.md))
 - **Multiple Agent Accounts**: Sign an organization in to several Claude and ChatGPT accounts; each chat and task starts on the one with the most usage left, and hands over to another mid-answer when it hits a limit (see [Which account runs a chat](docs/CONFIGURATION.md#which-account-runs-a-chat))
-- **Private Web Search** (optional): VPN-protected metasearch engine; when the VPN is on, all stack internet traffic uses the same tunnel
-
-### Platform Management
-- **Multi-Tenant Architecture**: Organizations and workspaces for team collaboration
-- **Role-Based Access Control**: Fine-grained permissions with users, roles, and policies
-- **Project & Task Management**: Organize work with agentic task execution
+- **Project & Task Management**: Projects linked to repositories, tasks on a kanban board, and two-way GitHub and Linear issue sync
 - **Auto projects**: Describe a project, answer the interview, and Zone plans, builds, reviews with a second model, merges and reports every task until the project is complete
+- **Subagents**: The subagents a coding agent starts show in the chat beside its answer
+- **Checked work**: Every change an agent makes to a task, document, message or reminder gets a receipt built from the tool call, not from the model's account of it, and a check the model proposes is run and judged by the server
+- **Learning from runs**: What worked, what failed and what reviewers said becomes conventions and lessons in later prompts once a second run confirms them
+- **Pull request upkeep**: Fixes a pull request until its checks pass, repairs merge conflicts and refuses a repair that drops either side, scores each change's blast radius, merges from the chat, and flags tasks that regress after they finish
+- **Task run evaluation**: Tests, lint and typecheck are measured before and after each task run and the run judged improved, unchanged or regressed; build and coverage are opt-in through `ZONE_TASK_EVALUATION_CATEGORIES`, and it is off unless `ZONE_TASK_EVALUATION` is on (`true`, `1`, `yes`, `on`) (see [Task evaluation](docs/CONFIGURATION.md#-task-evaluation))
+- **Analytics**: A page per workspace over 24 hours, 7, 30 or 90 days: success rate and trend, runs by outcome, failure kinds, per-source and per-model breakdowns, pull request merge rate and time to merge, task status and origins, and evaluation verdicts
+- **GitHub App & Releases**: Connect repositories through an organization's GitHub App, and cut releases from the workspace
 - **MCP tools**: Attach stdio and streamable HTTP MCP servers (magents by default) so tasks can spawn or message other coding agents, or import the ones a connected provider already has configured
-- **Source Integration**: Connect and manage various data sources
-- **Wiki & Documentation**: Built-in knowledge base per workspace
-- **Theme Customization**: Workspace-specific theming
+
+### Zone Studio
+- **Generation**: Images (SDXL, FLUX), image edits (Qwen Image Edit) and audio (ACE-Step) as chat tools, plus video (Wan 2.2 A14B) and upscaling (Real-ESRGAN) when a chat without Agent mode asks for them, all through ComfyUI (see [docs/COMFYUI.md](docs/COMFYUI.md))
+- **Training**: LoRA, full fine-tune and pivotal training for people and other subjects, on this machine or on Runpod; a chat switches to a trained LoRA when the prompt names its subject
+- **Language Model Fine-Tunes**: LoRA and full post-training of chat models with MLX on the host
+- **Character Cards**: V1, V2 and V3 JSON or PNG cards become a chat's persona
 
 ### Infrastructure
 - **Reverse Proxy**: Automatic HTTPS with Let's Encrypt (Traefik)
+- **Kubernetes**: Helm charts for the infrastructure, AI and app tiers (see [helm/QUICK_START.md](helm/QUICK_START.md))
 - **Comprehensive Monitoring**: Prometheus metrics with Grafana dashboards
 - **Security First**: JWT authentication, basic auth, secrets management, and no telemetry from Zone itself (the Codex CLI still exports its own metrics to OpenAI when an organization uses it)
 
@@ -88,7 +115,7 @@ Access the services:
 ### Prerequisites
 
 - **Ollama** installed and listening on port 11434 (host daemon is the default engine)
-- **Docker** (20.10+) and **Docker Compose** (v2.0+)
+- **Docker** (20.10+) and **Docker Compose** (v2.0+; v2.24+ for the `vpn` profile)
 - **8 GB RAM** for chat only; **16 GB** for vision (`llava:7b`); **64 GB** for video (Wan 2.2 A14B)
 - **174 GB free disk** for every feature; a chat-only install is a few GB
 - **NVIDIA GPU** (optional, only for `--profile bundled-ollama`)
@@ -130,20 +157,22 @@ OLLAMA_BASE_URL=http://ollama:11434
 | Service | Description | Port | Tech Stack |
 |---------|-------------|------|------------|
 | **Manager API** | Backend API for platform management | 8000 | Rust, Axum, sqlx |
-| **Manager Console** | Web frontend for workspace management and chat | 5173 | React 19, TypeScript, Tailwind |
+| **Manager Console** | Web frontend for workspace management and chat | 3001 | React 19, TypeScript, Tailwind |
 | **LiteLLM** | LLM proxy with semantic routing | 4000 | Python |
-| **Ollama** | Local LLM inference engine | 11434 | Go |
+| **Ollama** | Local LLM inference engine (host daemon by default) | 11434 | Go |
 | **PostgreSQL** | Database with pgvector | 5432 | PostgreSQL 16 |
 | **Valkey** | In-memory cache | 6379 | Valkey (Redis fork) |
 | **Traefik** | Reverse proxy with TLS | 80, 443 | Go |
+
+Only Traefik publishes public ports; everything else is reached through it, apart from the manager's Claude sign-in callback on `127.0.0.1:54545`. The `dev` profile also publishes the manager, console, PostgreSQL and Valkey.
 
 ### Optional Services (Profiles)
 
 | Profile | Services | Description |
 |---------|----------|-------------|
 | `dev` | Manager + console overlays | Hot reload (`docker-compose.dev.yml`) |
-| `vpn` | Gluetun, SearXNG | Full-tunnel VPN for stack internet traffic |
-| `monitoring` | Prometheus, Grafana | Metrics and dashboards |
+| `vpn` | Gluetun, SearXNG | Full-tunnel VPN for stack internet traffic (Compose v2.24+) |
+| `monitoring` | Prometheus, Grafana, exporters | Metrics and dashboards |
 | `bundled-ollama` | Ollama | In-compose engine (Linux NVIDIA / CPU) |
 | `bundled-comfyui` | ComfyUI | Bundled NVIDIA image/video/audio/upscale runtime |
 
@@ -250,10 +279,10 @@ make pull-models       # Manually pull models
 make list-models       # List downloaded models
 
 # Development
-make dev               # Start with live logs
+make dev               # Hot reload
 make rebuild           # Rebuild and restart
-make test              # Run tests
-make lint              # Run linters
+make test              # Smoke test the running stack
+make dev-check         # Format check, lint and test every project
 
 # Maintenance
 make backup            # Backup volumes
@@ -286,6 +315,10 @@ curl -X POST https://manager.yourdomain.com/api/auth/login \
 
 # List workspaces (with JWT token)
 curl https://manager.yourdomain.com/api/workspaces \
+  -H "Authorization: Bearer ${JWT_TOKEN}"
+
+# Workspace analytics (period: day, week, month or quarter)
+curl "https://manager.yourdomain.com/api/workspaces/${WORKSPACE_ID}/analytics?period=week" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
@@ -372,11 +405,12 @@ The system provides three models:
 
 | Component | Technology |
 |-----------|------------|
-| Backend | Rust 1.83+, Axum, sqlx, Redis |
-| Frontend | React 19, TypeScript, Tailwind CSS, React Router |
+| Backend | Rust 1.97.1 (edition 2024), Axum, sqlx, Redis |
+| Frontend | React 19, TypeScript, Tailwind CSS, React Router, Vite, Bun, Biome |
+| Clients | Tauri 2 (desktop, Android, iOS) |
 | Database | PostgreSQL 16 with pgvector |
 | Cache | Valkey (Redis fork) |
-| Testing | Cargo test (backend), Jest + Playwright (frontend) |
+| Testing | Cargo test / nextest (backend), `bun test` + Playwright (frontend) |
 | CI/CD | GitHub Actions |
 
 ### Local Development
@@ -409,26 +443,31 @@ A database migrated before the v1 baseline, through `024_chat_subagents.sql`, mo
 ```
 zone/
 ├── runner/                  # Rust backend workspace
-│   ├── zone_core/           # Shared agent logic & types
-│   │   ├── src/agent/       # Agent loop implementation
+│   ├── zone_core/           # Shared LLM client, MCP servers & types
 │   │   ├── src/llm/         # LLM client
-│   │   ├── src/tools/       # Agent tools
-│   │   ├── src/session/     # Session management
 │   │   └── src/types/       # Shared domain types
 │   ├── zone_server/         # HTTP/WS server
 │   │   ├── src/routes/      # API endpoints
+│   │   ├── src/agent/       # Chat agent, tools, receipts and verification
+│   │   ├── src/workers/     # Task runs, auto projects, pull requests, learning, reminders
 │   │   ├── src/services/comfy/ # ComfyUI generation and LoRA training via abnegate-comfy and abnegate-vision
 │   │   ├── src/db/          # Database queries (sqlx)
 │   │   ├── src/cache/       # Redis cache layer
 │   │   └── src/auth/        # JWT & password auth
+│   ├── zone_context/        # Source adapters, embeddings and context gathering
 │   ├── zone_cli/            # CLI tool
+│   ├── zone_desktop/        # Tauri desktop, Android and iOS client
+│   ├── zone_installer/      # Client shell that serves the console and proxies the API
 │   ├── zone_routing/        # Proxy routing for tool, MCP and command runs
 │   └── zone_runner/         # Daemon binary (command execution via abnegate-exec)
 ├── manager/                 # Manager frontend
 │   └── frontend/            # React frontend
-│       ├── src/components/  # UI components
-│       ├── src/pages/       # Page components
-│       └── src/context/     # React context
+│       ├── src/features/    # Analytics, chats, tasks, projects, knowledge, models, pull requests, releases
+│       └── src/components/  # UI components
+├── packages/ui/             # Shared @zone/ui components
+├── comfyui/                 # ComfyUI image, workflows and trainers
+├── helm/                    # Helm charts (infra, AI, apps)
+├── k8s/                     # Kind + Tilt development cluster
 ├── litellm/                 # LLM proxy configuration
 ├── ollama/                  # Model pulling scripts
 ├── searxng/                 # Search engine config

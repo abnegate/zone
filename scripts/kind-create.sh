@@ -54,6 +54,7 @@ KIND_CONFIG="$(mktemp)"
 trap 'rm -f "$KIND_CONFIG"' EXIT
 # envsubst is not always present; fall back to sed.
 if command -v envsubst >/dev/null 2>&1; then
+    # shellcheck disable=SC2016
     envsubst '${KIND_HTTP_PORT} ${KIND_HTTPS_PORT} ${KIND_STATS_PORT}' \
       < "$PROJECT_ROOT/k8s/kind-config.yaml" > "$KIND_CONFIG"
 else

@@ -159,7 +159,9 @@ test.describe('Pull requests', () => {
     const pane = details(page, notReadyPullRequest.number);
     await expect(pane).toBeVisible();
     await expect(card(page, notReadyPullRequest.title)).toHaveAttribute('aria-current', 'true');
-    await expect(page).toHaveURL(`${PAGE}?id=${encodeURIComponent(pullRequestKey(notReadyPullRequest))}`);
+    await expect(page).toHaveURL(
+      `${PAGE}?id=${encodeURIComponent(pullRequestKey(notReadyPullRequest))}`
+    );
     await expect(pane.getByRole('region', { name: 'Unresolved threads' })).toContainText(
       'Handle the error here.'
     );
@@ -261,7 +263,9 @@ test.describe('Pull requests', () => {
     const pushed = {
       ...populatedPullRequests,
       pull_requests: populatedPullRequests.pull_requests.map((pullRequest) =>
-        pullRequest.number === readyPullRequest.number ? { ...pullRequest, head: PUSHED } : pullRequest
+        pullRequest.number === readyPullRequest.number
+          ? { ...pullRequest, head: PUSHED }
+          : pullRequest
       ),
     };
     await routeApi(page, listPattern, (route) =>
@@ -269,8 +273,8 @@ test.describe('Pull requests', () => {
         ? route.fulfill({ status: 200, json: pushed })
         : route.fallback()
     );
-    const relisted = page.waitForResponse(
-      (response) => listPattern.test(new URL(response.url()).pathname)
+    const relisted = page.waitForResponse((response) =>
+      listPattern.test(new URL(response.url()).pathname)
     );
     await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')));
     await relisted;
@@ -371,10 +375,9 @@ test.describe('Pull requests', () => {
 
     const alert = dialog.getByRole('alert');
     await expect(alert).toContainText('Check the pull request on GitHub before trying again.');
-    await expect(alert.getByRole('link', { name: 'Open the pull request on GitHub' })).toHaveAttribute(
-      'href',
-      readyPullRequest.url
-    );
+    await expect(
+      alert.getByRole('link', { name: 'Open the pull request on GitHub' })
+    ).toHaveAttribute('href', readyPullRequest.url);
     await expect(dialog.getByRole('button', { name: MERGE, exact: true })).toBeDisabled();
   });
 

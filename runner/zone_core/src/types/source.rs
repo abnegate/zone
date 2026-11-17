@@ -29,7 +29,6 @@ pub enum SourceType {
     // Content sources
     GoogleCalendar,
     GoogleMail,
-    Notion,
     Slack,
     Web,
     // Text sources
@@ -75,7 +74,6 @@ impl SourceType {
             }
             SourceType::GoogleCalendar => SourceCategory::Calendar,
             SourceType::GoogleMail => SourceCategory::Mail,
-            SourceType::Notion => SourceCategory::Document,
             SourceType::Slack => SourceCategory::Communication,
             SourceType::Web => SourceCategory::Web,
             SourceType::Text => SourceCategory::Text,
@@ -154,11 +152,6 @@ mod tests {
     #[test]
     fn test_source_type_category_mail() {
         assert_eq!(SourceType::GoogleMail.category(), SourceCategory::Mail);
-    }
-
-    #[test]
-    fn test_source_type_category_notion() {
-        assert_eq!(SourceType::Notion.category(), SourceCategory::Document);
     }
 
     #[test]

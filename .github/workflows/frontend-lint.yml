@@ -5,12 +5,18 @@ on:
     branches: [main]
     paths:
       - 'manager/frontend/src/**'
+      - 'manager/frontend/e2e/**'
+      - 'manager/frontend/live/**'
+      - 'manager/frontend/*.ts'
       - 'manager/frontend/biome.json'
       - 'manager/frontend/package.json'
       - '.github/workflows/frontend-lint.yml'
   pull_request:
     paths:
       - 'manager/frontend/src/**'
+      - 'manager/frontend/e2e/**'
+      - 'manager/frontend/live/**'
+      - 'manager/frontend/*.ts'
       - 'manager/frontend/biome.json'
       - 'manager/frontend/package.json'
       - '.github/workflows/frontend-lint.yml'
@@ -34,7 +40,7 @@ jobs:
 
       - name: Run Biome lint
         working-directory: manager/frontend
-        run: biome lint src
+        run: biome lint .
 
   biome-format:
     name: Biome Format Check
@@ -50,7 +56,7 @@ jobs:
 
       - name: Check formatting
         working-directory: manager/frontend
-        run: biome format src
+        run: biome format .
 
   biome-imports:
     name: Import Organization
@@ -66,7 +72,7 @@ jobs:
 
       - name: Check import organization
         working-directory: manager/frontend
-        run: biome check --linter-enabled=false --formatter-enabled=false src
+        run: biome check --linter-enabled=false --formatter-enabled=false .
 
   audit:
     name: Security Audit

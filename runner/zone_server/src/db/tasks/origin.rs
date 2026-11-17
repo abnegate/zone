@@ -9,6 +9,8 @@ pub enum Origin {
 }
 
 impl Origin {
+    pub const ALL: [Origin; 3] = [Origin::Member, Origin::Reminder, Origin::Automation];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Member => "member",

@@ -35,12 +35,11 @@ fn section<'a>(artifacts: Option<&'a Value>, key: &str) -> Option<&'a Value> {
     artifacts?.get(key).filter(|value| !value.is_null())
 }
 
-fn count(section: Option<&Value>, key: &str) -> u32 {
+fn count(section: Option<&Value>, key: &str) -> Option<u32> {
     section
         .and_then(|value| value.get(key))
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or_default()
 }
 
 fn timestamp(section: Option<&Value>, key: &str) -> Option<NaiveDateTime> {
@@ -68,9 +67,17 @@ pub fn reception(artifacts: Option<&Value>, opened_at: Option<NaiveDateTime>) ->
 
     ChangeReception {
         minutes_to_merge: recorded_minutes.or(derived_minutes),
-        review_cycles: count(pull_request, REVIEW_CYCLES_KEY),
-        approvals: count(pull_request, APPROVALS_KEY),
+        review_cycles: review_cycles(artifacts).unwrap_or_default(),
+        approvals: approvals(artifacts).unwrap_or_default(),
     }
+}
+
+pub fn review_cycles(artifacts: Option<&Value>) -> Option<u32> {
+    count(section(artifacts, PULL_REQUEST_KEY), REVIEW_CYCLES_KEY)
+}
+
+pub fn approvals(artifacts: Option<&Value>) -> Option<u32> {
+    count(section(artifacts, PULL_REQUEST_KEY), APPROVALS_KEY)
 }
 
 /// The review comment bodies recorded against a run, if any were ever synced.
@@ -228,6 +235,24 @@ mod tests {
             ChangeReception::default(),
             "a malformed artifact must not be read as a score"
         );
+    }
+
+    #[test]
+    fn review_counts_are_unknown_unless_recorded_as_a_count_that_fits() {
+        let recorded = json!({ "pr": { "review_cycles": 3, "approvals": 0 } });
+        assert_eq!(review_cycles(Some(&recorded)), Some(3));
+        assert_eq!(approvals(Some(&recorded)), Some(0));
+
+        let unsynced = json!({ "pr": { "pr_url": "https://example.test/pull/1" } });
+        assert_eq!(review_cycles(Some(&unsynced)), None);
+        assert_eq!(approvals(Some(&unsynced)), None);
+
+        let wild = json!({ "pr": { "review_cycles": 1e20, "approvals": -2 } });
+        assert_eq!(review_cycles(Some(&wild)), None);
+        assert_eq!(approvals(Some(&wild)), None);
+
+        let legacy = json!({ "pr": "https://example.test/pull/1" });
+        assert_eq!(review_cycles(Some(&legacy)), None);
     }
 
     #[test]
