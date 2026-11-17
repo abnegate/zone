@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use super::digest::{Digest, generate};
 use super::schedule::{Cadence, Due, Schedule, due};
+use crate::config::Environment;
 use crate::db::DbResult;
 use crate::db::analytics::{self, ReportableWorkspace};
 use crate::state::AppState;
@@ -42,7 +43,7 @@ const DAY_OF_MONTH_VARIABLE: &str = "ZONE_REPORT_DAY_OF_MONTH";
 /// The raw environment a schedule is resolved from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReportEnvironment {
-    pub enabled: Option<String>,
+    pub enabled: Option<bool>,
     pub cadence: Option<String>,
     pub hour: Option<String>,
     pub weekday: Option<String>,
@@ -51,12 +52,17 @@ pub struct ReportEnvironment {
 
 impl ReportEnvironment {
     pub fn from_process() -> Self {
+        Self::from_lookup(|variable| std::env::var(variable).ok())
+    }
+
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let environment = Environment::new(lookup);
         Self {
-            enabled: std::env::var(ENABLED_VARIABLE).ok(),
-            cadence: std::env::var(CADENCE_VARIABLE).ok(),
-            hour: std::env::var(HOUR_VARIABLE).ok(),
-            weekday: std::env::var(WEEKDAY_VARIABLE).ok(),
-            day_of_month: std::env::var(DAY_OF_MONTH_VARIABLE).ok(),
+            enabled: environment.flag(ENABLED_VARIABLE),
+            cadence: environment.read(CADENCE_VARIABLE),
+            hour: environment.read(HOUR_VARIABLE),
+            weekday: environment.read(WEEKDAY_VARIABLE),
+            day_of_month: environment.read(DAY_OF_MONTH_VARIABLE),
         }
     }
 }
@@ -111,11 +117,7 @@ impl ReportSettings {
         );
 
         Self {
-            enabled: environment
-                .enabled
-                .as_deref()
-                .map(parse_flag)
-                .unwrap_or(defaults.enabled),
+            enabled: environment.enabled.unwrap_or(defaults.enabled),
             schedule: Schedule {
                 cadence,
                 hour: or_default(
@@ -155,13 +157,6 @@ impl ReportSettings {
     pub fn from_process_environment() -> Self {
         Self::resolve(&ReportEnvironment::from_process())
     }
-}
-
-fn parse_flag(raw: &str) -> bool {
-    matches!(
-        raw.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
 }
 
 /// The last delivery per workspace, held across cycles.
@@ -346,7 +341,7 @@ mod tests {
 
     fn environment(cadence: &str, hour: &str) -> ReportEnvironment {
         ReportEnvironment {
-            enabled: Some("true".to_string()),
+            enabled: Some(true),
             cadence: Some(cadence.to_string()),
             hour: Some(hour.to_string()),
             ..ReportEnvironment::default()
@@ -359,6 +354,45 @@ mod tests {
 
         assert!(!settings.enabled);
         assert_eq!(settings.schedule, Schedule::default());
+    }
+
+    #[test]
+    fn blank_values_read_as_unset() {
+        let variables = [
+            ENABLED_VARIABLE,
+            CADENCE_VARIABLE,
+            HOUR_VARIABLE,
+            WEEKDAY_VARIABLE,
+            DAY_OF_MONTH_VARIABLE,
+        ];
+        for blank in ["", "  ", "\t"] {
+            let environment = ReportEnvironment::from_lookup(|variable| {
+                variables.contains(&variable).then(|| blank.to_string())
+            });
+
+            assert_eq!(
+                environment,
+                ReportEnvironment::default(),
+                "{blank:?} must read as unset"
+            );
+            assert_eq!(
+                ReportSettings::resolve(&environment),
+                ReportSettings::default()
+            );
+        }
+    }
+
+    #[test]
+    fn non_blank_values_are_read_through_the_lookup() {
+        let environment = ReportEnvironment::from_lookup(|variable| {
+            (variable == CADENCE_VARIABLE).then(|| "daily".to_string())
+        });
+
+        assert_eq!(environment.cadence.as_deref(), Some("daily"));
+        assert_eq!(
+            ReportSettings::resolve(&environment).schedule.cadence,
+            Cadence::Daily
+        );
     }
 
     #[test]

@@ -20,42 +20,26 @@ set -eu
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+# shellcheck source=SCRIPTDIR/env-file.sh
+. "$root/scripts/env-file.sh"
+
 ZONE_ENV_FILE=${ZONE_ENV_FILE:-$root/.env}
 KNOWN_PROFILES='dev vpn monitoring bundled-ollama bundled-comfyui comfyui-model-setup'
 ALL_OVERLAY_PROFILES='dev,vpn,monitoring,bundled-ollama,bundled-comfyui,comfyui-model-setup'
 
 is_on() {
-    value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-    case "$value" in
+    case $(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') in
         1|true|yes|on) return 0 ;;
         *) return 1 ;;
     esac
 }
 
-read_env_value() {
-    name=$1
-    file=$2
-    if [ ! -f "$file" ]; then
-        return 0
-    fi
-    awk -F= -v name="$name" '
-        $0 ~ "^[[:space:]]*(export[[:space:]]+)?" name "[[:space:]]*=" {
-            value = $0
-            sub(/^[[:space:]]*(export[[:space:]]+)?[^=]+=/, "", value)
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-            gsub(/^["'\'']|["'\'']$/, "", value)
-            found = value
-        }
-        END { if (found != "") print found }
-    ' "$file"
-}
-
 zone_vpn_enabled() {
-    value=${ZONE_VPN:-}
-    if [ -z "$value" ]; then
-        value=$(read_env_value ZONE_VPN "$ZONE_ENV_FILE")
+    vpn=${ZONE_VPN:-}
+    if [ -z "$vpn" ]; then
+        vpn=$(read_env_value ZONE_VPN "$ZONE_ENV_FILE")
     fi
-    is_on "$value"
+    is_on "$vpn"
 }
 
 tokenize_profiles() {

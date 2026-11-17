@@ -143,35 +143,42 @@ verify-comfyui-audio-model: ## Verify the installed ACE-Step v1 3.5B size and SH
 
 setup-auth: ## Generate basic auth credentials
 	@echo "$(BLUE)Setting up basic authentication...$(NC)"
-	@mkdir -p auth
-	@read -p "Enter username: " username; \
-	htpasswd -cB auth/users.htpasswd $$username
+	@file=$$(sh scripts/auth-file.sh prepare) || exit 1; \
+	printf 'Enter username: '; read -r username; \
+	htpasswd -cB "$$file" "$$username"
 
 add-user: ## Add additional basic auth user
 	@echo "$(BLUE)Adding user to basic authentication...$(NC)"
-	@read -p "Enter username: " username; \
-	htpasswd -B auth/users.htpasswd $$username
+	@file=$$(sh scripts/auth-file.sh path) || exit 1; \
+	printf 'Enter username: '; read -r username; \
+	htpasswd -B "$$file" "$$username"
 
 validate: ## Validate configuration
 	@echo "$(BLUE)Validating configuration...$(NC)"
-	@if [ -f .env ] && [ -f auth/users.htpasswd ]; then \
-		echo "$(GREEN)✓ .env file exists$(NC)"; \
-		echo "$(GREEN)✓ auth file exists$(NC)"; \
-		$(COMPOSE) --replace-profiles= config --quiet && echo "$(GREEN)✓ Docker Compose config is valid$(NC)" || echo "$(RED)✗ Docker Compose config is invalid$(NC)"; \
-		$(COMPOSE) --replace-profiles=dev,vpn,monitoring,bundled-ollama,bundled-comfyui,comfyui-model-setup config --quiet \
-			&& echo "$(GREEN)✓ Combined Compose profiles are valid$(NC)" || echo "$(RED)✗ Combined Compose profiles are invalid$(NC)"; \
-		sh scripts/test-model-proxy.sh; \
-		sh scripts/test-vpn-compose.sh; \
-		sh scripts/test-compose-profiles.sh; \
-		sh scripts/test-dockerfile-members.sh; \
-		sh scripts/test-pull-models.sh; \
-		sh scripts/test-setup.sh; \
-		python3 -m unittest -v scripts/test_setup_models.py; \
-		( cd comfyui && python3 -m unittest -v tests.test_download_models ); \
-	else \
-		echo "$(RED)✗ Missing .env or auth/users.htpasswd. Run 'make setup' first.$(NC)"; \
+	@if [ ! -f .env ]; then \
+		echo "$(RED)✗ Missing .env. Run 'make setup' first.$(NC)"; \
 		exit 1; \
-	fi
+	fi; \
+	if ! problem=$$(sh scripts/auth-file.sh check); then \
+		echo "$(RED)✗ $$problem$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "$(GREEN)✓ .env file exists$(NC)"; \
+	echo "$(GREEN)✓ auth file exists$(NC)"; \
+	$(COMPOSE) --replace-profiles= config --quiet && echo "$(GREEN)✓ Docker Compose config is valid$(NC)" || echo "$(RED)✗ Docker Compose config is invalid$(NC)"; \
+	$(COMPOSE) --replace-profiles=dev,vpn,monitoring,bundled-ollama,bundled-comfyui,comfyui-model-setup config --quiet \
+		&& echo "$(GREEN)✓ Combined Compose profiles are valid$(NC)" || echo "$(RED)✗ Combined Compose profiles are invalid$(NC)"; \
+	sh scripts/test-model-proxy.sh; \
+	sh scripts/test-vpn-compose.sh; \
+	sh scripts/test-env-file.sh; \
+	sh scripts/test-auth-file.sh; \
+	sh scripts/test-smoke-test.sh; \
+	sh scripts/test-compose-profiles.sh; \
+	sh scripts/test-dockerfile-members.sh; \
+	sh scripts/test-pull-models.sh; \
+	sh scripts/test-setup.sh; \
+	python3 -m unittest -v scripts/test_setup_models.py; \
+	( cd comfyui && python3 -m unittest -v tests.test_download_models )
 
 ##@ Docker Operations
 
@@ -602,16 +609,8 @@ shell-valkey: ## Open shell in valkey container
 
 ##@ Testing
 
-test: ## Run basic smoke tests for all services
-	@echo "$(BLUE)Running smoke tests...$(NC)"
-	@echo "Testing Ollama API..."
-	@curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && echo "$(GREEN)✓ Ollama$(NC)" || echo "$(RED)✗ Ollama$(NC)"
-	@echo "Testing LiteLLM API..."
-	@curl -sf http://localhost:4000/health >/dev/null 2>&1 && echo "$(GREEN)✓ LiteLLM$(NC)" || echo "$(RED)✗ LiteLLM$(NC)"
-	@echo "Testing Manager API..."
-	@curl -sf http://localhost:8000/api/health >/dev/null 2>&1 && echo "$(GREEN)✓ Manager$(NC)" || echo "$(RED)✗ Manager$(NC)"
-	@echo "Testing Console..."
-	@curl -sf http://localhost:3000/health >/dev/null 2>&1 && echo "$(GREEN)✓ Console$(NC)" || echo "$(RED)✗ Console$(NC)"
+test: ## Smoke test the running stack
+	@sh scripts/smoke-test.sh
 
 test-server: ## Run zone_server (Rust) unit tests
 	@echo "$(BLUE)Running zone_server tests...$(NC)"

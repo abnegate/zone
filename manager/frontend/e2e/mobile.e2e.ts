@@ -1,6 +1,6 @@
-import { test, expect } from './fixtures';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { routeApi } from './test-utils';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
 
 // Use iPhone 12 viewport dimensions for mobile tests
 test.describe('Mobile Responsiveness', () => {

@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { z } from 'zod';
 
-import { rustVariants, structFields } from '../../test/rust';
+import { rustShape, type WireField, type WireShape, zodShape } from '../../test/contract';
+import { rustVariants } from '../../test/rust';
 import {
   CreatedResponseSchema,
   CreatedSchema,
@@ -41,32 +42,17 @@ const ROUTES = join(SERVER, 'routes/releases');
 const ENVELOPE = ['code', 'error'];
 const FLATTENED = 'detail';
 const SUCCESS = 'success';
+const REQUIRED: WireField = { optional: false, nullable: false };
 
 const read = (path: string): string => readFileSync(path, 'utf8');
 
 type Shaped = z.ZodObject<z.ZodRawShape>;
 
-function rustShape(path: string, structName: string): Record<string, boolean> {
-  return Object.fromEntries(
-    structFields(read(path), structName).map((field) => [field.name, field.optional])
-  );
-}
-
-/// Whether the parsed value may lack the key. `isOptional()` would also count a
-/// `.default()` or `.catch()`, which only make the console tolerant of a field
-/// the server always sends; serde omits a key only under `skip_serializing_if`,
-/// and that is what the output optionality must mirror.
-function zodShape(schema: Shaped): Record<string, boolean> {
-  return Object.fromEntries(
-    Object.entries(schema.shape).map(([key, value]) => [key, value._zod.optout === 'optional'])
-  );
-}
-
 const keys = (shape: Record<string, unknown>): string[] => Object.keys(shape).sort();
 
 const sorted = (values: readonly string[]): string[] => [...values].sort();
 
-function withoutEnvelope(shape: Record<string, boolean>): Record<string, boolean> {
+function withoutEnvelope(shape: WireShape): WireShape {
   return Object.fromEntries(Object.entries(shape).filter(([key]) => !ENVELOPE.includes(key)));
 }
 
@@ -91,7 +77,7 @@ describe('a release reads as the server serialises it', () => {
     ['Preview', join(RELEASES, 'preview.rs'), PreviewSchema],
     ['Created', join(RELEASES, 'created.rs'), CreatedSchema],
   ])('%s carries the same fields on both sides', (structName, path, schema) => {
-    expect(zodShape(schema)).toEqual(rustShape(path, structName));
+    expect(zodShape(schema)).toEqual(rustShape(read(path), structName));
   });
 });
 
@@ -103,27 +89,32 @@ describe('the release routes answer in the envelopes the console reads', () => {
     ['PreviewResponse', 'preview_response.rs', PreviewResponseSchema],
     ['CreatedResponse', 'created_response.rs', CreatedResponseSchema],
   ])('%s carries the same fields on both sides', (structName, file, schema) => {
-    expect(zodShape(schema)).toEqual(rustShape(join(ROUTES, file), structName));
+    expect(zodShape(schema)).toEqual(rustShape(read(join(ROUTES, file)), structName));
   });
 
   test.each<[string, string, Shaped]>([
     ['PreviewRequest', 'preview_request.rs', PreviewRequestSchema],
     ['CreateRequest', 'create_request.rs', CreateReleaseRequestSchema],
   ])('%s is sent with the fields the server reads', (structName, file, schema) => {
-    expect(keys(schema.shape)).toEqual(keys(rustShape(join(ROUTES, file), structName)));
+    expect(keys(schema.shape)).toEqual(keys(rustShape(read(join(ROUTES, file)), structName)));
   });
 });
 
 describe('a release refusal reads as the server flattens it', () => {
-  const envelope = rustShape(join(ROUTES, 'refusal_response.rs'), 'RefusalResponse');
-  const tag = rustShape(join(ROUTES, 'tag_detail.rs'), 'TagDetail');
+  const envelope = rustShape(read(join(ROUTES, 'refusal_response.rs')), 'RefusalResponse');
+  const tag = rustShape(read(join(ROUTES, 'tag_detail.rs')), 'TagDetail');
   const reconciliation = rustShape(
-    join(ROUTES, 'reconciliation_detail.rs'),
+    read(join(ROUTES, 'reconciliation_detail.rs')),
     'ReconciliationDetail'
   );
 
   test('every refusal carries the error and code, a flattened detail, and a success flag the console ignores', () => {
-    expect(envelope).toEqual({ [SUCCESS]: false, error: false, code: false, [FLATTENED]: false });
+    expect(envelope).toEqual({
+      [SUCCESS]: REQUIRED,
+      error: REQUIRED,
+      code: REQUIRED,
+      [FLATTENED]: REQUIRED,
+    });
     for (const option of RefusalSchema.options) {
       expect(keys(option.shape)).toEqual(expect.arrayContaining(ENVELOPE));
       expect(option.shape).not.toHaveProperty(SUCCESS);

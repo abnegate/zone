@@ -1,17 +1,10 @@
 import { ApiError } from '../../api/ApiError';
-import { deviceHeaders } from '../../api/device';
+import { AuthorizedApi } from '../../api/AuthorizedApi';
 import { HttpStatus } from '../../api/HttpStatus';
-import { session } from '../../api/session';
 
 export const REFRESH = '1';
 
-export abstract class GitHubApi {
-  private getAccessToken: () => string | null = () => session.getAccessToken();
-
-  setGetAccessToken(provider: () => string | null): void {
-    this.getAccessToken = provider;
-  }
-
+export abstract class GitHubApi extends AuthorizedApi {
   protected abstract refusal(body: unknown): ApiError | null;
 
   protected async send(url: string, init: RequestInit, action: string): Promise<unknown> {
@@ -20,18 +13,6 @@ export abstract class GitHubApi {
       throw await this.failure(response, action);
     }
     return response.json();
-  }
-
-  private headers(): HeadersInit {
-    const headers: HeadersInit = {
-      'Content-Type': 'application/json',
-      ...deviceHeaders(),
-    };
-    const token = this.getAccessToken();
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-    return headers;
   }
 
   private async failure(response: Response, action: string): Promise<ApiError> {

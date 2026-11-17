@@ -21,6 +21,7 @@ pub mod worker;
 
 pub use period::{BucketSize, TimePeriod, TimeWindow, last_weekday_before};
 pub use summary::{
-    AgentAnalytics, AgentRun, CompletionTimes, SeriesPoint, Trend, TrendDirection, summarize,
+    AgentAnalytics, AgentRun, CompletionTimes, SeriesPoint, Trend, TrendDirection,
+    completion_times, outcomes, summarize,
 };
 pub use worker::{AnalyticsPolicy, load_runs, run_cycle};

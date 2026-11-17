@@ -1,5 +1,5 @@
-import { defineConfig, devices } from '@playwright/test';
 import os from 'node:os';
+import { defineConfig, devices } from '@playwright/test';
 
 // Allow configurable port for running alongside other services
 const isCI = !!process.env.CI;
@@ -91,9 +91,7 @@ export default defineConfig({
   reporter: collectCoverage ? coverageReporter : defaultReporters,
   use: {
     baseURL,
-    ...(process.env.PLAYWRIGHT_CHANNEL
-      ? { channel: process.env.PLAYWRIGHT_CHANNEL }
-      : {}),
+    ...(process.env.PLAYWRIGHT_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHANNEL } : {}),
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     navigationTimeout: 30000, // 30s for navigation

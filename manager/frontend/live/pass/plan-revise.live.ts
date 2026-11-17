@@ -23,22 +23,17 @@ import {
 const REPO_PROJECT = 'Real pass repository';
 const SOURCE = 'Scratch repo';
 
-async function toggle(
-  dialog: Locator,
-  title: string,
-  wanted: boolean,
-): Promise<void> {
+async function toggle(dialog: Locator, title: string, wanted: boolean): Promise<void> {
   const label = dialog.locator('label.toggle-label', { hasText: title });
   await expect(label).toBeVisible();
   const box = label.locator('input[type="checkbox"]');
-  if ((await box.isChecked()) !== wanted)
-    await label.locator('.toggle-slider').click();
+  if ((await box.isChecked()) !== wanted) await label.locator('.toggle-slider').click();
   await expect(box).toBeChecked({ checked: wanted });
 }
 
 function calls(runId: string): string[] {
   return sql(
-    `select case when message like 'Executing tool:%' then replace(message, 'Executing tool: ', '') || ' | call | ' || left(coalesce(metadata->>'args', ''), 160) else replace(replace(message, 'Tool ', ''), ' finished', '') || ' | ' || case when metadata->>'success' = 'true' then 'ok' else 'failed' end || ' | ' || left(coalesce(metadata->>'error', metadata->>'output', ''), 160) end from task_run_logs where task_run_id = '${runId}' and (message like 'Executing tool:%' or message like 'Tool % finished') order by created_at`,
+    `select case when message like 'Executing tool:%' then replace(message, 'Executing tool: ', '') || ' | call | ' || left(coalesce(metadata->>'args', ''), 160) else replace(replace(message, 'Tool ', ''), ' finished', '') || ' | ' || case when metadata->>'success' = 'true' then 'ok' else 'failed' end || ' | ' || left(coalesce(metadata->>'error', metadata->>'output', ''), 160) end from task_run_logs where task_run_id = '${runId}' and (message like 'Executing tool:%' or message like 'Tool % finished') order by created_at`
   );
 }
 
@@ -63,7 +58,7 @@ test.describe('plan revise', () => {
     await dialog
       .locator('#task-description')
       .fill(
-        `Rename the function area in src/widget.py to widget_area_${s} and update check.sh accordingly.`,
+        `Rename the function area in src/widget.py to widget_area_${s} and update check.sh accordingly.`
       );
     await dialog.getByRole('button', { name: 'Next' }).click();
     await toggle(dialog, 'Enable Agentic Mode', true);
@@ -76,14 +71,12 @@ test.describe('plan revise', () => {
     }
     await dialog.getByRole('button', { name: 'Create Task' }).click();
     await expect(dialog).toBeHidden({ timeout: 30_000 });
-    const { body } = await api(
-      'GET',
-      `/api/workspaces/${state.owner.workspace.id}/tasks`,
-      { token: await ownerToken() },
+    const { body } = await api('GET', `/api/workspaces/${state.owner.workspace.id}/tasks`, {
+      token: await ownerToken(),
+    });
+    const task = ((body as { tasks?: { id: string; title: string }[] }).tasks ?? []).find(
+      (t) => t.title === title
     );
-    const task = (
-      (body as { tasks?: { id: string; title: string }[] }).tasks ?? []
-    ).find((t) => t.title === title);
     expect(task).toBeTruthy();
     await chooseTaskAction(page, title, 'Run');
     await page.getByRole('button', { name: /start execution/i }).click();
@@ -91,13 +84,13 @@ test.describe('plan revise', () => {
       .poll(
         () =>
           sql(
-            `select status from task_runs where task_id = '${task!.id}' order by started_at desc limit 1`,
+            `select status from task_runs where task_id = '${task!.id}' order by started_at desc limit 1`
           ).join(','),
-        { timeout: 1_500_000, intervals: [3_000] },
+        { timeout: 1_500_000, intervals: [3_000] }
       )
       .toMatch(/waiting|completed|failed/);
     const parked = sql(
-      `select id || '|' || status from task_runs where task_id = '${task!.id}' order by started_at desc limit 1`,
+      `select id || '|' || status from task_runs where task_id = '${task!.id}' order by started_at desc limit 1`
     )[0].split('|');
     const prompt = page.locator('.execution-question');
     let options: string[] = [];
@@ -105,9 +98,7 @@ test.describe('plan revise', () => {
       await expect(prompt).toBeVisible({ timeout: 60_000 });
       options = await prompt
         .getByRole('radio')
-        .evaluateAll((els) =>
-          els.map((e) => (e as HTMLInputElement).labels?.[0]?.innerText ?? ''),
-        );
+        .evaluateAll((els) => els.map((e) => (e as HTMLInputElement).labels?.[0]?.innerText ?? ''));
       // Revise says "say what to change under Other", and the text box
       // opens only under Other, so the instruction to stop is sent as Other.
       await prompt.getByRole('radio', { name: 'Other' }).check();
@@ -121,18 +112,18 @@ test.describe('plan revise', () => {
       .poll(
         () =>
           sql(
-            `select status from task_runs where task_id = '${task!.id}' order by started_at desc limit 1`,
+            `select status from task_runs where task_id = '${task!.id}' order by started_at desc limit 1`
           ).join(','),
-        { timeout: 1_500_000, intervals: [3_000] },
+        { timeout: 1_500_000, intervals: [3_000] }
       )
       .toMatch(/completed|failed|cancelled|waiting/);
     await page.waitForTimeout(3_000);
     const after = sql(
-      `select id || '|' || status from task_runs where task_id = '${task!.id}' order by started_at desc limit 1`,
+      `select id || '|' || status from task_runs where task_id = '${task!.id}' order by started_at desc limit 1`
     )[0].split('|');
     const made = calls(after[0]);
     const writes = made.filter((c) =>
-      /^(write_file|apply_patch|run_shell|run_command) \| ok/.test(c),
+      /^(write_file|apply_patch|run_shell|run_command) \| ok/.test(c)
     );
     const summary = (
       await page
@@ -143,8 +134,7 @@ test.describe('plan revise', () => {
     ).replace(/\s+/g, ' ');
     await shot(page, '26-plan-revise-outcome');
     record(26.5, {
-      result:
-        parked[1] === 'waiting' && writes.length === 0 ? 'WORKS' : 'FAILS',
+      result: parked[1] === 'waiting' && writes.length === 0 ? 'WORKS' : 'FAILS',
       note: 'The plan card offers Approve, Revise and Other; there is no Reject. What to change goes under Other, so the instruction to stop was sent there.',
       task_id: task!.id,
       run_id: after[0],

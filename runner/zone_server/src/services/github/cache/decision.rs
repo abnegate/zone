@@ -5,6 +5,7 @@ use super::super::snapshot::Snapshot;
 pub(super) enum Decision<T> {
     Serve(Snapshot<T>, Freshness),
     Refuse(Fault),
+    Revalidate(Snapshot<T>, Freshness),
     Fetch,
 }
 
@@ -13,7 +14,7 @@ impl<T> Decision<T> {
         match self {
             Decision::Serve(snapshot, freshness) => Some(Ok((snapshot, freshness))),
             Decision::Refuse(fault) => Some(Err(fault)),
-            Decision::Fetch => None,
+            Decision::Revalidate(..) | Decision::Fetch => None,
         }
     }
 }

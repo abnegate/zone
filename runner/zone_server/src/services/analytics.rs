@@ -1,0 +1,104 @@
+mod evaluation_summary;
+mod model_breakdown;
+mod overview;
+mod pull_request_summary;
+mod source_breakdown;
+mod tally;
+mod task_summary;
+mod truncation;
+
+use chrono::NaiveDateTime;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::db::DbResult;
+use crate::db::analytics;
+use crate::db::analytics::AttributedRunRow;
+use crate::workers::analytics::AgentRun;
+use crate::workers::analytics::TimePeriod;
+use crate::workers::analytics::summarize;
+use crate::workers::evaluation;
+
+pub use evaluation_summary::EvaluationSummary;
+pub use model_breakdown::ModelBreakdown;
+pub use overview::Overview;
+pub use pull_request_summary::PullRequestSummary;
+pub use source_breakdown::SourceBreakdown;
+pub use tally::Tally;
+pub use task_summary::TaskSummary;
+pub use truncation::Truncation;
+
+pub const MAXIMUM_RUNS: i64 = 10_000;
+pub const MAXIMUM_PULL_REQUESTS: i64 = 10_000;
+
+pub async fn overview(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    period: TimePeriod,
+    now: NaiveDateTime,
+) -> DbResult<Overview> {
+    let window = period.window_ending(now);
+    let (start, end) = (window.start, window.end);
+
+    let mut snapshot = analytics::snapshot(pool).await?;
+    let attributed =
+        analytics::attributed_runs(&mut *snapshot, workspace_id, start, end, MAXIMUM_RUNS).await?;
+    let pull_requests = analytics::pull_requests(
+        &mut *snapshot,
+        workspace_id,
+        start,
+        end,
+        MAXIMUM_PULL_REQUESTS,
+    )
+    .await?;
+    let statuses = analytics::task_statuses(&mut *snapshot, workspace_id).await?;
+    let origins = analytics::task_origins(&mut *snapshot, workspace_id, start, end).await?;
+    let activity = analytics::task_activity(&mut *snapshot, workspace_id, start, end).await?;
+    let verdicts = analytics::evaluation_verdicts(
+        &mut *snapshot,
+        workspace_id,
+        start,
+        end,
+        evaluation::PHASE,
+        evaluation::AGENT,
+    )
+    .await?;
+    snapshot.commit().await?;
+
+    let (runs, attributions): (Vec<AgentRun>, Vec<&AttributedRunRow>) = attributed
+        .rows
+        .iter()
+        .filter_map(|row| AgentRun::from_row(&row.run).map(|run| (run, row)))
+        .unzip();
+    let summary = summarize(&runs, period, window, now);
+    let measured_from = attributed
+        .rows
+        .iter()
+        .map(|row| row.run.finished_at)
+        .min()
+        .filter(|_| attributed.truncated)
+        .map(|oldest| period.bucket().after(oldest).min(end));
+
+    Ok(Overview {
+        period,
+        window,
+        truncated: Truncation {
+            runs: attributed.truncated,
+            pull_requests: pull_requests.truncated,
+        },
+        measured_from,
+        runs: match measured_from {
+            Some(start) => summary.measured_from(start),
+            None => summary,
+        },
+        sources: SourceBreakdown::group(
+            runs.iter().zip(attributions.iter().copied()),
+            &pull_requests.rows,
+            now,
+        ),
+        models: ModelBreakdown::group(runs.iter().zip(attributions.iter().copied()), now),
+        tasks: TaskSummary::new(&statuses, &origins, activity),
+        pull_requests: PullRequestSummary::new(&pull_requests.rows),
+        evaluations: EvaluationSummary::new(&verdicts),
+    })
+}

@@ -4,6 +4,7 @@
 
 pub mod agents;
 pub mod ai_settings;
+pub mod analytics;
 pub mod artifacts;
 pub mod audit;
 pub mod auth;
@@ -368,6 +369,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/chats/{id}/pull-requests/{pull_request_id}/diff",
             get(chats::pull_requests::diff),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/analytics",
+            get(analytics::overview),
         )
         .route(
             "/api/workspaces/{workspace_id}/pull-requests",

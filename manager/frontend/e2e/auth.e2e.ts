@@ -1,10 +1,16 @@
-import { test, expect } from './fixtures';
-import { EMPTY_SETUP_PLAN, routeApi } from './test-utils';
 import type { Page } from '@playwright/test';
+import { expect, test } from './fixtures';
+import { EMPTY_SETUP_PLAN, routeApi } from './test-utils';
 
 // Helper to create a mock JWT token with embedded roles and permissions
 // JWT format: header.payload.signature (all base64url encoded)
-function createMockJwt(payload: { sub: string; email: string; roles: string[]; permissions: string[]; exp: number }) {
+function createMockJwt(payload: {
+  sub: string;
+  email: string;
+  roles: string[];
+  permissions: string[];
+  exp: number;
+}) {
   const header = { alg: 'HS256', typ: 'JWT' };
   const fullPayload = { ...payload, iat: Math.floor(Date.now() / 1000), jti: 'test-jti' };
   const base64Header = Buffer.from(JSON.stringify(header)).toString('base64');
@@ -14,23 +20,56 @@ function createMockJwt(payload: { sub: string; email: string; roles: string[]; p
 
 // Standard user permissions
 const userPermissions = [
-  'models:read', 'models:create',
-  'chats:read', 'chats:create', 'chats:update', 'chats:delete',
-  'projects:read', 'projects:create', 'projects:update', 'projects:delete',
-  'tasks:read', 'tasks:create', 'tasks:update', 'tasks:delete',
+  'models:read',
+  'models:create',
+  'chats:read',
+  'chats:create',
+  'chats:update',
+  'chats:delete',
+  'projects:read',
+  'projects:create',
+  'projects:update',
+  'projects:delete',
+  'tasks:read',
+  'tasks:create',
+  'tasks:update',
+  'tasks:delete',
   'sources:read',
-  'wiki:read', 'wiki:create', 'wiki:update',
+  'wiki:read',
+  'wiki:create',
+  'wiki:update',
 ];
 
 // Admin permissions
 const adminPermissions = [
-  'models:read', 'models:create', 'models:update', 'models:delete',
-  'chats:read', 'chats:create', 'chats:update', 'chats:delete',
-  'projects:read', 'projects:create', 'projects:update', 'projects:delete',
-  'tasks:read', 'tasks:create', 'tasks:update', 'tasks:delete',
-  'sources:read', 'sources:create', 'sources:update', 'sources:delete',
-  'wiki:read', 'wiki:create', 'wiki:update', 'wiki:delete',
-  'users:read', 'users:create', 'users:update', 'users:delete',
+  'models:read',
+  'models:create',
+  'models:update',
+  'models:delete',
+  'chats:read',
+  'chats:create',
+  'chats:update',
+  'chats:delete',
+  'projects:read',
+  'projects:create',
+  'projects:update',
+  'projects:delete',
+  'tasks:read',
+  'tasks:create',
+  'tasks:update',
+  'tasks:delete',
+  'sources:read',
+  'sources:create',
+  'sources:update',
+  'sources:delete',
+  'wiki:read',
+  'wiki:create',
+  'wiki:update',
+  'wiki:delete',
+  'users:read',
+  'users:create',
+  'users:update',
+  'users:delete',
 ];
 
 // Mock auth API responses - wrapped in { data: ... } to match API structure
@@ -182,7 +221,7 @@ test.describe('Login Page', () => {
 
   test('shows loading state during authentication', async ({ page }) => {
     await routeApi(page, '**/api/auth/login', async (route) => {
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 500));
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -282,7 +321,9 @@ test.describe('Register Page', () => {
     await page.fill('input[placeholder="Repeat your password"]', 'different123');
     await page.click('button[type="submit"]');
 
-    await expect(page.locator('[role="alert"]', { hasText: 'Passwords do not match' })).toBeVisible();
+    await expect(
+      page.locator('[role="alert"]', { hasText: 'Passwords do not match' })
+    ).toBeVisible();
   });
 
   test('shows validation error for short password', async ({ page }) => {
@@ -397,7 +438,14 @@ test.describe('Protected Routes', () => {
       sub: 'user-1',
       email: 'test@example.com',
       roles: ['user'],
-      permissions: ['models:read', 'chats:read', 'projects:read', 'tasks:read', 'sources:read', 'wiki:read'],
+      permissions: [
+        'models:read',
+        'chats:read',
+        'projects:read',
+        'tasks:read',
+        'sources:read',
+        'wiki:read',
+      ],
       exp: Math.floor(Date.now() / 1000) + 3600, // Expires in 1 hour
     });
 
@@ -418,11 +466,14 @@ test.describe('Protected Routes', () => {
 
     // Navigate and set up authentication state
     await page.goto('/login');
-    await page.evaluate(({ token, user }) => {
-      localStorage.setItem('manager_access_token', token);
-      localStorage.setItem('manager_refresh_token', 'valid-refresh-token');
-      localStorage.setItem('manager_user', JSON.stringify(user));
-    }, { token: mockToken, user: mockUser });
+    await page.evaluate(
+      ({ token, user }) => {
+        localStorage.setItem('manager_access_token', token);
+        localStorage.setItem('manager_refresh_token', 'valid-refresh-token');
+        localStorage.setItem('manager_user', JSON.stringify(user));
+      },
+      { token: mockToken, user: mockUser }
+    );
 
     await page.goto('/');
 
@@ -458,11 +509,14 @@ test.describe('Unauthorized Access', () => {
 
     // Set up authentication state without proper permissions
     await page.goto('/login');
-    await page.evaluate(({ token, user }) => {
-      localStorage.setItem('manager_access_token', token);
-      localStorage.setItem('manager_refresh_token', 'valid-refresh-token');
-      localStorage.setItem('manager_user', JSON.stringify(user));
-    }, { token: mockToken, user: mockUser });
+    await page.evaluate(
+      ({ token, user }) => {
+        localStorage.setItem('manager_access_token', token);
+        localStorage.setItem('manager_refresh_token', 'valid-refresh-token');
+        localStorage.setItem('manager_user', JSON.stringify(user));
+      },
+      { token: mockToken, user: mockUser }
+    );
 
     await page.goto('/');
 
@@ -485,7 +539,14 @@ test.describe('Logout', () => {
       sub: 'user-1',
       email: 'test@example.com',
       roles: ['user'],
-      permissions: ['models:read', 'chats:read', 'projects:read', 'tasks:read', 'sources:read', 'wiki:read'],
+      permissions: [
+        'models:read',
+        'chats:read',
+        'projects:read',
+        'tasks:read',
+        'sources:read',
+        'wiki:read',
+      ],
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
 
@@ -513,11 +574,14 @@ test.describe('Logout', () => {
 
     // Set up authenticated state
     await page.goto('/login');
-    await page.evaluate(({ token, user }) => {
-      localStorage.setItem('manager_access_token', token);
-      localStorage.setItem('manager_refresh_token', 'valid-refresh-token');
-      localStorage.setItem('manager_user', JSON.stringify(user));
-    }, { token: mockToken, user: mockUser });
+    await page.evaluate(
+      ({ token, user }) => {
+        localStorage.setItem('manager_access_token', token);
+        localStorage.setItem('manager_refresh_token', 'valid-refresh-token');
+        localStorage.setItem('manager_user', JSON.stringify(user));
+      },
+      { token: mockToken, user: mockUser }
+    );
 
     await page.goto('/');
     await expect(page.locator('.sidebar')).toBeVisible();
@@ -595,11 +659,14 @@ test.describe('Token Persistence', () => {
 
     // Set up expired token state
     await page.goto('/login');
-    await page.evaluate(({ token, user }) => {
-      localStorage.setItem('manager_access_token', token);
-      localStorage.setItem('manager_refresh_token', 'expired-refresh-token');
-      localStorage.setItem('manager_user', JSON.stringify(user));
-    }, { token: expiredToken, user: mockUser });
+    await page.evaluate(
+      ({ token, user }) => {
+        localStorage.setItem('manager_access_token', token);
+        localStorage.setItem('manager_refresh_token', 'expired-refresh-token');
+        localStorage.setItem('manager_user', JSON.stringify(user));
+      },
+      { token: expiredToken, user: mockUser }
+    );
 
     await page.goto('/');
 
@@ -615,7 +682,14 @@ test.describe('Permission-Based UI', () => {
       sub: 'user-1',
       email: 'test@example.com',
       roles: ['user'],
-      permissions: ['models:read', 'chats:read', 'projects:read', 'tasks:read', 'sources:read', 'wiki:read'],
+      permissions: [
+        'models:read',
+        'chats:read',
+        'projects:read',
+        'tasks:read',
+        'sources:read',
+        'wiki:read',
+      ],
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
 
@@ -659,11 +733,14 @@ test.describe('Permission-Based UI', () => {
 
     // Set up auth without delete permission
     await page.goto('/login');
-    await page.evaluate(({ token, user }) => {
-      localStorage.setItem('manager_access_token', token);
-      localStorage.setItem('manager_refresh_token', 'valid-refresh-token');
-      localStorage.setItem('manager_user', JSON.stringify(user));
-    }, { token: mockToken, user: mockUser });
+    await page.evaluate(
+      ({ token, user }) => {
+        localStorage.setItem('manager_access_token', token);
+        localStorage.setItem('manager_refresh_token', 'valid-refresh-token');
+        localStorage.setItem('manager_user', JSON.stringify(user));
+      },
+      { token: mockToken, user: mockUser }
+    );
 
     await page.goto('/models');
 
@@ -700,11 +777,14 @@ test.describe('Permission-Based UI', () => {
 
     // Set up admin auth
     await page.goto('/login');
-    await page.evaluate(({ token, user }) => {
-      localStorage.setItem('manager_access_token', token);
-      localStorage.setItem('manager_refresh_token', 'admin-refresh-token');
-      localStorage.setItem('manager_user', JSON.stringify(user));
-    }, { token: mockToken, user: mockUser });
+    await page.evaluate(
+      ({ token, user }) => {
+        localStorage.setItem('manager_access_token', token);
+        localStorage.setItem('manager_refresh_token', 'admin-refresh-token');
+        localStorage.setItem('manager_user', JSON.stringify(user));
+      },
+      { token: mockToken, user: mockUser }
+    );
 
     await page.goto('/');
 

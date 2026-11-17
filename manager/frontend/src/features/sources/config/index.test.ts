@@ -60,7 +60,7 @@ describe('Source Registry', () => {
     });
 
     it('returns undefined for invalid id', () => {
-      const source = getSourceById('invalid' as SourceType);
+      const source = getSourceById('invalid');
       expect(source).toBeUndefined();
     });
   });
@@ -128,7 +128,7 @@ describe('Source Registry', () => {
     });
 
     it('returns type as label for unknown type', () => {
-      const label = getSourceLabel('unknown' as SourceType);
+      const label = getSourceLabel('unknown');
       expect(label).toBe('unknown');
     });
   });

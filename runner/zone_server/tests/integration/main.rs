@@ -130,6 +130,7 @@ mod tenant_admin_permissions;
 mod tenant_isolation;
 mod test_config;
 mod wait_for;
+mod workspace_analytics;
 mod workspace_creation_atomicity;
 mod workspace_owner_backfill;
 mod workspace_owner_floor;

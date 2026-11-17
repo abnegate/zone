@@ -3,11 +3,14 @@
 use std::time::Duration;
 
 use super::category::EvalCategory;
+use crate::config::Environment;
 
 pub const ENABLED_VARIABLE: &str = "ZONE_TASK_EVALUATION";
 pub const CATEGORIES_VARIABLE: &str = "ZONE_TASK_EVALUATION_CATEGORIES";
 pub const TOOL_TIMEOUT_VARIABLE: &str = "ZONE_TASK_EVALUATION_TOOL_TIMEOUT_SECONDS";
 pub const BUDGET_VARIABLE: &str = "ZONE_TASK_EVALUATION_BUDGET_SECONDS";
+
+const ALL_CATEGORIES: &str = "all";
 
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_TOTAL_BUDGET: Duration = Duration::from_secs(900);
@@ -66,18 +69,42 @@ impl CategorySelection {
         }
     }
 
-    pub fn parse(list: &str) -> Self {
+    pub fn parse(list: &str) -> Option<Self> {
         let mut selection = Self::NONE;
+        let mut recognised = false;
+        let mut unrecognised: Vec<String> = Vec::new();
         for token in list.split(',') {
             let token = token.trim().to_ascii_lowercase();
-            if token == "all" {
-                return Self::ALL;
+            if token.is_empty() {
+                continue;
             }
-            if let Some(category) = EvalCategory::ALL.iter().find(|c| c.as_str() == token) {
+            if token == ALL_CATEGORIES {
+                selection = Self::ALL;
+                recognised = true;
+            } else if let Some(category) = EvalCategory::ALL
+                .iter()
+                .find(|category| category.as_str() == token)
+            {
                 selection.enable(*category);
+                recognised = true;
+            } else if !unrecognised.contains(&token) {
+                unrecognised.push(token);
             }
         }
-        selection
+
+        for token in &unrecognised {
+            tracing::warn!(
+                variable = CATEGORIES_VARIABLE,
+                "{CATEGORIES_VARIABLE} names an unknown category {token:?}; ignoring it"
+            );
+        }
+        if !recognised {
+            tracing::warn!(
+                variable = CATEGORIES_VARIABLE,
+                "{CATEGORIES_VARIABLE} names no known category; using the default selection"
+            );
+        }
+        recognised.then_some(selection)
     }
 }
 
@@ -121,7 +148,7 @@ impl Default for EvaluationSettings {
 /// The raw environment a set of settings is resolved from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EvaluationEnvironment {
-    pub enabled: Option<String>,
+    pub enabled: Option<bool>,
     pub categories: Option<String>,
     pub tool_timeout_seconds: Option<String>,
     pub budget_seconds: Option<String>,
@@ -129,11 +156,16 @@ pub struct EvaluationEnvironment {
 
 impl EvaluationEnvironment {
     pub fn from_process() -> Self {
+        Self::from_lookup(|variable| std::env::var(variable).ok())
+    }
+
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let environment = Environment::new(lookup);
         Self {
-            enabled: std::env::var(ENABLED_VARIABLE).ok(),
-            categories: std::env::var(CATEGORIES_VARIABLE).ok(),
-            tool_timeout_seconds: std::env::var(TOOL_TIMEOUT_VARIABLE).ok(),
-            budget_seconds: std::env::var(BUDGET_VARIABLE).ok(),
+            enabled: environment.flag(ENABLED_VARIABLE),
+            categories: environment.read(CATEGORIES_VARIABLE),
+            tool_timeout_seconds: environment.read(TOOL_TIMEOUT_VARIABLE),
+            budget_seconds: environment.read(BUDGET_VARIABLE),
         }
     }
 }
@@ -142,15 +174,11 @@ impl EvaluationSettings {
     pub fn resolve(environment: &EvaluationEnvironment) -> Self {
         let defaults = Self::default();
         Self {
-            enabled: environment
-                .enabled
-                .as_deref()
-                .map(parse_flag)
-                .unwrap_or(defaults.enabled),
+            enabled: environment.enabled.unwrap_or(defaults.enabled),
             categories: environment
                 .categories
                 .as_deref()
-                .map(CategorySelection::parse)
+                .and_then(CategorySelection::parse)
                 .unwrap_or(defaults.categories),
             tool_timeout: parse_duration(
                 environment.tool_timeout_seconds.as_deref(),
@@ -176,13 +204,6 @@ impl EvaluationSettings {
     }
 }
 
-fn parse_flag(raw: &str) -> bool {
-    matches!(
-        raw.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
 fn parse_duration(raw: Option<&str>, fallback: Duration, ceiling: Duration) -> Duration {
     raw.and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|seconds| *seconds > 0)
@@ -193,6 +214,10 @@ fn parse_duration(raw: Option<&str>, fallback: Duration, ceiling: Duration) -> D
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
     use super::*;
 
     #[test]
@@ -207,17 +232,15 @@ mod tests {
     #[test]
     fn accepts_the_usual_spellings_of_true() {
         for raw in ["1", "true", "TRUE", "yes", " on "] {
-            let settings = EvaluationSettings::resolve(&EvaluationEnvironment {
-                enabled: Some(raw.to_string()),
-                ..EvaluationEnvironment::default()
-            });
+            let settings = EvaluationSettings::resolve(&EvaluationEnvironment::from_lookup(
+                lookup(&[(ENABLED_VARIABLE, raw)]),
+            ));
             assert!(settings.enabled, "{raw} should enable evaluation");
         }
         for raw in ["0", "false", "no", "", "maybe"] {
-            let settings = EvaluationSettings::resolve(&EvaluationEnvironment {
-                enabled: Some(raw.to_string()),
-                ..EvaluationEnvironment::default()
-            });
+            let settings = EvaluationSettings::resolve(&EvaluationEnvironment::from_lookup(
+                lookup(&[(ENABLED_VARIABLE, raw)]),
+            ));
             assert!(!settings.enabled, "{raw} should not enable evaluation");
         }
     }
@@ -234,7 +257,7 @@ mod tests {
 
     #[test]
     fn parses_a_category_list() {
-        let categories = CategorySelection::parse("test, coverage");
+        let categories = CategorySelection::parse("test, coverage").expect("a selection");
         assert!(categories.includes(EvalCategory::Test));
         assert!(categories.includes(EvalCategory::Coverage));
         assert!(!categories.includes(EvalCategory::Lint));
@@ -242,19 +265,78 @@ mod tests {
 
     #[test]
     fn parses_the_all_shorthand() {
-        assert_eq!(CategorySelection::parse("all"), CategorySelection::ALL);
-        assert_eq!(CategorySelection::parse("test,all"), CategorySelection::ALL);
+        assert_eq!(
+            CategorySelection::parse("all"),
+            Some(CategorySelection::ALL)
+        );
+        assert_eq!(
+            CategorySelection::parse("test,all"),
+            Some(CategorySelection::ALL)
+        );
     }
 
     #[test]
-    fn ignores_unknown_category_names() {
-        assert_eq!(
-            CategorySelection::parse("nonsense"),
-            CategorySelection::NONE
-        );
-        let categories = CategorySelection::parse("nonsense,lint");
+    fn an_unknown_name_is_ignored_with_one_warning_each() {
+        let (categories, log) = logged(|| CategorySelection::parse("nonsense,lint,Nonsense,tset"));
+        let categories = categories.expect("lint was recognised");
         assert!(categories.includes(EvalCategory::Lint));
         assert!(!categories.includes(EvalCategory::Test));
+        assert_eq!(
+            log.matches("\"nonsense\"").count(),
+            1,
+            "a repeated unknown name is reported once: {log}"
+        );
+        assert_eq!(log.matches("\"tset\"").count(), 1, "{log}");
+        assert!(!log.contains("default selection"), "{log}");
+    }
+
+    #[test]
+    fn a_list_with_no_known_name_keeps_the_default_selection() {
+        let (settings, log) = logged(|| {
+            EvaluationSettings::resolve(&EvaluationEnvironment::from_lookup(lookup(&[(
+                CATEGORIES_VARIABLE,
+                "nonsense, tset",
+            )])))
+        });
+        assert_eq!(
+            settings.categories,
+            CategorySelection::default(),
+            "a list of typos must not switch every category off"
+        );
+        assert!(log.contains(CATEGORIES_VARIABLE), "{log}");
+        assert!(log.contains("default selection"), "{log}");
+        assert_eq!(log.matches("\"nonsense\"").count(), 1, "{log}");
+        assert_eq!(log.matches("\"tset\"").count(), 1, "{log}");
+    }
+
+    fn logged<T>(read: impl FnOnce() -> T) -> (T, String) {
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for Captured {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("the captured log")
+                    .extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, read);
+        let log =
+            String::from_utf8_lossy(&captured.0.lock().expect("the captured log")).into_owned();
+        (value, log)
     }
 
     #[test]
@@ -301,6 +383,69 @@ mod tests {
             settings.slice(Duration::from_secs(10_000)),
             settings.tool_timeout
         );
+    }
+
+    fn lookup(values: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let values: Vec<(String, String)> = values
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        move |variable| {
+            values
+                .iter()
+                .find(|(name, _)| name == variable)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    #[test]
+    fn blank_categories_keep_the_default_selection() {
+        for blank in ["", "   ", "\t"] {
+            let environment = EvaluationEnvironment::from_lookup(lookup(&[
+                (ENABLED_VARIABLE, "true"),
+                (CATEGORIES_VARIABLE, blank),
+            ]));
+            let settings = EvaluationSettings::resolve(&environment);
+            assert_eq!(
+                settings.categories,
+                CategorySelection::default(),
+                "{blank:?} must not switch every category off"
+            );
+            assert!(settings.categories.includes(EvalCategory::Test));
+            assert!(settings.categories.includes(EvalCategory::Lint));
+            assert!(settings.categories.includes(EvalCategory::Typecheck));
+        }
+    }
+
+    #[test]
+    fn blank_values_read_as_unset() {
+        let environment = EvaluationEnvironment::from_lookup(lookup(&[
+            (ENABLED_VARIABLE, " "),
+            (CATEGORIES_VARIABLE, ""),
+            (TOOL_TIMEOUT_VARIABLE, ""),
+            (BUDGET_VARIABLE, "  "),
+        ]));
+        assert_eq!(environment, EvaluationEnvironment::default());
+        assert_eq!(
+            EvaluationSettings::resolve(&environment),
+            EvaluationSettings::default()
+        );
+    }
+
+    #[test]
+    fn non_blank_values_still_apply() {
+        let environment = EvaluationEnvironment::from_lookup(lookup(&[
+            (ENABLED_VARIABLE, "true"),
+            (CATEGORIES_VARIABLE, "build"),
+            (TOOL_TIMEOUT_VARIABLE, "45"),
+            (BUDGET_VARIABLE, "600"),
+        ]));
+        let settings = EvaluationSettings::resolve(&environment);
+        assert!(settings.enabled);
+        assert!(settings.categories.includes(EvalCategory::Build));
+        assert!(!settings.categories.includes(EvalCategory::Test));
+        assert_eq!(settings.tool_timeout, Duration::from_secs(45));
+        assert_eq!(settings.total_budget, Duration::from_secs(600));
     }
 
     #[test]
