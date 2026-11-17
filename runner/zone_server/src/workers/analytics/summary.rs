@@ -156,7 +156,6 @@ pub struct Trend {
     pub direction: TrendDirection,
     pub earlier_success_rate: Option<f64>,
     pub later_success_rate: Option<f64>,
-    /// Later minus earlier, as a share. Zero when either half is too thin.
     pub change: f64,
 }
 
@@ -202,6 +201,12 @@ impl AgentAnalytics {
         self.outcomes.total == 0
     }
 
+    pub fn measured_from(mut self, start: NaiveDateTime) -> Self {
+        self.series.retain(|point| point.window.start >= start);
+        self.trend = Trend::steady();
+        self
+    }
+
     /// The failure kinds that showed up, heaviest first.
     pub fn failures(&self) -> impl Iterator<Item = (ErrorCategory, usize)> + '_ {
         self.outcomes
@@ -230,19 +235,22 @@ pub fn summarize(
         return AgentAnalytics::empty(period, window);
     }
 
-    let attempts: Vec<ClassifiedAttempt> = inside.iter().map(|run| run.as_attempt()).collect();
-
     AgentAnalytics {
         period,
         window,
-        outcomes: summarize_outcomes(&attempts, now),
+        outcomes: outcomes(&inside, now),
         completion: completion_times(&inside),
         series: series(&inside, window, period),
         trend: trend(&inside, window),
     }
 }
 
-fn completion_times(runs: &[&AgentRun]) -> CompletionTimes {
+pub fn outcomes(runs: &[&AgentRun], now: NaiveDateTime) -> OutcomeStatistics {
+    let attempts: Vec<ClassifiedAttempt> = runs.iter().map(|run| run.as_attempt()).collect();
+    summarize_outcomes(&attempts, now)
+}
+
+pub fn completion_times(runs: &[&AgentRun]) -> CompletionTimes {
     let mut durations: Vec<f64> = runs
         .iter()
         .filter(|run| run.outcome.is_success())
@@ -308,9 +316,12 @@ fn trend(runs: &[&AgentRun], window: TimeWindow) -> Trend {
         return Trend::steady();
     };
 
+    if earlier_count < MINIMUM_TREND_SAMPLE || later_count < MINIMUM_TREND_SAMPLE {
+        return Trend::steady();
+    }
+
     let change = later_rate - earlier_rate;
-    let thin = earlier_count < MINIMUM_TREND_SAMPLE || later_count < MINIMUM_TREND_SAMPLE;
-    let direction = if thin || change.abs() < MINIMUM_TREND_CHANGE {
+    let direction = if change.abs() < MINIMUM_TREND_CHANGE {
         TrendDirection::Steady
     } else if change.is_sign_positive() {
         TrendDirection::Improving
@@ -322,7 +333,7 @@ fn trend(runs: &[&AgentRun], window: TimeWindow) -> Trend {
         direction,
         earlier_success_rate: Some(earlier_rate),
         later_success_rate: Some(later_rate),
-        change: if thin { 0.0 } else { change },
+        change,
     }
 }
 
@@ -343,6 +354,7 @@ fn success_rate(runs: &[&AgentRun], window: TimeWindow) -> Option<(f64, usize)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workers::analytics::BucketSize;
     use chrono::NaiveDate;
 
     fn moment(day: u32, hour: u32) -> NaiveDateTime {
@@ -587,11 +599,12 @@ mod tests {
         let analytics = summarize(&runs, TimePeriod::Week, week(), moment(8, 0));
 
         assert_eq!(
-            analytics.trend.direction,
-            TrendDirection::Steady,
-            "one failure against six successes is not a decline"
+            analytics.trend,
+            Trend::steady(),
+            "one failure against six successes is no trend yet, not a measured steady one"
         );
-        assert_eq!(analytics.trend.change, 0.0);
+        assert_eq!(analytics.trend.earlier_success_rate, None);
+        assert_eq!(analytics.trend.later_success_rate, None);
     }
 
     #[test]
@@ -658,6 +671,59 @@ mod tests {
         assert_eq!(
             AgentRun::from_row(&backwards).and_then(|run| run.duration_seconds),
             None
+        );
+    }
+
+    #[test]
+    fn a_partial_load_keeps_only_the_buckets_it_read_completely() {
+        let runs = vec![
+            run(1, AttemptOutcome::Failed, 5, 9),
+            run(2, AttemptOutcome::Succeeded, 6, 9),
+        ];
+        let start = BucketSize::Day.after(moment(5, 9));
+        let analytics =
+            summarize(&runs, TimePeriod::Week, week(), moment(8, 0)).measured_from(start);
+
+        let starts: Vec<NaiveDateTime> = analytics
+            .series
+            .iter()
+            .map(|point| point.window.start)
+            .collect();
+        assert_eq!(
+            starts,
+            vec![moment(6, 0), moment(7, 0)],
+            "the bucket holding the oldest loaded run lost the runs before it, so it goes too"
+        );
+        assert_eq!(
+            analytics
+                .series
+                .iter()
+                .map(|point| point.total)
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(
+            analytics.outcomes.total, 2,
+            "the outcomes still count every loaded run"
+        );
+    }
+
+    #[test]
+    fn a_partial_load_claims_no_trend() {
+        let mut runs: Vec<AgentRun> = (0..6)
+            .map(|index| run(index, AttemptOutcome::Succeeded, 2, 9))
+            .collect();
+        runs.extend((0..6).map(|index| run(100 + index, AttemptOutcome::Failed, 6, 9)));
+
+        let analytics = summarize(&runs, TimePeriod::Week, week(), moment(8, 0))
+            .measured_from(BucketSize::Day.after(moment(2, 9)));
+
+        assert_eq!(analytics.trend, Trend::steady());
+        assert_eq!(analytics.trend.earlier_success_rate, None);
+        assert_eq!(analytics.trend.later_success_rate, None);
+        assert_eq!(
+            analytics.outcomes.total, 12,
+            "the outcomes still count every loaded run"
         );
     }
 

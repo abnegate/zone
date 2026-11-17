@@ -69,7 +69,7 @@ use crate::services::route::Route;
 use crate::services::route::Unusable;
 use crate::services::stages;
 use crate::state::AppState;
-use crate::workers::evaluation::EvaluationSettings;
+use crate::workers::evaluation;
 use crate::workers::evaluation::Evaluator;
 use crate::workers::evaluation::Verdict;
 use crate::workers::instructions;
@@ -1359,10 +1359,7 @@ async fn execute_in_checkout<'a>(
         tracing::warn!(%run_id, "Could not record the run's model; a reviewer is chosen without it");
     }
 
-    let evaluator = Evaluator::detect(
-        &workspace_path,
-        EvaluationSettings::from_process_environment(),
-    );
+    let evaluator = Evaluator::detect(&workspace_path, state.config().evaluation.clone());
     let baseline = if evaluator.is_active() {
         record_evaluation_log(
             state,
@@ -2256,9 +2253,6 @@ async fn record_attempt(pool: &PgPool, run_id: Uuid, policy: RetryPolicy, attemp
     }
 }
 
-const EVALUATION_PHASE: &str = "evaluating";
-const EVALUATION_AGENT: &str = "evaluation";
-
 async fn record_evaluation_log(
     state: &AppState,
     run_id: Uuid,
@@ -2269,8 +2263,8 @@ async fn record_evaluation_log(
     if let Err(error) = tasks::add_task_run_log(
         state.db(),
         run_id,
-        EVALUATION_PHASE,
-        EVALUATION_AGENT,
+        evaluation::PHASE,
+        evaluation::AGENT,
         log_level,
         message,
         metadata,

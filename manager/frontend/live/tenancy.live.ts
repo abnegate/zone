@@ -90,7 +90,7 @@ test("another tenant's task, theme and AI settings are all refused", async () =>
   expect(ghostAi.body).toEqual(foreignAi.body);
 });
 
-test("the run stream is closed to a tenant that does not own it", async ({ page }) => {
+test('the run stream is closed to a tenant that does not own it', async ({ page }) => {
   const { runId } = await tenantA();
 
   const watch = async (who: typeof state.owner) => {

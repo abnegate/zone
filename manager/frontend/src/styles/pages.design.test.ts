@@ -120,6 +120,10 @@ describe('chats layout', () => {
   it('keeps group and sort controls out of the 48px page-bar', () => {
     expect(rule(chats, '.chats-sidebar-header.page-bar')).not.toContain('chats-arrange');
     expect(rule(chats, '.chats-arrange')).toContain('flex-shrink: 0');
+    // The flex item is the Select's wrapper, so sizing the trigger alone would
+    // leave each control at content width in a half-empty row.
+    expect(rule(chats, '.chats-arrange > .ui-select-control')).toContain('flex: 1 1 0');
+    expect(rule(chats, '.chats-arrange .ui-select-trigger')).toContain('width: 100%');
     expect(rule(chats, '.chats-arrange .ui-select-trigger')).toContain(
       'height: var(--ui-control-height-sm)'
     );

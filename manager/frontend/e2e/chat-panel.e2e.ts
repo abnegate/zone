@@ -319,9 +319,7 @@ async function openChat(page: Page) {
   await page.click('a[href="/chats"]');
   await page.click('.chat-item');
   await expect(page.locator('.message-form textarea')).toBeVisible();
-  await expect(
-    page.getByRole('link', { name: PULL_REQUESTS[0].title, exact: true })
-  ).toBeVisible();
+  await expect(page.getByRole('link', { name: PULL_REQUESTS[0].title, exact: true })).toBeVisible();
 }
 
 test.describe('Chat changes and gallery panel', () => {
@@ -346,7 +344,9 @@ test.describe('Chat changes and gallery panel', () => {
       await page.mouse.move(0, 0);
       await page.screenshot({ path: `screenshots/${name}.png`, animations: 'disabled' });
     };
-    const panel = page.getByRole('complementary', { name: 'Changes, agents, tasks, media and sources' });
+    const panel = page.getByRole('complementary', {
+      name: 'Changes, agents, tasks, media and sources',
+    });
     await expect(panel).toBeVisible();
     await expect(panel.getByRole('button', { name: 'Gallery, 5' })).toBeVisible();
     await expect(panel.getByText('widgets #13')).toBeVisible();
@@ -369,7 +369,9 @@ test.describe('Chat changes and gallery panel', () => {
     await capture('chats-panel-dark');
     await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'light'));
 
-    const separator = panel.getByRole('separator', { name: 'Resize changes, agents, tasks, media and sources' });
+    const separator = panel.getByRole('separator', {
+      name: 'Resize changes, agents, tasks, media and sources',
+    });
     const before = Number(await separator.getAttribute('aria-valuenow'));
     await separator.focus();
     await page.keyboard.press('ArrowLeft');
@@ -393,11 +395,19 @@ test.describe('Chat changes and gallery panel', () => {
     ).toHaveAttribute('aria-valuenow', String(dragged));
     await capture('chats-panel-wide');
 
-    await page.getByRole('button', { name: 'Hide changes, agents, tasks, media and sources' }).click();
-    await expect(page.getByRole('separator', { name: 'Resize changes, agents, tasks, media and sources' })).toHaveCount(0);
+    await page
+      .getByRole('button', { name: 'Hide changes, agents, tasks, media and sources' })
+      .click();
+    await expect(
+      page.getByRole('separator', { name: 'Resize changes, agents, tasks, media and sources' })
+    ).toHaveCount(0);
     await capture('chats-panel-hidden');
-    await page.getByRole('button', { name: /Show changes, agents, tasks, media and sources/ }).click();
-    await expect(page.getByRole('separator', { name: 'Resize changes, agents, tasks, media and sources' })).toBeVisible();
+    await page
+      .getByRole('button', { name: /Show changes, agents, tasks, media and sources/ })
+      .click();
+    await expect(
+      page.getByRole('separator', { name: 'Resize changes, agents, tasks, media and sources' })
+    ).toBeVisible();
   });
 
   test('offers what Zone can do to a pull request, and shows its changes', async ({
@@ -434,7 +444,10 @@ test.describe('Chat changes and gallery panel', () => {
     await expect(lightbox.getByText('2 of 5')).toBeVisible();
     await expect(lightbox.getByRole('img', { name: 'harbour.svg' })).toBeVisible();
     if (testInfo.project.name === 'chromium') {
-      await page.screenshot({ path: 'screenshots/chats-panel-lightbox.png', animations: 'disabled' });
+      await page.screenshot({
+        path: 'screenshots/chats-panel-lightbox.png',
+        animations: 'disabled',
+      });
     }
 
     await page.keyboard.press('ArrowRight');
@@ -451,7 +464,7 @@ test.describe('Chat changes and gallery panel', () => {
     await expect(page.locator('#chat-message-msg-art')).toHaveClass(/message--linked/);
   });
 
-  test('lists the chat\'s sources once each, newest first, and collapses them', async ({
+  test("lists the chat's sources once each, newest first, and collapses them", async ({
     page,
   }, testInfo) => {
     const capture = async (name: string) => {
@@ -459,7 +472,9 @@ test.describe('Chat changes and gallery panel', () => {
       await page.mouse.move(0, 0);
       await page.screenshot({ path: `screenshots/${name}.png`, animations: 'disabled' });
     };
-    const panel = page.getByRole('complementary', { name: 'Changes, agents, tasks, media and sources' });
+    const panel = page.getByRole('complementary', {
+      name: 'Changes, agents, tasks, media and sources',
+    });
     await panel.getByRole('button', { name: 'Gallery, 5' }).click();
     const toggle = panel.getByRole('button', { name: 'Sources, 4' });
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
@@ -520,7 +535,9 @@ test.describe('Chat changes and gallery panel', () => {
     await mockChat(page, uncited());
     await page.reload();
     await openChat(page);
-    const panel = page.getByRole('complementary', { name: 'Changes, agents, tasks, media and sources' });
+    const panel = page.getByRole('complementary', {
+      name: 'Changes, agents, tasks, media and sources',
+    });
     await expect(panel.getByRole('button', { name: 'Gallery, 5' })).toBeVisible();
     await expect(panel.getByRole('button', { name: /^Sources/ })).toHaveCount(0);
     await expect(page.locator('.message-sources')).toHaveCount(0);
@@ -540,7 +557,9 @@ test.describe('Chat changes and gallery panel', () => {
       if (testInfo.project.name !== 'chromium') return;
       await page.screenshot({ path: `screenshots/${name}.png`, animations: 'disabled' });
     };
-    const panel = page.getByRole('complementary', { name: 'Changes, agents, tasks, media and sources' });
+    const panel = page.getByRole('complementary', {
+      name: 'Changes, agents, tasks, media and sources',
+    });
     await panel.getByRole('button', { name: 'Sources, 4' }).click();
     await expect(boxOrder(panel)).resolves.toEqual(['changes', 'sources', 'gallery']);
     await page.mouse.move(0, 0);
@@ -568,7 +587,9 @@ test.describe('Chat changes and gallery panel', () => {
 
   test('moves a box from the keyboard in the sheet on a phone', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 });
-    await page.getByRole('button', { name: /^Changes, agents, tasks, media and sources: / }).click();
+    await page
+      .getByRole('button', { name: /^Changes, agents, tasks, media and sources: / })
+      .click();
     const sheet = page.getByRole('dialog', { name: 'Changes, agents, tasks, media and sources' });
     const grip = sheet.getByRole('button', { name: 'Move Changes' });
 
@@ -611,7 +632,9 @@ test.describe('Chat changes and gallery panel', () => {
     await mockTasks(page, TASKS);
     await page.reload();
     await openChat(page);
-    const panel = page.getByRole('complementary', { name: 'Changes, agents, tasks, media and sources' });
+    const panel = page.getByRole('complementary', {
+      name: 'Changes, agents, tasks, media and sources',
+    });
     const toggle = panel.getByRole('button', { name: 'Tasks, 4' });
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
     const rows = panel.locator('.chat-task');
@@ -645,14 +668,14 @@ test.describe('Chat changes and gallery panel', () => {
     await expect(reopened).toHaveAttribute('aria-expanded', 'false');
     await reopened.click();
 
-    await page
-      .getByRole('link', { name: 'Round cart prices to the cent', exact: true })
-      .click();
+    await page.getByRole('link', { name: 'Round cart prices to the cent', exact: true }).click();
     await expect(page).toHaveURL(/\/tasks\?id=task-3$/);
   });
 
   test('leaves the tasks out of a chat that started none', async ({ page }, testInfo) => {
-    const panel = page.getByRole('complementary', { name: 'Changes, agents, tasks, media and sources' });
+    const panel = page.getByRole('complementary', {
+      name: 'Changes, agents, tasks, media and sources',
+    });
     await expect(panel.getByRole('button', { name: 'Gallery, 5' })).toBeVisible();
     await expect(panel.getByRole('button', { name: /^Tasks/ })).toHaveCount(0);
     if (testInfo.project.name === 'chromium') {
@@ -694,7 +717,9 @@ test.describe('Chat changes and gallery panel', () => {
       await page.screenshot({ path: `screenshots/${name}.png`, animations: 'disabled' });
     };
     await page.setViewportSize({ width: 375, height: 812 });
-    await expect(page.getByRole('complementary', { name: 'Changes, agents, tasks, media and sources' })).toBeHidden();
+    await expect(
+      page.getByRole('complementary', { name: 'Changes, agents, tasks, media and sources' })
+    ).toBeHidden();
     const toggle = page.getByRole('button', {
       name: 'Changes, agents, tasks, media and sources: 4 changes, 5 media items, 4 sources',
     });

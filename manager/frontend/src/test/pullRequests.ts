@@ -1,3 +1,6 @@
+import type { z } from 'zod';
+import type { PullRequestSchema } from '../features/pull-requests/schemas';
+
 export const HEAD = 'a'.repeat(40);
 export const BASE = 'b'.repeat(40);
 export const SOURCE_ID = '7f1c2b4e-3d5a-4c6b-8e9f-0a1b2c3d4e5f';
@@ -57,7 +60,7 @@ export const wirePullRequest = {
   comments_complete: true,
   assessed_at: '2026-11-13T10:00:05Z',
   rank: 0,
-};
+} satisfies z.input<typeof PullRequestSchema>;
 
 export const wireSourceStatus = {
   source_id: SOURCE_ID,

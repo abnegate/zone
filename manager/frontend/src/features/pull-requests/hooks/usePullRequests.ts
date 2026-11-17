@@ -5,6 +5,7 @@ import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import {
   errorMessage,
   gatewayFailed,
+  pollAfter,
   retryDelay,
   retryPolled,
   type SourceStatus,
@@ -72,7 +73,7 @@ export function usePullRequests(): PullRequests {
   const { data, dataUpdatedAt, isLoading, error, failureReason } = useQuery({
     ...pullRequestListQuery(workspaceId),
     enabled: !!workspaceId,
-    refetchInterval: LIST_POLL_MS,
+    refetchInterval: (query) => pollAfter(query.state, LIST_POLL_MS),
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     retry: retryPolled,

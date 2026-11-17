@@ -60,19 +60,21 @@ async fn the_run_cap_drops_the_oldest_runs_not_the_newest() {
 
     let capped = analytics::finished_runs(&pool, workspace_id, start, now, limit)
         .await
-        .expect("runs are readable");
+        .expect("runs are readable")
+        .rows;
 
     assert_eq!(capped.len(), limit as usize, "the cap is applied");
 
     let all = analytics::finished_runs(&pool, workspace_id, start, now, 100)
         .await
-        .expect("runs are readable");
+        .expect("runs are readable")
+        .rows;
     assert_eq!(all.len(), 10, "the workspace really does have more runs");
 
-    let newest = all.iter().map(|run| run.finished_at).max().expect("a run");
+    let newest = all.iter().map(|row| row.finished_at).max().expect("a run");
     let kept = capped
         .iter()
-        .map(|run| run.finished_at)
+        .map(|row| row.finished_at)
         .max()
         .expect("a run");
     assert_eq!(
@@ -83,10 +85,10 @@ async fn the_run_cap_drops_the_oldest_runs_not_the_newest() {
 
     let oldest_kept = capped
         .iter()
-        .map(|run| run.finished_at)
+        .map(|row| row.finished_at)
         .min()
         .expect("a run");
-    let oldest = all.iter().map(|run| run.finished_at).min().expect("a run");
+    let oldest = all.iter().map(|row| row.finished_at).min().expect("a run");
     assert!(
         oldest_kept > oldest,
         "the cap should have cost the oldest runs, not the newest"
@@ -102,7 +104,8 @@ async fn an_uncapped_window_returns_every_run_in_it() {
 
     let inside = analytics::finished_runs(&pool, workspace_id, now - Duration::days(1), now, 100)
         .await
-        .expect("runs are readable");
+        .expect("runs are readable")
+        .rows;
     assert_eq!(inside.len(), 5);
 
     // `[start, end)`: a window that ends before the newest run excludes it.
@@ -114,6 +117,68 @@ async fn an_uncapped_window_returns_every_run_in_it() {
         100,
     )
     .await
-    .expect("runs are readable");
+    .expect("runs are readable")
+    .rows;
     assert_eq!(earlier.len(), 4);
+}
+
+#[tokio::test]
+async fn reaching_the_run_cap_exactly_is_not_passing_it() {
+    let pool = common::create_test_pool().await;
+    let workspace_id = workspace_with_runs(&pool, 4).await;
+
+    let now = Utc::now().naive_utc();
+    let start = now - Duration::days(1);
+
+    let exact = analytics::finished_runs(&pool, workspace_id, start, now, 4)
+        .await
+        .expect("runs are readable");
+    assert_eq!(exact.rows.len(), 4);
+    assert!(
+        !exact.truncated,
+        "every run in the window was read, so nothing is missing"
+    );
+
+    let short = analytics::finished_runs(&pool, workspace_id, start, now, 3)
+        .await
+        .expect("runs are readable");
+    assert_eq!(short.rows.len(), 3, "the cap still holds");
+    assert!(short.truncated, "one run past the cap was left out");
+}
+
+#[tokio::test]
+async fn a_run_still_going_is_not_a_finished_run() {
+    let pool = common::create_test_pool().await;
+    let workspace_id = workspace_with_runs(&pool, 2).await;
+    let now = Utc::now().naive_utc();
+    for status in ["running", "waiting"] {
+        let task_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tasks (workspace_id, title, description) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(workspace_id)
+        .bind(format!("{status} task"))
+        .bind("a run that has not finished")
+        .fetch_one(&pool)
+        .await
+        .expect("task is created");
+        sqlx::query("INSERT INTO task_runs (task_id, status, started_at) VALUES ($1, $2, $3)")
+            .bind(task_id)
+            .bind(status)
+            .bind(now - Duration::minutes(5))
+            .execute(&pool)
+            .await
+            .expect("an unfinished run is created");
+    }
+
+    let runs = analytics::finished_runs(&pool, workspace_id, now - Duration::days(1), now, 100)
+        .await
+        .expect("runs are readable")
+        .rows;
+    assert_eq!(
+        runs.iter()
+            .map(|row| row.status.as_str())
+            .collect::<Vec<_>>(),
+        vec!["completed", "completed"],
+        "runs that have not finished have no outcome to count"
+    );
 }

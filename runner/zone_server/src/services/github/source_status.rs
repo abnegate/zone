@@ -106,6 +106,7 @@ mod tests {
     fn every_freshness_is_spelled_as_the_console_reads_it() {
         for (freshness, spelled) in [
             (Freshness::Cached, "cached"),
+            (Freshness::Revalidating, "revalidating"),
             (Freshness::Refreshed, "refreshed"),
             (Freshness::Floored, "floored"),
             (Freshness::Stale, "stale"),

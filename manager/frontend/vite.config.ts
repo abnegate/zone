@@ -1,8 +1,8 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createServer, defineConfig, type Plugin } from 'vite';
-import react from '@vitejs/plugin-react';
 import tailwind from '@tailwindcss/vite';
+import react from '@vitejs/plugin-react';
+import { createServer, defineConfig, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
 import {
@@ -40,7 +40,10 @@ function deferFeatureStylesheet(): Plugin {
         const found: string[] = [];
         const names = STYLESHEETS.join('|');
         const output = html.replace(
-          new RegExp(`<link rel="stylesheet" crossorigin href="(/assets/(${names})-[^"/]+\\.css)">`, 'g'),
+          new RegExp(
+            `<link rel="stylesheet" crossorigin href="(/assets/(${names})-[^"/]+\\.css)">`,
+            'g'
+          ),
           (link, href: string, stylesheet: string) => {
             found.push(stylesheet);
             return stylesheet === FEATURE_STYLESHEET
@@ -185,7 +188,11 @@ export default defineConfig(({ command }) => {
         output: {
           codeSplitting: {
             groups: [
-              { name: 'runtime', test: /preload-helper|rolldown:runtime|staleChunk|\/src\/routes\.ts|\/api\/session\.ts|\/shared\/stylesheet\.ts|\/shared\/lastPath\.ts|\/shell\/(paint|release)\.ts/, priority: 4 },
+              {
+                name: 'runtime',
+                test: /preload-helper|rolldown:runtime|staleChunk|\/src\/routes\.ts|\/api\/session\.ts|\/shared\/stylesheet\.ts|\/shared\/lastPath\.ts|\/shell\/(paint|release)\.ts/,
+                priority: 4,
+              },
               {
                 name: SHARED_STYLESHEET,
                 test: /(\/src\/App\.css|\/styles\/globals\.css)($|\?)/,

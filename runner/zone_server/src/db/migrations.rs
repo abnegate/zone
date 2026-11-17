@@ -1,5 +1,6 @@
 //! Schema upgrades.
 
+pub mod interrupted;
 pub mod legacy;
 
 use sqlx::PgPool;
@@ -39,6 +40,7 @@ pub async fn run(pool: &PgPool) -> Result<(), MigrateError> {
     migrator.set_locking(false);
     let result = async {
         legacy::rebase(&mut connection, &migrator).await?;
+        interrupted::drop_invalid_indexes(&mut connection, &migrator).await?;
         migrator.run_direct(None, &mut *connection, false).await
     }
     .await;

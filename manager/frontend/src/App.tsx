@@ -30,6 +30,7 @@ import { releaseShell } from './shell/release';
 
 const AuthenticatedProviders = lazyRoute(loaders.authenticatedProviders);
 const AgentSignInPage = lazyRoute(loaders.agentSignIn);
+const AnalyticsPage = lazyRoute(loaders.analytics);
 const ChatsPage = lazyRoute(loaders.chats);
 const Layout = lazyRoute(loaders.layout);
 const ModelsPage = lazyRoute(loaders.models);
@@ -177,6 +178,14 @@ function App({
                           element={
                             <ProtectedRoute requiredPermission={PERMISSIONS.TASKS.READ}>
                               <TasksPage />
+                            </ProtectedRoute>
+                          }
+                        />
+                        <Route
+                          path="analytics"
+                          element={
+                            <ProtectedRoute requiredPermission={PERMISSIONS.TASKS.READ}>
+                              <AnalyticsPage />
                             </ProtectedRoute>
                           }
                         />

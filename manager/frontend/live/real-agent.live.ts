@@ -1,13 +1,5 @@
 import { api, expect, signIn, state, test, tokenFor } from './harness';
-import {
-  calledTools,
-  forwardedFor,
-  newChat,
-  send,
-  settled,
-  stamp,
-  turnDone,
-} from './stub';
+import { calledTools, forwardedFor, newChat, send, settled, stamp, turnDone } from './stub';
 
 /**
  * A real model behind the same rig. Nothing is scripted: each lane types what
@@ -37,25 +29,40 @@ test('real model: asks with a question card when told not to decide alone', asyn
   const first = card.getByRole('radio').first();
   await first.check();
   await card.locator('[data-testid="question-submit"]').click();
-  await expect.poll(async () => (await forwardedFor(`Marker ${s}`)).length, { timeout: ROUND, intervals: [5_000] }).toBeGreaterThan(1);
+  await expect
+    .poll(async () => (await forwardedFor(`Marker ${s}`)).length, {
+      timeout: ROUND,
+      intervals: [5_000],
+    })
+    .toBeGreaterThan(1);
   const rounds = await turnDone(`Marker ${s}`, ROUND);
   await settled(page, 2, ROUND);
   expect(calledTools(rounds)).toContain('ask_user');
-  test.info().annotations.push({ type: 'model', description: `${model}: ${calledTools(rounds).join(',') || 'no tools'}; ${rounds.map((r) => r.answer?.seconds).join('s,')}s` });
+  test.info().annotations.push({
+    type: 'model',
+    description: `${model}: ${calledTools(rounds).join(',') || 'no tools'}; ${rounds.map((r) => r.answer?.seconds).join('s,')}s`,
+  });
 });
 
 test('real model: stores a fact with the memory tool when asked to remember', async ({ page }) => {
   const s = stamp();
   await signIn(page);
   await newChat(page, { agent: true, autoApprove: true });
-  await send(page, `Marker ${s}. Please remember for future conversations that my favourite editor is Helix. Store it with your memory tool, then confirm.`);
+  await send(
+    page,
+    `Marker ${s}. Please remember for future conversations that my favourite editor is Helix. Store it with your memory tool, then confirm.`
+  );
   const rounds = await turnDone(`Marker ${s}`, ROUND);
   await settled(page, 1, ROUND);
   expect(calledTools(rounds)).toContain('memory_write');
-  test.info().annotations.push({ type: 'model', description: `${model}: ${calledTools(rounds).join(',')}` });
+  test
+    .info()
+    .annotations.push({ type: 'model', description: `${model}: ${calledTools(rounds).join(',')}` });
 });
 
-test('real model: backgrounds a command, waits for it, and reports its output', async ({ page }) => {
+test('real model: backgrounds a command, waits for it, and reports its output', async ({
+  page,
+}) => {
   const s = stamp();
   await signIn(page);
   await newChat(page, { agent: true, autoApprove: true });
@@ -100,7 +107,9 @@ test('real model: loads the reminder tool and sets a reminder that fires', async
       async () =>
         (await thread())
           .slice(before)
-          .some((m) => typeof m.content === 'string' && m.content.includes(`stretch your legs ${s}`)),
+          .some(
+            (m) => typeof m.content === 'string' && m.content.includes(`stretch your legs ${s}`)
+          ),
       { timeout: 420_000, intervals: [5_000] }
     )
     .toBe(true);
@@ -127,5 +136,7 @@ test('real model: reads a workspace skill before doing what it covers', async ({
   await settled(page, 1, ROUND);
   expect(calledTools(rounds)).toContain('read_document');
   await expect(page.locator('.message-assistant').last()).toContainText(`Cheers-${s}`);
-  test.info().annotations.push({ type: 'model', description: `${model}: ${calledTools(rounds).join(',')}` });
+  test
+    .info()
+    .annotations.push({ type: 'model', description: `${model}: ${calledTools(rounds).join(',')}` });
 });

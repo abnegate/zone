@@ -35,17 +35,12 @@ function pngSize(bytes: Buffer): { width: number; height: number } {
   return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
 }
 
-async function fetchAttachment(
-  page: Page,
-  selector: string,
-  index: number,
-): Promise<Buffer> {
+async function fetchAttachment(page: Page, selector: string, index: number): Promise<Buffer> {
   const source = await page.locator(selector).nth(index).getAttribute('src');
   expect(source, 'the media element resolved no source').toBeTruthy();
   const bytes = await page.evaluate(async (url) => {
     const response = await fetch(url as string);
-    if (!response.ok)
-      throw new Error(`artifact fetch failed: ${response.status}`);
+    if (!response.ok) throw new Error(`artifact fetch failed: ${response.status}`);
     return new Uint8Array(await response.arrayBuffer());
   }, source);
   return Buffer.from(bytes);
@@ -76,27 +71,26 @@ async function comfyHistory(): Promise<
       (n) =>
         n.class_type === 'CLIPTextEncode' ||
         n.class_type === 'TextEncodeQwenImageEditPlus' ||
-        n.class_type === 'TextEncodeAceStepAudio',
+        n.class_type === 'TextEncodeAceStepAudio'
     );
     const messages = entry.status?.messages ?? [];
-    const start = messages.find((m) => m[0] === 'execution_start')?.[1]
-      .timestamp;
-    const end = messages.find((m) => m[0] === 'execution_success')?.[1]
-      .timestamp;
+    const start = messages.find((m) => m[0] === 'execution_start')?.[1].timestamp;
+    const end = messages.find((m) => m[0] === 'execution_success')?.[1].timestamp;
     return {
       id,
       classes,
       seconds: start && end ? (end - start) / 1000 : null,
-      prompt: String(
-        text?.inputs.text ?? text?.inputs.prompt ?? text?.inputs.tags ?? '',
-      ).slice(0, 120),
+      prompt: String(text?.inputs.text ?? text?.inputs.prompt ?? text?.inputs.tags ?? '').slice(
+        0,
+        120
+      ),
     };
   });
 }
 
 function toolNames(chatId: string): string[] {
   return sql(
-    `select c->'function'->>'name' from chat_entries, jsonb_array_elements(coalesce(nullif(message->'tool_calls', 'null'::jsonb), '[]'::jsonb)) c where chat_id = '${chatId}' order by position`,
+    `select c->'function'->>'name' from chat_entries, jsonb_array_elements(coalesce(nullif(message->'tool_calls', 'null'::jsonb), '[]'::jsonb)) c where chat_id = '${chatId}' order by position`
   );
 }
 
@@ -104,7 +98,7 @@ async function turn(
   page: Page,
   message: string,
   replies: number,
-  timeout = 3_700_000,
+  timeout = 3_700_000
 ): Promise<{ seconds: number; text: string }> {
   const started = Date.now();
   const text = await ask(page, message, { replies, timeout });
@@ -115,35 +109,21 @@ test.describe('media through chat', () => {
   test.skip(!enabled, 'set ZONE_LIVE_REAL_PASS=1 against the real rig');
   test.describe.configure({ timeout: 4 * 3_600_000 });
 
-  test('38: an image, a soundscape, a clip, and upscales, all by intent', async ({
-    page,
-  }) => {
+  test('38: an image, a soundscape, a clip, and upscales, all by intent', async ({ page }) => {
     await signIn(page);
     const chatId = await newChat(page, { model });
     const mark = logMark();
-    const image = await turn(
-      page,
-      'draw me a red bicycle leaning on a brick wall',
-      1,
-    );
+    const image = await turn(page, 'draw me a red bicycle leaning on a brick wall', 1);
     const images = page.locator('[data-testid="message-image"]');
     await expect(images).toHaveCount(1);
-    const generated = await fetchAttachment(
-      page,
-      '[data-testid="message-image"]',
-      0,
-    );
+    const generated = await fetchAttachment(page, '[data-testid="message-image"]', 0);
     const size = pngSize(generated);
     writeFileSync(join(evidenceDir, '38-image.png'), generated);
     await shot(page, '38-image-rendered');
 
     const upscale = await turn(page, 'upscale that', 2);
     await expect(images).toHaveCount(2);
-    const upscaled = await fetchAttachment(
-      page,
-      '[data-testid="message-image"]',
-      1,
-    );
+    const upscaled = await fetchAttachment(page, '[data-testid="message-image"]', 1);
     const upSize = pngSize(upscaled);
     await shot(page, '38-image-upscaled');
 
@@ -173,11 +153,7 @@ test.describe('media through chat', () => {
         audio: count,
       });
       if (count > 0) {
-        clip = await fetchAttachment(
-          page,
-          '[data-testid="message-audio"]',
-          count - 1,
-        );
+        clip = await fetchAttachment(page, '[data-testid="message-audio"]', count - 1);
         writeFileSync(join(evidenceDir, '38-audio.flac'), clip);
         break;
       }
@@ -186,22 +162,13 @@ test.describe('media through chat', () => {
     await shot(page, '38-audio-rendered');
 
     replies += 1;
-    const video = await turn(
-      page,
-      'a short clip of a sunset over the ocean',
-      replies,
-    );
+    const video = await turn(page, 'a short clip of a sunset over the ocean', replies);
     const videos = page.locator('[data-testid="message-video"]');
     const videoCount = await videos.count();
     const generatedVideo = videoCount
-      ? await fetchAttachment(
-          page,
-          '[data-testid="message-video"]',
-          videoCount - 1,
-        )
+      ? await fetchAttachment(page, '[data-testid="message-video"]', videoCount - 1)
       : Buffer.alloc(0);
-    if (videoCount)
-      writeFileSync(join(evidenceDir, '38-video.webm'), generatedVideo);
+    if (videoCount) writeFileSync(join(evidenceDir, '38-video.webm'), generatedVideo);
     await shot(page, '38-video-rendered');
 
     replies += 1;
@@ -209,11 +176,7 @@ test.describe('media through chat', () => {
     const upscaledCount = await videos.count();
     const upscaledVideo =
       upscaledCount > videoCount
-        ? await fetchAttachment(
-            page,
-            '[data-testid="message-video"]',
-            upscaledCount - 1,
-          )
+        ? await fetchAttachment(page, '[data-testid="message-video"]', upscaledCount - 1)
         : Buffer.alloc(0);
     await shot(page, '38-video-upscaled');
 
@@ -228,10 +191,7 @@ test.describe('media through chat', () => {
 
     const history = await comfyHistory();
     const tools = toolNames(chatId);
-    const log = logLines(mark, /comfy|intent|classif|upscale|generat/i).slice(
-      0,
-      12,
-    );
+    const log = logLines(mark, /comfy|intent|classif|upscale|generat/i).slice(0, 12);
     const ok =
       size.width >= 512 &&
       upSize.width === size.width * 4 &&
@@ -309,42 +269,23 @@ test.describe('media through chat', () => {
     const s = stamp();
     // Row 36: "Use as starting image" turns the next request into an edit.
     const chatId = await newChat(page, { model });
-    const drawn = await turn(
-      page,
-      'draw me a small wooden boat on a calm lake at dawn',
-      1,
-    );
+    const drawn = await turn(page, 'draw me a small wooden boat on a calm lake at dawn', 1);
     await expect(page.locator('[data-testid="message-image"]')).toHaveCount(1);
-    const original = await fetchAttachment(
-      page,
-      '[data-testid="message-image"]',
-      0,
-    );
-    await page
-      .getByRole('button', { name: 'Use as starting image' })
-      .first()
-      .click();
-    await expect(
-      page.locator('.attachment-chip', { hasText: 'Starting image' }),
-    ).toBeVisible();
+    const original = await fetchAttachment(page, '[data-testid="message-image"]', 0);
+    await page.getByRole('button', { name: 'Use as starting image' }).first().click();
+    await expect(page.locator('.attachment-chip', { hasText: 'Starting image' })).toBeVisible();
     await shot(page, '36-starting-image-chip');
     const edited = await turn(
       page,
       'make the boat bright red and add a lighthouse on the shore',
-      2,
+      2
     );
-    const imageCount = await page
-      .locator('[data-testid="message-image"]')
-      .count();
+    const imageCount = await page.locator('[data-testid="message-image"]').count();
     expect(
       imageCount,
-      'the edited image arrived after the echoed starting image',
+      'the edited image arrived after the echoed starting image'
     ).toBeGreaterThanOrEqual(2);
-    const result = await fetchAttachment(
-      page,
-      '[data-testid="message-image"]',
-      imageCount - 1,
-    );
+    const result = await fetchAttachment(page, '[data-testid="message-image"]', imageCount - 1);
     writeFileSync(join(evidenceDir, '36-edit-original.png'), original);
     writeFileSync(join(evidenceDir, '36-edit-result.png'), result);
     await shot(page, '36-edited-image');
@@ -365,7 +306,7 @@ test.describe('media through chat', () => {
     const genTool = await turn(
       page,
       `Use your image generation tool to produce a picture of a green ceramic teapot on a wooden table, seed ${s}.`,
-      1,
+      1
     );
     await expect(page.locator('[data-testid="message-image"]')).toHaveCount(1, {
       timeout: 60_000,
@@ -374,13 +315,13 @@ test.describe('media through chat', () => {
     const editTool = await turn(
       page,
       'Use your image editing tool on the teapot picture you just made: change the teapot to blue.',
-      2,
+      2
     );
     await shot(page, '49-edit-image-tool');
     const audioTool = await turn(
       page,
       'Use your audio generation tool to create a ten second clip of wind chimes in a light breeze.',
-      3,
+      3
     );
     await expect(page.locator('[data-testid="message-audio"]')).toHaveCount(1, {
       timeout: 60_000,
@@ -431,10 +372,7 @@ test.describe('media through chat', () => {
       comfy_history: history.slice(0, 4),
       path_comparison:
         'intent path: no tool call in the transcript, the classifier routed the message; tool path: generate_image, edit_image and generate_audio appear in the transcript',
-      server_log: logLines(
-        mark,
-        /comfy|intent|classif|generate|edit_image/i,
-      ).slice(0, 10),
+      server_log: logLines(mark, /comfy|intent|classif|generate|edit_image/i).slice(0, 10),
       screenshots: [
         '49-generate-image-tool.png',
         '49-edit-image-tool.png',

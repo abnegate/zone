@@ -30,12 +30,7 @@ test.describe('wiki and search', () => {
     page.on('dialog', (d) => d.accept());
     await page.goto('/wiki');
 
-    async function open(
-      kind: RegExp,
-      value: string,
-      title: string,
-      tags: string[],
-    ): Promise<void> {
+    async function open(kind: RegExp, value: string, title: string, tags: string[]): Promise<void> {
       await page.getByRole('button', { name: /add knowledge/i }).click();
       const wizard = page.getByRole('dialog');
       await expect(wizard).toContainText('Add Knowledge Entry');
@@ -48,10 +43,7 @@ test.describe('wiki and search', () => {
         await wizard.locator('#knowledge-tags').fill(tag);
         await wizard.locator('#knowledge-tags').press('Enter');
       }
-      await shot(
-        page,
-        `54-wizard-${title.toLowerCase().replace(/\W+/g, '-').slice(0, 24)}`,
-      );
+      await shot(page, `54-wizard-${title.toLowerCase().replace(/\W+/g, '-').slice(0, 24)}`);
       await wizard.getByRole('button', { name: 'Create Entry' }).click();
       await expect(wizard).toBeHidden({ timeout: 30_000 });
     }
@@ -61,7 +53,7 @@ test.describe('wiki and search', () => {
       /Text Content/,
       `The Auckland Harbour Bridge opened in 1959 and gained its clip-on lanes in 1969. Marker ${s}.`,
       textTitle,
-      ['history', `pass-${s}`],
+      ['history', `pass-${s}`]
     );
     const textCard = page.locator('.knowledge-card', { hasText: textTitle });
     await expect(textCard).toBeVisible({ timeout: 30_000 });
@@ -74,20 +66,16 @@ test.describe('wiki and search', () => {
     await expect(urlCard).toBeVisible({ timeout: 30_000 });
     const urlRow = () =>
       sql(
-        `select coalesce(source_url, '') || ' | ' || left(replace(coalesce(content, ''), E'\\n', ' '), 60) || ' | ' || coalesce(last_fetched_at::text, '') || ' | ' || coalesce(last_fetch_error, '') from knowledge_entries where title = '${urlTitle}'`,
+        `select coalesce(source_url, '') || ' | ' || left(replace(coalesce(content, ''), E'\\n', ' '), 60) || ' | ' || coalesce(last_fetched_at::text, '') || ' | ' || coalesce(last_fetch_error, '') from knowledge_entries where title = '${urlTitle}'`
       ).join(',');
-    const urlBadge = (
-      await urlCard.locator('.ui-badge, .knowledge-card-type').allInnerTexts()
-    )
+    const urlBadge = (await urlCard.locator('.ui-badge, .knowledge-card-type').allInnerTexts())
       .join(' ')
       .trim();
     const refresh = urlCard.locator('button[aria-label="Refresh URL content"]');
     const refreshable = (await refresh.count()) > 0;
     const fetchedBefore = urlRow();
     if (refreshable) {
-      await expect
-        .poll(urlRow, { timeout: 120_000, intervals: [3_000] })
-        .not.toMatch(/\| \| $/);
+      await expect.poll(urlRow, { timeout: 120_000, intervals: [3_000] }).not.toMatch(/\| \| $/);
       await urlCard.hover();
       await refresh.click();
       await page.waitForTimeout(5_000);
@@ -108,7 +96,7 @@ test.describe('wiki and search', () => {
       .getByText('Not indexed')
       .count();
     const embeddings = sql(
-      `select count(*) from knowledge_embeddings where knowledge_entry_id in (select id from knowledge_entries where title = '${textTitle}')`,
+      `select count(*) from knowledge_embeddings where knowledge_entry_id in (select id from knowledge_entries where title = '${textTitle}')`
     ).join(',');
 
     await page.getByLabel('Search knowledge').fill(`Harbour bridge facts ${s}`);
@@ -124,22 +112,22 @@ test.describe('wiki and search', () => {
     const reply = await ask(
       page,
       `When did the Auckland Harbour Bridge open and when did it get its clip-on lanes? Answer from the workspace knowledge base (the entry with marker ${s}) and cite it.`,
-      { replies: 1, timeout: 600_000 },
+      { replies: 1, timeout: 600_000 }
     );
-    const citations = (
-      await page.locator('[data-testid="citation"]').allInnerTexts()
-    ).map((c) => c.replace(/\s+/g, ' '));
+    const citations = (await page.locator('[data-testid="citation"]').allInnerTexts()).map((c) =>
+      c.replace(/\s+/g, ' ')
+    );
     await shot(page, '54-agent-cites-entry');
 
     await page.goto('/wiki');
     const urlEntry = page.locator('.knowledge-card', { hasText: urlTitle });
     await urlEntry.hover();
     await urlEntry.locator('button[aria-label="Delete entry"]').click();
-    await expect(
-      page.locator('.knowledge-card', { hasText: urlTitle }),
-    ).toHaveCount(0, { timeout: 30_000 });
+    await expect(page.locator('.knowledge-card', { hasText: urlTitle })).toHaveCount(0, {
+      timeout: 30_000,
+    });
     const deleted = sql(
-      `select count(*) from knowledge_entries where title = '${urlTitle}' and is_active`,
+      `select count(*) from knowledge_entries where title = '${urlTitle}' and is_active`
     ).join(',');
     await shot(page, '54-url-entry-deleted');
 
@@ -180,7 +168,7 @@ test.describe('wiki and search', () => {
     expect(indexedNow).toBe(0);
     expect(
       citations.some((c) => c.includes(textTitle)),
-      citations.join(' || '),
+      citations.join(' || ')
     ).toBe(true);
     expect(deleted).toBe('0');
   });
@@ -190,7 +178,7 @@ test.describe('wiki and search', () => {
   }) => {
     await signIn(page);
     const sources = sql(
-      `select name || ' | ' || source_type || ' | ' || is_active from sources where workspace_id = '${state.owner.workspace.id}' order by created_at`,
+      `select name || ' | ' || source_type || ' | ' || is_active from sources where workspace_id = '${state.owner.workspace.id}' order by created_at`
     );
     await page.goto('/wiki');
     if (sources.length)
@@ -198,22 +186,14 @@ test.describe('wiki and search', () => {
         timeout: 60_000,
       });
     const pills = await page.locator('.source-pill').allInnerTexts();
-    const results: Record<
-      string,
-      { count: number; first: string; labels: string[] }
-    > = {};
+    const results: Record<string, { count: number; first: string; labels: string[] }> = {};
     for (const [mode, query, pill] of [
       ['Hybrid', 'widget area check', 'Scratch repo'],
-      [
-        'Semantic',
-        'a script that verifies a small python module',
-        'Scratch repo',
-      ],
+      ['Semantic', 'a script that verifies a small python module', 'Scratch repo'],
       ['Keyword', 'widget', null],
     ] as const) {
       await page.getByRole('tab', { name: mode }).click();
-      for (const active of await page.locator('.source-pill.active').all())
-        await active.click();
+      for (const active of await page.locator('.source-pill.active').all()) await active.click();
       if (pill) {
         const target = page.locator('.source-pill', { hasText: pill });
         if (await target.count()) await target.click();
@@ -221,10 +201,8 @@ test.describe('wiki and search', () => {
       await page.getByPlaceholder('Search knowledge and sources...').fill(query);
       const response = page
         .waitForResponse(
-          (r) =>
-            r.url().includes('/api/context/search') ||
-            r.url().includes('/search'),
-          { timeout: 60_000 },
+          (r) => r.url().includes('/api/context/search') || r.url().includes('/search'),
+          { timeout: 60_000 }
         )
         .catch(() => null);
       await page.getByRole('button', { name: 'Search', exact: true }).click();
@@ -264,7 +242,7 @@ test.describe('wiki and search', () => {
     });
     expect(
       Object.values(results).every((r) => r.count > 0),
-      JSON.stringify(results),
+      JSON.stringify(results)
     ).toBe(true);
   });
 });

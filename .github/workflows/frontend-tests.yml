@@ -11,6 +11,14 @@ on:
       - 'runner/zone_server/src/services/login/status/**'
       - 'runner/zone_server/src/services/login/status.rs'
       - 'runner/zone_server/src/routes/agents.rs'
+      - 'runner/zone_server/src/services/analytics.rs'
+      - 'runner/zone_server/src/services/analytics/**'
+      - 'runner/zone_server/src/workers/analytics/summary.rs'
+      - 'runner/zone_server/src/workers/analytics/period.rs'
+      - 'runner/zone_server/src/workers/learning/attempt.rs'
+      - 'runner/zone_server/src/workers/learning/error_category.rs'
+      - 'runner/zone_server/src/workers/learning/quality.rs'
+      - 'runner/zone_server/src/db/tasks/origin.rs'
       - '.github/workflows/frontend-tests.yml'
   pull_request:
     paths:
@@ -21,6 +29,14 @@ on:
       - 'runner/zone_server/src/services/login/status/**'
       - 'runner/zone_server/src/services/login/status.rs'
       - 'runner/zone_server/src/routes/agents.rs'
+      - 'runner/zone_server/src/services/analytics.rs'
+      - 'runner/zone_server/src/services/analytics/**'
+      - 'runner/zone_server/src/workers/analytics/summary.rs'
+      - 'runner/zone_server/src/workers/analytics/period.rs'
+      - 'runner/zone_server/src/workers/learning/attempt.rs'
+      - 'runner/zone_server/src/workers/learning/error_category.rs'
+      - 'runner/zone_server/src/workers/learning/quality.rs'
+      - 'runner/zone_server/src/db/tasks/origin.rs'
       - '.github/workflows/frontend-tests.yml'
 
 concurrency:

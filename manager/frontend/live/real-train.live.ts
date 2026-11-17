@@ -80,10 +80,9 @@ test.describe('real LoRA training', () => {
 
     // A run that could not be probed says so rather than showing a band, and
     // that is a real outcome — but it is not evidence the adapter learned.
-    expect(
-      reported,
-      `probing did not run, so nothing was measured: ${reported}`
-    ).not.toContain('Not measured');
+    expect(reported, `probing did not run, so nothing was measured: ${reported}`).not.toContain(
+      'Not measured'
+    );
 
     // 15% is what an adapter that learned nothing scores, so a healthy run has
     // to clear it. The band label is the console's own reading of the number.

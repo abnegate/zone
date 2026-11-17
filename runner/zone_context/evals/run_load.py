@@ -27,7 +27,7 @@ EVAL_DIR = Path(__file__).resolve().parent
 DEFAULT_QUERIES = [
     "How does the server verify a GitHub webhook signature?",
     "What does should_skip_blob do when a GitHub file SHA is unchanged?",
-    "Where is NotionAdapter implemented?",
+    "Where is WebAdapter implemented?",
     "How does validate_public_url reject private IP addresses?",
     "Where is the in-process Jina ONNX cross-encoder constructed?",
     "How is source_sync_state version stored after an incremental index?",

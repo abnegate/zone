@@ -1,5 +1,5 @@
 import type { Locator, Page, Request, Route } from '@playwright/test';
-import { test, expect } from './fixtures';
+import { expect, test } from './fixtures';
 import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { MOCK_PNG_BYTES } from './helpers/chatSocket';
 import { blockServiceWorker, routeApi } from './test-utils';

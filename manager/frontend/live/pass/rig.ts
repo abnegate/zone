@@ -1,35 +1,22 @@
 import { execFileSync } from 'node:child_process';
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  statSync,
-} from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Page } from '@playwright/test';
 import {
   api,
+  test as base,
   chooseOption,
   chooseTaskAction,
   deleteTask,
   expect,
-  signIn,
   SOURCES_PATH,
+  signIn,
   state,
-  test as base,
-  tokenFor,
   type Tenant,
+  tokenFor,
 } from '../harness';
-import {
-  approveIfAsked,
-  newChat,
-  send,
-  setChecked,
-  settled,
-  stamp,
-} from '../stub';
+import { approveIfAsked, newChat, send, setChecked, settled, stamp } from '../stub';
 
 /**
  * Helpers for the real pass: every row leaves a screenshot and a line of
@@ -42,9 +29,7 @@ import {
 
 export const enabled = process.env.ZONE_LIVE_REAL_PASS === '1';
 export const model =
-  process.env.ZONE_LIVE_AGENT_MODEL ??
-  process.env.ZONE_LIVE_MODEL ??
-  'qwen3.8:27b';
+  process.env.ZONE_LIVE_AGENT_MODEL ?? process.env.ZONE_LIVE_MODEL ?? 'qwen3.8:27b';
 export const evidenceDir =
   process.env.ZONE_LIVE_EVIDENCE ??
   fileURLToPath(new URL('../../../../docs/live-real-pass-2026-09-20', import.meta.url));
@@ -87,7 +72,7 @@ export function logLines(mark: number, pattern: RegExp): string[] {
 export async function logEventually(
   mark: number,
   pattern: RegExp,
-  timeout = 60_000,
+  timeout = 60_000
 ): Promise<string[]> {
   await expect
     .poll(() => logLines(mark, pattern).length, { timeout, intervals: [1_000] })
@@ -121,7 +106,7 @@ export async function renderedToolCalls(page: Page): Promise<string[]> {
 export async function ask(
   page: Page,
   message: string,
-  options: { replies: number; approve?: boolean; timeout?: number } = { replies: 1 },
+  options: { replies: number; approve?: boolean; timeout?: number } = { replies: 1 }
 ): Promise<string> {
   const assistant = page.locator('.message-assistant');
   const usersBefore = await page.locator('.message-user').count();
@@ -148,10 +133,10 @@ export async function ask(
         return Array.from(document.querySelectorAll('.message-assistant')).some(
           (reply) =>
             Boolean(last.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING) &&
-            (reply.textContent ?? '').trim().length > 0,
+            (reply.textContent ?? '').trim().length > 0
         );
       },
-      { text: message.slice(0, 30).replace(/\s+/g, ' '), before: usersBefore },
+      { text: message.slice(0, 30).replace(/\s+/g, ' '), before: usersBefore }
     );
     quiet = answered && status === 0 ? quiet + 1 : 0;
     if (quiet >= 3) break;
@@ -166,6 +151,7 @@ export async function ask(
 }
 
 export const test = base;
+export type { Tenant };
 export {
   api,
   approveIfAsked,
@@ -174,13 +160,12 @@ export {
   deleteTask,
   expect,
   newChat,
+  SOURCES_PATH,
   send,
   setChecked,
   settled,
   signIn,
-  SOURCES_PATH,
   stamp,
   state,
   tokenFor,
 };
-export type { Tenant };
