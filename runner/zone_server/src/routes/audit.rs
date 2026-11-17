@@ -1,7 +1,7 @@
-//! Audit logging routes
-//!
-//! Provides endpoints for viewing and exporting audit logs.
-//! Only organization admins can access audit logs.
+//! The Community audit log: organization admins list, read and export their organization's
+//! audit logs. The Enterprise export, streaming and retention routes in the submodules are open
+//! to organization owners and admins for their organization, and to server admins for the
+//! server's own audit rows.
 
 pub mod access;
 pub mod destinations;
@@ -36,37 +36,38 @@ impl ErrorResponse {
     }
 }
 
-/// Query parameters for listing audit logs
+const DEFAULT_LIMIT: i64 = 50;
+const MAXIMUM_LIMIT: i64 = 100;
+const DATE_FORMAT: &str = "%Y-%m-%d";
+const UNAUTHENTICATED: &str = "Invalid user ID in token";
+const ADMIN_CHECK_FAILED: &str = "Failed to check admin status";
+const ADMIN_REQUIRED: &str = "Admin access required";
+const START_DATE_INVALID: &str = "Invalid start_date format. Use ISO 8601 format.";
+const END_DATE_INVALID: &str = "Invalid end_date format. Use ISO 8601 format.";
+const LOG_MISSING: &str = "Audit log not found";
+
 #[derive(Debug, Deserialize)]
 pub struct ListAuditLogsQuery {
-    /// Filter by action type
     #[serde(default)]
     pub action: Option<String>,
-    /// Filter by resource type
     #[serde(default)]
     pub resource_type: Option<String>,
-    /// Filter by resource ID
     #[serde(default)]
     pub resource_id: Option<Uuid>,
-    /// Filter by actor ID
     #[serde(default)]
     pub actor_id: Option<Uuid>,
-    /// Filter by start date (ISO 8601)
     #[serde(default)]
     pub start_date: Option<String>,
-    /// Filter by end date (ISO 8601)
     #[serde(default)]
     pub end_date: Option<String>,
-    /// Pagination limit
     #[serde(default = "default_limit")]
     pub limit: i64,
-    /// Pagination offset
     #[serde(default)]
     pub offset: i64,
 }
 
 fn default_limit() -> i64 {
-    50
+    DEFAULT_LIMIT
 }
 
 /// A bound given either as an RFC 3339 instant or as a calendar date; a date
@@ -85,20 +86,16 @@ fn parse_bound(value: &str, time: NaiveTime) -> Option<DateTime<Utc>> {
     if let Ok(instant) = DateTime::parse_from_rfc3339(value) {
         return Some(instant.with_timezone(&Utc));
     }
-    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?;
+    let date = NaiveDate::parse_from_str(value, DATE_FORMAT).ok()?;
     Some(date.and_time(time).and_utc())
 }
 
-/// Query parameters for exporting audit logs
 #[derive(Debug, Deserialize)]
 pub struct ExportAuditLogsQuery {
-    /// Start date (ISO 8601) - required
     pub start_date: String,
-    /// End date (ISO 8601) - required
     pub end_date: String,
 }
 
-/// Response for listing audit logs
 #[derive(Debug, Serialize)]
 pub struct ListAuditLogsResponse {
     pub logs: Vec<audit::AuditLog>,
@@ -107,47 +104,40 @@ pub struct ListAuditLogsResponse {
     pub offset: i64,
 }
 
-/// List audit logs for an organization
-///
-/// GET /api/organizations/:org_id/audit-logs
-///
-/// Requires admin access to the organization.
-/// Supports filtering by action, resource_type, resource_id, actor_id, and date range.
-/// Returns paginated results.
+/// GET /api/organizations/{org_id}/audit-logs
 pub async fn list_audit_logs(
     State(state): State<AppState>,
-    Path(org_id): Path<Uuid>,
+    Path(organization): Path<Uuid>,
     Query(query): Query<ListAuditLogsQuery>,
     AuthUser(claims): AuthUser,
 ) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
+    let user = match Uuid::parse_str(&claims.sub) {
+        Ok(user) => user,
         Err(_) => {
             return (
                 StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
+                Json(ErrorResponse::new(UNAUTHENTICATED)),
             )
                 .into_response();
         }
     };
 
-    // Verify user is an admin of the organization
-    let is_admin = match organization_members::is_admin(state.db(), org_id, user_id).await {
+    let admin = match organization_members::is_admin(state.db(), organization, user).await {
         Ok(admin) => admin,
-        Err(e) => {
-            tracing::error!("Failed to check admin status: {}", e);
+        Err(error) => {
+            tracing::error!(%error, "Failed to check admin status");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to check admin status")),
+                Json(ErrorResponse::new(ADMIN_CHECK_FAILED)),
             )
                 .into_response();
         }
     };
 
-    if !is_admin {
+    if !admin {
         return (
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new("Admin access required")),
+            Json(ErrorResponse::new(ADMIN_REQUIRED)),
         )
             .into_response();
     }
@@ -156,9 +146,7 @@ pub async fn list_audit_logs(
         Some(None) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "Invalid start_date format. Use ISO 8601 format.",
-                )),
+                Json(ErrorResponse::new(START_DATE_INVALID)),
             )
                 .into_response();
         }
@@ -169,25 +157,21 @@ pub async fn list_audit_logs(
         Some(None) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "Invalid end_date format. Use ISO 8601 format.",
-                )),
+                Json(ErrorResponse::new(END_DATE_INVALID)),
             )
                 .into_response();
         }
         bound => bound.flatten(),
     };
 
-    // Validate limit
-    let limit = if query.limit > 100 {
-        100
+    let limit = if query.limit > MAXIMUM_LIMIT {
+        MAXIMUM_LIMIT
     } else if query.limit < 1 {
-        50
+        DEFAULT_LIMIT
     } else {
         query.limit
     };
 
-    // Build filters
     let filters = audit::AuditFilters {
         action: query.action,
         resource_type: query.resource_type,
@@ -197,12 +181,12 @@ pub async fn list_audit_logs(
         end_date,
     };
 
-    // Get logs and total count
-    let logs = match audit::list_audit_logs(state.db(), org_id, &filters, limit, query.offset).await
+    let logs = match audit::list_audit_logs(state.db(), organization, &filters, limit, query.offset)
+        .await
     {
         Ok(logs) => logs,
-        Err(e) => {
-            tracing::error!("Failed to list audit logs: {}", e);
+        Err(error) => {
+            tracing::error!(%error, "Failed to list audit logs");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Failed to list audit logs")),
@@ -211,10 +195,10 @@ pub async fn list_audit_logs(
         }
     };
 
-    let total = match audit::count_audit_logs(state.db(), org_id, &filters).await {
+    let total = match audit::count_audit_logs(state.db(), organization, &filters).await {
         Ok(count) => count,
-        Err(e) => {
-            tracing::error!("Failed to count audit logs: {}", e);
+        Err(error) => {
+            tracing::error!(%error, "Failed to count audit logs");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Failed to count audit logs")),
@@ -232,70 +216,50 @@ pub async fn list_audit_logs(
     .into_response()
 }
 
-/// Get a single audit log by ID
-///
-/// GET /api/organizations/:org_id/audit-logs/:log_id
-///
-/// Requires admin access to the organization.
+/// GET /api/organizations/{org_id}/audit-logs/{log_id}
 pub async fn get_audit_log(
     State(state): State<AppState>,
-    Path((org_id, log_id)): Path<(Uuid, Uuid)>,
+    Path((organization, id)): Path<(Uuid, Uuid)>,
     AuthUser(claims): AuthUser,
 ) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
+    let user = match Uuid::parse_str(&claims.sub) {
+        Ok(user) => user,
         Err(_) => {
             return (
                 StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
+                Json(ErrorResponse::new(UNAUTHENTICATED)),
             )
                 .into_response();
         }
     };
 
-    // Verify user is an admin of the organization
-    let is_admin = match organization_members::is_admin(state.db(), org_id, user_id).await {
+    let admin = match organization_members::is_admin(state.db(), organization, user).await {
         Ok(admin) => admin,
-        Err(e) => {
-            tracing::error!("Failed to check admin status: {}", e);
+        Err(error) => {
+            tracing::error!(%error, "Failed to check admin status");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to check admin status")),
+                Json(ErrorResponse::new(ADMIN_CHECK_FAILED)),
             )
                 .into_response();
         }
     };
 
-    if !is_admin {
+    if !admin {
         return (
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new("Admin access required")),
+            Json(ErrorResponse::new(ADMIN_REQUIRED)),
         )
             .into_response();
     }
 
-    // Get the log
-    let log = match audit::get_audit_log(state.db(), log_id).await {
-        Ok(Some(log)) => {
-            // Verify the log belongs to this organization
-            if log.organization_id != Some(org_id) {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse::new("Audit log not found")),
-                )
-                    .into_response();
-            }
-            log
+    let log = match audit::get_audit_log(state.db(), id).await {
+        Ok(Some(log)) if log.organization_id == Some(organization) => log,
+        Ok(_) => {
+            return (StatusCode::NOT_FOUND, Json(ErrorResponse::new(LOG_MISSING))).into_response();
         }
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Audit log not found")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to get audit log: {}", e);
+        Err(error) => {
+            tracing::error!(%error, "Failed to get audit log");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Failed to get audit log")),
@@ -307,46 +271,40 @@ pub async fn get_audit_log(
     Json(log).into_response()
 }
 
-/// Export audit logs as CSV
-///
-/// GET /api/organizations/:org_id/audit-logs/export
-///
-/// Requires admin access to the organization.
-/// Query parameters `start_date` and `end_date` are required (ISO 8601 format).
+/// GET /api/organizations/{org_id}/audit-logs/export
 pub async fn export_audit_logs_csv(
     State(state): State<AppState>,
-    Path(org_id): Path<Uuid>,
+    Path(organization): Path<Uuid>,
     Query(query): Query<ExportAuditLogsQuery>,
     AuthUser(claims): AuthUser,
 ) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
+    let user = match Uuid::parse_str(&claims.sub) {
+        Ok(user) => user,
         Err(_) => {
             return (
                 StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
+                Json(ErrorResponse::new(UNAUTHENTICATED)),
             )
                 .into_response();
         }
     };
 
-    // Verify user is an admin of the organization
-    let is_admin = match organization_members::is_admin(state.db(), org_id, user_id).await {
+    let admin = match organization_members::is_admin(state.db(), organization, user).await {
         Ok(admin) => admin,
-        Err(e) => {
-            tracing::error!("Failed to check admin status: {}", e);
+        Err(error) => {
+            tracing::error!(%error, "Failed to check admin status");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to check admin status")),
+                Json(ErrorResponse::new(ADMIN_CHECK_FAILED)),
             )
                 .into_response();
         }
     };
 
-    if !is_admin {
+    if !admin {
         return (
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new("Admin access required")),
+            Json(ErrorResponse::new(ADMIN_REQUIRED)),
         )
             .into_response();
     }
@@ -354,9 +312,7 @@ pub async fn export_audit_logs_csv(
     let Some(start_date) = parse_start(&query.start_date) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(
-                "Invalid start_date format. Use ISO 8601 format.",
-            )),
+            Json(ErrorResponse::new(START_DATE_INVALID)),
         )
             .into_response();
     };
@@ -364,29 +320,26 @@ pub async fn export_audit_logs_csv(
     let Some(end_date) = parse_end(&query.end_date) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(
-                "Invalid end_date format. Use ISO 8601 format.",
-            )),
+            Json(ErrorResponse::new(END_DATE_INVALID)),
         )
             .into_response();
     };
 
-    // Export logs as CSV
-    match audit::export_audit_logs_csv(state.db(), org_id, start_date, end_date).await {
+    match audit::export_audit_logs_csv(state.db(), organization, start_date, end_date).await {
         Ok(csv) => (
             StatusCode::OK,
             [
                 ("Content-Type", "text/csv"),
                 (
                     "Content-Disposition",
-                    &format!("attachment; filename=\"audit-logs-{}.csv\"", org_id),
+                    &format!("attachment; filename=\"audit-logs-{organization}.csv\""),
                 ),
             ],
             csv,
         )
             .into_response(),
-        Err(e) => {
-            tracing::error!("Failed to export audit logs: {}", e);
+        Err(error) => {
+            tracing::error!(%error, "Failed to export audit logs");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Failed to export audit logs")),
