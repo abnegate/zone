@@ -6,6 +6,7 @@
 pub mod access;
 pub mod destinations;
 pub mod refusal;
+pub mod retention;
 
 use axum::{
     Json,
