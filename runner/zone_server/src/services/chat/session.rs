@@ -18,7 +18,7 @@ use abnegate_agent::chat::{self, Capacity, History, NewEntry, ReplayMessage};
 use abnegate_agent::context::{
     self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary,
 };
-use abnegate_llm::{Message, ReasoningEffort, Role};
+use abnegate_llm::{Message, ReasoningEffort, Role, Usage};
 use abnegate_search::SearchContext;
 use base64::Engine;
 use serde_json::Value;
@@ -145,6 +145,10 @@ pub struct RunContext {
     /// filled, its own prompt and tools included, which zone's estimate of
     /// what it sends leaves out.
     pub reported: Option<u64>,
+    /// The round in flight's latest usage the run has not yet yielded as
+    /// `AgentEvent::Usage`. A consumer that drops the run mid-round takes it
+    /// from here, so the round is still counted, and counted once.
+    pub pending_usage: Option<Usage>,
 }
 
 impl RunContext {
@@ -170,6 +174,7 @@ impl RunContext {
             artifacts: None,
             vision: true,
             reported: None,
+            pending_usage: None,
         }
     }
 
@@ -581,6 +586,7 @@ pub async fn build(
         )),
         vision: sees_images(&chat.model_name, capacity.vision),
         reported,
+        pending_usage: None,
     };
     context.search(&SearchContext::new(&state.config().web_search));
     let sent = agentic.then(|| tools.definitions());
@@ -850,6 +856,27 @@ pub(crate) fn informed(at: &str, findings: &str, memory: &str) -> String {
     )
 }
 
+/// Image formats the engine on the other side of a turn can decode.
+///
+/// Checked against the Ollama an install ships with: it reads JPEG, PNG,
+/// WebP, GIF and BMP, and refuses a phone's HEIC with "Failed to load image
+/// or audio file". That refusal fails the whole request rather than the one
+/// image, so a HEIC stored before the composer transcoded it would break
+/// every later turn in its chat, text-only turns included.
+const DECODABLE_IMAGE_MIMES: &[&str] = &[
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+    "image/bmp",
+];
+
+/// The images a stored message replays on a later turn.
+///
+/// A format the engine cannot read is dropped rather than replayed, because
+/// one of those in the history fails every turn that follows it, and a turn
+/// that answers without an old image beats a turn that 500s.
 pub fn images(metadata: Option<&Value>) -> Vec<String> {
     metadata
         .and_then(|value| value.get("attachments"))
@@ -860,11 +887,38 @@ pub fn images(metadata: Option<&Value>) -> Vec<String> {
             attachment
                 .get("mime")
                 .and_then(Value::as_str)
-                .is_some_and(|mime| mime.starts_with("image/"))
+                .is_some_and(is_image_mime)
         })
-        .filter_map(|attachment| attachment.get("url").and_then(Value::as_str))
+        .filter_map(|attachment| {
+            let url = attachment.get("url").and_then(Value::as_str)?;
+            decodable(attachment, url).then_some(url)
+        })
         .map(str::to_string)
         .collect()
+}
+
+/// Whether a stored attachment is an image at all, whatever case the browser
+/// that recorded it used.
+fn is_image_mime(mime: &str) -> bool {
+    mime.get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+}
+
+/// Whether the bytes behind a stored attachment are in a format the engine
+/// reads. A data URL declares the format of what will actually be sent, so it
+/// is believed over the `mime` recorded beside it; any other URL leaves that
+/// recorded mime as the only thing to go on.
+fn decodable(attachment: &Value, url: &str) -> bool {
+    let declared = url
+        .strip_prefix("data:")
+        .and_then(|rest| rest.split([';', ',']).next())
+        .filter(|mime| !mime.is_empty())
+        .or_else(|| attachment.get("mime").and_then(Value::as_str));
+    declared.is_some_and(|mime| {
+        DECODABLE_IMAGE_MIMES
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(mime.trim()))
+    })
 }
 
 pub fn core_summary(summary: chat::Summary) -> Summary {
@@ -967,6 +1021,89 @@ mod tests {
     use super::*;
     use std::time::Instant;
     use zone_core::llm::LlmBackend;
+
+    #[test]
+    fn a_format_the_engine_cannot_read_leaves_the_replayed_history() {
+        // One HEIC in the history fails every later turn in the chat, so it is
+        // dropped rather than replayed; the turn answers without it instead.
+        let metadata = serde_json::json!({
+            "attachments": [
+                { "name": "photo.heic", "mime": "image/heic", "url": "data:image/heic;base64,AAAAGGZ0eXA=" },
+                { "name": "shot.png", "mime": "image/png", "url": "data:image/png;base64,xx" }
+            ]
+        });
+        assert_eq!(
+            images(Some(&metadata)),
+            vec!["data:image/png;base64,xx".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_data_url_names_the_format_its_stored_mime_got_wrong() {
+        // The bytes are what the engine has to open, and the data URL is what
+        // carries them, so its own header wins over the recorded mime.
+        let mislabelled = serde_json::json!({
+            "attachments": [{
+                "name": "photo.jpg",
+                "mime": "image/jpeg",
+                "url": "data:image/heif;base64,AAAAGGZ0eXA="
+            }]
+        });
+        assert!(images(Some(&mislabelled)).is_empty());
+    }
+
+    #[test]
+    fn every_format_the_engine_decodes_is_still_replayed() {
+        // Verified against the shipped Ollama: each of these is accepted, and
+        // narrowing this list would silently drop images that work today.
+        for mime in [
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "image/gif",
+            "image/bmp",
+            "IMAGE/JPEG",
+        ] {
+            let url = format!("data:{mime};base64,xx");
+            let metadata = serde_json::json!({
+                "attachments": [{ "name": "shot", "mime": mime, "url": url }]
+            });
+            assert_eq!(
+                images(Some(&metadata)),
+                vec![url],
+                "{mime} should still reach the model"
+            );
+        }
+    }
+
+    #[test]
+    fn a_protected_artifact_is_still_replayed_for_transport_to_resolve() {
+        // These carry no data URL header, so the stored mime answers for them,
+        // and `Context::transport` is what turns the path into bytes later.
+        let artifact = serde_json::json!({
+            "attachments": [{
+                "name": "generated.png",
+                "mime": "image/png",
+                "url": "/api/artifacts/w/c/o/image.png"
+            }]
+        });
+        assert_eq!(
+            images(Some(&artifact)),
+            vec!["/api/artifacts/w/c/o/image.png".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_message_with_no_attachments_replays_nothing() {
+        assert!(images(None).is_empty());
+        assert!(images(Some(&serde_json::json!({}))).is_empty());
+        assert!(
+            images(Some(&serde_json::json!({
+                "attachments": [{ "name": "notes.md", "mime": "text/markdown", "url": "data:text/markdown,x" }]
+            })))
+            .is_empty()
+        );
+    }
 
     /// What `SearchContext::capability()` returns on its quieter arm. Non-empty
     /// on both arms, which is what keeps a memory block one blank line below it

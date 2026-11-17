@@ -1,6 +1,6 @@
 import { useId, useRef, useState } from 'react';
 import { formatContextLength } from '../../models/utils/formatters';
-import type { ContextUsage as Usage } from '../types';
+import type { TokenTotals, ContextUsage as Usage } from '../types';
 import './ContextUsage.css';
 
 interface Props {
@@ -8,6 +8,8 @@ interface Props {
   error?: string | null;
   previewing?: boolean;
   capacity?: number | null;
+  /** What the chat has spent across every turn so far. */
+  spend?: TokenTotals | null;
 }
 const labels: Record<keyof Usage['breakdown'], string> = {
   instructions: 'Instructions',
@@ -27,7 +29,18 @@ function positive(value?: number | null): number | null {
   return value && value > 0 ? value : null;
 }
 
-export function ContextUsage({ usage, error, previewing = false, capacity = null }: Props) {
+/** Divided by the turns a provider reported, since a turn it did not report is not a free one. */
+function perTurn(total: number, turns: number): number | null {
+  return turns > 0 ? Math.round(total / turns) : null;
+}
+
+export function ContextUsage({
+  usage,
+  error,
+  previewing = false,
+  capacity = null,
+  spend = null,
+}: Props) {
   const [expanded, setExpanded] = useState(false);
   const identifier = useId();
   const button = useRef<HTMLButtonElement>(null);
@@ -166,6 +179,42 @@ export function ContextUsage({ usage, error, previewing = false, capacity = null
                   ? 'Estimating context for this draft…'
                   : 'This server has not supplied context usage. You can still send messages.')}
             </p>
+          )}
+          {spend && spend.turns > 0 && (
+            <section aria-label="Tokens spent in this chat">
+              <dl className="context-usage-spend">
+                <div>
+                  <dt>Spent in this chat</dt>
+                  <dd>{count(spend.total_tokens)}</dd>
+                </div>
+                <div>
+                  <dt>Turns</dt>
+                  <dd>{count(spend.turns)}</dd>
+                </div>
+                <div>
+                  <dt>Prompt</dt>
+                  <dd>{count(spend.prompt_tokens)}</dd>
+                </div>
+                <div>
+                  <dt>Completion</dt>
+                  <dd>{count(spend.completion_tokens)}</dd>
+                </div>
+                <div>
+                  <dt>Average per turn</dt>
+                  <dd>{count(perTurn(spend.total_tokens, spend.reported_turns))}</dd>
+                </div>
+                <div>
+                  <dt>Model rounds</dt>
+                  <dd>{count(spend.rounds)}</dd>
+                </div>
+              </dl>
+              {spend.reported_turns < spend.turns && (
+                <p>
+                  {count(spend.turns - spend.reported_turns)} of {count(spend.turns)} turns ran on a
+                  backend that reported no token count, so these totals cover the rest.
+                </p>
+              )}
+            </section>
           )}
           {usage && previewing && <p>Updating for your draft…</p>}
         </section>

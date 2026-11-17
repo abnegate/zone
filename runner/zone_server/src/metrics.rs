@@ -9,6 +9,12 @@
 //! `zone_embedding_*`, `zone_gathering_*`, `zone_ws_chat_*`, `zone_task_run_*`,
 //! `zone_searxng_*`, `zone_comfyui_*`, `zone_auth_*`, `zone_source_resync_*`.
 //!
+//! Token spend (chat-tokens board): `zone_chat_tokens_total`,
+//! `zone_chat_turn_tokens`, `zone_chat_turn_rounds`,
+//! `zone_chat_turn_tool_calls`, `zone_chat_context_tokens`. None of them carry
+//! a chat label; per-chat totals live in the `chat_token_usage` table, which
+//! `/api/chats/{id}/token-usage` reads.
+//!
 //! The recorder is process-wide and installed once so `create_router` can be
 //! called from tests without conflicting global recorders.
 
@@ -44,6 +50,15 @@ const WS_CHAT_EVENTS: &str = "zone_ws_chat_connections_total";
 const WS_CHAT_ACTIVE: &str = "zone_ws_chat_connections_active";
 
 const CITATION_MARKERS: &str = "zone_chat_citation_markers_total";
+
+/// No chat label: one series per chat would grow without bound.
+const CHAT_TOKENS: &str = "zone_chat_tokens_total";
+pub const TOKENS_PROMPT: &str = "prompt";
+pub const TOKENS_COMPLETION: &str = "completion";
+const CHAT_TURN_TOKENS: &str = "zone_chat_turn_tokens";
+const CHAT_TURN_ROUNDS: &str = "zone_chat_turn_rounds";
+const CHAT_TURN_TOOL_CALLS: &str = "zone_chat_turn_tool_calls";
+const CHAT_CONTEXT_TOKENS: &str = "zone_chat_context_tokens";
 pub const MARKER_RESOLVED: &str = "resolved";
 pub const MARKER_UNRESOLVED: &str = "unresolved";
 
@@ -81,6 +96,24 @@ const JOB_DURATION_BUCKETS: &[f64] = &[1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0,
 const SEARXNG_DURATION_BUCKETS: &[f64] = &[0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0];
 const COUNT_BUCKETS: &[f64] = &[0.0, 1.0, 5.0, 10.0, 20.0, 50.0, 100.0];
 const BATCH_BUCKETS: &[f64] = &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0];
+/// Token counts span four orders of magnitude between a one-line answer and a
+/// compacted agentic turn, so they get their own spread rather than
+/// [`COUNT_BUCKETS`], whose top bucket every real turn would land in.
+const TOKEN_BUCKETS: &[f64] = &[
+    100.0,
+    500.0,
+    1_000.0,
+    2_500.0,
+    5_000.0,
+    10_000.0,
+    25_000.0,
+    50_000.0,
+    100_000.0,
+    250_000.0,
+    500_000.0,
+    1_000_000.0,
+];
+const ROUND_BUCKETS: &[f64] = &[1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0];
 
 /// Install the process-wide Prometheus recorder if it is not already installed.
 pub fn init() {
@@ -122,6 +155,20 @@ fn handle() -> PrometheusHandle {
             describe_counter!(
                 CITATION_MARKERS,
                 "Source markers a reply cited, by whether the registry held one"
+            );
+            describe_counter!(
+                CHAT_TOKENS,
+                "Tokens chat turns spent, by model and prompt/completion"
+            );
+            describe_histogram!(
+                CHAT_TURN_TOKENS,
+                "Tokens one chat turn spent in all, by the model it ended on"
+            );
+            describe_histogram!(CHAT_TURN_ROUNDS, "Model rounds one chat turn took");
+            describe_histogram!(CHAT_TURN_TOOL_CALLS, "Tool calls one chat turn made");
+            describe_histogram!(
+                CHAT_CONTEXT_TOKENS,
+                "Tokens a chat turn's final context held, by category"
             );
             describe_counter!(TASK_RUNS, "Background task run outcomes");
             describe_histogram!(TASK_DURATION, "Background task run duration in seconds");
@@ -216,6 +263,24 @@ fn handle() -> PrometheusHandle {
                 })
                 .and_then(|b| {
                     b.set_buckets_for_metric(Matcher::Full(EMBED_BATCH.into()), BATCH_BUCKETS)
+                })
+                .and_then(|b| {
+                    b.set_buckets_for_metric(Matcher::Full(CHAT_TURN_TOKENS.into()), TOKEN_BUCKETS)
+                })
+                .and_then(|b| {
+                    b.set_buckets_for_metric(
+                        Matcher::Full(CHAT_CONTEXT_TOKENS.into()),
+                        TOKEN_BUCKETS,
+                    )
+                })
+                .and_then(|b| {
+                    b.set_buckets_for_metric(Matcher::Full(CHAT_TURN_ROUNDS.into()), ROUND_BUCKETS)
+                })
+                .and_then(|b| {
+                    b.set_buckets_for_metric(
+                        Matcher::Full(CHAT_TURN_TOOL_CALLS.into()),
+                        COUNT_BUCKETS,
+                    )
                 })
                 .expect("prometheus histogram buckets")
                 .install_recorder()
@@ -542,6 +607,47 @@ pub fn record_citation_markers(status: &'static str, count: usize) {
     }
     init();
     counter!(CITATION_MARKERS, "status" => status).increment(count as u64);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BilledTokens {
+    pub prompt: u64,
+    pub completion: u64,
+}
+
+/// `total` is the provider's own figure for the whole turn, which can exceed
+/// prompt and completion together once cache writes and reads are counted.
+pub fn record_chat_turn(model: &str, total: Option<u64>, rounds: u64, tool_calls: u64) {
+    init();
+    histogram!(CHAT_TURN_ROUNDS).record(rounds as f64);
+    histogram!(CHAT_TURN_TOOL_CALLS).record(tool_calls as f64);
+    if let Some(total) = total {
+        histogram!(CHAT_TURN_TOKENS, "model" => model.to_string()).record(total as f64);
+    }
+}
+
+pub fn record_chat_tokens(model: &str, tokens: BilledTokens) {
+    init();
+    counter!(CHAT_TOKENS, "model" => model.to_string(), "kind" => TOKENS_PROMPT)
+        .increment(tokens.prompt);
+    counter!(CHAT_TOKENS, "model" => model.to_string(), "kind" => TOKENS_COMPLETION)
+        .increment(tokens.completion);
+}
+
+#[cfg(test)]
+pub(crate) fn rendered() -> String {
+    handle().render()
+}
+
+/// Record where one turn's final context went, a category at a time.
+///
+/// The categories are the fixed set zone's own context breakdown names, so
+/// each is a `'static` label and the series count stays flat.
+pub fn record_chat_context(categories: &[(&'static str, u64)]) {
+    init();
+    for (category, tokens) in categories {
+        histogram!(CHAT_CONTEXT_TOKENS, "category" => *category).record(*tokens as f64);
+    }
 }
 
 /// Increments the chat WS gauge and decrements it on drop.

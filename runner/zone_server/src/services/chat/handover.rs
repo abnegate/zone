@@ -329,6 +329,7 @@ pub fn carried(whole: &RunContext) -> RunContext {
         artifacts: whole.artifacts.clone(),
         vision: whole.vision,
         reported: whole.reported,
+        pending_usage: None,
     }
 }
 

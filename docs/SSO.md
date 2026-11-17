@@ -378,10 +378,7 @@ is verified before Zone links or creates anything.
 
 Email addresses are unique ignoring case: `Jane@acme.com` and
 `jane@acme.com` are the same account, and Zone stores new addresses in
-lower case. If an existing server has accounts whose emails differ only in
-case, the upgrade stops before it starts the server and names those
-addresses. Change the email of all but one of each, or delete the extras,
-and start Zone again. Zone never merges or deletes them itself.
+lower case.
 
 Zone refuses the sign-in with `sso_email_conflict` when an account has the
 email and:

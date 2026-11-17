@@ -219,18 +219,18 @@ CREATE FUNCTION search_knowledge(query_vector vector, p_workspace_id uuid, p_lim
 BEGIN
   RETURN QUERY
   WITH ann AS (
-    SELECT ke_embed.knowledge_entry_id, ke_embed.vector
+    SELECT ke.id, ke.title, ke.content, ke.category, ke.tags, ke_embed.vector
     FROM knowledge_embeddings ke_embed
+    JOIN knowledge_entries ke ON ke.id = ke_embed.knowledge_entry_id
     WHERE ke_embed.workspace_id = p_workspace_id
+      AND ke.is_active = TRUE
     ORDER BY ke_embed.vector_bit <~> binary_quantize(query_vector)::bit(1024)
     LIMIT GREATEST(p_limit * 8, 32)
   )
-  SELECT ke.id as entry_id, (1 - (ann.vector <=> query_vector))::FLOAT as similarity,
-         ke.title, ke.content, ke.category, ke.tags
+  SELECT ann.id as entry_id, (1 - (ann.vector <=> query_vector))::FLOAT as similarity,
+         ann.title, ann.content, ann.category, ann.tags
   FROM ann
-  JOIN knowledge_entries ke ON ke.id = ann.knowledge_entry_id
-  WHERE ke.is_active = TRUE
-    AND (1 - (ann.vector <=> query_vector)) >= p_threshold
+  WHERE (1 - (ann.vector <=> query_vector)) >= p_threshold
   ORDER BY ann.vector <=> query_vector
   LIMIT p_limit;
 END;
@@ -290,6 +290,13 @@ CREATE TABLE device_policy (
     CONSTRAINT device_policy_singleton CHECK (id)
 );
 
+CREATE TABLE licenses (
+    id smallint DEFAULT 1 NOT NULL PRIMARY KEY,
+    key text NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT licenses_singleton_check CHECK (id = 1)
+);
+
 CREATE TABLE organizations (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     name text NOT NULL,
@@ -312,21 +319,6 @@ CREATE TABLE permissions (
 );
 CREATE INDEX idx_permissions_resource ON permissions (resource);
 
-CREATE TABLE plans (
-    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
-    name character varying(100) NOT NULL,
-    slug character varying(50) NOT NULL UNIQUE,
-    description text,
-    price_monthly_cents integer NOT NULL,
-    price_yearly_cents integer NOT NULL,
-    is_active boolean DEFAULT true NOT NULL,
-    is_public boolean DEFAULT true NOT NULL,
-    features jsonb DEFAULT '{}'::jsonb NOT NULL,
-    limits jsonb DEFAULT '{}'::jsonb NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
 CREATE TABLE roles (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     name text NOT NULL UNIQUE,
@@ -345,6 +337,29 @@ CREATE TABLE source_types (
 );
 CREATE INDEX idx_source_types_category ON source_types (category);
 
+CREATE TABLE sso_providers (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    protocol text DEFAULT 'oidc'::text NOT NULL,
+    display_name text NOT NULL,
+    issuer text NOT NULL,
+    client_id text NOT NULL,
+    client_secret text NOT NULL,
+    allowed_domains text[] DEFAULT '{}'::text[] NOT NULL,
+    require_verified_email boolean DEFAULT true NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    UNIQUE (issuer, client_id),
+    CONSTRAINT sso_providers_protocol_check CHECK ((protocol = 'oidc'::text))
+);
+
+CREATE TABLE sso_settings (
+    id boolean DEFAULT true NOT NULL PRIMARY KEY,
+    required boolean DEFAULT false NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT sso_settings_singleton_check CHECK (id)
+);
+
 CREATE TABLE users (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     email text NOT NULL UNIQUE,
@@ -359,6 +374,7 @@ CREATE TABLE users (
     time_zone text
 );
 CREATE INDEX idx_users_is_active ON users (is_active);
+CREATE UNIQUE INDEX users_email_lower_key ON users (lower(email));
 
 CREATE TABLE wiki_entries (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
@@ -489,6 +505,15 @@ CREATE INDEX idx_org_members_active ON organization_members (organization_id, is
 CREATE INDEX idx_org_members_org ON organization_members (organization_id);
 CREATE INDEX idx_org_members_user_active ON organization_members (user_id) WHERE (is_active = true);
 
+CREATE TABLE organization_policies (
+    organization_id uuid NOT NULL PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+    rules jsonb DEFAULT '{}'::jsonb NOT NULL,
+    updated_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT organization_policies_rules_check CHECK ((jsonb_typeof(rules) = 'object'::text))
+);
+
 CREATE TABLE password_reset_tokens (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -519,24 +544,29 @@ CREATE TABLE role_permissions (
 );
 CREATE INDEX idx_role_permissions_role_id ON role_permissions (role_id);
 
-CREATE TABLE subscriptions (
+CREATE TABLE sso_attempts (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
-    organization_id uuid NOT NULL UNIQUE REFERENCES organizations(id) ON DELETE CASCADE,
-    plan_id uuid NOT NULL REFERENCES plans(id),
-    status character varying(50) NOT NULL,
-    current_period_start timestamp with time zone NOT NULL,
-    current_period_end timestamp with time zone NOT NULL,
-    cancel_at_period_end boolean DEFAULT false NOT NULL,
-    canceled_at timestamp with time zone,
-    trial_start timestamp with time zone,
-    trial_end timestamp with time zone,
-    stripe_subscription_id character varying(255),
-    stripe_customer_id character varying(255),
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    state_hash text NOT NULL UNIQUE,
+    provider_id uuid NOT NULL REFERENCES sso_providers(id) ON DELETE CASCADE,
+    nonce text NOT NULL,
+    code_verifier text NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
-CREATE INDEX idx_subscriptions_status ON subscriptions (status);
-CREATE INDEX idx_subscriptions_stripe ON subscriptions (stripe_subscription_id);
+CREATE INDEX sso_attempts_expires_at_idx ON sso_attempts (expires_at);
+
+CREATE TABLE sso_identities (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    provider_id uuid NOT NULL REFERENCES sso_providers(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    subject text NOT NULL,
+    email text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_signed_in_at timestamp with time zone DEFAULT now() NOT NULL,
+    UNIQUE (provider_id, subject),
+    UNIQUE (provider_id, user_id)
+);
+CREATE INDEX sso_identities_user_id_idx ON sso_identities (user_id);
 
 CREATE TABLE user_roles (
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -637,11 +667,71 @@ CREATE TABLE sessions (
     expires_at timestamp with time zone NOT NULL,
     revoked_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    device_id uuid REFERENCES devices(id)
+    device_id uuid REFERENCES devices(id),
+    sso_provider_id uuid REFERENCES sso_providers(id) ON DELETE CASCADE,
+    absolute_expires_at timestamp with time zone NOT NULL
 );
 CREATE INDEX idx_sessions_expires ON sessions (expires_at);
 CREATE INDEX idx_sessions_user_active ON sessions (user_id, last_active_at DESC) WHERE (revoked_at IS NULL);
 CREATE INDEX sessions_device_id_idx ON sessions (device_id);
+CREATE INDEX sessions_sso_provider_id_idx ON sessions (sso_provider_id) WHERE (sso_provider_id IS NOT NULL);
+
+CREATE TABLE github_apps (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    app_id bigint NOT NULL,
+    slug text NOT NULL,
+    name text NOT NULL,
+    owner_login text NOT NULL,
+    owner_type text NOT NULL,
+    html_url text NOT NULL,
+    client_id text NOT NULL,
+    client_secret text NOT NULL,
+    private_key text NOT NULL,
+    webhook_secret text,
+    created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT github_apps_id_organization_key UNIQUE (id, organization_id),
+    CONSTRAINT github_apps_owner_type_check CHECK ((owner_type = ANY (ARRAY['User'::text, 'Organization'::text])))
+);
+CREATE UNIQUE INDEX github_apps_organization_owner_idx ON github_apps (organization_id, lower(owner_login));
+
+CREATE TABLE github_installations (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    github_app_id uuid NOT NULL,
+    installation_id bigint NOT NULL UNIQUE,
+    account_login text NOT NULL,
+    account_type text NOT NULL,
+    repository_selection text NOT NULL,
+    html_url text NOT NULL,
+    suspended_at timestamp with time zone,
+    revoked_at timestamp with time zone,
+    created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT github_installations_account_type_check CHECK ((account_type = ANY (ARRAY['User'::text, 'Organization'::text, 'Enterprise'::text]))),
+    CONSTRAINT github_installations_repository_selection_check CHECK ((repository_selection = ANY (ARRAY['all'::text, 'selected'::text]))),
+    CONSTRAINT github_installations_github_app_organization_fkey FOREIGN KEY (github_app_id, organization_id) REFERENCES github_apps(id, organization_id) ON DELETE CASCADE
+);
+CREATE INDEX github_installations_organization_id_idx ON github_installations (organization_id);
+CREATE INDEX github_installations_github_app_organization_idx ON github_installations (github_app_id, organization_id);
+
+CREATE TABLE github_connection_states (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    nonce_hash text NOT NULL UNIQUE,
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    github_app_id uuid REFERENCES github_apps(id) ON DELETE CASCADE,
+    purpose text NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT github_connection_states_purpose_check CHECK ((purpose = ANY (ARRAY['registration'::text, 'installation'::text])))
+);
+CREATE INDEX github_connection_states_expires_at_idx ON github_connection_states (expires_at);
+CREATE INDEX github_connection_states_user_id_idx ON github_connection_states (user_id);
+CREATE INDEX github_connection_states_github_app_id_idx ON github_connection_states (github_app_id) WHERE (github_app_id IS NOT NULL);
 
 CREATE TABLE sources (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
@@ -657,24 +747,44 @@ CREATE TABLE sources (
     last_error text,
     created_at timestamp without time zone DEFAULT now(),
     updated_at timestamp without time zone DEFAULT now(),
+    github_installation_id uuid REFERENCES github_installations(id) ON DELETE SET NULL,
     UNIQUE (name, source_type)
 );
 CREATE INDEX idx_sources_active ON sources (is_active) WHERE (is_active = true);
+CREATE INDEX sources_github_installation_id_idx ON sources (github_installation_id) WHERE (github_installation_id IS NOT NULL);
 CREATE INDEX idx_sources_workspace_filters ON sources (workspace_id, source_type, is_active, created_at DESC);
 
-CREATE TABLE usage_events (
+CREATE TABLE mcp_servers (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    workspace_id uuid REFERENCES workspaces(id) ON DELETE SET NULL,
-    user_id uuid REFERENCES users(id) ON DELETE SET NULL,
-    event_type character varying(50) NOT NULL,
-    quantity bigint DEFAULT 1 NOT NULL,
-    metadata jsonb DEFAULT '{}'::jsonb,
-    recorded_at timestamp with time zone DEFAULT now() NOT NULL
+    name text NOT NULL,
+    transport text NOT NULL,
+    command text,
+    arguments text[] DEFAULT '{}'::text[] NOT NULL,
+    url text,
+    tools text[],
+    enabled boolean DEFAULT true NOT NULL,
+    secrets text,
+    created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT mcp_servers_id_organization_key UNIQUE (id, organization_id),
+    CONSTRAINT mcp_servers_organization_name_key UNIQUE (organization_id, name),
+    CONSTRAINT mcp_servers_transport_check CHECK ((transport = ANY (ARRAY['stdio'::text, 'http'::text]))),
+    CONSTRAINT mcp_servers_target_check CHECK (((transport = 'stdio' AND command IS NOT NULL AND url IS NULL) OR (transport <> 'stdio' AND url IS NOT NULL AND command IS NULL))),
+    CONSTRAINT mcp_servers_name_check CHECK ((name ~ '^[A-Za-z0-9_-]{1,32}$' AND position('__' in name) = 0 AND name !~ '_$'))
 );
-CREATE INDEX idx_usage_events_org_time ON usage_events (organization_id, recorded_at);
-CREATE INDEX idx_usage_events_org_type_time ON usage_events (organization_id, event_type, recorded_at);
-CREATE INDEX idx_usage_events_type ON usage_events (event_type);
+
+CREATE TABLE workspace_mcp_servers (
+    workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    server_id uuid NOT NULL,
+    organization_id uuid NOT NULL,
+    enabled boolean NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (workspace_id, server_id),
+    CONSTRAINT workspace_mcp_servers_server_organization_fkey FOREIGN KEY (server_id, organization_id) REFERENCES mcp_servers(id, organization_id) ON DELETE CASCADE
+);
+CREATE INDEX workspace_mcp_servers_server_idx ON workspace_mcp_servers (server_id);
 
 CREATE TABLE workspace_ai_settings (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
@@ -728,6 +838,15 @@ CREATE TABLE workspace_members (
 CREATE INDEX idx_workspace_members_active ON workspace_members (workspace_id, is_active) WHERE (is_active = true);
 CREATE INDEX idx_workspace_members_user_active ON workspace_members (user_id) WHERE (is_active = true);
 CREATE INDEX idx_workspace_members_workspace ON workspace_members (workspace_id);
+
+CREATE TABLE workspace_policies (
+    workspace_id uuid NOT NULL PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+    rules jsonb DEFAULT '{}'::jsonb NOT NULL,
+    updated_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT workspace_policies_rules_check CHECK ((jsonb_typeof(rules) = 'object'::text))
+);
 
 CREATE TABLE workspace_themes (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
@@ -809,12 +928,17 @@ CREATE TABLE projects (
     auto_claimed_at timestamp with time zone,
     auto_completed_at timestamp with time zone,
     "position" integer DEFAULT 0 NOT NULL,
+    github_installation_id uuid REFERENCES github_installations(id) ON DELETE SET NULL,
+    auto_driven_at timestamp with time zone,
+    auto_stalled boolean DEFAULT false NOT NULL,
+    auto_claim_id uuid,
     CONSTRAINT projects_status_check CHECK ((status = ANY (ARRAY['active'::text, 'on_hold'::text, 'cancelled'::text])))
 );
 CREATE INDEX idx_projects_auto ON projects (id) WHERE auto;
 CREATE INDEX idx_projects_status ON projects (status);
 CREATE INDEX idx_projects_workspace_position ON projects (workspace_id, "position");
 CREATE INDEX idx_projects_workspace_status ON projects (workspace_id, status, created_at DESC);
+CREATE INDEX projects_github_installation_id_idx ON projects (github_installation_id) WHERE (github_installation_id IS NOT NULL);
 
 CREATE TABLE source_sync_state (
     source_id uuid NOT NULL PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
@@ -1025,6 +1149,65 @@ CREATE INDEX idx_messages_search_vector ON messages USING gin (search_vector);
 CREATE INDEX idx_messages_typed ON messages (chat_id, created_at DESC) WHERE ((role = 'user'::text) AND (NOT COALESCE(((jsonb_typeof(metadata) = 'object'::text) AND (metadata ? 'source'::text)), false)));
 CREATE TRIGGER message_search_vector_trigger BEFORE INSERT OR UPDATE OF content ON messages FOR EACH ROW EXECUTE FUNCTION update_message_search_vector();
 
+CREATE TABLE chat_token_usage (
+    message_id uuid REFERENCES messages(id) ON DELETE SET NULL,
+    chat_id uuid REFERENCES chats(id) ON DELETE SET NULL,
+    workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    model text NOT NULL,
+    reasoning_effort text NOT NULL,
+    prompt_tokens bigint,
+    completion_tokens bigint,
+    total_tokens bigint,
+    rounds integer NOT NULL,
+    tool_calls integer NOT NULL,
+    context_tokens bigint,
+    instructions_tokens bigint,
+    conversation_tokens bigint,
+    tools_tokens bigint,
+    results_tokens bigint,
+    summary_tokens bigint,
+    attachments_tokens bigint,
+    overhead_tokens bigint,
+    estimated boolean,
+    recorded_at timestamp with time zone DEFAULT now() NOT NULL,
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    turn_id uuid NOT NULL,
+    CONSTRAINT chat_token_usage_turn_model_key UNIQUE (turn_id, model),
+    CONSTRAINT chat_token_usage_reported_check CHECK (
+        (prompt_tokens IS NULL AND completion_tokens IS NULL AND total_tokens IS NULL)
+        OR (prompt_tokens >= 0 AND completion_tokens >= 0 AND total_tokens >= 0)
+    ),
+    CONSTRAINT chat_token_usage_rounds_check CHECK (rounds >= 0),
+    CONSTRAINT chat_token_usage_tool_calls_check CHECK (tool_calls >= 0),
+    CONSTRAINT chat_token_usage_context_check CHECK (
+        (
+            context_tokens IS NULL
+            AND instructions_tokens IS NULL
+            AND conversation_tokens IS NULL
+            AND tools_tokens IS NULL
+            AND results_tokens IS NULL
+            AND summary_tokens IS NULL
+            AND attachments_tokens IS NULL
+            AND overhead_tokens IS NULL
+            AND estimated IS NULL
+        )
+        OR (
+            context_tokens >= 0
+            AND instructions_tokens >= 0
+            AND conversation_tokens >= 0
+            AND tools_tokens >= 0
+            AND results_tokens >= 0
+            AND summary_tokens >= 0
+            AND (attachments_tokens IS NULL OR attachments_tokens >= 0)
+            AND overhead_tokens >= 0
+            AND estimated IS NOT NULL
+        )
+    )
+);
+CREATE INDEX chat_token_usage_chat_idx ON chat_token_usage (chat_id, recorded_at DESC);
+CREATE INDEX chat_token_usage_workspace_idx ON chat_token_usage (workspace_id, recorded_at DESC);
+CREATE INDEX chat_token_usage_message_idx ON chat_token_usage (message_id);
+
 CREATE TABLE sync_deliveries (
     sync_config_id uuid NOT NULL REFERENCES sync_configs(id) ON DELETE CASCADE,
     delivery_id text NOT NULL,
@@ -1179,6 +1362,7 @@ CREATE TABLE task_runs (
     CONSTRAINT task_runs_progress_percent_check CHECK (((progress_percent >= 0) AND (progress_percent <= 100))),
     CONSTRAINT task_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'waiting'::text, 'completed'::text, 'failed'::text, 'cancelled'::text])))
 );
+CREATE INDEX idx_task_runs_finished ON task_runs ((COALESCE(completed_at, started_at)));
 CREATE INDEX idx_task_runs_status ON task_runs (status);
 CREATE INDEX idx_task_runs_task_started ON task_runs (task_id, started_at DESC);
 CREATE UNIQUE INDEX task_runs_active_waiting ON task_runs (task_id) WHERE (status = ANY (ARRAY['running'::text, 'waiting'::text]));
@@ -1290,9 +1474,11 @@ CREATE TABLE tasks (
     title_pending boolean DEFAULT false NOT NULL,
     chat_id uuid REFERENCES chats(id) ON DELETE SET NULL,
     origin text DEFAULT 'member'::text NOT NULL,
+    shipped_at timestamp without time zone,
+    reopened_at timestamp without time zone,
     CONSTRAINT tasks_origin_check CHECK ((origin = ANY (ARRAY['member'::text, 'reminder'::text, 'automation'::text]))),
     CONSTRAINT tasks_priority_check CHECK (((priority >= 1) AND (priority <= 5))),
-    CONSTRAINT tasks_status_check CHECK ((status = ANY (ARRAY['created'::text, 'queued'::text, 'in_progress'::text, 'review'::text, 'complete'::text, 'blocked'::text])))
+    CONSTRAINT tasks_status_check CHECK ((status = ANY (ARRAY['created'::text, 'queued'::text, 'in_progress'::text, 'review'::text, 'complete'::text, 'blocked'::text, 'paused'::text, 'cancelled'::text])))
 );
 CREATE INDEX idx_tasks_branch_name ON tasks (branch_name) WHERE (branch_name IS NOT NULL);
 CREATE INDEX idx_tasks_pr_status ON tasks (pr_status) WHERE (pr_status IS NOT NULL);
@@ -1302,6 +1488,7 @@ CREATE INDEX idx_tasks_status ON tasks (status);
 CREATE INDEX idx_tasks_worker_id ON tasks (worker_id) WHERE (worker_id IS NOT NULL);
 CREATE INDEX idx_tasks_workspace_created ON tasks (workspace_id, created_at DESC);
 CREATE INDEX idx_tasks_workspace_status ON tasks (workspace_id, status, created_at DESC);
+CREATE INDEX idx_tasks_workspace_pr_created ON tasks (workspace_id, pr_created_at) WHERE (pr_url IS NOT NULL);
 CREATE INDEX tasks_chat_id_idx ON tasks (chat_id, created_at DESC) WHERE (chat_id IS NOT NULL);
 
 CREATE TABLE context_gatherings (
@@ -1360,8 +1547,11 @@ CREATE TABLE task_automation (
     auto_created boolean DEFAULT false NOT NULL,
     last_run_id uuid REFERENCES task_runs(id) ON DELETE SET NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    parked_stage text,
+    parked_reason text,
     CONSTRAINT task_automation_kind_check CHECK ((kind = ANY (ARRAY['scaffold'::text, 'ci'::text, 'tests'::text, 'feature'::text, 'deployment'::text, 'docs'::text, 'fix'::text]))),
-    CONSTRAINT task_automation_stage_check CHECK ((stage = ANY (ARRAY['idle'::text, 'running'::text, 'no_changes'::text, 'awaiting_checks'::text, 'awaiting_reviews'::text, 'fixing'::text, 'merging'::text, 'post_merge'::text, 'merged'::text, 'paused'::text])))
+    CONSTRAINT task_automation_stage_check CHECK ((stage = ANY (ARRAY['idle'::text, 'running'::text, 'no_changes'::text, 'awaiting_checks'::text, 'awaiting_reviews'::text, 'fixing'::text, 'merging'::text, 'post_merge'::text, 'merged'::text, 'paused'::text]))),
+    CONSTRAINT task_automation_parked_check CHECK (stage = 'paused' OR (parked_stage IS NULL AND parked_reason IS NULL))
 );
 CREATE INDEX idx_task_automation_project_stage ON task_automation (project_id, stage);
 
@@ -1487,7 +1677,11 @@ INSERT INTO permissions (name, description, resource, action) VALUES
   ('workspaces:create', 'Create new workspaces', 'workspaces', 'create'),
   ('workspaces:read', 'View workspaces', 'workspaces', 'read'),
   ('workspaces:update', 'Update workspace settings', 'workspaces', 'update'),
-  ('workspaces:delete', 'Delete workspaces', 'workspaces', 'delete');
+  ('workspaces:delete', 'Delete workspaces', 'workspaces', 'delete'),
+  ('pull_requests:read', 'View pull requests', 'pull_requests', 'read'),
+  ('pull_requests:update', 'Merge pull requests', 'pull_requests', 'update'),
+  ('releases:read', 'View releases', 'releases', 'read'),
+  ('releases:create', 'Create releases', 'releases', 'create');
 
 INSERT INTO roles (id, name, description, is_system) VALUES
   ('00000000-0000-0000-0000-000000000001', 'admin', 'Full system access', TRUE),
@@ -1505,7 +1699,8 @@ WHERE name IN (
   'chats:create', 'chats:read', 'chats:update', 'chats:delete',
   'sources:read', 'models:read', 'wiki:read', 'wiki:create', 'wiki:update',
   'organizations:create', 'organizations:read', 'organizations:update',
-  'workspaces:create', 'workspaces:read', 'workspaces:update'
+  'workspaces:create', 'workspaces:read', 'workspaces:update',
+  'pull_requests:read', 'pull_requests:update', 'releases:read', 'releases:create'
 );
 
 INSERT INTO role_permissions (role_id, permission_id)
@@ -1516,10 +1711,5 @@ INSERT INTO organizations (id, name, slug, description, is_active) VALUES
 
 INSERT INTO workspaces (id, organization_id, name, slug, description, is_active) VALUES
   ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', 'Default Workspace', 'default', 'Default workspace for self-hosted installation', true);
-
-INSERT INTO plans (name, slug, description, price_monthly_cents, price_yearly_cents, features, limits) VALUES
-  ('Free', 'free', 'For individuals and small teams', 0, 0, '{"api_access": true}'::jsonb, '{"max_workspaces": 1, "max_members": 3, "max_chats_per_month": 100}'::jsonb),
-  ('Pro', 'pro', 'For growing teams', 2900, 29000, '{"api_access": true, "priority_support": true}'::jsonb, '{"max_workspaces": 10, "max_members": 25, "max_chats_per_month": 5000}'::jsonb),
-  ('Enterprise', 'enterprise', 'For large organizations', 9900, 99000, '{"api_access": true, "priority_support": true, "sso": true, "audit_log": true}'::jsonb, '{"max_workspaces": -1, "max_members": -1, "max_chats_per_month": -1}'::jsonb);
 
 INSERT INTO device_policy (id, mode) VALUES (true, 'open');

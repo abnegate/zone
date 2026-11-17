@@ -12,7 +12,8 @@
 //! not there. Every run of either stand-in records how it was invoked, where,
 //! under which home and MCP token, and what it read on stdin.
 
-use crate::common::context::{finish, next, send, successful};
+use crate::common::context::{Socket, finish, next, send, successful};
+use crate::common::eventually::eventually;
 use crate::common::stand_in::MCP_TOKEN;
 use crate::common::transcript::{self, Speaker};
 use crate::common::{
@@ -45,6 +46,7 @@ use zone_server::db::chats::{self, ChatSession};
 use zone_server::services::backend;
 use zone_server::services::login::claude::Sealed;
 use zone_server::services::login::router::unfunded;
+use zone_server::services::stages;
 use zone_server::state::AppState;
 
 const QUESTION: &str = "Why are there two tides a day?";
@@ -80,10 +82,14 @@ const ANSWER_OUTPUT_TOKENS: u32 = 7;
 const SESSION_ID: &str = "--session-id";
 const RESUME: &str = "--resume";
 const MODEL: &str = "--model";
+/// The model the harness's chat is created on.
+const CHAT_MODEL: &str = "sonnet";
 const CODEX_RESUME: &str = "resume";
 
 const MESSAGE_START: &str = "message_start";
 const MESSAGE_END: &str = "message_end";
+const CHUNK: &str = "chunk";
+const CANCELLED: &str = "cancelled";
 const HANDOVER: &str = "handover";
 const ERROR: &str = "error";
 
@@ -114,6 +120,12 @@ const CODEX_CREDENTIALS_FILE: &str = "auth.json";
 
 /// While this file is in the stand-in `claude`'s plans, a run that has started holds its answer.
 const HOLD: &str = "hold";
+
+/// While this file is in the stand-in `claude`'s plans, a run that has played its plan stays open.
+const STALL: &str = "stall";
+
+/// The second message a stand-in that [`Run::Streams`] sends, after the first has reported its usage.
+const FOLLOWING: &str = " Reading the release notes next.";
 
 /// A codex login's credentials, enough for anything that reads them to find it signed in.
 const CODEX_CREDENTIALS: &str = r#"{"tokens":{"access_token":"fake-codex-access-token","refresh_token":"fake-codex-refresh-token","account_id":"fake-codex-account"}}"#;
@@ -219,6 +231,11 @@ struct Expected<'a> {
 enum Run<'a> {
     /// It answers in full.
     Answers(&'a str),
+    /// It streams `partial`, then [`FOLLOWING`] as a second message, and says nothing more.
+    Streams(&'a str),
+    /// It reports what a request took without having written any of its answer, then fails as
+    /// a login whose sign-in was revoked.
+    Silent,
     /// It streams `partial`, then refuses the rest as an account past its
     /// five-hour window, which resets at `resets_at`.
     Limited {
@@ -244,6 +261,20 @@ impl Run<'_> {
                     "result": text,
                     "usage": {"input_tokens": ANSWER_INPUT_TOKENS, "output_tokens": ANSWER_OUTPUT_TOKENS},
                 }),
+            ],
+            Self::Streams(partial) => streamed(Some(partial))
+                .into_iter()
+                .chain([json!({"type": "assistant", "message": {"content": [{"type": "text", "text": FOLLOWING}]}})])
+                .collect(),
+            Self::Silent => vec![
+                json!({
+                    "type": "assistant",
+                    "message": {
+                        "content": [],
+                        "usage": {"input_tokens": PARTIAL_INPUT_TOKENS, "output_tokens": PARTIAL_OUTPUT_TOKENS},
+                    },
+                }),
+                json!({"type": "result", "subtype": "success", "is_error": true, "result": INVALID_KEY}),
             ],
             Self::Limited { partial, resets_at } => streamed(partial)
                 .into_iter()
@@ -392,7 +423,7 @@ impl Agent {
              ! mkdir \"$plans/$CLAUDE_CODE_OAUTH_TOKEN.$k\" 2>/dev/null; do k=$((k + 1)); \
              done\nplan=\"$plans/$CLAUDE_CODE_OAUTH_TOKEN.$k.jsonl\"\n[ -f \"$plan\" ] || \
              plan=\"$plans/default.jsonl\"\nwhile [ -e \"$plans/{HOLD}\" ]; do sleep 0.05; \
-             done\ncat \"$plan\"\n"
+             done\ncat \"$plan\"\nwhile [ -e \"$plans/{STALL}\" ]; do sleep 0.05; done\n"
         );
         agent.install("CLAUDE_CONFIG_DIR", &body)
     }
@@ -414,7 +445,7 @@ impl Agent {
             "id=\"{thread}\"\nprevious=\"\"\nfor argument in \"$@\"; do\n  [ \"$previous\" = \
              \"{CODEX_RESUME}\" ] && id=\"$argument\"\n  previous=\"$argument\"\ndone\nprintf \
              '{{\"type\":\"thread.started\",\"thread_id\":\"%s\"}}\\n' \"$id\"\ncat \
-             \"$plans/default.jsonl\"\n"
+             \"$plans/default.jsonl\"\nwhile [ -e \"$plans/{STALL}\" ]; do sleep 0.05; done\n"
         );
         agent.install("CODEX_HOME", &body)
     }
@@ -603,7 +634,7 @@ impl Harness {
                 &json!({
                     "workspace_id": workspace,
                     "title": "Chat handover",
-                    "model_name": "sonnet",
+                    "model_name": CHAT_MODEL,
                     "agent_enabled": tools == Tools::Served,
                     "auto_approve": true,
                     "automatic_title": false,
@@ -714,7 +745,7 @@ impl Harness {
         .id
     }
 
-    async fn turn(&self, content: &str) -> Vec<Value> {
+    async fn connect(&self) -> Socket {
         let (mut socket, _) =
             connect_async(format!("ws://{}/ws/chats/{}", self.address, self.chat))
                 .await
@@ -722,6 +753,11 @@ impl Harness {
         send(&mut socket, json!({"type": "auth", "token": self.token})).await;
         let initial = next(&mut socket).await;
         assert_eq!(initial["type"], "init", "initial frame: {initial}");
+        socket
+    }
+
+    async fn turn(&self, content: &str) -> Vec<Value> {
+        let mut socket = self.connect().await;
         send(&mut socket, json!({"type": "send", "content": content})).await;
         let frames = finish(&mut socket).await;
         let _ = socket.close(None).await;
@@ -1173,6 +1209,212 @@ async fn a_chat_whose_agent_is_spent_continues_on_the_other_agent() {
     assert_eq!(session.agent, AgentKind::Codex, "{session:?}");
     assert_eq!(session.login, Some(carol), "{session:?}");
     assert_eq!(session.id, harness.thread, "{session:?}");
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct Spent {
+    model: String,
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+    context_tokens: Option<i64>,
+}
+
+/// The chat's recorded rows once there are `count`, the model the turn ended on last.
+async fn spent(harness: &Harness, count: usize) -> Vec<Spent> {
+    let rows = || async {
+        sqlx::query_as::<_, Spent>(
+            "SELECT model, prompt_tokens, completion_tokens, context_tokens \
+             FROM chat_token_usage WHERE chat_id = $1 ORDER BY context_tokens NULLS FIRST",
+        )
+        .bind(harness.chat)
+        .fetch_all(&harness.pool)
+        .await
+        .expect("the turn's recorded spend")
+    };
+    assert!(
+        eventually(|| async { rows().await.len() >= count }).await,
+        "{count} rows were never recorded: {:?}",
+        rows().await
+    );
+    rows().await
+}
+
+#[tokio::test]
+async fn a_turn_handed_to_another_model_counts_each_model_for_its_own_part() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    harness.sign_in_codex(CAROL).await;
+    harness.claude.plan(
+        ALICE,
+        0,
+        Run::Limited {
+            partial: Some(PARTIAL),
+            resets_at: reset_in(TimeDelta::hours(2)),
+        },
+    );
+
+    let frames = harness.turn(QUESTION).await;
+    answered(&frames);
+
+    let rows = spent(&harness, 2).await;
+    let [claude, codex] = rows.as_slice() else {
+        panic!("the turn is recorded as one share per model: {rows:?}");
+    };
+    assert_eq!(claude.model, CHAT_MODEL, "{rows:?}");
+    let codex_runs = harness.codex.invocations();
+    let [moved] = codex_runs.as_slice() else {
+        panic!("the turn runs codex once: {codex_runs:#?}");
+    };
+    assert_eq!(
+        codex.model,
+        moved.after(MODEL).unwrap_or(stages::AUTO),
+        "codex's share is recorded under the model it was started on: {rows:?}"
+    );
+    assert_eq!(
+        (claude.prompt_tokens, claude.completion_tokens),
+        (
+            Some(i64::from(PARTIAL_INPUT_TOKENS)),
+            Some(i64::from(PARTIAL_OUTPUT_TOKENS))
+        ),
+        "Claude is counted for what it streamed before its limit: {rows:?}"
+    );
+    assert_eq!(claude.context_tokens, None, "{rows:?}");
+    assert_eq!(
+        (codex.prompt_tokens, codex.completion_tokens),
+        (Some(1), Some(1)),
+        "codex is counted only for its own part: {rows:?}"
+    );
+    assert!(
+        codex.context_tokens.is_some(),
+        "the model the turn ended on carries its closing context: {rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_turn_stopped_after_its_agent_reported_usage_records_that_usage_once() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    harness.claude.plan(ALICE, 0, Run::Streams(PARTIAL));
+    std::fs::write(harness.claude.plans.join(STALL), "").expect("the stall");
+
+    let mut socket = harness.connect().await;
+    send(&mut socket, json!({"type": "send", "content": QUESTION})).await;
+    let mut streamed = String::new();
+    while !streamed.contains(FOLLOWING) {
+        let frame = next(&mut socket).await;
+        assert_ne!(frame["type"], ERROR, "{frame}");
+        if frame["type"] == CHUNK {
+            streamed.push_str(frame["content"].as_str().unwrap_or_default());
+        }
+    }
+    send(&mut socket, json!({"type": "cancel"})).await;
+    let frames = finish(&mut socket).await;
+    std::fs::remove_file(harness.claude.plans.join(STALL)).expect("the stall to be lifted");
+    assert_eq!(kinds(&frames, CANCELLED).len(), 1, "{frames:?}");
+
+    let rows = spent(&harness, 1).await;
+    let [row] = rows.as_slice() else {
+        panic!("one turn on one model is one row: {rows:?}");
+    };
+    assert_eq!(row.model, CHAT_MODEL, "{rows:?}");
+    assert_eq!(
+        (row.prompt_tokens, row.completion_tokens),
+        (
+            Some(i64::from(PARTIAL_INPUT_TOKENS)),
+            Some(i64::from(PARTIAL_OUTPUT_TOKENS))
+        ),
+        "what the agent reported before the stop is counted, and counted once: {rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_turn_that_fails_before_any_content_still_records_what_its_agent_reported() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    harness.claude.plan(ALICE, 0, Run::Silent);
+
+    let frames = harness.turn(QUESTION).await;
+
+    assert_eq!(kinds(&frames, ERROR).len(), 1, "{frames:?}");
+    assert!(
+        kinds(&frames, CHUNK).is_empty(),
+        "the turn never wrote anything: {frames:?}"
+    );
+    let rows = spent(&harness, 1).await;
+    let [row] = rows.as_slice() else {
+        panic!("one turn on one model is one row: {rows:?}");
+    };
+    assert_eq!(row.model, CHAT_MODEL, "{rows:?}");
+    assert_eq!(
+        (row.prompt_tokens, row.completion_tokens),
+        (
+            Some(i64::from(PARTIAL_INPUT_TOKENS)),
+            Some(i64::from(PARTIAL_OUTPUT_TOKENS))
+        ),
+        "a turn with no answer still counts what it spent, once: {rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn usage_reported_before_a_stop_is_counted_for_the_model_that_ran_the_round() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    harness.sign_in_codex(CAROL).await;
+    harness.claude.plan(
+        ALICE,
+        0,
+        Run::Limited {
+            partial: Some(PARTIAL),
+            resets_at: reset_in(TimeDelta::hours(2)),
+        },
+    );
+    std::fs::write(
+        harness.codex.plans.join("default.jsonl"),
+        jsonl(&[
+            json!({"type": "turn.started"}),
+            json!({"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": CODEX_ANSWER}}),
+            json!({"type": "turn.completed", "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1}}),
+            json!({"type": "turn.started"}),
+            json!({"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": FOLLOWING}}),
+        ]),
+    )
+    .expect("the stand-in's plan");
+    std::fs::write(harness.codex.plans.join(STALL), "").expect("the stall");
+
+    let mut socket = harness.connect().await;
+    send(&mut socket, json!({"type": "send", "content": QUESTION})).await;
+    let mut streamed = String::new();
+    while !streamed.contains(FOLLOWING) {
+        let frame = next(&mut socket).await;
+        assert_ne!(frame["type"], ERROR, "{frame}");
+        if frame["type"] == CHUNK {
+            streamed.push_str(frame["content"].as_str().unwrap_or_default());
+        }
+    }
+    send(&mut socket, json!({"type": "cancel"})).await;
+    let frames = finish(&mut socket).await;
+    std::fs::remove_file(harness.codex.plans.join(STALL)).expect("the stall to be lifted");
+    assert_eq!(kinds(&frames, CANCELLED).len(), 1, "{frames:?}");
+
+    let rows = spent(&harness, 2).await;
+    let [claude, codex] = rows.as_slice() else {
+        panic!("one share per model: {rows:?}");
+    };
+    assert_eq!(claude.model, CHAT_MODEL, "{rows:?}");
+    assert_eq!(
+        (claude.prompt_tokens, claude.completion_tokens),
+        (
+            Some(i64::from(PARTIAL_INPUT_TOKENS)),
+            Some(i64::from(PARTIAL_OUTPUT_TOKENS))
+        ),
+        "Claude keeps only what it reported before its limit: {rows:?}"
+    );
+    assert_ne!(codex.model, CHAT_MODEL, "{rows:?}");
+    assert_eq!(
+        (codex.prompt_tokens, codex.completion_tokens),
+        (Some(1), Some(1)),
+        "what codex reported before the stop is codex's: {rows:?}"
+    );
 }
 
 #[tokio::test]
