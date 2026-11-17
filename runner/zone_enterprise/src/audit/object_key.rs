@@ -1,11 +1,12 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::audit::Format;
+
 pub const SERVER: &str = "server";
 
 const DATE_PATH: &str = "%Y/%m/%d";
 const TIME: &str = "%H%M%S";
-const EXTENSION: &str = "ndjson";
 
 pub fn object_key(
     prefix: &str,
@@ -15,9 +16,10 @@ pub fn object_key(
 ) -> String {
     let owner = organization_id.map_or_else(|| SERVER.to_owned(), |id| id.to_string());
     format!(
-        "{prefix}{owner}/{}/{}Z-{first}.{EXTENSION}",
+        "{prefix}{owner}/{}/{}Z-{first}.{}",
         created_at.format(DATE_PATH),
-        created_at.format(TIME)
+        created_at.format(TIME),
+        Format::Ndjson.extension()
     )
 }
 
