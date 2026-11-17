@@ -150,6 +150,18 @@ dependent: `nyc` and `workbox-build` on glob 14.0.2 or later, and
 `chromium-bidi` on zod 4. Revisit both if Lighthouse starts using WebDriver
 BiDi or if chrome-launcher is called with a user-supplied profile path.
 
+## Syslog TLS
+
+`zone_server` depends directly on `rustls` 0.23.46 (no default features;
+`aws-lc-rs`, `std` and `tls12`), `tokio-rustls` 0.26.4 (no default features)
+and `rustls-platform-verifier` 0.7.0, each pinned exactly, to deliver audit
+events to syslog over TLS (see [AUDIT.md](AUDIT.md#syslog)). All three were
+already in `runner/Cargo.lock` at those versions through reqwest, and they use
+the aws-lc-rs provider reqwest and jsonwebtoken already link, so no package,
+version or license changes. The `audit` feature of `zone_enterprise` adds
+`hex` 0.4.3 and `hmac` 0.13.0 for webhook signatures and SigV4, also already
+locked at those versions.
+
 ## aiusg
 
 `aiusg` 0.5.0 reads each signed-in Claude and ChatGPT login's plan usage, so

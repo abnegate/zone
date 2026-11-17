@@ -33,6 +33,7 @@ Your AI, your data, your infrastructure—put your backlog on autopilot.
 ### Platform Management
 - **Multi-Tenant Architecture**: Organizations and workspaces for team collaboration
 - **Role-Based Access Control**: Fine-grained permissions with users, roles, and policies
+- **Team and Enterprise controls**: With a Zone Team or Enterprise license, single sign-on ([docs/SSO.md](docs/SSO.md)), agent and model policy ([docs/POLICY.md](docs/POLICY.md)), and audit log download, streaming to a SIEM and retention ([docs/AUDIT.md](docs/AUDIT.md))
 - **Project & Task Management**: Organize work with agentic task execution
 - **Auto projects**: Describe a project, answer the interview, and Zone plans, builds, reviews with a second model, merges and reports every task until the project is complete
 - **MCP tools**: Attach stdio and streamable HTTP MCP servers (magents by default) so tasks can spawn or message other coding agents, or import the ones a connected provider already has configured
