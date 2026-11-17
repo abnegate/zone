@@ -94,7 +94,7 @@ const DELIVERED: DeliveryResponse = {
   backlog: 0,
   oldest_pending_at: null,
   attempts: 0,
-  next_attempt_at: null,
+  next_attempt_at: '2026-11-17T11:59:40Z',
   last_success_at: '2026-11-17T11:59:40Z',
   last_failure_at: null,
   last_error_code: null,
@@ -161,6 +161,7 @@ export const PAUSED_SYSLOG: DestinationResponse = {
   delivery: {
     ...DELIVERED,
     health: DeliveryHealth.Paused,
+    next_attempt_at: null,
     backlog: 57,
     oldest_pending_at: '2026-11-16T08:00:00Z',
     last_success_at: '2026-11-16T07:59:00Z',
@@ -199,6 +200,7 @@ export const DISABLED_UDP_SYSLOG: DestinationResponse = {
   delivery: {
     ...DELIVERED,
     health: DeliveryHealth.Disabled,
+    next_attempt_at: null,
     backlog: 0,
     last_success_at: '2026-11-01T00:00:00Z',
     delivered_count: 120,

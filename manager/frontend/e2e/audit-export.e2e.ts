@@ -220,7 +220,7 @@ function freshDelivery(enabled: boolean): DeliveryResponse {
     backlog: 0,
     oldest_pending_at: null,
     attempts: 0,
-    next_attempt_at: null,
+    next_attempt_at: enabled ? NOW : null,
     last_success_at: null,
     last_failure_at: null,
     last_error_code: null,
@@ -246,10 +246,10 @@ function createdDestination(request: CreateDestinationRequest): DestinationRespo
 
 function updatedDelivery(delivery: DeliveryResponse, enabled: boolean): DeliveryResponse {
   if (!enabled) {
-    return { ...delivery, health: DeliveryHealth.Disabled };
+    return { ...delivery, health: DeliveryHealth.Disabled, next_attempt_at: null };
   }
   return delivery.health === DeliveryHealth.Disabled
-    ? { ...delivery, health: DeliveryHealth.Healthy }
+    ? { ...delivery, health: DeliveryHealth.Healthy, next_attempt_at: NOW }
     : delivery;
 }
 
