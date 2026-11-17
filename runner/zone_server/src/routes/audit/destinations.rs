@@ -25,8 +25,9 @@ use super::refusal::Refusal;
 use crate::auth::entitlement::Unentitled;
 use crate::auth::{AuthUser, ServerAdmin};
 use crate::db::audit::scope::Scope;
-use crate::services::audit::destinations::{self, Actor, Draft, Overview, Revision, View};
+use crate::services::audit::destinations::{self, Draft, Overview, Revision, View};
 use crate::services::audit::transport::Failure;
+use crate::services::audit::{Actor, standing};
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -444,7 +445,7 @@ async fn listed(
     transaction: Transaction<'static, Postgres>,
 ) -> Result<DestinationsResponse, Refusal> {
     transaction.commit().await?;
-    let standing = destinations::standing(state).await?;
+    let standing = standing(state).await?;
     let overview = destinations::overview(state, scope).await?;
     Ok(DestinationsResponse::new(standing, overview))
 }
@@ -456,7 +457,7 @@ async fn shown(
     id: Uuid,
 ) -> Result<DestinationResponse, Refusal> {
     transaction.commit().await?;
-    let standing = destinations::standing(state).await?;
+    let standing = standing(state).await?;
     let view = destinations::view(state, scope, id).await?;
     Ok(DestinationResponse::new(view, standing.pause))
 }
@@ -468,7 +469,7 @@ async fn created(
     transaction: Transaction<'static, Postgres>,
     body: Body<CreateDestinationRequest>,
 ) -> Result<DestinationResponse, Refusal> {
-    let standing = destinations::standing(state).await?;
+    let standing = standing(state).await?;
     streams(&standing)?;
     let Json(request) = body.map_err(Refusal::Body)?;
     let view = destinations::create(state, transaction, scope, actor, request.into()).await?;
@@ -483,7 +484,7 @@ async fn updated(
     id: Uuid,
     body: Body<UpdateDestinationRequest>,
 ) -> Result<DestinationResponse, Refusal> {
-    let standing = destinations::standing(state).await?;
+    let standing = standing(state).await?;
     let Json(request) = body.map_err(Refusal::Body)?;
     let revision = Revision::from(request);
     if !revision.only_disables() {
@@ -514,7 +515,7 @@ async fn tested(
     id: Uuid,
 ) -> Result<TestResponse, Refusal> {
     transaction.commit().await?;
-    streams(&destinations::standing(state).await?)?;
+    streams(&standing(state).await?)?;
     let sent = destinations::test(state, scope, id, actor).await?;
     Ok(TestResponse::from(sent))
 }

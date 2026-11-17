@@ -21,7 +21,10 @@ use crate::db::audit::scope::Scope;
 use crate::db::audit::{actions, resources};
 use crate::routes::common::{AuditEvent, audit};
 use crate::services::audit::retention::{self, Change, Holder, Status};
+use crate::services::audit::{Actor, standing};
 use crate::state::AppState;
+
+const DAYS: &str = "days";
 
 #[derive(Debug, Serialize)]
 pub struct RetentionResponse {
@@ -78,11 +81,6 @@ impl From<Holder> for HolderResponse {
 pub struct UpdateRetentionRequest {
     #[serde(default)]
     pub days: Option<Number>,
-}
-
-struct Actor<'a> {
-    id: Uuid,
-    email: &'a str,
 }
 
 /// GET /api/organizations/{org_id}/audit-retention
@@ -213,15 +211,6 @@ async fn settled(
     Ok(RetentionResponse::new(standing, status))
 }
 
-async fn standing(state: &AppState) -> Result<Standing, Refusal> {
-    let stored = state.stored_license().await?;
-    Ok(Standing::of(
-        stored.license(),
-        stored.refusal().is_some(),
-        Utc::now(),
-    ))
-}
-
 async fn record(state: &AppState, scope: Scope, actor: &Actor<'_>, change: Change) {
     audit(
         state.db(),
@@ -233,8 +222,8 @@ async fn record(state: &AppState, scope: Scope, actor: &Actor<'_>, change: Chang
             action: actions::AUDIT_RETENTION_UPDATED,
             resource_type: resources::AUDIT_RETENTION,
             resource_id: scope.organization_id(),
-            old_values: Some(json!({ "days": change.previous })),
-            new_values: Some(json!({ "days": change.next })),
+            old_values: Some(json!({ DAYS: change.previous })),
+            new_values: Some(json!({ DAYS: change.next })),
         },
     )
     .await;

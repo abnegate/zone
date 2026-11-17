@@ -4,14 +4,12 @@
 //! names leave this module, and every change is audited. Testing a destination is not a change,
 //! so it is never audited.
 
-mod actor;
 mod draft;
 mod error;
 mod overview;
 mod revision;
 mod view;
 
-pub use actor::Actor;
 pub use draft::Draft;
 pub use error::Error;
 pub use overview::Overview;
@@ -31,8 +29,9 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 use zone_enterprise::audit::delivery::STALL_AGE;
 use zone_enterprise::audit::destination::{self, SecretName, Secrets, Settings};
-use zone_enterprise::audit::{Event, FailureCode, Kind, Standing, UrlReason, VERSION};
+use zone_enterprise::audit::{Event, FailureCode, Kind, UrlReason, VERSION};
 
+use super::Actor;
 use super::delivery::Open;
 use super::transport::open::Transports;
 use super::transport::{Batch, Failure, syslog};
@@ -60,16 +59,6 @@ const SETTINGS: &str = "settings";
 const SECRETS_CHANGED: &str = "secrets_changed";
 const PORT: &str = "port";
 const SYSLOG_SCHEME: &str = "http";
-
-/// The license as stored, verified or not: an unverified key streams nothing.
-pub async fn standing(state: &AppState) -> Result<Standing, Error> {
-    let stored = state.stored_license().await?;
-    Ok(Standing::of(
-        stored.license(),
-        stored.refusal().is_some(),
-        Utc::now(),
-    ))
-}
 
 /// Every destination of `scope` with its delivery health. Reads on the pool: a transaction that
 /// has written would hold the snapshot horizon back and misreport the backlog.

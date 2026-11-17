@@ -8,6 +8,7 @@ use uuid::Uuid;
 use zone_enterprise::audit::retention::{cutoff, wait};
 use zone_enterprise::audit::{Error, Standing, Wait};
 
+use super::standing;
 use crate::db::DbResult;
 use crate::db::audit::retentions::{self, RetentionRecord};
 use crate::db::audit::scope::Scope;
@@ -130,8 +131,7 @@ pub async fn update(
 pub async fn sweep(state: &AppState) -> Result<u64, sqlx::Error> {
     let pool = state.db();
     events::rebase(pool).await?;
-    let stored = state.stored_license().await?;
-    let standing = Standing::of(stored.license(), stored.refusal().is_some(), Utc::now());
+    let standing = standing(state).await?;
     if !standing.applies {
         return Ok(0);
     }
