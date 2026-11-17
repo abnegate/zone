@@ -1,0 +1,374 @@
+use std::fmt;
+use std::net::Ipv4Addr;
+use std::ops::RangeInclusive;
+
+use serde::{Deserialize, Serialize};
+use url::Url;
+
+use crate::audit::destination::{REDACTED, url};
+use crate::audit::error::Error;
+
+const BUCKET_LENGTH: RangeInclusive<usize> = 3..=63;
+const BUCKET_RESERVED_PREFIXES: [&str; 3] = ["xn--", "sthree-", "amzn-s3-demo-"];
+const BUCKET_RESERVED_SUFFIXES: [&str; 5] =
+    ["-s3alias", "--ol-s3", ".mrap", "--x-s3", "--table-s3"];
+const DOT: char = '.';
+const HYPHEN: char = '-';
+const SLASH: char = '/';
+const CURRENT_SEGMENT: &str = ".";
+const PARENT_SEGMENT: &str = "..";
+const ADJACENT_DOTS: &str = "..";
+const OBJECT_KEY_MAXIMUM: usize = 1024;
+const LONGEST_OBJECT_NAME: &str = "00000000-0000-0000-0000-000000000000/0000/00/00/000000Z-00000000-0000-0000-0000-000000000000.ndjson";
+const PREFIX_MAXIMUM: usize = OBJECT_KEY_MAXIMUM - LONGEST_OBJECT_NAME.len();
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Addressing {
+    Path,
+    #[default]
+    VirtualHost,
+}
+
+impl Addressing {
+    pub const ALL: [Self; 2] = [Self::Path, Self::VirtualHost];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Path => "path",
+            Self::VirtualHost => "virtual_host",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S3Settings {
+    pub bucket: String,
+    pub region: String,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub prefix: String,
+    #[serde(default)]
+    pub addressing: Addressing,
+}
+
+impl S3Settings {
+    pub fn validated(self) -> Result<Self, Error> {
+        let bucket = self.bucket.trim();
+        if !valid_bucket(bucket) {
+            return Err(Error::BucketInvalid(bucket.to_owned()));
+        }
+        let region = self.region.trim();
+        if !valid_region(region) {
+            return Err(Error::RegionInvalid(region.to_owned()));
+        }
+        let endpoint = match self.endpoint.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(endpoint) => Some(url(endpoint)?),
+        };
+        Ok(Self {
+            bucket: bucket.to_owned(),
+            region: region.to_owned(),
+            endpoint,
+            prefix: prefix(&self.prefix)?,
+            addressing: self.addressing,
+        })
+    }
+
+    pub fn endpoint_url(&self) -> Url {
+        match &self.endpoint {
+            Some(endpoint) => Url::parse(endpoint),
+            None => Url::parse(&format!("https://s3.{}.amazonaws.com", self.region)),
+        }
+        .expect("validated S3 settings name a parseable endpoint")
+    }
+}
+
+fn valid_bucket(bucket: &str) -> bool {
+    BUCKET_LENGTH.contains(&bucket.len())
+        && bucket.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || character == DOT
+                || character == HYPHEN
+        })
+        && bucket.starts_with(|character: char| character.is_ascii_alphanumeric())
+        && bucket.ends_with(|character: char| character.is_ascii_alphanumeric())
+        && !bucket.contains(ADJACENT_DOTS)
+        && bucket.parse::<Ipv4Addr>().is_err()
+        && !BUCKET_RESERVED_PREFIXES
+            .iter()
+            .any(|reserved| bucket.starts_with(reserved))
+        && !BUCKET_RESERVED_SUFFIXES
+            .iter()
+            .any(|reserved| bucket.ends_with(reserved))
+}
+
+fn valid_region(region: &str) -> bool {
+    !region.is_empty()
+        && region.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == HYPHEN
+        })
+}
+
+fn prefix(raw: &str) -> Result<String, Error> {
+    let stripped = raw.trim().trim_start_matches(SLASH);
+    if stripped.is_empty() {
+        return Ok(String::new());
+    }
+    let body = stripped.strip_suffix(SLASH).unwrap_or(stripped);
+    let valid = body.len() < PREFIX_MAXIMUM
+        && !body.chars().any(char::is_control)
+        && body.split(SLASH).all(|segment| {
+            !segment.is_empty() && segment != CURRENT_SEGMENT && segment != PARENT_SEGMENT
+        });
+    if !valid {
+        return Err(Error::PrefixInvalid(raw.trim().to_owned()));
+    }
+    Ok(format!("{body}{SLASH}"))
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S3Secrets {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+}
+
+impl fmt::Debug for S3Secrets {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("S3Secrets")
+            .field("access_key_id", &REDACTED)
+            .field("secret_access_key", &REDACTED)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::url_reason::UrlReason;
+
+    fn settings() -> S3Settings {
+        S3Settings {
+            bucket: "audit-logs".into(),
+            region: "us-east-1".into(),
+            endpoint: None,
+            prefix: String::new(),
+            addressing: Addressing::default(),
+        }
+    }
+
+    #[test]
+    fn addressing_is_snake_case_and_defaults_to_virtual_host() {
+        let values: Vec<String> = Addressing::ALL
+            .iter()
+            .map(|addressing| serde_json::to_string(addressing).unwrap())
+            .collect();
+        assert_eq!(values, [r#""path""#, r#""virtual_host""#]);
+        for addressing in Addressing::ALL {
+            assert_eq!(
+                serde_json::to_value(addressing).unwrap(),
+                addressing.as_str()
+            );
+        }
+        assert_eq!(Addressing::default(), Addressing::VirtualHost);
+        assert!(serde_json::from_str::<Addressing>(r#""virtualHost""#).is_err());
+    }
+
+    #[test]
+    fn bucket_names_follow_the_aws_rules() {
+        for bucket in [
+            "abc",
+            "audit-logs",
+            "audit.logs.2026",
+            "1bucket",
+            &"a".repeat(63),
+        ] {
+            assert!(valid_bucket(bucket), "{bucket:?}");
+        }
+        for bucket in [
+            "",
+            "ab",
+            &"a".repeat(64),
+            "Audit-Logs",
+            "audit_logs",
+            "audit logs",
+            "-audit",
+            "audit-",
+            ".audit",
+            "audit.",
+            "audit..logs",
+            "192.168.5.4",
+            "xn--audit",
+            "sthree-audit",
+            "amzn-s3-demo-audit",
+            "audit-s3alias",
+            "audit--ol-s3",
+            "audit.mrap",
+            "audit--x-s3",
+            "audit--table-s3",
+            "bücket",
+        ] {
+            assert!(!valid_bucket(bucket), "{bucket:?}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_bucket_is_named() {
+        let error = S3Settings {
+            bucket: " Audit_Logs ".into(),
+            ..settings()
+        }
+        .validated();
+        assert_eq!(error, Err(Error::BucketInvalid("Audit_Logs".into())));
+    }
+
+    #[test]
+    fn regions_are_lowercase_letters_digits_and_hyphens() {
+        for region in ["us-east-1", "eu-west-2", "auto", "garage"] {
+            assert!(valid_region(region), "{region:?}");
+        }
+        for region in ["", "US-EAST-1", "us east 1", "us_east_1", "us-east-1/"] {
+            assert!(!valid_region(region), "{region:?}");
+            assert_eq!(
+                S3Settings {
+                    region: region.into(),
+                    ..settings()
+                }
+                .validated(),
+                Err(Error::RegionInvalid(region.trim().into())),
+                "{region:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prefixes_are_normalised() {
+        for (raw, expected) in [
+            ("", ""),
+            ("/", ""),
+            ("  ", ""),
+            ("zone", "zone/"),
+            ("zone/", "zone/"),
+            ("/zone", "zone/"),
+            ("//zone/audit/", "zone/audit/"),
+            (" audit/eu ", "audit/eu/"),
+            ("logs/2026.v1", "logs/2026.v1/"),
+        ] {
+            assert_eq!(prefix(raw).as_deref(), Ok(expected), "{raw:?}");
+            assert_eq!(prefix(expected).as_deref(), Ok(expected), "{expected:?}");
+        }
+    }
+
+    #[test]
+    fn prefixes_refuse_empty_dot_and_control_segments() {
+        for raw in ["a//b", "a/./b", "../a", "a/..", "a//", "a\nb", "a\u{0}b"] {
+            assert_eq!(
+                prefix(raw),
+                Err(Error::PrefixInvalid(raw.trim().into())),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prefix_leaves_room_for_the_object_name() {
+        let longest = "a".repeat(PREFIX_MAXIMUM - 1);
+        let normalised = prefix(&longest).unwrap();
+        assert_eq!(
+            normalised.len() + LONGEST_OBJECT_NAME.len(),
+            OBJECT_KEY_MAXIMUM
+        );
+        assert!(prefix(&"a".repeat(PREFIX_MAXIMUM)).is_err());
+    }
+
+    #[test]
+    fn the_endpoint_follows_the_url_syntax() {
+        let validated = S3Settings {
+            endpoint: Some(" http://minio:9000 ".into()),
+            ..settings()
+        }
+        .validated()
+        .unwrap();
+        assert_eq!(validated.endpoint.as_deref(), Some("http://minio:9000"));
+        for (endpoint, reason) in [
+            ("minio:9000", UrlReason::Scheme),
+            ("https://key:secret@minio", UrlReason::Userinfo),
+            ("https://minio?x-id=1", UrlReason::Query),
+        ] {
+            assert_eq!(
+                S3Settings {
+                    endpoint: Some(endpoint.into()),
+                    ..settings()
+                }
+                .validated(),
+                Err(Error::UrlInvalid(reason)),
+                "{endpoint:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_blank_endpoint_means_aws() {
+        let validated = S3Settings {
+            endpoint: Some("  ".into()),
+            ..settings()
+        }
+        .validated()
+        .unwrap();
+        assert_eq!(validated.endpoint, None);
+    }
+
+    #[test]
+    fn the_endpoint_url_defaults_to_the_regions_aws_host() {
+        assert_eq!(
+            S3Settings {
+                region: "eu-west-2".into(),
+                ..settings()
+            }
+            .endpoint_url()
+            .as_str(),
+            "https://s3.eu-west-2.amazonaws.com/"
+        );
+        assert_eq!(
+            S3Settings {
+                endpoint: Some("http://10.0.0.7:9000".into()),
+                ..settings()
+            }
+            .endpoint_url()
+            .as_str(),
+            "http://10.0.0.7:9000/"
+        );
+    }
+
+    #[test]
+    fn validation_is_idempotent() {
+        let validated = S3Settings {
+            bucket: " audit-logs ".into(),
+            region: " us-east-1".into(),
+            endpoint: Some("https://r2.example.com ".into()),
+            prefix: "/zone".into(),
+            addressing: Addressing::Path,
+        }
+        .validated()
+        .unwrap();
+        assert_eq!(validated.clone().validated(), Ok(validated));
+    }
+
+    #[test]
+    fn debug_never_shows_the_keys() {
+        let secrets = S3Secrets {
+            access_key_id: "AKIAEXAMPLE".into(),
+            secret_access_key: "wJalrXUtnFEMI".into(),
+        };
+        let shown = format!("{secrets:?}");
+        assert!(
+            !shown.contains("AKIAEXAMPLE") && !shown.contains("wJalrXUtnFEMI"),
+            "{shown}"
+        );
+    }
+}
