@@ -1,5 +1,5 @@
-import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
+import { expect, test } from '@playwright/test';
 
 const styles = [
   '../../../packages/ui/src/styles/variables.css',
@@ -32,9 +32,14 @@ for (const theme of ['light', 'dark']) {
       </body></html>
     `);
 
-    const ink = theme === 'dark'
-      ? { primary: 'rgb(243, 238, 230)', secondary: 'rgb(196, 184, 168)', muted: 'rgb(168, 159, 145)' }
-      : { primary: 'rgb(26, 22, 18)', secondary: 'rgb(83, 75, 66)', muted: 'rgb(106, 97, 86)' };
+    const ink =
+      theme === 'dark'
+        ? {
+            primary: 'rgb(243, 238, 230)',
+            secondary: 'rgb(196, 184, 168)',
+            muted: 'rgb(168, 159, 145)',
+          }
+        : { primary: 'rgb(26, 22, 18)', secondary: 'rgb(83, 75, 66)', muted: 'rgb(106, 97, 86)' };
     await expect(page.locator('.ui-dialog-content')).toHaveCSS('color', ink.primary);
     await expect(page.locator('.ui-dialog-content > p')).toHaveCSS('color', ink.secondary);
     await expect(page.getByRole('button', { name: 'Close' })).toHaveCSS('color', ink.muted);

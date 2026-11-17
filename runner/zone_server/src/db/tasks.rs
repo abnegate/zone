@@ -7,6 +7,7 @@ use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::services::github::pull_requests;
 use crate::services::task_progress;
 
 use super::{
@@ -1997,19 +1998,23 @@ pub async fn update_task_pr(
     execution: &Execution,
     url: &str,
     branch: &str,
-    status: &str,
+    status: pull_requests::Status,
 ) -> DbResult<bool> {
     Ok(sqlx::query("UPDATE tasks t SET pr_url=$5, branch_name=$6, pr_status=$7, pr_created_at=NOW(), updated_at=NOW() FROM task_runs r, workspace_members m WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.task_id=t.id AND r.owner=$3 AND r.triggered_by=$4 AND r.status='running' AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND t.created_by IS NOT NULL AND m.workspace_id=t.workspace_id AND m.user_id=$4 AND m.is_active AND m.role IN ('member','admin','owner')")
-        .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(url).bind(branch).bind(status).execute(pool).await?.rows_affected() == 1)
+        .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(url).bind(branch).bind(status.as_str()).execute(pool).await?.rows_affected() == 1)
 }
 
 /// Record how a task's pull request stands once its reception has been read.
 ///
 /// Only a task that has a pull request is touched, and a row that already says
 /// so is left alone, so `updated_at` moves only when the status really changes.
-pub async fn update_task_pr_status(pool: &PgPool, task_id: Uuid, status: &str) -> DbResult<bool> {
+pub async fn update_task_pr_status(
+    pool: &PgPool,
+    task_id: Uuid,
+    status: pull_requests::Status,
+) -> DbResult<bool> {
     Ok(sqlx::query("UPDATE tasks SET pr_status=$2, updated_at=NOW() WHERE id=$1 AND pr_url IS NOT NULL AND pr_status IS DISTINCT FROM $2")
-        .bind(task_id).bind(status).execute(pool).await?.rows_affected() == 1)
+        .bind(task_id).bind(status.as_str()).execute(pool).await?.rows_affected() == 1)
 }
 
 pub async fn update_task_branch(
@@ -2020,11 +2025,6 @@ pub async fn update_task_branch(
     Ok(sqlx::query("UPDATE tasks t SET branch_name=$5, updated_at=NOW() FROM task_runs r, workspace_members m WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.task_id=t.id AND r.owner=$3 AND r.triggered_by=$4 AND r.status='running' AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND t.created_by IS NOT NULL AND m.workspace_id=t.workspace_id AND m.user_id=$4 AND m.is_active AND m.role IN ('member','admin','owner')")
         .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(branch).execute(pool).await?.rows_affected() == 1)
 }
-
-// ---------------------------------------------------------------------------
-// Auto projects: tasks created several at a time, runs nobody is watching, and
-// the merge that finishes a task without a person moving it.
-// ---------------------------------------------------------------------------
 
 /// Insert a task inside a caller's transaction, for a write that makes several
 /// at once and wants all or none of them. Project membership is locked the way
@@ -2174,12 +2174,13 @@ pub async fn record_run_model(
 /// to does not matter: the merge is a fact.
 pub async fn complete_merged_task(pool: &PgPool, task_id: Uuid, pr_url: &str) -> DbResult<bool> {
     Ok(sqlx::query(
-        "UPDATE tasks SET status = 'complete', pr_status = 'merged', completed_at = NOW(), \
+        "UPDATE tasks SET status = 'complete', pr_status = $3, completed_at = NOW(), \
            shipped_at = NOW(), reopened_at = NULL, updated_at = NOW() \
          WHERE id = $1 AND active_run_id IS NULL AND status <> 'complete' AND pr_url = $2",
     )
     .bind(task_id)
     .bind(pr_url)
+    .bind(pull_requests::Status::Merged.as_str())
     .execute(pool)
     .await?
     .rows_affected()
@@ -2188,11 +2189,15 @@ pub async fn complete_merged_task(pool: &PgPool, task_id: Uuid, pr_url: &str) ->
 
 /// Record what became of a task's pull request when something other than a
 /// merge closed it.
-pub async fn mark_pr_status(pool: &PgPool, task_id: Uuid, status: &str) -> DbResult<bool> {
+pub async fn mark_pr_status(
+    pool: &PgPool,
+    task_id: Uuid,
+    status: pull_requests::Status,
+) -> DbResult<bool> {
     Ok(
         sqlx::query("UPDATE tasks SET pr_status = $2, updated_at = NOW() WHERE id = $1")
             .bind(task_id)
-            .bind(status)
+            .bind(status.as_str())
             .execute(pool)
             .await?
             .rows_affected()

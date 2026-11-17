@@ -21,12 +21,16 @@ import {
 async function messages(chatId: string): Promise<{ role: string; content: string }[]> {
   const token = await tokenFor(state.owner);
   const { status, body } = await api('GET', `/api/chats/${chatId}/messages`, { token });
-  if (status !== 200) throw new Error(`messages of ${chatId}: ${status} ${JSON.stringify(body).slice(0, 200)}`);
+  if (status !== 200)
+    throw new Error(`messages of ${chatId}: ${status} ${JSON.stringify(body).slice(0, 200)}`);
   const found = (body as { messages?: unknown }).messages;
-  if (!Array.isArray(found)) throw new Error(`messages of ${chatId} are not a list: ${JSON.stringify(body).slice(0, 200)}`);
+  if (!Array.isArray(found))
+    throw new Error(`messages of ${chatId} are not a list: ${JSON.stringify(body).slice(0, 200)}`);
   for (const message of found) {
     if (typeof message?.role !== 'string' || typeof message?.content !== 'string') {
-      throw new Error(`a message of ${chatId} has no role or content: ${JSON.stringify(message).slice(0, 200)}`);
+      throw new Error(
+        `a message of ${chatId} has no role or content: ${JSON.stringify(message).slice(0, 200)}`
+      );
     }
   }
   return found as { role: string; content: string }[];
@@ -75,7 +79,15 @@ test('a new chat with the agent on streams a reply, shows its reasoning and offe
 
   const rounds = await roundsFor(`hello ${s}`);
   expect(rounds).toHaveLength(1);
-  for (const tool of ['ask_user', 'wait_for', 'search_tools', 'load_tools', 'memory_write', 'read_document', 'run_shell']) {
+  for (const tool of [
+    'ask_user',
+    'wait_for',
+    'search_tools',
+    'load_tools',
+    'memory_write',
+    'read_document',
+    'run_shell',
+  ]) {
     expect(rounds[0].tools, `${tool} is offered in the core set`).toContain(tool);
   }
   expect(rounds[0].tools, 'create_reminder is deferred').not.toContain('create_reminder');
@@ -89,11 +101,22 @@ test('an outward write waits for confirmation, runs when approved and stops when
 }) => {
   const s = stamp();
   await script(`file the note ${s}`, [
-    { calls: [{ name: 'create_document', arguments: { title: `Note ${s}`, content: `Filed by the stand-in ${s}.` } }] },
+    {
+      calls: [
+        {
+          name: 'create_document',
+          arguments: { title: `Note ${s}`, content: `Filed by the stand-in ${s}.` },
+        },
+      ],
+    },
     { text: `Filed note ${s}.` },
   ]);
   await script(`file another note ${s}`, [
-    { calls: [{ name: 'create_document', arguments: { title: `Denied ${s}`, content: 'never filed' } }] },
+    {
+      calls: [
+        { name: 'create_document', arguments: { title: `Denied ${s}`, content: 'never filed' } },
+      ],
+    },
     { text: `Understood, not filed ${s}.` },
   ]);
 
@@ -101,14 +124,19 @@ test('an outward write waits for confirmation, runs when approved and stops when
   await newChat(page, { agent: true });
 
   await send(page, `file the note ${s}`);
-  await expect(page.locator('[data-testid="tool-approve"]').first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('[data-testid="tool-approve"]').first()).toBeVisible({
+    timeout: 30_000,
+  });
   await expect(page.locator('[data-testid="tool-call-preview"]').first()).toBeVisible();
   await page.locator('[data-testid="tool-approve"]').first().click();
   await settled(page, 1);
   await expect(page.locator('.message-assistant').last()).toContainText(`Filed note ${s}`);
   const receipt = page.locator('[data-testid="action-receipt"]').first();
   await expect(receipt).toBeVisible();
-  await expect(receipt.locator('[data-testid="action-receipt-link"]')).toHaveAttribute('href', /\/wiki\?id=/);
+  await expect(receipt.locator('[data-testid="action-receipt-link"]')).toHaveAttribute(
+    'href',
+    /\/wiki\?id=/
+  );
   await expect.poll(() => knowledgeTitled(`Note ${s}`), { timeout: 20_000 }).toBe(true);
 
   await send(page, `file another note ${s}`);
@@ -118,7 +146,9 @@ test('an outward write waits for confirmation, runs when approved and stops when
   await expect(page.locator('.message-assistant').last()).toContainText(`not filed ${s}`);
   const denied = await roundsFor(`file another note ${s}`);
   expect(denied).toHaveLength(2);
-  expect(denied[1].tool_results.map((r) => r.content).join('\n')).toMatch(/den|declin|refus|not approved/i);
+  expect(denied[1].tool_results.map((r) => r.content).join('\n')).toMatch(
+    /den|declin|refus|not approved/i
+  );
   expect(await knowledgeTitled(`Denied ${s}`)).toBe(false);
   expect(consoleErrors).toEqual([]);
 });
@@ -177,7 +207,18 @@ test('a command runs in the background, the model waits for it, and reads its lo
   const s = stamp();
   const jobId = '$re:^Started ([A-Za-z0-9_-]+) \\(pid';
   await script(`run the slow job ${s}`, [
-    { calls: [{ name: 'run_shell', arguments: { command: `sleep 4; echo finished-${s}`, background: true, reason: 'A job that outlives one round' } }] },
+    {
+      calls: [
+        {
+          name: 'run_shell',
+          arguments: {
+            command: `sleep 4; echo finished-${s}`,
+            background: true,
+            reason: 'A job that outlives one round',
+          },
+        },
+      ],
+    },
     { calls: [{ name: 'wait_for', arguments: { kind: 'job', id: jobId, timeout_secs: 60 } }] },
     { calls: [{ name: 'tail_job', arguments: { id: jobId } }] },
     { text: `The job printed finished-${s}.` },
@@ -208,7 +249,19 @@ test('what is remembered in one chat is read back in the next, with the badge to
 }) => {
   const s = stamp();
   await script(`remember my editor ${s}`, [
-    { calls: [{ name: 'memory_write', arguments: { category: 'fact', name: `editor-${s}`, description: 'Which editor they use', content: `Helix ${s}` } }] },
+    {
+      calls: [
+        {
+          name: 'memory_write',
+          arguments: {
+            category: 'fact',
+            name: `editor-${s}`,
+            description: 'Which editor they use',
+            content: `Helix ${s}`,
+          },
+        },
+      ],
+    },
     { text: `Noted: Helix ${s}.` },
   ]);
   await script(`which editor do I use ${s}`, [
@@ -255,13 +308,17 @@ test('a deferred tool is found, loaded and used, and the reminder it sets fires 
   await send(page, `remind me to stretch ${s}`);
   await approveIfAsked(page, 5_000);
   await settled(page, 1);
-  await expect(page.locator('.message-assistant').last()).toContainText(`Reminder set for stretching ${s}`);
+  await expect(page.locator('.message-assistant').last()).toContainText(
+    `Reminder set for stretching ${s}`
+  );
 
   const rounds = await roundsFor(`remind me to stretch ${s}`);
   expect(rounds).toHaveLength(4);
   expect(rounds[0].tools).not.toContain('create_reminder');
   expect(rounds[1].tool_results.map((r) => r.content).join('\n')).toContain('create_reminder');
-  expect(rounds[2].tools, 'the loaded tool is offered on the next round').toContain('create_reminder');
+  expect(rounds[2].tools, 'the loaded tool is offered on the next round').toContain(
+    'create_reminder'
+  );
   expect(rounds[3].tool_results.map((r) => r.content).join('\n')).toMatch(/remind/i);
 
   await expect
@@ -283,17 +340,48 @@ test('a reminder that carries a prompt runs a turn when it fires, and can be lis
   const s = stamp();
   const due = new Date(Date.now() + 70_000).toISOString();
   await script(`schedule the time report ${s}`, [
-    { calls: [{ name: 'load_tools', arguments: { names: ['create_reminder', 'list_reminders', 'cancel_reminder'] } }] },
-    { calls: [{ name: 'create_reminder', arguments: { content: `Time report ${s}`, due_at: due, time_zone: 'UTC', rrule: 'FREQ=HOURLY', prompt: `Report the time ${s}` } }] },
+    {
+      calls: [
+        {
+          name: 'load_tools',
+          arguments: { names: ['create_reminder', 'list_reminders', 'cancel_reminder'] },
+        },
+      ],
+    },
+    {
+      calls: [
+        {
+          name: 'create_reminder',
+          arguments: {
+            content: `Time report ${s}`,
+            due_at: due,
+            time_zone: 'UTC',
+            rrule: 'FREQ=HOURLY',
+            prompt: `Report the time ${s}`,
+          },
+        },
+      ],
+    },
     { calls: [{ name: 'list_reminders', arguments: {} }] },
     { text: `Scheduled the hourly time report ${s}.` },
   ]);
   await script(`Report the time ${s}`, [{ text: `Time report delivered ${s}.` }]);
   await script(`cancel the time report ${s}`, [
-    { calls: [{ name: 'load_tools', arguments: { names: ['list_reminders', 'cancel_reminder'] } }] },
+    {
+      calls: [{ name: 'load_tools', arguments: { names: ['list_reminders', 'cancel_reminder'] } }],
+    },
     { calls: [{ name: 'list_reminders', arguments: {} }] },
     // list_reminders answers JSON; inside one object, `content` precedes `id`.
-    { calls: [{ name: 'cancel_reminder', arguments: { reminder_id: `$re:"content":"Time report ${s}"[^}]*?"id":"([0-9a-f-]{36})"` } }] },
+    {
+      calls: [
+        {
+          name: 'cancel_reminder',
+          arguments: {
+            reminder_id: `$re:"content":"Time report ${s}"[^}]*?"id":"([0-9a-f-]{36})"`,
+          },
+        },
+      ],
+    },
     { calls: [{ name: 'list_reminders', arguments: {} }] },
     { text: `Cancelled the time report ${s}.` },
   ]);
@@ -303,16 +391,22 @@ test('a reminder that carries a prompt runs a turn when it fires, and can be lis
   await send(page, `schedule the time report ${s}`);
   await approveIfAsked(page, 5_000);
   await settled(page, 1);
-  await expect(page.locator('.message-assistant').last()).toContainText(`Scheduled the hourly time report ${s}`);
+  await expect(page.locator('.message-assistant').last()).toContainText(
+    `Scheduled the hourly time report ${s}`
+  );
   const scheduled = await roundsFor(`schedule the time report ${s}`);
   expect(scheduled[3].tool_results.map((r) => r.content).join('\n')).toContain(`Time report ${s}`);
 
   await settledRounds(`Report the time ${s}`, 1, 200_000);
   await expect
-    .poll(async () => (await messages(chatId)).some((m) => m.content.includes(`Time report delivered ${s}`)), {
-      timeout: 60_000,
-      intervals: [2_000],
-    })
+    .poll(
+      async () =>
+        (await messages(chatId)).some((m) => m.content.includes(`Time report delivered ${s}`)),
+      {
+        timeout: 60_000,
+        intervals: [2_000],
+      }
+    )
     .toBe(true);
   await page.reload();
   await expect(page.locator(`text=Report the time ${s}`).first()).toBeVisible({ timeout: 30_000 });
@@ -326,11 +420,17 @@ test('a reminder that carries a prompt runs a turn when it fires, and can be lis
     .toBe(5);
   const cancelled = await roundsFor(`cancel the time report ${s}`);
   const afterCancel = cancelled[3].tool_results.map((r) => r.content).join('\n');
-  expect(afterCancel, 'cancel_reminder took the id list_reminders gave').not.toMatch(/not found|error/i);
+  expect(afterCancel, 'cancel_reminder took the id list_reminders gave').not.toMatch(
+    /not found|error/i
+  );
   // The stand-in hands back every result of the turn; the second listing is the last of them.
   const listedAgain = cancelled[4].tool_results.at(-1)?.content ?? '';
-  const entry = new RegExp(`"content":"Time report ${s}"[^}]*"status":"([a-z_]+)"`).exec(listedAgain);
-  expect(entry?.[1], 'the hourly report is cancelled, not pending for its next firing').toBe('cancelled');
+  const entry = new RegExp(`"content":"Time report ${s}"[^}]*"status":"([a-z_]+)"`).exec(
+    listedAgain
+  );
+  expect(entry?.[1], 'the hourly report is cancelled, not pending for its next firing').toBe(
+    'cancelled'
+  );
   expect((await messages(chatId)).length).toBeGreaterThan(before);
   expect(consoleErrors).toEqual([]);
 });
@@ -347,7 +447,16 @@ test('a skill filed in the workspace is indexed in the prompt and read on demand
     'skill'
   );
   await script(`draft the release notes ${s}`, [
-    { calls: [{ name: 'read_document', arguments: { id: `$re:${title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\[([0-9a-f-]{36})\\]` } }] },
+    {
+      calls: [
+        {
+          name: 'read_document',
+          arguments: {
+            id: `$re:${title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\[([0-9a-f-]{36})\\]`,
+          },
+        },
+      ],
+    },
     { text: `Following the release notes skill ${s}.` },
   ]);
 
@@ -355,20 +464,30 @@ test('a skill filed in the workspace is indexed in the prompt and read on demand
   await newChat(page, { agent: true });
   await send(page, `draft the release notes ${s}`);
   await settled(page, 1);
-  await expect(page.locator('.message-assistant').last()).toContainText(`Following the release notes skill ${s}`);
+  await expect(page.locator('.message-assistant').last()).toContainText(
+    `Following the release notes skill ${s}`
+  );
 
   const rounds = await roundsFor(`draft the release notes ${s}`);
   expect(rounds).toHaveLength(2);
   expect(rounds[0].system).toContain(title);
   expect(rounds[0].system).toContain(`Use when asked for release notes ${s}`);
-  expect(rounds[1].tool_results.map((r) => r.content).join('\n')).toContain(`List the merged changes ${s}`);
+  expect(rounds[1].tool_results.map((r) => r.content).join('\n')).toContain(
+    `List the merged changes ${s}`
+  );
   expect(consoleErrors).toEqual([]);
 });
 
-test('a knowledge search the model makes is cited on the reply', async ({ page, consoleErrors }) => {
+test('a knowledge search the model makes is cited on the reply', async ({
+  page,
+  consoleErrors,
+}) => {
   const s = stamp();
   const title = `Deployment checklist ${s}`;
-  await createKnowledge(title, `Rotate the signing key ${s}, then restart the gateway, then watch the error rate for ten minutes.`);
+  await createKnowledge(
+    title,
+    `Rotate the signing key ${s}, then restart the gateway, then watch the error rate for ten minutes.`
+  );
   await script(`what does the deployment checklist ${s} say`, [
     { calls: [{ name: 'search_knowledge', arguments: { query: `deployment checklist ${s}` } }] },
     { text: `It says to rotate the signing key and restart the gateway ${s}.` },
@@ -381,7 +500,9 @@ test('a knowledge search the model makes is cited on the reply', async ({ page, 
 
   const rounds = await roundsFor(`what does the deployment checklist ${s} say`);
   expect(rounds).toHaveLength(2);
-  expect(rounds[1].tool_results.map((r) => r.content).join('\n')).toContain(`Rotate the signing key ${s}`);
+  expect(rounds[1].tool_results.map((r) => r.content).join('\n')).toContain(
+    `Rotate the signing key ${s}`
+  );
   await page
     .locator('.message-assistant')
     .last()

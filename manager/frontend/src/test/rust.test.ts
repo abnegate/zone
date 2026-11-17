@@ -34,6 +34,17 @@ pub struct Question {
 }
 `;
 
+const NULLABLE = `
+#[derive(Debug, Serialize)]
+pub struct Refusal {
+    pub reason: Option<String>,
+    pub retry_at: std::option::Option<NaiveDateTime>,
+    pub attempts: Vec<Option<u32>>,
+    #[serde(flatten)]
+    pub detail: Option<Detail>,
+}
+`;
+
 const RENAMED_ALL = `
 /// A struct the console has no mapping for.
 #[derive(Debug, Serialize)]
@@ -73,22 +84,31 @@ pub enum SubagentStatus {
 describe('the reader reports what travels, not what the field is called', () => {
   test('a plain field is read under its own name, private or public', () => {
     expect(structFields(PLAIN, 'Receipt')).toEqual([
-      { name: 'run_id', optional: false },
-      { name: 'answered', optional: false },
+      { name: 'run_id', optional: false, nullable: false },
+      { name: 'answered', optional: false, nullable: false },
     ]);
   });
 
   test('a renamed field is read under the name serde sends it as', () => {
     expect(structFields(RENAMED, 'Receipt')).toEqual([
-      { name: 'run_id', optional: false },
-      { name: 'count', optional: false },
+      { name: 'run_id', optional: false, nullable: false },
+      { name: 'count', optional: false, nullable: false },
     ]);
   });
 
   test('a field serde may omit is optional, and its neighbour is not', () => {
     expect(structFields(SKIPPED, 'Question')).toEqual([
-      { name: 'header', optional: false },
-      { name: 'preview', optional: true },
+      { name: 'header', optional: false, nullable: false },
+      { name: 'preview', optional: true, nullable: false },
+    ]);
+  });
+
+  test('an Option travels as null unless serde skips or flattens it', () => {
+    expect(structFields(NULLABLE, 'Refusal')).toEqual([
+      { name: 'reason', optional: false, nullable: true },
+      { name: 'retry_at', optional: false, nullable: true },
+      { name: 'attempts', optional: false, nullable: false },
+      { name: 'detail', optional: false, nullable: false },
     ]);
   });
 });

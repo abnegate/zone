@@ -16,6 +16,7 @@ mod reading;
 mod refusal;
 mod repository;
 mod squash;
+mod status;
 mod survey;
 #[cfg(test)]
 mod tests;
@@ -37,6 +38,7 @@ pub use pull_request::PullRequest;
 pub use readiness::Readiness;
 pub use refusal::Refusal;
 pub use repository::Repository;
+pub use status::Status;
 use survey::Survey;
 pub use thread::Thread;
 pub use thread_comment::ThreadComment;

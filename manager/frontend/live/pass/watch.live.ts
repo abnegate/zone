@@ -25,9 +25,7 @@ test.describe('condition watch', () => {
   test.skip(!enabled, 'set ZONE_LIVE_REAL_PASS=1 against the real rig');
   test.describe.configure({ timeout: 2 * 3_600_000 });
 
-  test('45c: an hourly watch reports the file change on its next firing', async ({
-    page,
-  }) => {
+  test('45c: an hourly watch reports the file change on its next firing', async ({ page }) => {
     await signIn(page);
     const s = stamp();
     const chatId = await newChat(page, {
@@ -45,19 +43,15 @@ test.describe('condition watch', () => {
     await ask(
       page,
       `Create a file watch-${s}.txt in your working directory containing the single word v1. Then create a condition_watch reminder, with rrule FREQ=HOURLY (hourly is the smallest cadence the tool accepts) and due_at ${first.toISOString()} (that is ${clock} today in Auckland; use that exact UTC instant), whose prompt reads watch-${s}.txt with read_file and reports its contents only if they differ from the last observation. Name it "Watch ${s}".`,
-      { replies: 1, timeout: 1_200_000 },
+      { replies: 1, timeout: 1_200_000 }
     );
     const rows = sql(
-      `select id || ' | ' || timing_mode || ' | ' || coalesce(rrule, '') || ' | ' || status || ' | ' || to_char(due_at at time zone 'UTC', 'HH24:MI:SS') || 'Z' from reminders where chat_id = '${chatId}' and timing_mode = 'condition_watch' order by created_at desc limit 1`,
+      `select id || ' | ' || timing_mode || ' | ' || coalesce(rrule, '') || ' | ' || status || ' | ' || to_char(due_at at time zone 'UTC', 'HH24:MI:SS') || 'Z' from reminders where chat_id = '${chatId}' and timing_mode = 'condition_watch' order by created_at desc limit 1`
     );
     const id = rows[0]?.split(' | ')[0] ?? '';
     await shot(page, '45-watch-set');
     const fired = () =>
-      id
-        ? Number(
-            sql(`select fired_count from reminders where id = '${id}'`)[0] ?? 0,
-          )
-        : 0;
+      id ? Number(sql(`select fired_count from reminders where id = '${id}'`)[0] ?? 0) : 0;
     let firstFiringAfterMs = -1;
     if (id) {
       const t0 = Date.now();
@@ -71,7 +65,7 @@ test.describe('condition watch', () => {
     }
     const baseline = id
       ? sql(
-          `select left(coalesce(last_observation, ''), 200) from reminders where id = '${id}'`,
+          `select left(coalesce(last_observation, ''), 200) from reminders where id = '${id}'`
         ).join(',')
       : '';
     await expect
@@ -96,10 +90,9 @@ test.describe('condition watch', () => {
       page,
       `Change watch-${s}.txt so that it contains the single word v2 instead of v1. Do not touch the reminder.`,
       {
-        replies:
-          messagesAfterFirst.filter((m) => m.role === 'assistant').length + 1,
+        replies: messagesAfterFirst.filter((m) => m.role === 'assistant').length + 1,
         timeout: 1_200_000,
-      },
+      }
     );
     const changedAt = Date.now();
     let reportedAfterMs = -1;
@@ -125,10 +118,10 @@ test.describe('condition watch', () => {
                 m.role === 'assistant' &&
                 /\bv2\b/.test(m.content) &&
                 !/instead of v1/.test(m.content) &&
-                new Date(m.created_at ?? 0).getTime() > changedAt + 60_000,
+                new Date(m.created_at ?? 0).getTime() > changedAt + 60_000
             );
           },
-          { timeout: 75 * 60_000, intervals: [15_000] },
+          { timeout: 75 * 60_000, intervals: [15_000] }
         )
         .toBe(true)
         .then(() => {
@@ -141,21 +134,18 @@ test.describe('condition watch', () => {
     await shot(page, '45-watch-fired-on-change');
     const after = id
       ? sql(
-          `select fired_count || ' | ' || status || ' | ' || left(coalesce(last_observation, ''), 200) from reminders where id = '${id}'`,
+          `select fired_count || ' | ' || status || ' | ' || left(coalesce(last_observation, ''), 200) from reminders where id = '${id}'`
         ).join(',')
       : '';
     const turns = id
       ? sql(
-          `select to_char(created_at at time zone 'UTC', 'HH24:MI:SS') || 'Z attempts=' || attempts || ' claimed=' || coalesce(claimed_at::text, '') from reminder_turns where reminder_id = '${id}' order by created_at`,
+          `select to_char(created_at at time zone 'UTC', 'HH24:MI:SS') || 'Z attempts=' || attempts || ' claimed=' || coalesce(claimed_at::text, '') from reminder_turns where reminder_id = '${id}' order by created_at`
         )
       : [];
     if (id)
-      sql(
-        `update reminders set status = 'cancelled' where id = '${id}' and status = 'pending'`,
-      );
+      sql(`update reminders set status = 'cancelled' where id = '${id}' and status = 'pending'`);
     record(45.7, {
-      result:
-        id && firstFiringAfterMs > 0 && reportedAfterMs > 0 ? 'WORKS' : 'FAILS',
+      result: id && firstFiringAfterMs > 0 && reportedAfterMs > 0 ? 'WORKS' : 'FAILS',
       cause: !id
         ? 'model: no condition_watch reminder was created'
         : firstFiringAfterMs < 0
@@ -187,15 +177,14 @@ test.describe('condition watch', () => {
     const file = process.env.ZONE_WATCH_FILE ?? '';
     test.skip(
       !id || !file,
-      'set ZONE_WATCH_ID and ZONE_WATCH_FILE from the watch the first test created',
+      'set ZONE_WATCH_ID and ZONE_WATCH_FILE from the watch the first test created'
     );
     await signIn(page);
     await page.goto('/chats');
     const item = page.locator('.chat-item', { hasText: file });
     await expect(item.first()).toBeVisible({ timeout: 60_000 });
     await item.first().click();
-    const chatId =
-      sql(`select chat_id from reminders where id = '${id}'`)[0] ?? '';
+    const chatId = sql(`select chat_id from reminders where id = '${id}'`)[0] ?? '';
     await expect
       .poll(async () => page.locator('.message-status').count(), {
         timeout: 20 * 60_000,
@@ -211,7 +200,7 @@ test.describe('condition watch', () => {
         ).body as { messages?: { role: string; content: string }[] }
       ).messages ?? [];
     const firstFiring = sql(
-      `select fired_count || ' | ' || to_char(last_fired_at at time zone 'UTC', 'HH24:MI:SS') || 'Z | ' || left(coalesce(last_observation, ''), 200) from reminders where id = '${id}'`,
+      `select fired_count || ' | ' || to_char(last_fired_at at time zone 'UTC', 'HH24:MI:SS') || 'Z | ' || left(coalesce(last_observation, ''), 200) from reminders where id = '${id}'`
     ).join(',');
     await shot(page, '45-watch-first-firing');
     await ask(
@@ -220,7 +209,7 @@ test.describe('condition watch', () => {
       {
         replies: before.filter((m) => m.role === 'assistant').length + 1,
         timeout: 1_200_000,
-      },
+      }
     );
     const changedAt = Date.now();
     await shot(page, '45-watch-file-changed');
@@ -246,10 +235,10 @@ test.describe('condition watch', () => {
               m.role === 'assistant' &&
               /\bv2\b/.test(m.content) &&
               !/instead of v1/.test(m.content) &&
-              new Date(m.created_at ?? 0).getTime() > changedAt + 120_000,
+              new Date(m.created_at ?? 0).getTime() > changedAt + 120_000
           );
         },
-        { timeout: 80 * 60_000, intervals: [15_000] },
+        { timeout: 80 * 60_000, intervals: [15_000] }
       )
       .toBe(true)
       .then(() => {
@@ -265,10 +254,10 @@ test.describe('condition watch', () => {
     await page.waitForTimeout(1_500);
     await shot(page, '45-watch-fired-on-change');
     const after = sql(
-      `select fired_count || ' | ' || status || ' | ' || to_char(last_fired_at at time zone 'UTC', 'HH24:MI:SS') || 'Z | ' || left(coalesce(last_observation, ''), 300) from reminders where id = '${id}'`,
+      `select fired_count || ' | ' || status || ' | ' || to_char(last_fired_at at time zone 'UTC', 'HH24:MI:SS') || 'Z | ' || left(coalesce(last_observation, ''), 300) from reminders where id = '${id}'`
     ).join(',');
     const turns = sql(
-      `select to_char(created_at at time zone 'UTC', 'HH24:MI:SS') || 'Z attempts=' || attempts || ' claimed=' || coalesce(claimed_at::text, '') from reminder_turns where reminder_id = '${id}' order by created_at`,
+      `select to_char(created_at at time zone 'UTC', 'HH24:MI:SS') || 'Z attempts=' || attempts || ' claimed=' || coalesce(claimed_at::text, '') from reminder_turns where reminder_id = '${id}' order by created_at`
     );
     const firings = (
       (
@@ -282,13 +271,8 @@ test.describe('condition watch', () => {
       ).messages ?? []
     )
       .filter((m) => m.role === 'assistant')
-      .map(
-        (m) =>
-          `${m.created_at ?? ''} ${m.content.replace(/\s+/g, ' ').slice(0, 160)}`,
-      );
-    sql(
-      `update reminders set status = 'cancelled' where id = '${id}' and status = 'pending'`,
-    );
+      .map((m) => `${m.created_at ?? ''} ${m.content.replace(/\s+/g, ' ').slice(0, 160)}`);
+    sql(`update reminders set status = 'cancelled' where id = '${id}' and status = 'pending'`);
     record(45.7, {
       result: reportedAfterMs > 0 ? 'WORKS' : 'FAILS',
       cause:

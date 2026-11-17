@@ -13,9 +13,7 @@ test.describe('Sub nav resize', () => {
     await setupAdminAuth(page);
   });
 
-  test('drags the chat list wider and restores the width after reload', async ({
-    page,
-  }) => {
+  test('drags the chat list wider and restores the width after reload', async ({ page }) => {
     await page.goto('/chats');
     await expect(page.locator('.chat-item').first()).toBeVisible();
     await dragWider(page, page.locator('.chats-sidebar'), 'Resize chat list');
@@ -24,11 +22,7 @@ test.describe('Sub nav resize', () => {
   test('drags the project list wider', async ({ page }) => {
     await page.goto('/projects');
     await expect(page.locator('.project-card').first()).toBeVisible();
-    await dragWider(
-      page,
-      page.locator('.projects-list-pane'),
-      'Resize project list'
-    );
+    await dragWider(page, page.locator('.projects-list-pane'), 'Resize project list');
   });
 });
 

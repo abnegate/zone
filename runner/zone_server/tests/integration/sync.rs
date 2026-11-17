@@ -80,6 +80,7 @@ async fn setup_test_state() -> AppState {
         web_search: zone_server::services::search::defaults(),
         comfyui: Default::default(),
         source_index: Default::default(),
+        evaluation: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
         train_upload_limit_mb: 512,

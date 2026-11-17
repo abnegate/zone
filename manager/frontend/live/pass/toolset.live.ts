@@ -32,7 +32,7 @@ test.describe('tool set seen by the model', () => {
     const reply = await ask(
       page,
       'Without calling any tool: list the exact names of every tool whose full schema (parameters) is currently in front of you, one per line, alphabetically. Then on a separate line list the names of tools you only know by name from the catalog, if any. Do not explain.',
-      { replies: 1, timeout: 1_200_000 },
+      { replies: 1, timeout: 1_200_000 }
     );
     await shot(page, '51-tool-schemas-seen-by-model');
     const names = reply
@@ -62,12 +62,12 @@ test.describe('tool set seen by the model', () => {
     const started = await ask(
       page,
       `Call the start_task tool now (its schema is in front of you) with title "Named-run ${s}" and description "List the files in your working directory and report how many there are." Then tell me the task_id and run_id it returned.`,
-      { replies: 1, timeout: 1_200_000 },
+      { replies: 1, timeout: 1_200_000 }
     );
     await shot(page, '51-start-task-named');
     const task =
       sql(
-        `select id || '|' || status || '|' || is_agentic from tasks where title = 'Named-run ${s}' order by created_at desc limit 1`,
+        `select id || '|' || status || '|' || is_agentic from tasks where title = 'Named-run ${s}' order by created_at desc limit 1`
       )[0]?.split('|') ?? [];
     let run = '';
     if (task[0]) {
@@ -75,28 +75,26 @@ test.describe('tool set seen by the model', () => {
         .poll(
           () =>
             sql(
-              `select status from task_runs where task_id = '${task[0]}' order by started_at desc limit 1`,
+              `select status from task_runs where task_id = '${task[0]}' order by started_at desc limit 1`
             ).join(','),
-          { timeout: 1_500_000, intervals: [5_000] },
+          { timeout: 1_500_000, intervals: [5_000] }
         )
         .toMatch(/completed|failed/)
         .catch(() => undefined);
       run = sql(
-        `select id || ' | ' || status || ' | ' || left(coalesce(result_summary, ''), 160) from task_runs where task_id = '${task[0]}' order by started_at desc limit 1`,
+        `select id || ' | ' || status || ' | ' || left(coalesce(result_summary, ''), 160) from task_runs where task_id = '${task[0]}' order by started_at desc limit 1`
       ).join(',');
     }
     const status = await ask(
       page,
       `Use get_task_run to read the latest run of "Named-run ${s}" and tell me its status and result in one sentence.`,
-      { replies: 2, timeout: 1_200_000 },
+      { replies: 2, timeout: 1_200_000 }
     );
     await shot(page, '51-get-task-run-named');
     const tools = sql(
-      `select coalesce(nullif(message->'tool_calls', 'null'::jsonb), '[]'::jsonb) from chat_entries where chat_id = '${chatId}' and message->>'role' = 'assistant' order by created_at`,
+      `select coalesce(nullif(message->'tool_calls', 'null'::jsonb), '[]'::jsonb) from chat_entries where chat_id = '${chatId}' and message->>'role' = 'assistant' order by created_at`
     ).flatMap((line) =>
-      (JSON.parse(line) as { function: { name: string } }[]).map(
-        (c) => c.function.name,
-      ),
+      (JSON.parse(line) as { function: { name: string } }[]).map((c) => c.function.name)
     );
     await page.goto('/tasks');
     const card = page.locator('.task-card', { hasText: `Named-run ${s}` });
@@ -108,9 +106,7 @@ test.describe('tool set seen by the model', () => {
     if (onPage) await shot(page, '51-named-task-on-tasks-page');
     record(51.6, {
       result:
-        tools.includes('start_task') &&
-        tools.includes('get_task_run') &&
-        /completed/.test(run)
+        tools.includes('start_task') && tools.includes('get_task_run') && /completed/.test(run)
           ? 'WORKS'
           : 'FAILS',
       cause: tools.includes('start_task')

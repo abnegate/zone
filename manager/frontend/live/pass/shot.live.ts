@@ -12,7 +12,7 @@ test.describe('screenshot of a chat', () => {
   const name = process.env.ZONE_SHOT_NAME ?? '';
   test.skip(
     !enabled || (!chat && !route) || !name,
-    'set ZONE_SHOT_CHAT or ZONE_SHOT_ROUTE, and ZONE_SHOT_NAME',
+    'set ZONE_SHOT_CHAT or ZONE_SHOT_ROUTE, and ZONE_SHOT_NAME'
   );
 
   test('opens a route and keeps a screenshot of it', async ({ page }) => {

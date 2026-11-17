@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { SOURCES_LOCATION } from '../../settings/navigation/sections';
+import { getSourceLabel } from '../../sources/config';
 import type { Source } from '../../sources/types';
 import type { ChatSource } from '../types';
 
@@ -9,23 +10,6 @@ interface ChatSourcesProps {
   loading: boolean;
   error: string | null;
   onChange: (sourceIds: string[]) => Promise<void>;
-}
-
-const KIND_LABELS: Record<string, string> = {
-  github: 'GitHub',
-  gitlab: 'GitLab',
-  filesystem: 'Folder',
-  notion: 'Notion',
-  text: 'Text',
-  web: 'Web',
-  imap: 'Mail',
-  ical: 'Calendar',
-  slack: 'Slack',
-  discord: 'Discord',
-};
-
-function kindLabel(kind: string): string {
-  return KIND_LABELS[kind] ?? kind;
 }
 
 /**
@@ -113,7 +97,7 @@ export function ChatSources({ attached, available, loading, error, onChange }: C
 
       {attached.map((source) => (
         <span key={source.id} className="chat-source-chip" data-testid="chat-source-chip">
-          <span className="chat-source-chip-kind">{kindLabel(source.source_type)}</span>
+          <span className="chat-source-chip-kind">{getSourceLabel(source.source_type)}</span>
           <span className="chat-source-chip-name">{source.name}</span>
           <button
             type="button"
@@ -153,7 +137,9 @@ export function ChatSources({ attached, available, loading, error, onChange }: C
                     disabled={saving}
                   />
                   <span className="chat-sources-option-name">{source.name}</span>
-                  <span className="chat-sources-option-kind">{kindLabel(source.source_type)}</span>
+                  <span className="chat-sources-option-kind">
+                    {getSourceLabel(source.source_type)}
+                  </span>
                 </label>
               ))}
             </div>

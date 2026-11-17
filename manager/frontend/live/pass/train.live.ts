@@ -28,9 +28,7 @@ const comfy = process.env.ZONE_LIVE_COMFYUI_URL ?? 'http://127.0.0.1:8188';
 async function openTrainTab(page: Page): Promise<void> {
   await page.goto('/models');
   await page.getByRole('tab', { name: 'Train' }).click();
-  await expect(
-    page.getByRole('heading', { name: /train a lora/i }),
-  ).toBeVisible();
+  await expect(page.getByRole('heading', { name: /train a lora/i })).toBeVisible();
 }
 
 test.describe('training', () => {
@@ -53,9 +51,7 @@ test.describe('training', () => {
     const sampling = await receipt.innerText();
     const pairs = page.locator('.train-pair');
     const kept = await pairs.count();
-    const mirrored = await page
-      .locator('.train-pair-filename', { hasText: '(mirrored)' })
-      .count();
+    const mirrored = await page.locator('.train-pair-filename', { hasText: '(mirrored)' }).count();
     await shot(page, '17-frames-with-mirrors');
 
     // Mirror off, re-dropped on a fresh tab: no mirrored frames.
@@ -86,18 +82,16 @@ test.describe('training', () => {
       .poll(
         async () =>
           (
-            await captions.evaluateAll((els) =>
-              els.map((e) => (e as HTMLInputElement).value),
-            )
+            await captions.evaluateAll((els) => els.map((e) => (e as HTMLInputElement).value))
           ).filter((v) => v.trim().length > 0).length,
         {
           timeout: 1_200_000,
           intervals: [5_000],
-        },
+        }
       )
       .toBe(framesToTrain);
     const captionValues = await captions.evaluateAll((els) =>
-      els.map((e) => (e as HTMLInputElement).value),
+      els.map((e) => (e as HTMLInputElement).value)
     );
     await shot(page, '17-captions-from-vision-model');
 
@@ -120,14 +114,12 @@ test.describe('training', () => {
           }
           return 'running';
         },
-        { timeout: 2.5 * 3_600_000, intervals: [10_000] },
+        { timeout: 2.5 * 3_600_000, intervals: [10_000] }
       )
       .not.toBe('running');
     const minutes = Math.round((Date.now() - startedAt) / 60_000);
     await shot(page, '18-training-result');
-    const resultText = reason
-      ? ''
-      : (await result.innerText()).replace(/\s+/g, ' ');
+    const resultText = reason ? '' : (await result.innerText()).replace(/\s+/g, ' ');
     const screening = reason
       ? ''
       : (
@@ -208,7 +200,7 @@ test.describe('training', () => {
         '-c',
         `ps -Eww -o command= -p $(lsof -nP -iTCP:${process.env.ZONE_LIVE_API_PORT ?? '8010'} -sTCP:LISTEN -t) | tr ' ' '\\n' | grep '^COMFYUI_CHECKPOINT=' || echo COMFYUI_CHECKPOINT=`,
       ],
-      { encoding: 'utf8' },
+      { encoding: 'utf8' }
     ).trim();
     const chatId = await newChat(page, { model });
     const seen: { id: string; loras: string[]; prompt: string }[] = [];
@@ -229,9 +221,7 @@ test.describe('training', () => {
             .filter((n) => /Lora/i.test(n.class_type))
             .map((n) => `${n.class_type}: ${String(n.inputs.lora_name ?? '')}`);
           const text = Object.values(graph).find(
-            (n) =>
-              n.class_type === 'CLIPTextEncode' &&
-              typeof n.inputs.text === 'string',
+            (n) => n.class_type === 'CLIPTextEncode' && typeof n.inputs.text === 'string'
           );
           seen.push({
             id,
@@ -245,7 +235,7 @@ test.describe('training', () => {
     const reply = await ask(
       page,
       'draw me zrkxyz standing in a snowy pine forest, full body, facing the camera',
-      { replies: 1, timeout: 1_800_000 },
+      { replies: 1, timeout: 1_800_000 }
     );
     watching = false;
     await watcher;
@@ -256,10 +246,7 @@ test.describe('training', () => {
       const response = await fetch(url as string);
       return new Uint8Array(await response.arrayBuffer());
     }, source);
-    writeFileSync(
-      join(evidenceDir, '19-adapter-image.png'),
-      Buffer.from(bytes),
-    );
+    writeFileSync(join(evidenceDir, '19-adapter-image.png'), Buffer.from(bytes));
     await shot(page, '19-adapter-image-in-chat');
     const render = seen.find((s) => /zrkxyz/.test(s.prompt)) ?? seen.at(-1);
     record(19, {

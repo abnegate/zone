@@ -34,7 +34,6 @@ use crate::db::sources::GITHUB;
 use crate::db::sources::GITLAB;
 use crate::db::sources::ICAL;
 use crate::db::sources::IMAP;
-use crate::db::sources::NOTION;
 use crate::db::sources::SLACK;
 use crate::db::sources::SourceChanges;
 use crate::db::sources::TEXT;
@@ -71,8 +70,6 @@ const GITHUB_UNAVAILABLE: &str = "GitHub could not be reached.";
 const APP_REJECTED: &str = "The GitHub App connection is broken. Reconnect GitHub.";
 
 const TOKEN_FIELD: &str = "token";
-
-const API_KEY_FIELD: &str = "api_key";
 
 fn internal() -> ServerError {
     ServerError::Internal(INTERNAL_ERROR.to_string())
@@ -959,7 +956,6 @@ pub async fn verify(
         GITHUB => zone_core::SourceType::GitHub,
         GITLAB => zone_core::SourceType::GitLab,
         FILESYSTEM => zone_core::SourceType::Filesystem,
-        NOTION => zone_core::SourceType::Notion,
         TEXT => zone_core::SourceType::Text,
         WEB => zone_core::SourceType::Web,
         _ => {
@@ -999,12 +995,8 @@ pub async fn verify(
     if let Some(credential) = credential
         && let Some(object) = config.as_object_mut()
     {
-        let field = match source_type {
-            zone_core::SourceType::Notion => API_KEY_FIELD,
-            _ => TOKEN_FIELD,
-        };
         object.insert(
-            field.to_string(),
+            TOKEN_FIELD.to_string(),
             serde_json::Value::String(credential.secret().expose().to_string()),
         );
     }

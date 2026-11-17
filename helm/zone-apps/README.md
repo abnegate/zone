@@ -75,6 +75,15 @@ The following table lists the configurable parameters and their default values.
 | `server.env.ZONE_MCP_COMMANDS` | Let organization admins add stdio (command) servers, which run as zone-server's user in the pod and can read any running child's environment from `/proc`. On, it gives every organization admin every other organization's stdio MCP secrets and, while an instance stdio server that inherits the environment runs (a `command` entry or the `magents` fallback), zone-server's own keys. Single-tenant installs only; see [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) | `"false"` |
 | `server.env.ZONE_MCP_CONFIG` | Path inside the pod to a JSON file of instance MCP servers | `""` |
 | `server.env.ZONE_MCP_SERVERS` | Inline JSON of instance MCP servers; takes precedence over `ZONE_MCP_CONFIG` | `""` |
+| `server.env.ZONE_TASK_EVALUATION` | Run a project's own tests, lint and typecheck before and after each task run and log the verdict: `true`, `1`, `yes` or `on` turns it on, `false`, `0`, `no` or `off` off, in any case, and any other value logs a warning and keeps it off; see [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) | unset (`false`) |
+| `server.env.ZONE_TASK_EVALUATION_CATEGORIES` | Comma-separated checks to run: `test`, `lint`, `typecheck`, `build`, `coverage`, or `all`. Unknown names are ignored with a warning; if none is recognised, the default set runs | unset (`test,lint,typecheck`) |
+| `server.env.ZONE_TASK_EVALUATION_TOOL_TIMEOUT_SECONDS` | Seconds one check may run, at most `1800` | unset (`300`) |
+| `server.env.ZONE_TASK_EVALUATION_BUDGET_SECONDS` | Seconds every check of one evaluation may run in total, at most `3600` | unset (`900`) |
+| `server.env.ZONE_REPORT_ENABLED` | Send each workspace a scheduled digest through the configured notification channels: `true`, `1`, `yes` or `on` turns it on, `false`, `0`, `no` or `off` off, in any case, and any other value logs a warning and keeps it off; see [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) | unset (`false`) |
+| `server.env.ZONE_REPORT_CADENCE` | How often a digest goes out: `daily`, `weekly` or `monthly` | unset (`weekly`) |
+| `server.env.ZONE_REPORT_HOUR` | Hour of the day, `0` to `23` UTC, a digest is owed | unset (`8`) |
+| `server.env.ZONE_REPORT_WEEKDAY` | Day of the week a weekly digest is owed | unset (`monday`) |
+| `server.env.ZONE_REPORT_DAY_OF_MONTH` | Day of the month, `1` to `31`, a monthly digest is owed; moved to the last day in shorter months | unset (`1`) |
 
 ### Manager Configuration
 

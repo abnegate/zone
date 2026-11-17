@@ -64,12 +64,8 @@ async function successAlert(page: Page, text: RegExp): Promise<string> {
 
 /** Whatever alert the page shows within a few seconds, success or error. */
 async function anyAlert(page: Page): Promise<string> {
-  const alert = page
-    .locator('.alert-success, .alert-error, [data-sonner-toast]')
-    .first();
-  await alert
-    .waitFor({ state: 'visible', timeout: 15_000 })
-    .catch(() => undefined);
+  const alert = page.locator('.alert-success, .alert-error, [data-sonner-toast]').first();
+  await alert.waitFor({ state: 'visible', timeout: 15_000 }).catch(() => undefined);
   return (await alert.innerText().catch(() => '')) || 'no alert shown';
 }
 
@@ -97,9 +93,7 @@ test.describe('organization and workspace settings', () => {
   test.skip(!enabled, 'set ZONE_LIVE_REAL_PASS=1 against the real rig');
   test.describe.configure({ timeout: 600_000 });
 
-  test('8: a member role is changed, and the audit log is checked for it', async ({
-    page,
-  }) => {
+  test('8: a member role is changed, and the audit log is checked for it', async ({ page }) => {
     await signIn(page);
     await page.goto(ORGANIZATION_MEMBERS);
     const table = page.locator('table.members-table');
@@ -114,7 +108,7 @@ test.describe('organization and workspace settings', () => {
       .first();
     await expect(
       row,
-      `a row for the second tenant among ${memberRows}: ${tableText.slice(0, 200)}`,
+      `a row for the second tenant among ${memberRows}: ${tableText.slice(0, 200)}`
     ).toBeVisible();
     const select = row.locator('.role-select');
     await shot(page, '08-members-before');
@@ -128,15 +122,13 @@ test.describe('organization and workspace settings', () => {
     });
     await shot(page, '08-role-changed');
     const dbRole = sql(
-      `select role from organization_members where organization_id = '${state.owner.organization.id}' and user_id = '${state.intruder.user.id}'`,
+      `select role from organization_members where organization_id = '${state.owner.organization.id}' and user_id = '${state.intruder.user.id}'`
     ).join(',');
 
     await page.goto(ORGANIZATION_AUDIT);
     await page.waitForTimeout(2_000);
     const auditText = await page.locator('main, .page').first().innerText();
-    const auditRows = await page
-      .locator('table.audit-logs-table tbody tr')
-      .count();
+    const auditRows = await page.locator('table.audit-logs-table tbody tr').count();
     await shot(page, '08-audit-logs');
     const auditDb = sql(`select count(*) from audit_logs`).join(',');
 
@@ -148,7 +140,7 @@ test.describe('organization and workspace settings', () => {
         .filter({ has: page.locator('.role-select') })
         .first()
         .locator('.role-select'),
-      'member',
+      'member'
     );
     await successAlert(page, /Role updated successfully/);
 
@@ -161,11 +153,7 @@ test.describe('organization and workspace settings', () => {
       audit_rows_rendered: auditRows,
       audit_rows_in_db: auditDb,
       audit_page_text: auditText.slice(0, 300),
-      screenshots: [
-        '08-members-before.png',
-        '08-role-changed.png',
-        '08-audit-logs.png',
-      ],
+      screenshots: ['08-members-before.png', '08-role-changed.png', '08-audit-logs.png'],
     });
     expect(auditShowsChange, 'the role change shows in Audit Logs').toBe(true);
   });
@@ -191,7 +179,7 @@ test.describe('organization and workspace settings', () => {
     await page.getByRole('button', { name: 'Save Changes' }).click();
     const saved = await successAlert(page, /Settings saved successfully/);
     const dbRow = sql(
-      `select provider, model_fast, model_reasoning, model_embedding, model_video, model_audio from organization_ai_settings where organization_id = '${state.owner.organization.id}'`,
+      `select provider, model_fast, model_reasoning, model_embedding, model_video, model_audio from organization_ai_settings where organization_id = '${state.owner.organization.id}'`
     ).join(' | ');
 
     // A chat on "Automatic" takes the fast model for a plain message and the
@@ -208,12 +196,10 @@ test.describe('organization and workspace settings', () => {
     await settled(page, 2, 600_000);
     const afterReason = await loadedModels();
     await shot(page, '09-auto-chat-reasoning-turn');
-    const chatModel = sql(
-      `select model_name from chats where id = '${chatId}'`,
-    ).join(',');
+    const chatModel = sql(`select model_name from chats where id = '${chatId}'`).join(',');
     const logged = logLines(
       mark,
-      new RegExp(`${FAST.replace('.', '\\.')}|${REASON.replace('.', '\\.')}`),
+      new RegExp(`${FAST.replace('.', '\\.')}|${REASON.replace('.', '\\.')}`)
     ).slice(0, 3);
 
     // Row 10: the provider forms for OpenAI and Anthropic, and the LiteLLM section.
@@ -231,12 +217,9 @@ test.describe('organization and workspace settings', () => {
       .fill(process.env.LITELLM_HOST ?? 'http://127.0.0.1:11434/v1');
     await page.locator('#litellm-key').fill('live-verify');
     await page.getByRole('button', { name: 'Save Changes' }).click();
-    const litellmSaved = await successAlert(
-      page,
-      /Settings saved successfully/,
-    );
+    const litellmSaved = await successAlert(page, /Settings saved successfully/);
     const litellmRow = sql(
-      `select litellm_host, litellm_key is not null from organization_ai_settings where organization_id = '${state.owner.organization.id}'`,
+      `select litellm_host, litellm_key is not null from organization_ai_settings where organization_id = '${state.owner.organization.id}'`
     ).join(' | ');
     await shot(page, '10-litellm-saved');
 
@@ -247,17 +230,14 @@ test.describe('organization and workspace settings', () => {
     await expect(page.locator('#ai-provider')).toBeVisible({ timeout: 30_000 });
     const fastAfterReset = (await page.locator('#model-fast').innerText()).trim();
     const rowsAfterReset = sql(
-      `select count(*) from organization_ai_settings where organization_id = '${state.owner.organization.id}'`,
+      `select count(*) from organization_ai_settings where organization_id = '${state.owner.organization.id}'`
     ).join(',');
     await shot(page, '09-after-reset');
 
     const fastUsed = afterFast.includes(FAST);
     const reasonUsed = afterReason.includes(REASON);
     record(9, {
-      result:
-        fastUsed && reasonUsed && fastAfterReset === AUTOMATIC
-          ? 'WORKS'
-          : 'FAILS',
+      result: fastUsed && reasonUsed && fastAfterReset === AUTOMATIC ? 'WORKS' : 'FAILS',
       saved_alert: saved,
       db_row_after_save: dbRow,
       chat_id: chatId,
@@ -288,14 +268,10 @@ test.describe('organization and workspace settings', () => {
         '10-litellm-saved.png',
       ],
     });
-    expect(
-      fastUsed,
-      `the plain turn loaded ${FAST}: ${afterFast.join(',')}`,
-    ).toBe(true);
-    expect(
-      reasonUsed,
-      `the step-by-step turn loaded ${REASON}: ${afterReason.join(',')}`,
-    ).toBe(true);
+    expect(fastUsed, `the plain turn loaded ${FAST}: ${afterFast.join(',')}`).toBe(true);
+    expect(reasonUsed, `the step-by-step turn loaded ${REASON}: ${afterReason.join(',')}`).toBe(
+      true
+    );
     expect(fastAfterReset).toBe(AUTOMATIC);
   });
 
@@ -336,7 +312,7 @@ test.describe('organization and workspace settings', () => {
       .click();
     const saved = await successAlert(page, /Settings saved successfully/);
     const dbRow = sql(
-      `select count(*) from workspace_themes where workspace_id = '${state.owner.workspace.id}'`,
+      `select count(*) from workspace_themes where workspace_id = '${state.owner.workspace.id}'`
     ).join(',');
 
     await page.reload();
@@ -364,11 +340,9 @@ test.describe('organization and workspace settings', () => {
     const afterReset = await accentVariable(page);
 
     const expectedAccent =
-      preview.theme === 'dark'
-        ? colours['#primary-dark']
-        : colours['#primary-light'];
+      preview.theme === 'dark' ? colours['#primary-dark'] : colours['#primary-light'];
     const worn = Object.values(pages).every(
-      (p) => p.accent.toLowerCase() === expectedAccent && p.fontSize === '18px',
+      (p) => p.accent.toLowerCase() === expectedAccent && p.fontSize === '18px'
     );
     record(12, {
       result:
@@ -408,9 +382,7 @@ test.describe('organization and workspace settings', () => {
       name: 'Provider',
       exact: true,
     });
-    await provider
-      .getByRole('button', { name: /^(Override|Edit) Provider$/ })
-      .click();
+    await provider.getByRole('button', { name: /^(Override|Edit) Provider$/ }).click();
     await chooseOption(page.locator('#ai-provider'), SELF_HOSTED);
     await page
       .locator('#litellm-host')
@@ -423,9 +395,7 @@ test.describe('organization and workspace settings', () => {
       name: 'Fast Model',
       exact: true,
     });
-    await fast
-      .getByRole('button', { name: /^(Override|Edit) Fast Model$/ })
-      .click();
+    await fast.getByRole('button', { name: /^(Override|Edit) Fast Model$/ }).click();
     const fastEditor = page.locator('#override-fast');
     if ((await fastEditor.evaluate((el) => el.tagName)) === 'INPUT') {
       await fastEditor.fill(FAST);
@@ -436,17 +406,15 @@ test.describe('organization and workspace settings', () => {
     const fastSaved = await successAlert(page, /Fast Model saved/);
     const saved = `${providerSaved}; ${fastSaved}`;
     const dbRow = sql(
-      `select provider, model_fast, litellm_host, litellm_key is not null from workspace_ai_settings where workspace_id = '${state.owner.workspace.id}'`,
+      `select provider, model_fast, litellm_host, litellm_key is not null from workspace_ai_settings where workspace_id = '${state.owner.workspace.id}'`
     ).join(' | ');
-    const org = await api(
-      'GET',
-      `/api/organizations/${state.owner.organization.id}/settings/ai`,
-      { token },
-    );
+    const org = await api('GET', `/api/organizations/${state.owner.organization.id}/settings/ai`, {
+      token,
+    });
     const effective = await api(
       'GET',
       `/api/organizations/${state.owner.organization.id}/workspaces/${state.owner.workspace.id}/settings/ai/effective`,
-      { token },
+      { token }
     );
 
     await unload(FAST);
@@ -471,15 +439,12 @@ test.describe('organization and workspace settings', () => {
       await successAlert(page, /AI settings follow the organization/);
     }
     const rowsAfter = sql(
-      `select count(*) from workspace_ai_settings where workspace_id = '${state.owner.workspace.id}'`,
+      `select count(*) from workspace_ai_settings where workspace_id = '${state.owner.workspace.id}'`
     ).join(',');
 
-    const orgFast =
-      (org.body as { model_fast?: string | null }).model_fast ?? null;
-    const effectiveFast =
-      (effective.body as { model_fast?: string | null }).model_fast ?? null;
-    const ok =
-      loaded.includes(FAST) && effectiveFast === FAST && orgFast !== FAST;
+    const orgFast = (org.body as { model_fast?: string | null }).model_fast ?? null;
+    const effectiveFast = (effective.body as { model_fast?: string | null }).model_fast ?? null;
+    const ok = loaded.includes(FAST) && effectiveFast === FAST && orgFast !== FAST;
     record(13, {
       result: ok ? 'WORKS' : 'FAILS',
       saved_alert: saved,
@@ -496,9 +461,6 @@ test.describe('organization and workspace settings', () => {
         '13-reset-alert.png',
       ],
     });
-    expect(
-      ok,
-      `loaded=${loaded.join(',')} effective=${effectiveFast} org=${orgFast}`,
-    ).toBe(true);
+    expect(ok, `loaded=${loaded.join(',')} effective=${effectiveFast} org=${orgFast}`).toBe(true);
   });
 });

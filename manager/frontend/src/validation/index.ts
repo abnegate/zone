@@ -1,6 +1,8 @@
 import type { z } from 'zod';
+import { ValidationError } from './ValidationError';
 
 export * from './schemas';
+export { ValidationError } from './ValidationError';
 
 /**
  * Parse and validate data against a Zod schema.
@@ -9,10 +11,7 @@ export * from './schemas';
 export function parse<T extends z.ZodType>(schema: T, data: unknown): z.infer<T> {
   const result = schema.safeParse(data);
   if (!result.success) {
-    const errors = result.error.issues
-      .map((e) => `${e.path.join('.') || 'Field'}: ${e.message}`)
-      .join(', ');
-    throw new Error(`Validation failed: ${errors}`);
+    throw new ValidationError(result.error.issues);
   }
   return result.data;
 }
