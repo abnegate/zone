@@ -40,6 +40,7 @@ use crate::db::auto_projects::Verdict as Recorded;
 use crate::db::tasks;
 use crate::db::tasks::TaskRow;
 use crate::services::endpoint::Origin;
+use crate::services::github::pull_requests::Status;
 use crate::services::github::readiness::SignalKind;
 use crate::services::github_app::Error as GitHubError;
 use crate::services::policy::Background;
@@ -263,7 +264,7 @@ async fn settled_elsewhere(step: &Step<'_>, pull: &PullRequestDetail) -> Result<
         return Ok(true);
     }
     if pull.state == PullRequestState::Closed {
-        tasks::mark_pr_status(pool, step.task.task_id, "closed")
+        tasks::mark_pr_status(pool, step.task.task_id, Status::Closed)
             .await
             .map_err(|error| error.to_string())?;
         step.pause("the pull request was closed on GitHub without merging")

@@ -15,8 +15,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly PROJECT_ROOT
 readonly ENV_FILE="${PROJECT_ROOT}/.env"
 readonly ENV_EXAMPLE="${PROJECT_ROOT}/.env.example"
-readonly AUTH_DIR="${PROJECT_ROOT}/auth"
-readonly AUTH_FILE="${AUTH_DIR}/users.htpasswd"
+readonly AUTH_SCRIPT="${PROJECT_ROOT}/scripts/auth-file.sh"
 readonly SETUP_MODELS="${PROJECT_ROOT}/scripts/setup-models.py"
 PYTHON="${PYTHON_BIN:-python3}"
 YES=0
@@ -290,7 +289,9 @@ run_model_setup() {
 setup_basic_auth() {
     log_step "Setting up basic authentication..."
 
-    if [ -f "${AUTH_FILE}" ]; then
+    local auth_file
+    auth_file=$(sh "${AUTH_SCRIPT}" path)
+    if [ -f "${auth_file}" ]; then
         read -p "$(echo -e "${YELLOW}Basic auth file already exists. Overwrite? (y/N):${NC} ")" -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -299,9 +300,8 @@ setup_basic_auth() {
         fi
     fi
 
-    if ! mkdir -p "${AUTH_DIR}" 2>/dev/null; then
-        log_error "Failed to create auth directory at ${AUTH_DIR}"
-        log_error "Please check permissions and try again"
+    if ! sh "${AUTH_SCRIPT}" prepare > /dev/null; then
+        log_error "Could not prepare the basic auth file at ${auth_file}"
         exit 1
     fi
 
@@ -322,22 +322,24 @@ setup_basic_auth() {
     if ! command_exists htpasswd; then
         log_error "htpasswd not found. Cannot create auth file."
         log_error "Install apache2-utils (Debian/Ubuntu) or httpd-tools (RHEL/CentOS)"
-        log_error "Or create it manually: htpasswd -nbB username password > ${AUTH_FILE}"
+        log_error "Or create it manually: htpasswd -nbB username password > ${auth_file}"
         exit 1
     fi
 
     # Create or overwrite htpasswd file
-    htpasswd -cB "${AUTH_FILE}" "${username}"
+    htpasswd -cB "${auth_file}" "${username}"
 
     log_info "✓ Basic auth configured for user: ${username}"
-    log_info "Auth file location: ${AUTH_FILE}"
+    log_info "Auth file location: ${auth_file}"
 }
 
 # Add more users to basic auth
 add_auth_user() {
     log_step "Adding additional user to basic auth..."
 
-    if [ ! -f "${AUTH_FILE}" ]; then
+    local auth_file
+    auth_file=$(sh "${AUTH_SCRIPT}" path)
+    if [ ! -f "${auth_file}" ]; then
         log_error "Auth file doesn't exist. Run setup first."
         exit 1
     fi
@@ -357,7 +359,7 @@ add_auth_user() {
     fi
 
     # Append without -c flag
-    htpasswd -B "${AUTH_FILE}" "${username}"
+    htpasswd -B "${auth_file}" "${username}"
 
     log_info "✓ User added: ${username}"
 }
@@ -371,8 +373,9 @@ validate_config() {
         exit 1
     fi
 
-    if [ ! -f "${AUTH_FILE}" ]; then
-        log_error "Auth file not found. Run setup first."
+    local auth_problem
+    if ! auth_problem=$(sh "${AUTH_SCRIPT}" check); then
+        log_error "${auth_problem}"
         exit 1
     fi
 

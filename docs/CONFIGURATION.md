@@ -2161,7 +2161,7 @@ Inside Docker the manager image does not include magents. Install it on the host
 
 ### `ZONE_MCP_ENABLED`
 - **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
-- **Description**: Master switch for both layers, which read it the same way: the value is trimmed and read in any case, `0` / `false` / `no` / `off` turns it off, and anything else, an empty or unrecognised value included, leaves it on. Off skips every instance server, and starts or connects no organization server: each one then shows `failed` with "MCP servers are turned off on this instance (ZONE_MCP_ENABLED)".
+- **Description**: Master switch for both layers, which read it the same way: the value is trimmed and read in any case, `1` / `true` / `yes` / `on` turns it on, `0` / `false` / `no` / `off` turns it off, a blank value counts as unset and leaves it on, and any other value logs a warning and leaves it on. Off skips every instance server, and starts or connects no organization server: each one then shows `failed` with "MCP servers are turned off on this instance (ZONE_MCP_ENABLED)".
 
 ### `ZONE_MCP_AUTO_CONNECT`
 - **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
@@ -2347,15 +2347,15 @@ Publication, pull-request sync, conflict repair, auto-project reviews and merges
 
 ### GitHub pages
 
-The console's **Pull Requests** and **Releases** pages read every active GitHub source in the workspace with that source's own credential. What GitHub said about each source is kept in the server's memory and shown again until it expires, so a page left open does not spend the credential's rate limit on every poll. **Refresh** asks GitHub again unless the source was read in the last 10 seconds. When GitHub cannot be reached, the page keeps showing what it last read and says the source is stale; when the credential's rate limit is exhausted, the source is not asked again for 5 minutes. A pipeline is read again after 15 seconds, and a source's tags and default branch after 5 minutes. A merge or a new release forgets what was read about its source. All settings are optional.
+The console's **Pull Requests** and **Releases** pages read every active GitHub source in the workspace with that source's own credential. What GitHub said about each source is kept in the server's memory and shown again until it expires, so a page left open does not spend the credential's rate limit on every poll. Once it expires it is still shown, marked as being read again, while GitHub is asked in the background, for up to 10 minutes past its expiry; after that, the page waits for GitHub. **Refresh** asks GitHub again unless the source was read in the last 10 seconds. When GitHub cannot be reached, the page keeps showing what it last read and says the source is stale; when the credential's rate limit is exhausted, the source is not asked again for 5 minutes. A pipeline is read again after 15 seconds, and a source's tags and default branch after 5 minutes. A merge or a new release forgets what was read about its source. All settings are optional.
 
 ### `ZONE_GITHUB_PULL_REQUEST_TTL_SECONDS`
 - **Default**: `45` (10–3600)
-- **Description**: How long a source's open pull requests are shown before GitHub is asked again.
+- **Description**: How long a source's open pull requests are shown before GitHub is asked again. Past it, they are still shown while GitHub is asked in the background, for up to 10 minutes more.
 
 ### `ZONE_GITHUB_RELEASE_TTL_SECONDS`
 - **Default**: `120` (10–3600)
-- **Description**: How long a source's recent releases are shown before GitHub is asked again.
+- **Description**: How long a source's recent releases are shown before GitHub is asked again. Past it, they are still shown while GitHub is asked in the background, for up to 10 minutes more.
 
 ### `ZONE_GITHUB_RELEASE_WINDOW_DAYS`
 - **Default**: `7` (1–90)
@@ -2443,9 +2443,31 @@ On Claude Code, an auto project's runs, reviews and summaries run with no one wa
 
 ---
 
+## 🧪 Task evaluation
+
+Off by default. When on, every task run runs the project's own tooling in its workspace — tests, lint and typecheck, found from a `Cargo.toml` or `package.json` up to three directories down — once before the agent starts and once after it finishes, and compares the two. Each tool, and the run as a whole, gets a verdict of `improved`, `unchanged`, `regressed` or `not_measured` (a tool that failed to start, timed out or ran out of budget on either side), and the comparison lands in the run's logs. A blank value counts as unset, so passing an empty variable through Compose keeps the default.
+
+### `ZONE_TASK_EVALUATION`
+- **Default**: `false`
+- **Description**: `true`, `1`, `yes` or `on`, in any case, evaluates every task run; `false`, `0`, `no` or `off` does not. A blank value counts as unset, and any other value logs a warning and keeps the default, off. Running a project's test suite twice per run is expensive, so it is opt-in.
+
+### `ZONE_TASK_EVALUATION_CATEGORIES`
+- **Default**: `test,lint,typecheck`
+- **Description**: Comma-separated checks to run, from `test`, `lint`, `typecheck`, `build` and `coverage`; `all` selects every one. Build and coverage cost far more than they add to a single run, so they run only when named here. Unknown names are ignored with a warning in the server log; if none of the names is recognised, the default set, `test,lint,typecheck`, runs instead.
+
+### `ZONE_TASK_EVALUATION_TOOL_TIMEOUT_SECONDS`
+- **Default**: `300` (max 1800)
+- **Description**: How long one tool may run before it is stopped and counted as not measured. Never longer than what is left of the budget below.
+
+### `ZONE_TASK_EVALUATION_BUDGET_SECONDS`
+- **Default**: `900` (max 3600)
+- **Description**: How long every tool of one evaluation may run in total.
+
+---
+
 ## 🔔 Notifications
 
-Every notice — an auto-project merge, pause or completion, a regression alert, a scheduled digest — lands in the project's updates chat whatever is configured here. These add Slack, Discord and email on top.
+Auto-project notices — a merge, pause or completion — land in the project's updates chat whatever is configured here, and these add Slack, Discord and email on top. Regression alerts and [workspace digests](#-workspace-digests) are sent only through the channels below, so they reach nobody until one is set.
 
 ### `ZONE_NOTIFY_SLACK_WEBHOOK`
 - **Default**: *empty*
@@ -2466,6 +2488,34 @@ Every notice — an auto-project merge, pause or completion, a regression alert,
 ### `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_FROM_NAME`
 - **Default**: *empty* (`SMTP_PORT` 587, `SMTP_FROM_NAME` Zone; a blank value other than `SMTP_PASSWORD` counts as unset and an unreadable `SMTP_PORT` falls back to 587; sign-up and reset mail falls back to `noreply@zone.app` when `SMTP_FROM` is unset, email notices need it set)
 - **Description**: The relay notices, sign-up verification and password resets send through. Port 465 connects with implicit TLS; any other port, 587 included, must upgrade with STARTTLS before signing in. `ALERT_SMTP_*` is Grafana's relay and is separate.
+
+---
+
+## 📬 Workspace digests
+
+Off by default. When on, every active workspace with a run that finished within the last cadence period gets one digest per slot: runs finished, succeeded, failed and cancelled, the success rate and its trend, median and 90th-percentile time to finish, failures by category, the busiest day (hour, on a daily cadence), and regressions — confirmed ones first, then those only worth a look. Slots are in UTC and checked every 15 minutes. A slot missed while the server was down is not lost: every missed slot folds into one catch-up digest that covers everything since the last delivery and says how many slots it covers. A restart never resends a slot already passed, at the cost of losing at most one.
+
+Digests are sent through the [notification](#-notifications) channels — Slack, Discord or email — and nowhere else, so one of them must be configured; with none, the server logs a warning at startup and no digest reaches anyone. A blank value counts as unset.
+
+### `ZONE_REPORT_ENABLED`
+- **Default**: `false`
+- **Description**: `true`, `1`, `yes` or `on`, in any case, sends scheduled digests; `false`, `0`, `no` or `off` does not. A blank value counts as unset, and any other value logs a warning and keeps the default, off.
+
+### `ZONE_REPORT_CADENCE`
+- **Default**: `weekly`
+- **Description**: `daily`, `weekly` or `monthly`. A value that cannot be read falls back to the default with a warning.
+
+### `ZONE_REPORT_HOUR`
+- **Default**: `8` (0–23, UTC)
+- **Description**: The hour of the day a digest is owed.
+
+### `ZONE_REPORT_WEEKDAY`
+- **Default**: `monday`
+- **Description**: The day a weekly digest is owed, as a name such as `friday` or `fri`. Read only on a weekly cadence.
+
+### `ZONE_REPORT_DAY_OF_MONTH`
+- **Default**: `1` (1–31)
+- **Description**: The day a monthly digest is owed; in a shorter month it moves to the month's last day. Read only on a monthly cadence.
 
 ---
 
@@ -2620,6 +2670,8 @@ Regenerate secrets for production:
 | Docker Versions | No | ✅ Yes |
 | Advanced | No | ✅ Yes |
 | MCP / magents | No | ✅ Yes (auto if `magents` is on PATH) |
+| Task evaluation | No | ✅ Yes (off) |
+| Workspace digests | No | ✅ Yes (off) |
 
 *Security variables have insecure defaults. Change for production.
 
@@ -2682,6 +2734,8 @@ Need to find a specific config? Quick lookup:
 - **Auto projects**: ZONE_AUTO_ENABLED, ZONE_AUTO_PARALLEL_TASKS, ZONE_AUTO_REVIEW_MODELS, ZONE_AUTO_REVIEW_BOTS, ZONE_AUTO_ADMIN_MERGE, ZONE_AUTO_*
 - **GitHub pages**: ZONE_GITHUB_PULL_REQUEST_TTL_SECONDS, ZONE_GITHUB_RELEASE_TTL_SECONDS, ZONE_GITHUB_RELEASE_WINDOW_DAYS, ZONE_GITHUB_OPEN_PULL_REQUEST_LIMIT, ZONE_GITHUB_ADMIN_MERGE
 - **Notifications**: ZONE_NOTIFY_SLACK_WEBHOOK, ZONE_NOTIFY_DISCORD_WEBHOOK, ZONE_NOTIFY_EMAIL_TO, SMTP_*
+- **Task evaluation**: ZONE_TASK_EVALUATION, ZONE_TASK_EVALUATION_CATEGORIES, ZONE_TASK_EVALUATION_TOOL_TIMEOUT_SECONDS, ZONE_TASK_EVALUATION_BUDGET_SECONDS
+- **Workspace digests**: ZONE_REPORT_ENABLED, ZONE_REPORT_CADENCE, ZONE_REPORT_HOUR, ZONE_REPORT_WEEKDAY, ZONE_REPORT_DAY_OF_MONTH
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
 - **Timezone**: TZ
 - **VPN**: VPN_*, OPENVPN_*

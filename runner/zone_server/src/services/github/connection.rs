@@ -9,6 +9,7 @@ use crate::db::sources;
 use crate::db::sources::SourceRow;
 use crate::state::AppState;
 
+#[derive(Clone)]
 pub(crate) struct ConnectedSource {
     pub(crate) source: SourceRow,
     pub(crate) configuration: Configuration,

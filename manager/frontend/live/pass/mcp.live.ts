@@ -51,10 +51,7 @@ const OFF = /=(0|false|no|off)$/i;
 const PORT_LINE = /^PORT=(\d+)$/;
 const STUB_DEADLINE = 30_000;
 const STUB = fileURLToPath(
-  new URL(
-    '../../../../runner/zone_server/tests/fixtures/stub_mcp_http_server.py',
-    import.meta.url,
-  ),
+  new URL('../../../../runner/zone_server/tests/fixtures/stub_mcp_http_server.py', import.meta.url)
 );
 
 // Which agent magents should start, and where: a headless claude on a host
@@ -66,16 +63,11 @@ const which = AGENT
   ? ` a new ${AGENT} session${AGENT_CWD ? ` in the directory ${AGENT_CWD}` : ''}`
   : ' a new agent session';
 
-async function toggle(
-  dialog: Locator,
-  title: string,
-  wanted: boolean,
-): Promise<void> {
+async function toggle(dialog: Locator, title: string, wanted: boolean): Promise<void> {
   const label = dialog.locator('label.toggle-label', { hasText: title });
   await expect(label).toBeVisible();
   const box = label.locator('input[type="checkbox"]');
-  if ((await box.isChecked()) !== wanted)
-    await label.locator('.toggle-slider').click();
+  if ((await box.isChecked()) !== wanted) await label.locator('.toggle-slider').click();
   await expect(box).toBeChecked({ checked: wanted });
 }
 
@@ -86,23 +78,23 @@ function serverSwitch(): string {
       '-c',
       `ps -Eww -o command= -p $(lsof -nP -iTCP:${process.env.ZONE_LIVE_API_PORT ?? '8010'} -sTCP:LISTEN -t) | tr ' ' '\\n' | grep '^ZONE_MCP_ENABLED=' || echo ZONE_MCP_ENABLED=unset`,
     ],
-    { encoding: 'utf8' },
+    { encoding: 'utf8' }
   ).trim();
 }
 
 function toolCalls(chatId: string): string[] {
   return sql(
-    `select coalesce(nullif(message->'tool_calls', 'null'::jsonb), '[]'::jsonb) from chat_entries where chat_id = '${chatId}' and message->>'role' = 'assistant' order by created_at`,
+    `select coalesce(nullif(message->'tool_calls', 'null'::jsonb), '[]'::jsonb) from chat_entries where chat_id = '${chatId}' and message->>'role' = 'assistant' order by created_at`
   ).flatMap((line) =>
-    (
-      JSON.parse(line) as { function: { name: string; arguments: string } }[]
-    ).map((c) => `${c.function.name} ${c.function.arguments.slice(0, 120)}`),
+    (JSON.parse(line) as { function: { name: string; arguments: string } }[]).map(
+      (c) => `${c.function.name} ${c.function.arguments.slice(0, 120)}`
+    )
   );
 }
 
 function toolResults(chatId: string): string[] {
   return sql(
-    `select replace(message->>'content', E'\\n', ' ') from chat_entries where chat_id = '${chatId}' and message->>'role' = 'tool' order by created_at`,
+    `select replace(message->>'content', E'\\n', ' ') from chat_entries where chat_id = '${chatId}' and message->>'role' = 'tool' order by created_at`
   );
 }
 
@@ -141,14 +133,10 @@ function row(page: Page): Locator {
 }
 
 async function remove(page: Page): Promise<void> {
-  await page
-    .getByRole('button', { name: `Actions for ${SERVER}`, exact: true })
-    .click();
+  await page.getByRole('button', { name: `Actions for ${SERVER}`, exact: true }).click();
   await page.getByRole('menuitem', { name: 'Remove', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: `Remove ${SERVER}?` });
-  await dialog
-    .getByRole('button', { name: 'Remove server', exact: true })
-    .click();
+  await dialog.getByRole('button', { name: 'Remove server', exact: true }).click();
   await expect(dialog).toHaveCount(0);
 }
 
@@ -158,12 +146,8 @@ async function remove(page: Page): Promise<void> {
  */
 async function clear(page: Page): Promise<void> {
   await page.goto(SETTINGS);
-  await expect(
-    page.getByRole('heading', { name: 'MCP servers', level: 2 }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole('button', { name: 'Add server', exact: true }),
-  ).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'MCP servers', level: 2 })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Add server', exact: true })).toBeVisible();
   if (await row(page).count()) await remove(page);
   await expect(row(page)).toHaveCount(0);
 }
@@ -196,20 +180,18 @@ test.describe('mcp', () => {
     await dialog
       .locator('#task-description')
       .fill(
-        `Hand this to another coding agent on this machine rather than doing it yourself: start${which.replace(' a new', ' a new independent')} whose instruction is "print the words delegated-${s}", then message it asking for its result, and report back what the other agent said. Use the tools you have for talking to other agents.`,
+        `Hand this to another coding agent on this machine rather than doing it yourself: start${which.replace(' a new', ' a new independent')} whose instruction is "print the words delegated-${s}", then message it asking for its result, and report back what the other agent said. Use the tools you have for talking to other agents.`
       );
     await dialog.getByRole('button', { name: 'Next' }).click();
     await toggle(dialog, 'Enable Agentic Mode', true);
     await dialog.getByRole('button', { name: 'Create Task' }).click();
     await expect(dialog).toBeHidden({ timeout: 30_000 });
-    const { body } = await api(
-      'GET',
-      `/api/workspaces/${state.owner.workspace.id}/tasks`,
-      { token: await ownerToken() },
+    const { body } = await api('GET', `/api/workspaces/${state.owner.workspace.id}/tasks`, {
+      token: await ownerToken(),
+    });
+    const task = ((body as { tasks?: { id: string; title: string }[] }).tasks ?? []).find(
+      (t) => t.title === title
     );
-    const task = (
-      (body as { tasks?: { id: string; title: string }[] }).tasks ?? []
-    ).find((t) => t.title === title);
     expect(task).toBeTruthy();
     const mark = logMark();
     await chooseTaskAction(page, title, 'Run');
@@ -218,26 +200,23 @@ test.describe('mcp', () => {
       .poll(
         () =>
           sql(
-            `select status from task_runs where task_id = '${task!.id}' order by started_at desc limit 1`,
+            `select status from task_runs where task_id = '${task!.id}' order by started_at desc limit 1`
           ).join(','),
-        { timeout: 1_800_000, intervals: [5_000] },
+        { timeout: 1_800_000, intervals: [5_000] }
       )
       .toMatch(/completed|failed|cancelled/);
     await page.waitForTimeout(2_000);
     const calls = sql(
-      `select case when message like 'Executing tool:%' then replace(message, 'Executing tool: ', '') || ' | call | ' || left(coalesce(metadata->>'args', ''), 160) else replace(replace(message, 'Tool ', ''), ' finished', '') || ' | ' || coalesce(metadata->>'success', '') || ' | ' || left(coalesce(metadata->>'error', metadata->>'output', ''), 160) end from task_run_logs where task_run_id = (select id from task_runs where task_id = '${task!.id}' order by started_at desc limit 1) and (message like 'Executing tool:%' or message like 'Tool % finished') order by created_at`,
+      `select case when message like 'Executing tool:%' then replace(message, 'Executing tool: ', '') || ' | call | ' || left(coalesce(metadata->>'args', ''), 160) else replace(replace(message, 'Tool ', ''), ' finished', '') || ' | ' || coalesce(metadata->>'success', '') || ' | ' || left(coalesce(metadata->>'error', metadata->>'output', ''), 160) end from task_run_logs where task_run_id = (select id from task_runs where task_id = '${task!.id}' order by started_at desc limit 1) and (message like 'Executing tool:%' or message like 'Tool % finished') order by created_at`
     );
     const logs = (await page.locator('.log-entry').allInnerTexts()).map((l) =>
-      l.replace(/\s+/g, ' '),
+      l.replace(/\s+/g, ' ')
     );
     const magentsCalls = calls.filter((c) => c.startsWith('magents_'));
     const shownInConsole = logs.filter((l) => /magents/i.test(l));
     await shot(page, '32-mcp-task-run');
     record(32, {
-      result:
-        magentsCalls.length > 0 && shownInConsole.length > 0
-          ? 'WORKS'
-          : 'FAILS',
+      result: magentsCalls.length > 0 && shownInConsole.length > 0 ? 'WORKS' : 'FAILS',
       cause:
         magentsCalls.length > 0
           ? undefined
@@ -271,7 +250,7 @@ test.describe('mcp', () => {
     const reply = await ask(
       page,
       `Using your magents tools (they are MCP tools named magents_*): spawn${which} whose instruction is exactly "print the words delegated-${s} and nothing else", wait for its reply or read its transcript, tell me word for word what it printed, then stop that session.`,
-      { replies: 1, timeout: 1_800_000 },
+      { replies: 1, timeout: 1_800_000 }
     );
     await shot(page, '32-magents-from-chat');
     const calls = toolCalls(chatId);
@@ -279,12 +258,9 @@ test.describe('mcp', () => {
     // The spawned session's title repeats the instruction, so what it
     // printed is read from the transcript's assistant turn, not from any
     // mention of the words.
-    const printed = new RegExp(
-      `"(last_assistant_action|text)":\\s*"delegated-${s}`,
-    );
+    const printed = new RegExp(`"(last_assistant_action|text)":\\s*"delegated-${s}`);
     const readBack =
-      results.some((result) => printed.test(result)) &&
-      reply.includes(`delegated-${s}`);
+      results.some((result) => printed.test(result)) && reply.includes(`delegated-${s}`);
     const magents = calls.filter((c) => c.startsWith('magents_'));
     const serverLog = logLines(mark, /mcp|magents/i)
       .slice(0, 12)
@@ -310,9 +286,7 @@ test.describe('mcp', () => {
     expect(magents.length, calls.join(' | ')).toBeGreaterThan(0);
   });
 
-  test("32c: an HTTP server added in Settings reaches a chat's tool trace", async ({
-    page,
-  }) => {
+  test("32c: an HTTP server added in Settings reaches a chat's tool trace", async ({ page }) => {
     const serverEnv = serverSwitch();
     const token = randomBytes(24).toString('hex');
     const stub = await startStub(token);
@@ -329,31 +303,19 @@ test.describe('mcp', () => {
     try {
       await signIn(page);
       await clear(page);
-      await page
-        .getByRole('button', { name: 'Add server', exact: true })
-        .click();
+      await page.getByRole('button', { name: 'Add server', exact: true }).click();
       const dialog = page.getByRole('dialog', { name: 'Add MCP server' });
       await expect(dialog).toBeVisible();
       const transport = dialog.getByRole('combobox', { name: 'Transport' });
       await chooseOption(transport, TRANSPORT);
       await expect(transport).toHaveText(TRANSPORT_LABEL);
       await dialog.getByLabel('Name', { exact: true }).fill(SERVER);
-      await dialog
-        .getByLabel('URL', { exact: true })
-        .fill(`http://127.0.0.1:${stub.port}/mcp`);
-      await dialog
-        .getByRole('button', { name: 'Add header', exact: true })
-        .click();
-      await dialog
-        .getByLabel('Header name 1', { exact: true })
-        .fill('Authorization');
-      await dialog
-        .getByLabel('Value for Authorization', { exact: true })
-        .fill(`Bearer ${token}`);
+      await dialog.getByLabel('URL', { exact: true }).fill(`http://127.0.0.1:${stub.port}/mcp`);
+      await dialog.getByRole('button', { name: 'Add header', exact: true }).click();
+      await dialog.getByLabel('Header name 1', { exact: true }).fill('Authorization');
+      await dialog.getByLabel('Value for Authorization', { exact: true }).fill(`Bearer ${token}`);
       submitted = true;
-      await dialog
-        .getByRole('button', { name: 'Add server', exact: true })
-        .click();
+      await dialog.getByRole('button', { name: 'Add server', exact: true }).click();
       await expect(dialog).toHaveCount(0);
 
       const item = row(page);
@@ -362,19 +324,13 @@ test.describe('mcp', () => {
         .toHaveText(CONNECTED, { timeout: 60_000 })
         .then(
           () => true,
-          () => false,
+          () => false
         );
       const badge = (await status.allInnerTexts()).join(' ').trim();
-      const refusal = scrub(
-        (await item.locator('.mcp-server-error').allInnerTexts()).join(' '),
-      );
+      const refusal = scrub((await item.locator('.mcp-server-error').allInnerTexts()).join(' '));
       if (connected) {
-        await item
-          .getByRole('button', { name: `Tools for ${SERVER}`, exact: true })
-          .click();
-        await expect(
-          item.getByRole('checkbox', { name: DELEGATE, exact: true }),
-        ).toBeChecked();
+        await item.getByRole('button', { name: `Tools for ${SERVER}`, exact: true }).click();
+        await expect(item.getByRole('checkbox', { name: DELEGATE, exact: true })).toBeChecked();
       }
       await shot(page, '32c-http-server-in-settings');
       const settings = {
@@ -403,24 +359,17 @@ test.describe('mcp', () => {
       const reply = await ask(
         page,
         `You have an MCP tool named ${TOOL}. Call it once with the instruction "${instruction}", then tell me word for word what it returned.`,
-        { replies: 1 },
+        { replies: 1 }
       );
       await shot(page, '32c-http-tool-from-chat');
       const calls = toolCalls(chatId);
       const results = toolResults(chatId);
       const called = calls.filter((c) => c.startsWith(TOOL));
-      const echoed = results.filter((result) =>
-        result.includes(`delegated:${instruction}`),
-      );
-      const rendered = (await renderedToolCalls(page)).map((call) =>
-        call.replace(/\s+/g, ' '),
-      );
+      const echoed = results.filter((result) => result.includes(`delegated:${instruction}`));
+      const rendered = (await renderedToolCalls(page)).map((call) => call.replace(/\s+/g, ' '));
       const traced = rendered.filter((call) => call.includes(TOOL_LABEL));
       record(32.7, {
-        result:
-          called.length > 0 && echoed.length > 0 && traced.length > 0
-            ? 'WORKS'
-            : 'FAILS',
+        result: called.length > 0 && echoed.length > 0 && traced.length > 0 ? 'WORKS' : 'FAILS',
         cause:
           called.length === 0
             ? `model: no ${TOOL} call from the chat (calls: ${[...new Set(calls.map((c) => c.split(' ')[0]))].join(', ')})`
@@ -433,17 +382,11 @@ test.describe('mcp', () => {
         chat_id: chatId,
         reply: reply.slice(0, 300),
         calls,
-        tool_results: results
-          .slice(0, 12)
-          .map((result) => result.slice(0, 300)),
+        tool_results: results.slice(0, 12).map((result) => result.slice(0, 300)),
         rendered_tool_calls: rendered,
-        mcp_attach_lines_since_mark: logLines(mark, /Attached MCP tools/)
-          .length,
+        mcp_attach_lines_since_mark: logLines(mark, /Attached MCP tools/).length,
         ...serverLog(),
-        screenshots: [
-          '32c-http-server-in-settings.png',
-          '32c-http-tool-from-chat.png',
-        ],
+        screenshots: ['32c-http-server-in-settings.png', '32c-http-tool-from-chat.png'],
       });
       expect(called.length, calls.join(' | ')).toBeGreaterThan(0);
       expect(echoed.length, results.join(' | ')).toBeGreaterThan(0);

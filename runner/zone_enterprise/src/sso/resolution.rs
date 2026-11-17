@@ -127,11 +127,16 @@ mod tests {
 
     #[test]
     fn an_existing_account_is_never_linked_when_verification_is_off() {
-        for local in [account(2), unverified(2), admin(2), inactive(2)] {
+        for (kind, local) in [
+            ("verified", account(2)),
+            ("unverified", unverified(2)),
+            ("admin", admin(2)),
+            ("inactive", inactive(2)),
+        ] {
             assert_eq!(
                 resolve(None, &[local], false, false),
                 Err(Error::EmailConflict),
-                "{local:?}"
+                "{kind} account"
             );
         }
     }

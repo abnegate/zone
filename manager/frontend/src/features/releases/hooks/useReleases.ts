@@ -1,7 +1,14 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
-import { errorMessage, gatewayFailed, retryDelay, retryPolled, useRefresh } from '../../github';
+import {
+  errorMessage,
+  gatewayFailed,
+  pollAfter,
+  retryDelay,
+  retryPolled,
+  useRefresh,
+} from '../../github';
 import type { Release, ReleasesResponse } from '../types';
 import { releaseWindowKey } from './keys';
 import { readReleases, releaseListQuery } from './listQuery';
@@ -36,7 +43,7 @@ export function useReleases(days?: number): Releases {
   } = useQuery({
     ...releaseListQuery(queryClient, workspaceId, days),
     enabled: !!workspaceId,
-    refetchInterval: RELEASES_POLL_MS,
+    refetchInterval: (query) => pollAfter(query.state, RELEASES_POLL_MS),
     refetchIntervalInBackground: false,
     retry: retryPolled,
     retryDelay,

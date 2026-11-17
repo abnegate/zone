@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Page } from '@playwright/test';
 import { expect, test } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { routeApi } from './test-utils';
 
 const setupHtml = readFileSync(
@@ -57,10 +57,16 @@ async function openSidebarIfNeeded(page: Page, mobile: boolean) {
   await expect(page.locator('.sidebar.open')).toBeVisible();
 }
 
-function clientSuite(name: string, options: { mobile: boolean; viewport?: { width: number; height: number } }) {
+function clientSuite(
+  name: string,
+  options: { mobile: boolean; viewport?: { width: number; height: number } }
+) {
   test.describe(name, () => {
     if (options.mobile) {
-      test.skip(({ browserName }) => browserName === 'firefox', 'Firefox does not support isMobile.');
+      test.skip(
+        ({ browserName }) => browserName === 'firefox',
+        'Firefox does not support isMobile.'
+      );
       test.use({
         viewport: options.viewport ?? { width: 390, height: 844 },
         isMobile: true,

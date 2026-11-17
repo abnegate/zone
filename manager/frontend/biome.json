@@ -7,10 +7,11 @@
   },
   "files": {
     "includes": [
-      "**/src/**/*.ts",
-      "**/src/**/*.tsx",
-      "**/src/**/*.js",
-      "**/src/**/*.jsx",
+      "**/*.ts",
+      "**/*.tsx",
+      "**/*.js",
+      "**/*.jsx",
+      "!public",
       "!**/node_modules",
       "!**/build",
       "!**/playwright-report",
@@ -67,6 +68,16 @@
           },
           "correctness": {
             "noUnusedVariables": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["e2e/**", "live/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noNonNullAssertion": "off"
           }
         }
       }

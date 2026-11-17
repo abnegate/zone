@@ -65,7 +65,7 @@ export async function turnDone(marker: string, timeout = 1_800_000): Promise<Stu
       async () => {
         const rounds = await forwardedFor(marker);
         const last = rounds[rounds.length - 1];
-        if (!last || !last.answer) return 'open';
+        if (!last?.answer) return 'open';
         const names = last.answer.calls.map((c) => c.name);
         if (names.length === 0) return 'done';
         return names.some((n) => n === 'ask_user' || n === 'submit_plan') ? 'done' : 'open';
@@ -99,7 +99,9 @@ export async function requests(): Promise<StubRequest[]> {
   }
   const body = (await response.json()) as { requests?: unknown };
   if (!Array.isArray(body.requests)) {
-    throw new Error(`the stand-in's request log is not a list: ${JSON.stringify(body).slice(0, 200)}`);
+    throw new Error(
+      `the stand-in's request log is not a list: ${JSON.stringify(body).slice(0, 200)}`
+    );
   }
   return body.requests as StubRequest[];
 }
@@ -116,7 +118,9 @@ export async function latest(): Promise<number> {
 
 /** The agent-loop rounds a trigger answered, in order, after request `since`. */
 export async function roundsFor(trigger: string, since = 0): Promise<StubRequest[]> {
-  return (await requests()).filter((r) => r.kind === 'round' && r.trigger === trigger && r.n > since);
+  return (await requests()).filter(
+    (r) => r.kind === 'round' && r.trigger === trigger && r.n > since
+  );
 }
 
 /** Wait until a trigger has answered `count` rounds after request `since`. */
@@ -190,7 +194,10 @@ export async function newChat(
   options: { agent?: boolean; autoApprove?: boolean; model?: string } = {}
 ): Promise<string> {
   await page.goto('/chats');
-  await page.getByRole('button', { name: /new chat/i }).first().click();
+  await page
+    .getByRole('button', { name: /new chat/i })
+    .first()
+    .click();
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();
   const model = options.model ?? process.env.ZONE_LIVE_MODEL ?? 'stand-in:latest';

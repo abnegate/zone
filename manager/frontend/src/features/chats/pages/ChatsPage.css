@@ -91,9 +91,15 @@
   padding-top: 0;
 }
 
-.chats-arrange .ui-select-trigger {
+/* A compact Select is a .ui-select-control wrapper around the trigger, so the
+   row's flex sizing belongs on the wrapper; the trigger fills it. */
+.chats-arrange > .ui-select-control {
   flex: 1 1 0;
-  width: auto;
+  min-width: 0;
+}
+
+.chats-arrange .ui-select-trigger {
+  width: 100%;
   min-width: 0;
   height: var(--ui-control-height-sm);
   padding: 0 var(--ui-space-2);

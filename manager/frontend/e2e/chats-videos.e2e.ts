@@ -1,7 +1,7 @@
-import { test, expect } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { installChatSocketMock, type ChatSocketController } from './helpers/chatSocket';
-import { blockServiceWorker, routeApi, CHAT_PROVIDERS } from './test-utils';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
+import { type ChatSocketController, installChatSocketMock } from './helpers/chatSocket';
+import { blockServiceWorker, CHAT_PROVIDERS, routeApi } from './test-utils';
 
 const GENERATED_VIDEO_URL =
   '/api/artifacts/00000000-0000-0000-0000-000000000001/chat-1/msg-generated/generated-video-1.webm';

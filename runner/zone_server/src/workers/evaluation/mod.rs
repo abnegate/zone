@@ -27,3 +27,6 @@ pub use diagnostic::{Diagnostic, DiagnosticSeverity};
 pub use evaluator::Evaluator;
 pub use settings::{CategorySelection, EvaluationSettings};
 pub use snapshot::{EvalSnapshot, RunOutcome};
+
+pub const PHASE: &str = "evaluating";
+pub const AGENT: &str = "evaluation";

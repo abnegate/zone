@@ -89,9 +89,9 @@ function providerOf(request: CreateProviderRequest): ProviderResponse {
     display_name: request.display_name,
     issuer: request.issuer,
     client_id: request.client_id,
-    allowed_domains: request.allowed_domains,
-    require_verified_email: request.require_verified_email,
-    enabled: request.enabled,
+    allowed_domains: request.allowed_domains ?? [],
+    require_verified_email: request.require_verified_email ?? true,
+    enabled: request.enabled ?? true,
     created_at: UPDATED_AT,
     updated_at: UPDATED_AT,
   };

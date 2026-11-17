@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 use zone_server::db::auto_projects::Stage;
+use zone_server::db::migrations::interrupted;
 use zone_server::db::{ai_settings, memory, migrations, tasks};
 
 use crate::common::Database;
@@ -1002,6 +1003,263 @@ async fn driver_tasks_still_waiting_move_to_the_front_of_the_most_urgent_first_o
             (SHIPPED.to_string(), lowest),
         ],
         "only a driver task still to run is moved from the old front of the queue to the new one"
+    );
+}
+
+const RUN_FINISH_INDEX: &str = "task run finish index";
+
+async fn migrator() -> Migrator {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    Migrator::new(directory.as_path()).await.unwrap()
+}
+
+fn version_before(migrator: &Migrator, description: &str) -> i64 {
+    let version = migrator
+        .iter()
+        .find(|migration| migration.description == description)
+        .unwrap_or_else(|| panic!("no migration is named {description}"))
+        .version;
+    migrator
+        .iter()
+        .map(|migration| migration.version)
+        .filter(|&earlier| earlier < version)
+        .max()
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn the_run_finish_index_builds_while_runs_keep_beating() {
+    const INDEX: &str = "idx_task_runs_finished";
+    const BEAT: &str = "UPDATE task_runs SET heartbeat_at = NOW() WHERE id = $1";
+    let database = Database::new(PREFIX).await;
+    let migrator = migrator().await;
+    migrator
+        .run_to(version_before(&migrator, RUN_FINISH_INDEX), &database.pool)
+        .await
+        .unwrap();
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let task = database.task().await;
+        let run: Uuid = sqlx::query_scalar(
+            "INSERT INTO task_runs(task_id, status, heartbeat_at) \
+             VALUES ($1, 'running', NOW()) RETURNING id",
+        )
+        .bind(task)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        runs.push(run);
+    }
+
+    let mut lingering = database.pool.begin().await.unwrap();
+    sqlx::query(BEAT)
+        .bind(runs[0])
+        .execute(&mut *lingering)
+        .await
+        .unwrap();
+    let building = tokio::spawn({
+        let pool = database.pool.clone();
+        async move { migrations::run(&pool).await }
+    });
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE datname = current_database() AND pid <> pg_backend_pid() \
+                   AND query LIKE '%' || $1 || '%' AND wait_event_type = 'Lock')",
+            )
+            .bind(INDEX)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the index build waits on the lingering transaction");
+
+    let mut beating = database.pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL lock_timeout = '1s'")
+        .execute(&mut *beating)
+        .await
+        .unwrap();
+    let beat = sqlx::query(BEAT).bind(runs[1]).execute(&mut *beating).await;
+    beating.commit().await.unwrap();
+    lingering.commit().await.unwrap();
+    let built = building.await.unwrap();
+    let valid: Option<bool> = sqlx::query_scalar(
+        "SELECT index.indisvalid FROM pg_index index \
+         JOIN pg_class class ON class.oid = index.indexrelid WHERE class.relname = $1",
+    )
+    .bind(INDEX)
+    .fetch_optional(&database.pool)
+    .await
+    .unwrap();
+    database.cleanup().await;
+
+    assert!(
+        beat.is_ok(),
+        "a heartbeat must not queue behind the index build, or a long build expires every \
+         running run's lease: {beat:?}"
+    );
+    built.expect("the migrations finish once the lingering transaction ends");
+    assert_eq!(valid, Some(true), "{INDEX} is built and usable");
+}
+
+#[tokio::test]
+async fn an_upgrade_stops_gathering_from_notion_sources() {
+    const NOTION_DEACTIVATION: &str = "deactivate notion sources";
+    const NOTION: &str = "notion";
+    const GITHUB: &str = "github";
+    let database = Database::new(PREFIX).await;
+    let migrator = migrator().await;
+    migrator
+        .run_to(
+            version_before(&migrator, NOTION_DEACTIVATION),
+            &database.pool,
+        )
+        .await
+        .unwrap();
+    let (workspace, _) = database.workspace().await;
+    sqlx::query(
+        "INSERT INTO source_types(name, category, description) VALUES ($1, 'file', 'Notion')",
+    )
+    .bind(NOTION)
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    for (name, source_type) in [("Wiki", NOTION), ("Repository", GITHUB)] {
+        sqlx::query(
+            "INSERT INTO sources(workspace_id, name, source_type, is_active) \
+             VALUES ($1, $2, $3, TRUE)",
+        )
+        .bind(workspace)
+        .bind(format!("{name} {workspace}"))
+        .bind(source_type)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    }
+
+    migrations::run(&database.pool).await.unwrap();
+
+    let active: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT source_type, is_active FROM sources WHERE workspace_id = $1 ORDER BY source_type",
+    )
+    .bind(workspace)
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    database.cleanup().await;
+
+    assert_eq!(
+        active,
+        vec![(GITHUB.to_string(), true), (NOTION.to_string(), false)],
+        "a Notion source has no adapter left to gather it, so only it is turned off"
+    );
+}
+
+#[tokio::test]
+async fn an_index_build_interrupted_on_an_earlier_boot_is_built_again() {
+    const UNRELATED: &str = "idx_migration_unrelated";
+    const CANCELED: &str = "57014";
+    let database = Database::new(PREFIX).await;
+    let migrator = migrator().await;
+    let before_concurrent_indexes = version_before(&migrator, RUN_FINISH_INDEX);
+    migrator
+        .run_to(before_concurrent_indexes, &database.pool)
+        .await
+        .unwrap();
+    let mut builds: Vec<(String, String)> = migrator
+        .iter()
+        .filter(|migration| migration.version > before_concurrent_indexes && migration.no_tx)
+        .map(|migration| {
+            let index = interrupted::indexes_built(migration.sql.as_str())
+                .into_iter()
+                .next()
+                .expect("each concurrent migration builds a named index");
+            (index, migration.sql.as_str().to_string())
+        })
+        .collect();
+    assert!(
+        !builds.is_empty(),
+        "no concurrent index builds to interrupt"
+    );
+    let built: Vec<String> = builds.iter().map(|(index, _)| index.clone()).collect();
+    builds.push((
+        UNRELATED.to_string(),
+        format!("CREATE INDEX CONCURRENTLY {UNRELATED} ON tasks (title)"),
+    ));
+
+    let mut lingering = database.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE task_runs, tasks IN ROW EXCLUSIVE MODE")
+        .execute(&mut *lingering)
+        .await
+        .unwrap();
+    for (index, sql) in &builds {
+        let mut connection = database.pool.acquire().await.unwrap();
+        connection.close_on_drop();
+        sqlx::query("SET statement_timeout = '300ms'")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        let error = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.clone()))
+            .execute(&mut *connection)
+            .await
+            .expect_err("the build waits on the lingering transaction until it is cancelled");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some(CANCELED),
+            "{index}: {error}"
+        );
+    }
+    lingering.rollback().await.unwrap();
+
+    let validity = |index: String| {
+        let pool = database.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT index.indisvalid FROM pg_index index \
+                 JOIN pg_class class ON class.oid = index.indexrelid WHERE class.relname = $1",
+            )
+            .bind(index)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    for (index, _) in &builds {
+        assert_eq!(
+            validity(index.clone()).await,
+            Some(false),
+            "the cancelled build leaves {index} behind, invalid"
+        );
+    }
+    migrations::run(&database.pool).await.unwrap();
+    let mut rebuilt = Vec::new();
+    for index in &built {
+        rebuilt.push((index.clone(), validity(index.clone()).await));
+    }
+    let unrelated = validity(UNRELATED.to_string()).await;
+    database.cleanup().await;
+
+    for (index, valid) in rebuilt {
+        assert_eq!(
+            valid,
+            Some(true),
+            "{index} is built again rather than skipped by IF NOT EXISTS"
+        );
+    }
+    assert_eq!(
+        unrelated,
+        Some(false),
+        "an invalid index no pending migration builds is left alone"
     );
 }
 

@@ -37,20 +37,15 @@ const FAST = process.env.ZONE_LIVE_LITELLM_FAST ?? 'llama3.2:3b';
 const REASON = process.env.ZONE_LIVE_LITELLM_REASON ?? 'qwen3.8:27b-ctx32k';
 
 function litellmLog(since: string): string {
-  return execFileSync(
-    'sh',
-    ['-c', 'docker logs --since "$0" "$1" 2>&1', since, CONTAINER],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-  );
+  return execFileSync('sh', ['-c', 'docker logs --since "$0" "$1" 2>&1', since, CONTAINER], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
 }
 
 function modelsIn(text: string): string[] {
   return [
-    ...new Set(
-      [...text.matchAll(/model[=:]\s*'?([A-Za-z0-9_.:\-/]+)/g)].map(
-        (match) => match[1],
-      ),
-    ),
+    ...new Set([...text.matchAll(/model[=:]\s*'?([A-Za-z0-9_.:\-/]+)/g)].map((match) => match[1])),
   ];
 }
 
@@ -83,14 +78,10 @@ async function throwawayTenant(owner: Tenant, token: string): Promise<Tenant> {
   const { organization } = created.body as {
     organization: Tenant['organization'];
   };
-  const space = await api(
-    'POST',
-    `/api/organizations/${organization.id}/workspaces`,
-    {
-      token,
-      body: { name: 'Routing', slug: 'routing', description: 'live row 58' },
-    },
-  );
+  const space = await api('POST', `/api/organizations/${organization.id}/workspaces`, {
+    token,
+    body: { name: 'Routing', slug: 'routing', description: 'live row 58' },
+  });
   expect(space.status, JSON.stringify(space.body)).toBe(201);
   const { workspace } = space.body as { workspace: Tenant['workspace'] };
   return { ...owner, organization, workspace };
@@ -100,7 +91,7 @@ test.describe('LiteLLM routing', () => {
   test.skip(!enabled, 'set ZONE_LIVE_REAL_PASS=1 against the real rig');
   test.skip(
     !LITELLM || !KEY || !CONTAINER,
-    'set ZONE_LIVE_LITELLM_URL, _KEY and _CONTAINER to a LiteLLM built from litellm/',
+    'set ZONE_LIVE_LITELLM_URL, _KEY and _CONTAINER to a LiteLLM built from litellm/'
   );
   test.describe.configure({ timeout: 2_400_000 });
 
@@ -133,7 +124,7 @@ test.describe('LiteLLM routing', () => {
       const boundary = new Date().toISOString();
       await send(
         page,
-        'Prove step by step that the sum of the first n odd numbers is n squared, and analyze the edge cases of the proof.',
+        'Prove step by step that the sum of the first n odd numbers is n squared, and analyze the edge cases of the proof.'
       );
       await settled(page, 2, 1_500_000);
       await shot(page, '58-hard-question');
@@ -141,7 +132,7 @@ test.describe('LiteLLM routing', () => {
       const trivialModels = modelsIn(afterTrivial);
       const hardModels = modelsIn(afterHard);
       const replies = sql(
-        `select left(replace(message->>'content', E'\\n', ' '), 200) from chat_entries where chat_id = '${chatId}' and message->>'role' = 'assistant' order by position`,
+        `select left(replace(message->>'content', E'\\n', ' '), 200) from chat_entries where chat_id = '${chatId}' and message->>'role' = 'assistant' order by position`
       );
       const routed =
         trivialModels.some((name) => name.includes(FAST)) &&

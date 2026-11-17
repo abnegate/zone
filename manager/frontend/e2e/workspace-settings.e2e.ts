@@ -1,5 +1,5 @@
-import { test, expect } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { chooseSelect, expectSelectOptions } from './helpers/select';
 import { blockServiceWorker, routeApiContext } from './test-utils';
 
@@ -133,7 +133,8 @@ function applied(row: WorkspaceRow, request: AiRequest): WorkspaceRow {
     models: { ...row.models },
     urls: { ...row.urls },
     keys: { ...row.keys },
-    runpod: request.runpod_api_key === undefined ? row.runpod : cleared(request.runpod_api_key) !== null,
+    runpod:
+      request.runpod_api_key === undefined ? row.runpod : cleared(request.runpod_api_key) !== null,
   };
   for (const key of MODEL_KEYS) {
     const value = request[key];
@@ -363,7 +364,13 @@ test.describe('Workspace Settings Page', () => {
     test('displays font family dropdown', async ({ page }) => {
       await expect(page.locator('#font-family')).toBeVisible();
       await expectSelectOptions(page.getByRole('combobox', { name: 'Font Family' }), [
-        'App Default', 'System Default', 'Inter', 'Roboto', 'Open Sans', 'Lato', 'Nunito',
+        'App Default',
+        'System Default',
+        'Inter',
+        'Roboto',
+        'Open Sans',
+        'Lato',
+        'Nunito',
       ]);
     });
 
@@ -441,7 +448,11 @@ test.describe('Workspace Settings Page', () => {
 
   test.describe('Save Changes', () => {
     test('saves theme successfully', async ({ page }) => {
-      await page.locator('.color-input-wrapper').first().locator('.color-text-input').fill('#ff5500');
+      await page
+        .locator('.color-input-wrapper')
+        .first()
+        .locator('.color-text-input')
+        .fill('#ff5500');
 
       await page.click('button:has-text("Save Changes")');
 
@@ -450,27 +461,23 @@ test.describe('Workspace Settings Page', () => {
 
     test('shows loading state while saving', async ({ context, page }) => {
       await context.unroute(themeRoutePattern);
-      await routeApiContext(
-        context,
-        themeRoutePattern,
-        async (route) => {
-          const method = route.request().method();
-          if (method === 'PUT') {
-            await new Promise((resolve) => setTimeout(resolve, 500));
-            route.fulfill({
-              status: 200,
-              contentType: 'application/json',
-              body: JSON.stringify({ theme: mockTheme }),
-            });
-          } else {
-            route.fulfill({
-              status: 200,
-              contentType: 'application/json',
-              body: JSON.stringify({ theme: mockTheme }),
-            });
-          }
+      await routeApiContext(context, themeRoutePattern, async (route) => {
+        const method = route.request().method();
+        if (method === 'PUT') {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ theme: mockTheme }),
+          });
+        } else {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ theme: mockTheme }),
+          });
         }
-      );
+      });
 
       await page.click('button:has-text("Save Changes")');
 
@@ -479,26 +486,22 @@ test.describe('Workspace Settings Page', () => {
 
     test('shows error when save fails', async ({ context, page }) => {
       await context.unroute(themeRoutePattern);
-      await routeApiContext(
-        context,
-        themeRoutePattern,
-        (route) => {
-          const method = route.request().method();
-          if (method === 'GET') {
-            route.fulfill({
-              status: 200,
-              contentType: 'application/json',
-              body: JSON.stringify({ theme: mockTheme }),
-            });
-          } else if (method === 'PUT') {
-            route.fulfill({
-              status: 500,
-              contentType: 'application/json',
-              body: JSON.stringify({ error: 'Failed to save' }),
-            });
-          }
+      await routeApiContext(context, themeRoutePattern, (route) => {
+        const method = route.request().method();
+        if (method === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ theme: mockTheme }),
+          });
+        } else if (method === 'PUT') {
+          route.fulfill({
+            status: 500,
+            contentType: 'application/json',
+            body: JSON.stringify({ error: 'Failed to save' }),
+          });
         }
-      );
+      });
 
       await page.click('button:has-text("Save Changes")');
 
@@ -508,7 +511,11 @@ test.describe('Workspace Settings Page', () => {
 
   test.describe('Reset to Defaults', () => {
     test('resets theme to defaults', async ({ page }) => {
-      await page.locator('.color-input-wrapper').first().locator('.color-text-input').fill('#ff5500');
+      await page
+        .locator('.color-input-wrapper')
+        .first()
+        .locator('.color-text-input')
+        .fill('#ff5500');
 
       await page.click('button:has-text("Reset to Defaults")');
 
@@ -517,26 +524,22 @@ test.describe('Workspace Settings Page', () => {
 
     test('shows error when reset fails', async ({ context, page }) => {
       await context.unroute(themeRoutePattern);
-      await routeApiContext(
-        context,
-        themeRoutePattern,
-        (route) => {
-          const method = route.request().method();
-          if (method === 'GET') {
-            route.fulfill({
-              status: 200,
-              contentType: 'application/json',
-              body: JSON.stringify({ theme: mockTheme }),
-            });
-          } else if (method === 'DELETE') {
-            route.fulfill({
-              status: 500,
-              contentType: 'application/json',
-              body: JSON.stringify({ error: 'Failed to reset' }),
-            });
-          }
+      await routeApiContext(context, themeRoutePattern, (route) => {
+        const method = route.request().method();
+        if (method === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ theme: mockTheme }),
+          });
+        } else if (method === 'DELETE') {
+          route.fulfill({
+            status: 500,
+            contentType: 'application/json',
+            body: JSON.stringify({ error: 'Failed to reset' }),
+          });
         }
-      );
+      });
 
       await page.click('button:has-text("Reset to Defaults")');
 
@@ -551,18 +554,14 @@ test.describe('Workspace Settings Page', () => {
         finishLoading = resolve;
       });
       await context.unroute(themeRoutePattern);
-      await routeApiContext(
-        context,
-        themeRoutePattern,
-        async (route) => {
-          await themeCanLoad;
-          await route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({ theme: mockTheme }),
-          });
-        }
-      );
+      await routeApiContext(context, themeRoutePattern, async (route) => {
+        await themeCanLoad;
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ theme: mockTheme }),
+        });
+      });
 
       await page.reload();
 
@@ -575,17 +574,13 @@ test.describe('Workspace Settings Page', () => {
   test.describe('Error State', () => {
     test('shows error when loading theme fails', async ({ context, page }) => {
       await context.unroute(themeRoutePattern);
-      await routeApiContext(
-        context,
-        themeRoutePattern,
-        (route) => {
-          route.fulfill({
-            status: 500,
-            contentType: 'application/json',
-            body: JSON.stringify({ error: 'Server error' }),
-          });
-        }
-      );
+      await routeApiContext(context, themeRoutePattern, (route) => {
+        route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: 'Server error' }),
+        });
+      });
 
       await page.reload();
 

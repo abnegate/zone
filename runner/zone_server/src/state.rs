@@ -56,8 +56,7 @@ const RATE_LIMITER_CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
 ///
 /// Every kind offered anywhere (the console's wizard, `GET /api/sources/types`,
 /// the create route's validation) is read from this registry, so a kind without
-/// a working adapter cannot be offered. Notion stays out until its adapter does
-/// more than refuse.
+/// a working adapter cannot be offered.
 pub fn default_adapter_registry() -> AdapterRegistry {
     let mut registry = AdapterRegistry::new();
     registry.register(FilesystemAdapter::new());
@@ -593,6 +592,7 @@ pub(crate) fn test_config() -> Config {
         web_search: crate::services::search::defaults(),
         comfyui: crate::services::comfy::settings::development(),
         source_index: Default::default(),
+        evaluation: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
         train_upload_limit_mb: 512,
@@ -827,6 +827,7 @@ mod tests {
             web_search: crate::services::search::defaults(),
             comfyui: crate::services::comfy::settings::development(),
             source_index: Default::default(),
+            evaluation: Default::default(),
             monitoring: Default::default(),
             chat: Default::default(),
             train_upload_limit_mb: 512,
@@ -904,10 +905,6 @@ mod tests {
         let mut kinds = registry.registered_types();
         kinds.sort();
         assert_eq!(kinds, ["filesystem", "github", "gitlab", "text", "web"]);
-        assert!(
-            !registry.has_adapter("notion"),
-            "the Notion adapter is a stub that refuses every verify; offering it would strand the source"
-        );
     }
 
     // Note: AppState with services requires a real database connection and embedding service.

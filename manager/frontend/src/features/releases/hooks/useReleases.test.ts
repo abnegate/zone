@@ -15,9 +15,10 @@ import type { ReactNode } from 'react';
 import { createElement } from 'react';
 import { ApiError } from '../../../api/ApiError';
 import { HttpStatus } from '../../../api/HttpStatus';
+import { wireSourceStatus } from '../../../test/pullRequests';
 import { listing, pipelineRun, release } from '../../../test/releases';
 import { fakeTimers } from '../../../test/timers';
-import { GATEWAY_BACKOFF_MS } from '../../github';
+import { GATEWAY_BACKOFF_MS, REVALIDATION_REFETCH_MS } from '../../github';
 import type { Release, ReleasesResponse } from '../types';
 
 const mockList = mock();
@@ -268,6 +269,50 @@ describe('useReleases', () => {
     expect(mockList).toHaveBeenCalledTimes(2);
 
     await advance(RELEASES_POLL_MS);
+    expect(mockList).toHaveBeenCalledTimes(3);
+  });
+
+  it('reads the list again soon after a source answered while it was read again', async () => {
+    await fakeTimers();
+    const revalidating: ReleasesResponse = {
+      ...current,
+      sources: [{ ...wireSourceStatus, freshness: 'revalidating' }],
+    };
+    mockList.mockResolvedValueOnce(revalidating).mockResolvedValue(current);
+    renderHook(() => useReleases(), { wrapper: provider(client) });
+    await advance(0);
+    expect(mockList).toHaveBeenCalledTimes(1);
+
+    await advance(REVALIDATION_REFETCH_MS);
+    expect(mockList).toHaveBeenCalledTimes(2);
+
+    await advance(REVALIDATION_REFETCH_MS);
+    expect(mockList).toHaveBeenCalledTimes(2);
+    await advance(RELEASES_POLL_MS - REVALIDATION_REFETCH_MS);
+    expect(mockList).toHaveBeenCalledTimes(3);
+  });
+
+  it('reads the list at the usual pace once a read fails after a source was read again', async () => {
+    await fakeTimers();
+    const revalidating: ReleasesResponse = {
+      ...current,
+      sources: [{ ...wireSourceStatus, freshness: 'revalidating' }],
+    };
+    mockList
+      .mockResolvedValueOnce(revalidating)
+      .mockRejectedValue(new ApiError('Not found', HttpStatus.NotFound));
+    renderHook(() => useReleases(), { wrapper: provider(client) });
+    await advance(0);
+    expect(mockList).toHaveBeenCalledTimes(1);
+
+    await advance(REVALIDATION_REFETCH_MS);
+    expect(mockList).toHaveBeenCalledTimes(2);
+
+    await advance(REVALIDATION_REFETCH_MS);
+    expect(mockList).toHaveBeenCalledTimes(2);
+    await advance(RELEASES_POLL_MS - REVALIDATION_REFETCH_MS * 2);
+    expect(mockList).toHaveBeenCalledTimes(2);
+    await advance(REVALIDATION_REFETCH_MS);
     expect(mockList).toHaveBeenCalledTimes(3);
   });
 

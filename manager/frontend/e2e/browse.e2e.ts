@@ -1,5 +1,5 @@
-import { test, expect } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { blockServiceWorker, routeApi } from './test-utils';
 
 const generateMockModels = (count: number, startId = 0) => {
@@ -58,8 +58,8 @@ test.describe('Browse Models - Virtual Scrolling', () => {
   });
 
   test('infinite scroll loads more models', async ({ page }) => {
-    let page1 = generateMockModels(20, 0);
-    let page2 = generateMockModels(20, 20);
+    const page1 = generateMockModels(20, 0);
+    const page2 = generateMockModels(20, 20);
 
     await page.unroute('**/api/models*');
     await routeApi(page, '**/api/models*', (route) => {
@@ -75,7 +75,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
         return;
       }
 
-      const offset = parseInt(url.searchParams.get('offset') || '0');
+      const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
       if (offset === 0) {
         route.fulfill({
@@ -117,7 +117,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
         return;
       }
 
-      const offset = parseInt(url.searchParams.get('offset') || '0');
+      const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
       if (offset > 0) {
         // Delay for load more
@@ -262,7 +262,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
         });
         return;
       }
-      const offset = parseInt(url.searchParams.get('offset') || '0');
+      const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
       if (offset > 0) {
         route.fulfill({ status: 500, body: 'Server Error' });

@@ -1,0 +1,59 @@
+name: Shell scripts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - 'Makefile'
+      - '.shellcheckrc'
+      - 'docker-compose*.yml'
+      - '.env.example'
+      - '.github/workflows/shellcheck.yml'
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - 'Makefile'
+      - '.shellcheckrc'
+      - 'docker-compose*.yml'
+      - '.env.example'
+      - '.github/workflows/shellcheck.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: ShellCheck and script harnesses
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint shell scripts with the ShellCheck release used locally
+        run: |
+          docker run --rm -v "$PWD:/zone:ro" -w /zone \
+            koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d \
+            scripts/*.sh
+
+      - name: Verify .env values read the way Compose reads them, under dash and bash
+        run: |
+          docker compose version
+          sh scripts/test-env-file.sh
+          bash scripts/test-env-file.sh
+
+      - name: Verify the basic auth file guard, under dash and bash
+        run: |
+          sh scripts/test-auth-file.sh
+          bash scripts/test-auth-file.sh
+
+      - name: Verify the smoke test against faked Docker and curl, under dash and bash
+        run: |
+          sh scripts/test-smoke-test.sh
+          bash scripts/test-smoke-test.sh

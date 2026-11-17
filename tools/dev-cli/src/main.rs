@@ -26,6 +26,8 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+const BIOME_SCOPE: &str = ".";
+
 #[derive(Parser)]
 #[command(name = "zone-dev")]
 #[command(
@@ -461,15 +463,12 @@ fn create_format_tasks(root: &Path, projects: &[Project], check: bool) -> Vec<Ta
 
         match project {
             Project::ManagerFrontend => {
-                // Check if biome is available
                 let biome_config = working_dir.join("biome.json");
                 if biome_config.exists() {
-                    // biome format without --write checks formatting (exits non-zero if changes needed)
-                    // biome format --write applies the formatting changes
                     let args = if check {
-                        vec!["biome", "format", "src"]
+                        vec!["biome", "format", BIOME_SCOPE]
                     } else {
-                        vec!["biome", "format", "--write", "src"]
+                        vec!["biome", "format", "--write", BIOME_SCOPE]
                     };
                     tasks.push(TaskConfig {
                         project: *project,
@@ -479,7 +478,6 @@ fn create_format_tasks(root: &Path, projects: &[Project], check: bool) -> Vec<Ta
                         working_dir,
                     });
                 } else {
-                    // Use prettier if available
                     let package_json = working_dir.join("package.json");
                     if package_json.exists()
                         && let Ok(content) = std::fs::read_to_string(&package_json)
@@ -533,13 +531,12 @@ fn create_lint_tasks(root: &Path, projects: &[Project], fix: bool) -> Vec<TaskCo
 
         match project {
             Project::ManagerFrontend => {
-                // Check for biome
                 let biome_config = working_dir.join("biome.json");
                 if biome_config.exists() {
                     let args = if fix {
-                        vec!["biome", "lint", "--write", "src"]
+                        vec!["biome", "lint", "--write", BIOME_SCOPE]
                     } else {
-                        vec!["biome", "lint", "src"]
+                        vec!["biome", "lint", BIOME_SCOPE]
                     };
                     tasks.push(TaskConfig {
                         project: *project,
@@ -1825,5 +1822,38 @@ mod tests {
         assert_eq!(setting("REDIS_URL"), Some("redis://localhost:6379"));
         assert!(command.contains("--migrate-only"));
         assert!(!command.contains("001_initial_schema.sql"));
+    }
+
+    #[test]
+    fn biome_formats_and_lints_the_whole_console_directory() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let console = root.join(Project::ManagerFrontend.relative_path());
+        std::fs::create_dir_all(&console).unwrap();
+        std::fs::write(console.join("biome.json"), "{}").unwrap();
+
+        let mut tasks = Vec::new();
+        for check in [true, false] {
+            tasks.extend(create_format_tasks(
+                root,
+                &[Project::ManagerFrontend],
+                check,
+            ));
+            tasks.extend(create_lint_tasks(root, &[Project::ManagerFrontend], check));
+        }
+
+        let biome: Vec<&TaskConfig> = tasks
+            .iter()
+            .filter(|task| task.args.first().map(String::as_str) == Some("biome"))
+            .collect();
+        assert_eq!(biome.len(), 4, "a format and a lint task in each mode");
+        for task in biome {
+            assert_eq!(
+                task.args.last().map(String::as_str),
+                Some(BIOME_SCOPE),
+                "`{}` must cover e2e, live and the root config files, not only src",
+                task.args.join(" ")
+            );
+        }
     }
 }

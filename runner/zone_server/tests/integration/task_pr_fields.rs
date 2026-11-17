@@ -58,6 +58,7 @@ mod db_tests {
 #[tokio::test]
 async fn a_reception_moves_the_tasks_pr_status_and_only_when_it_changes() {
     use zone_server::db::tasks;
+    use zone_server::services::github::pull_requests::Status;
 
     let pool = common::create_test_pool().await;
     let (_organization, workspace, _user) = common::setup_test_data(&pool).await;
@@ -76,7 +77,7 @@ async fn a_reception_moves_the_tasks_pr_status_and_only_when_it_changes() {
     .unwrap();
 
     assert!(
-        !tasks::update_task_pr_status(&pool, task.id, "merged")
+        !tasks::update_task_pr_status(&pool, task.id, Status::Merged)
             .await
             .unwrap(),
         "a task without a pull request has no status to move"
@@ -89,7 +90,7 @@ async fn a_reception_moves_the_tasks_pr_status_and_only_when_it_changes() {
         .unwrap();
 
     assert!(
-        tasks::update_task_pr_status(&pool, task.id, "merged")
+        tasks::update_task_pr_status(&pool, task.id, Status::Merged)
             .await
             .unwrap()
     );
@@ -97,7 +98,7 @@ async fn a_reception_moves_the_tasks_pr_status_and_only_when_it_changes() {
     assert_eq!(read.pr_status.as_deref(), Some("merged"));
 
     assert!(
-        !tasks::update_task_pr_status(&pool, task.id, "merged")
+        !tasks::update_task_pr_status(&pool, task.id, Status::Merged)
             .await
             .unwrap(),
         "a status that already reads merged is not rewritten"

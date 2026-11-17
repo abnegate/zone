@@ -58,16 +58,17 @@ use crate::services::github::client::INVALID_TAG;
 use crate::services::github::client::MEBIBYTE;
 use crate::services::github::client::PENDING_ASSESSMENT;
 use crate::services::github::client::PER_PAGE;
+use crate::services::github::client::Rows;
 use crate::services::github::client::SUCCESS_ASSESSMENT;
 use crate::services::github::client::UNAUTHORIZED;
 use crate::services::github::client::UNKNOWN_ASSESSMENT;
 use crate::services::github::client::UNPROCESSABLE_ENTITY;
-use crate::services::github::client::assessed;
 use crate::services::github::client::assessment;
 use crate::services::github::client::ci_token;
 use crate::services::github::client::conclusions;
 use crate::services::github::client::described;
 use crate::services::github::client::listed;
+use crate::services::github::client::outcome;
 use crate::services::github::client::revision;
 use crate::services::github::client::segment;
 use crate::services::github::client::status_error;
@@ -146,6 +147,10 @@ const MISSING_PULL_HEAD: &str = "GitHub did not return an immutable pull request
 const INVALID_PULL_BRANCH: &str =
     "GitHub returned a pull request without a usable head or base branch name.";
 const NO_PUSH_CREDENTIAL: &str = "The source has no credential to push with.";
+const NO_CHAT_CHECKOUT: &str =
+    "No directory was passed, and a run outside a chat has no project directory to default to.";
+const NO_PROJECT_CHECKOUT: &str =
+    "No directory was passed, and this chat's project starts it in no checkout on this machine.";
 const SOURCE_NOT_GITHUB: &str =
     "Live integrations currently support connected GitHub sources only.";
 const JOB_WITHOUT_COMMIT: &str = "GitHub returned a job without a commit SHA.";
@@ -339,7 +344,7 @@ impl Tool for Integration {
             properties["base"] = json!({"type": "string", "description": "Base branch; defaults to the source branch or repository default."});
             properties["body"] =
                 json!({"type": "string", "description": "Pull request description."});
-            properties["directory"] = json!({"type": "string", "description": "Absolute path of the checkout you committed head in. Zone pushes head from it with the source's credential before opening the pull request; do not git push yourself. Defaults to the chat's project directory. Omit for a fork's owner:branch head that is already pushed."});
+            properties["directory"] = json!({"type": "string", "description": "Absolute path of the checkout you committed head in. Zone pushes head from it with the source's credential before opening the pull request; do not git push yourself. Defaults to the chat's project directory, which only holds head when source_id is that project's own repository: pass it whenever you committed anywhere else, and Zone never pushes from a checkout of another repository. Omit for a fork's owner:branch head that is already pushed."});
             required.extend(["title", "head"]);
         }
         if matches!(self.operation, Operation::Comment) {
@@ -488,20 +493,25 @@ impl Integration {
                  request from that."
             ));
         }
-        self.push_head(github, arguments, head, &repository).await?;
-        let (head, base) = match github.create_pull(arguments).await? {
-            Creation::Created(created) => {
+        let pushed = self.push_head(github, arguments, head, &repository).await?;
+        let (head, base) = match github.create_pull(arguments).await {
+            Ok(Creation::Created(created)) => {
                 return Ok(json!({
                     "repository": repository,
                     "pull_request": created,
                 }));
             }
-            Creation::Refused { head, base } => (head, base),
+            Ok(Creation::Refused { head, base }) => (head, base),
+            Err(refusal) => return Err(unpushed(&pushed, head, &repository, refusal)),
         };
-        let existing = github
-            .already_open(&head, &base)
-            .await?
-            .ok_or_else(|| status_error(UNPROCESSABLE_ENTITY))?;
+        let existing = github.already_open(&head, &base).await?.ok_or_else(|| {
+            unpushed(
+                &pushed,
+                &head,
+                &repository,
+                status_error(UNPROCESSABLE_ENTITY),
+            )
+        })?;
         Ok(json!({
             "repository": repository,
             "pull_request": existing,
@@ -511,8 +521,10 @@ impl Integration {
 
     /// Pushes `head` from the checkout the chat committed it in, with the
     /// source's token, so a chat whose agent holds no GitHub credential can
-    /// still open a pull request. A fork's `owner:branch` head, and a chat with
-    /// no checkout to push from, are left for GitHub to find already pushed.
+    /// still open a pull request. A fork's `owner:branch` head is left for
+    /// GitHub to find already pushed, and so is a head no checkout of this
+    /// repository holds — with what stopped it, which is the one thing
+    /// GitHub's own refusal can never say.
     ///
     /// Git does not say why a push failed, so a failed push asks GitHub's API
     /// about the same token: one it refuses fails as unauthorized, which mints
@@ -523,12 +535,14 @@ impl Integration {
         arguments: &Arguments,
         head: &str,
         repository: &str,
-    ) -> Result<(), String> {
+    ) -> Result<Pushed, String> {
         if head.contains(':') {
-            return Ok(());
+            return Ok(Pushed::Published);
         }
-        let Some(directory) = self.checkout(arguments).await? else {
-            return Ok(());
+        let (directory, named) = match self.checkout(arguments).await? {
+            Pushing::Named(directory) => (directory, true),
+            Pushing::Project(directory) => (directory, false),
+            Pushing::Nowhere(reason) => return Ok(Pushed::Nothing(reason)),
         };
         if github.token().is_empty() {
             return Err(NO_PUSH_CREDENTIAL.to_string());
@@ -537,7 +551,7 @@ impl Integration {
             .map_err(|_| "The source does not name a GitHub repository.".to_string())?;
         let origin =
             Origin::parse(repository).ok_or("The source does not name a GitHub repository.")?;
-        let Err(error) = chat_pull_request::push(
+        let error = match chat_pull_request::push(
             &checkout::git(),
             &directory,
             &url,
@@ -546,9 +560,28 @@ impl Integration {
             github.token(),
         )
         .await
-        else {
-            return Ok(());
+        {
+            Ok(Some(_)) => return Ok(Pushed::Published),
+            Ok(None) => {
+                return Ok(Pushed::Nothing(format!(
+                    "{} holds no branch {head}.",
+                    directory.display()
+                )));
+            }
+            Err(error) => error,
         };
+        // A directory the model named is its own claim about where it
+        // committed, so a push that fails from it fails the call. The
+        // project's own directory is Zone's guess at the same thing, and a
+        // guess that turns out to be a checkout of another repository must not
+        // fail a pull request GitHub may well open from a head already on it.
+        if !named {
+            return Ok(Pushed::Nothing(format!(
+                "No directory was passed, and {head} could not be pushed from this chat's \
+                 project directory: {}.",
+                error.trim_end().trim_end_matches('.')
+            )));
+        }
         Err(
             match github
                 .service()
@@ -563,8 +596,10 @@ impl Integration {
 
     /// The checkout to push from: the one the model names, which must be one
     /// of this workspace's, or else the directory the chat's project starts
-    /// it in, which the turn itself ran in.
-    async fn checkout(&self, arguments: &Arguments) -> Result<Option<std::path::PathBuf>, String> {
+    /// it in, which the turn itself ran in. A call with neither answers with
+    /// the sentence saying so, for [`unpushed`] to quote if GitHub then finds
+    /// no head to open a pull request from.
+    async fn checkout(&self, arguments: &Arguments) -> Result<Pushing, String> {
         if let Some(directory) = arguments
             .directory
             .as_deref()
@@ -579,15 +614,15 @@ impl Integration {
                     directory.display()
                 ));
             }
-            return Ok(Some(directory));
+            return Ok(Pushing::Named(directory));
         }
         let Some(chat) = self.scope.chat_id else {
-            return Ok(None);
+            return Ok(Pushing::Nowhere(NO_CHAT_CHECKOUT.to_string()));
         };
         Ok(
             match project_directory::peek(&self.scope.state, chat, self.scope.workspace_id).await {
-                Start::Directory(directory) => Some(directory),
-                _ => None,
+                Start::Directory(directory) => Pushing::Project(directory),
+                start => Pushing::Nowhere(nowhere(start)),
             },
         )
     }
@@ -620,6 +655,51 @@ impl Integration {
 enum Creation {
     Created(Value),
     Refused { head: String, base: String },
+}
+
+/// The checkout Zone pushes a head from, and whose choice it was.
+enum Pushing {
+    /// The directory the model named, which it is claiming holds the head.
+    Named(std::path::PathBuf),
+    /// The directory the chat's project starts its turns in, which is Zone's
+    /// own guess at the same thing.
+    Project(std::path::PathBuf),
+    /// No checkout to push from, and the sentence saying why.
+    Nowhere(String),
+}
+
+/// What became of a head before the pull request was posted.
+#[derive(Debug)]
+enum Pushed {
+    /// Zone published it, or the head names a fork GitHub already holds.
+    Published,
+    /// Nothing was published, and the sentence saying why. GitHub's own
+    /// refusal cannot name this: the checkout is on this machine, not on it.
+    Nothing(String),
+}
+
+/// Why a call that passed no `directory` had no checkout to push from.
+fn nowhere(start: Start) -> String {
+    match start {
+        Start::Unavailable(reason) => format!("No directory was passed. {reason}"),
+        _ => NO_PROJECT_CHECKOUT.to_string(),
+    }
+}
+
+/// `refusal`, and what it most likely means: GitHub cannot open a pull
+/// request from a head nobody published, and it is the one cause of a refusal
+/// the model can act on. Only this side of the call can name it, since the
+/// checkout the head was committed in is on this machine rather than on
+/// GitHub, so a refusal that followed a push of nothing carries what stopped
+/// it. A head Zone did publish leaves GitHub's answer to speak for itself.
+fn unpushed(pushed: &Pushed, head: &str, repository: &str, refusal: String) -> String {
+    let Pushed::Nothing(reason) = pushed else {
+        return refusal;
+    };
+    format!(
+        "{refusal} Zone pushed no {head} for GitHub to open a pull request from. {reason} Commit \
+         {head} in a checkout of {repository} and pass that checkout's absolute path as directory."
+    )
 }
 
 impl Github {
@@ -886,8 +966,13 @@ impl Github {
     }
 
     async fn build(&self, sha: &str) -> Result<Value, String> {
-        let (workflows, checks, statuses, complete) = self.ci_rows(sha).await?;
-        let state = assessed(&conclusions(&workflows, &checks, &statuses), complete);
+        let Rows {
+            workflows,
+            checks,
+            statuses,
+            complete,
+        } = self.ci_rows(sha).await?;
+        let state = outcome(&conclusions(&workflows, &checks, &statuses), complete);
         Ok(bound_build(json!({
             "state": state,
             "complete": complete,
@@ -2888,7 +2973,8 @@ mod tests {
             .open_pull(&mocked(&server), &pull_args("feature", Some("main"), None))
             .await
             .expect_err("a closed pull request is not the one GitHub says is open");
-        assert_eq!(refused, status_error(UNPROCESSABLE_ENTITY));
+        assert!(refused.contains("Zone pushed no feature"), "{refused}");
+        assert!(refused.contains(NO_CHAT_CHECKOUT), "{refused}");
 
         server.reset().await;
         refuse_duplicate(&server).await;
@@ -2928,7 +3014,10 @@ mod tests {
             .open_pull(&mocked(&server), &pull_args("feature", Some("main"), None))
             .await
             .expect_err("a refusal that is not a duplicate is an error");
-        assert_eq!(refused, status_error(UNPROCESSABLE_ENTITY));
+        assert!(
+            refused.contains("pass that checkout's absolute path as directory"),
+            "{refused}"
+        );
         assert!(!refused.contains("No commits"), "{refused}");
         assert!(
             server
@@ -3094,18 +3183,12 @@ mod tests {
     #[tokio::test]
     async fn a_directory_in_the_workspaces_own_clones_is_its_own() {
         let tool = tool(Operation::CreatePull);
-        let clone = tool
-            .scope
-            .state
-            .config()
-            .clones
-            .join(tool.scope.workspace_id.as_hyphenated().to_string())
-            .join("repository");
+        let clone = owned_directory(&tool, "repository");
         let arguments = pull_args("feature", None, clone.to_str());
-        assert_eq!(
-            tool.checkout(&arguments).await.expect("its own clone"),
-            Some(clone)
-        );
+        let Pushing::Named(named) = tool.checkout(&arguments).await.expect("its own clone") else {
+            panic!("a directory the model named is the one pushed from");
+        };
+        assert_eq!(named, clone);
     }
 
     fn write_args(
@@ -5730,6 +5813,158 @@ mod tests {
                 "a missing or empty token must refuse the push"
             );
         }
+    }
+
+    /// A checkout of `remote` with a commit on `main` and no other branch,
+    /// removed by the caller.
+    fn checkout_of(directory: &std::path::Path, remote: &str) {
+        std::fs::create_dir_all(directory).expect("a checkout to push from");
+        for arguments in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["remote", "add", "origin", remote],
+            vec!["commit", "-q", "--allow-empty", "-m", "work"],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(arguments)
+                .current_dir(directory)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .status()
+                .expect("git runs");
+            assert!(status.success());
+        }
+    }
+
+    /// A path under this workspace's clones, which [`project_directory::owns`]
+    /// accepts without a database.
+    fn owned_directory(tool: &Integration, name: &str) -> std::path::PathBuf {
+        tool.scope
+            .state
+            .config()
+            .clones
+            .join(tool.scope.workspace_id.as_hyphenated().to_string())
+            .join(name)
+    }
+
+    #[tokio::test]
+    async fn a_checkout_without_the_head_reports_it_instead_of_failing_the_call() {
+        let server = MockServer::start().await;
+        let tool = tool(Operation::CreatePull);
+        let directory = owned_directory(&tool, "repository");
+        checkout_of(&directory, "https://github.com/owner/repository.git");
+
+        let pushed = tool
+            .push_head(
+                &mocked(&server),
+                &pull_args("feature", None, directory.to_str()),
+                "feature",
+                "https://github.com/owner/repository",
+            )
+            .await
+            .expect("a head the checkout does not hold is left for GitHub to find");
+
+        let Pushed::Nothing(ref reason) = pushed else {
+            panic!("a checkout without the branch publishes nothing");
+        };
+        assert!(reason.contains("holds no branch feature"), "{reason}");
+        assert!(
+            reason.contains(directory.to_str().expect("a printable path")),
+            "{reason}"
+        );
+        assert!(
+            unpushed(
+                &pushed,
+                "feature",
+                "https://github.com/owner/repository",
+                status_error(UNPROCESSABLE_ENTITY)
+            )
+            .contains(reason.as_str()),
+            "the refusal carries what stopped the push"
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn a_named_checkout_of_another_repository_fails_the_call() {
+        let server = MockServer::start().await;
+        let tool = tool(Operation::CreatePull);
+        let directory = owned_directory(&tool, "other");
+        checkout_of(&directory, "https://github.com/owner/other.git");
+
+        let refused = tool
+            .push_head(
+                &mocked(&server),
+                &pull_args("feature", None, directory.to_str()),
+                "feature",
+                "https://github.com/owner/repository",
+            )
+            .await
+            .expect_err("a directory the model named must hold the head it claims");
+
+        assert!(refused.contains("Could not push feature"), "{refused}");
+        assert!(refused.contains("owner/other"), "{refused}");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_refusal_names_the_head_zone_never_pushed() {
+        let repository = "https://github.com/owner/repository";
+        let refusal = status_error(UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            unpushed(&Pushed::Published, "feature", repository, refusal.clone()),
+            refusal,
+            "a head Zone published leaves GitHub's refusal to speak for itself"
+        );
+
+        let nothing = unpushed(
+            &Pushed::Nothing(NO_CHAT_CHECKOUT.to_string()),
+            "feature",
+            repository,
+            refusal.clone(),
+        );
+        assert!(nothing.starts_with(&refusal), "{nothing}");
+        assert!(nothing.contains("Zone pushed no feature"), "{nothing}");
+        assert!(nothing.contains(NO_CHAT_CHECKOUT), "{nothing}");
+        assert!(nothing.contains(repository), "{nothing}");
+        assert!(
+            nothing.contains("pass that checkout's absolute path as directory"),
+            "{nothing}"
+        );
+    }
+
+    #[test]
+    fn a_project_that_starts_nowhere_says_so_with_its_own_reason() {
+        assert_eq!(nowhere(Start::Elsewhere), NO_PROJECT_CHECKOUT);
+        let unavailable = nowhere(Start::Unavailable(
+            "The project's folder /work isn't available on this machine.".to_string(),
+        ));
+        assert!(
+            unavailable.starts_with("No directory was passed."),
+            "{unavailable}"
+        );
+        assert!(
+            unavailable.contains("/work isn't available on this machine."),
+            "{unavailable}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_directory_parameter_says_when_the_project_default_is_the_wrong_checkout() {
+        let schema = tool(Operation::CreatePull).parameters_schema();
+        let description = schema["properties"]["directory"]["description"]
+            .as_str()
+            .expect("the directory parameter is described");
+
+        assert!(
+            description.contains("pass it whenever you committed anywhere else"),
+            "{description}"
+        );
+        assert!(
+            description.contains("never pushes from a checkout of another repository"),
+            "{description}"
+        );
     }
 
     #[tokio::test]
