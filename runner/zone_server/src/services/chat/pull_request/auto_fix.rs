@@ -18,11 +18,13 @@ use uuid::Uuid;
 
 use super::checks::Checks;
 use super::mergeable::Mergeable;
+use super::state::State;
 use super::status::Status;
 use crate::db::chat_pull_requests::{self, Claim, PullRequestRow};
 use crate::db::projects;
 use crate::db::sources;
 use crate::db::tasks::{Create, Origin};
+use crate::services::chat::notice;
 use crate::state::AppState;
 
 /// Why a pull request wants fixing, in the words the run is asked to act on.
@@ -57,6 +59,9 @@ pub async fn consider(
     branch: &BranchName,
     head: &CommitSha,
 ) {
+    // A run that already ended is judged on what the pull request shows now,
+    // whether or not auto-fix would still start another one for it.
+    finish(state, row, status).await;
     // A run still working answers for whatever the branch shows now, and a
     // second run on the same branch would fight it.
     if !row.auto_fix || row.auto_fixing {
@@ -268,6 +273,54 @@ async fn start(
     Ok(Some(run.id))
 }
 
+/// Whether the pull request now shows that the run it had did what it was
+/// started for.
+///
+/// A merge settles it outright. Short of that this is [`Status::ready_to_merge`],
+/// the same bar the chat uses to offer a merge: every check passed, nothing in
+/// the way of merging, and no review thread left open. Nothing weaker will do.
+/// A fix run is told to answer every unresolved review comment, so a task that
+/// completed while comments sat unanswered would be reporting work it did not
+/// do, and `ready_to_merge` is already tested for exactly these states.
+///
+/// Being too strict here costs a task that waits in review for a person, which
+/// is where it already was. Being too loose costs a task that stops asking for
+/// attention it still needs.
+fn proven(status: &Status) -> bool {
+    status.state == State::Merged || status.ready_to_merge()
+}
+
+/// Finishes the task of a run that has already ended, once `status` proves it
+/// worked. Never fails the status read that called it: a task that could not
+/// be finished this time is judged again on the next poll.
+async fn finish(state: &AppState, row: &PullRequestRow, status: &Status) {
+    // A run still working has not proven anything yet, whatever the pull
+    // request shows while it pushes.
+    if row.auto_fixing {
+        return;
+    }
+    let Some(run_id) = row.auto_fix_run_id else {
+        return;
+    };
+    if !proven(status) {
+        return;
+    }
+    match chat_pull_requests::complete_auto_fix_task(state.db(), run_id).await {
+        Ok(true) => tracing::info!(
+            pull_request = %row.id,
+            run = %run_id,
+            "the pull request this run fixed is passing, so its task is finished"
+        ),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(
+            pull_request = %row.id,
+            run = %run_id,
+            %error,
+            "could not finish the task of the run that fixed this pull request"
+        ),
+    }
+}
+
 /// How the chat names the pull request a notice is about.
 fn name(row: &PullRequestRow) -> String {
     format!("{}/{}#{}", row.owner, row.repo, row.number)
@@ -341,11 +394,8 @@ impl Finished {
             "run_id": run_id,
             "link": self.url,
         });
-        match chat_pull_requests::announce(state.db(), self.chat_id, &content, metadata).await {
-            Ok(stored) => crate::db::actions::publish(self.chat_id, stored),
-            Err(error) => {
-                tracing::warn!(%run_id, %error, "could not say in the chat how an auto-fix run ended");
-            }
+        if let Some(notice) = notice::post(state.db(), self.chat_id, &content, metadata).await {
+            notice.publish();
         }
     }
 }
@@ -428,6 +478,97 @@ mod tests {
     #[test]
     fn a_pending_check_is_not_yet_a_complaint() {
         assert_eq!(complaint(&status(Checks::Pending, Mergeable::Clean)), None);
+    }
+
+    /// A pull request with nothing left wrong with it: checks passed, it
+    /// merges cleanly, and every review thread is resolved.
+    fn settled() -> Status {
+        let mut status = status(Checks::Passing, Mergeable::Clean);
+        status.threads = Some(super::super::threads::Threads {
+            open: 0,
+            resolved: 3,
+        });
+        status
+    }
+
+    #[test]
+    fn a_pull_request_with_nothing_left_wrong_proves_the_run_did_its_job() {
+        assert!(proven(&settled()));
+    }
+
+    #[test]
+    fn a_merge_proves_it_whatever_the_checks_last_said() {
+        let mut merged = status(Checks::Pending, Mergeable::Unknown);
+        merged.state = State::Merged;
+        assert!(proven(&merged));
+    }
+
+    #[test]
+    fn a_review_comment_nobody_answered_proves_nothing() {
+        // A fix run is told to answer every unresolved comment, so finishing
+        // its task while one is open would report work it did not do.
+        let mut open = settled();
+        open.threads = Some(super::super::threads::Threads {
+            open: 1,
+            resolved: 2,
+        });
+        assert!(!proven(&open));
+    }
+
+    #[test]
+    fn threads_that_were_never_read_prove_nothing() {
+        // GitHub would not list them in full, so nothing says they are clear.
+        let mut unread = settled();
+        unread.threads = None;
+        assert!(!proven(&unread));
+    }
+
+    #[test]
+    fn a_verdict_that_never_arrived_proves_nothing() {
+        // The complaint is gone in all three, and in none of them did anything
+        // report that the checks pass.
+        for checks in [Checks::Pending, Checks::None, Checks::Unknown] {
+            let mut status = settled();
+            status.checks = checks;
+            assert!(!proven(&status), "{checks:?} should not finish a task");
+        }
+    }
+
+    #[test]
+    fn anything_short_of_a_clean_merge_proves_nothing() {
+        // Blocked, behind and unknown are all states where the fix has not
+        // been shown to hold, whatever the checks that ran said.
+        for mergeable in [
+            Mergeable::Conflicted,
+            Mergeable::Unstable,
+            Mergeable::Blocked,
+            Mergeable::Unknown,
+        ] {
+            let mut status = settled();
+            status.mergeable = mergeable;
+            assert!(!proven(&status), "{mergeable:?} should not finish a task");
+        }
+    }
+
+    #[test]
+    fn a_failing_pull_request_proves_nothing() {
+        let mut failing = settled();
+        failing.checks = Checks::Failing;
+        assert!(!proven(&failing));
+    }
+
+    #[test]
+    fn a_draft_proves_nothing() {
+        let mut draft = settled();
+        draft.draft = true;
+        assert!(!proven(&draft));
+    }
+
+    #[test]
+    fn a_pull_request_closed_unmerged_proves_nothing() {
+        let mut closed = settled();
+        closed.state = State::Closed;
+        assert!(!proven(&closed));
     }
 
     #[test]

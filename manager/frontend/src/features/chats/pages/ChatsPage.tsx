@@ -62,6 +62,7 @@ import {
   useChatSubagents,
   useChats,
   useChatTasks,
+  useChatTokenUsage,
   usePreloadChats,
   useWorkspaceChatProviders,
 } from '../hooks';
@@ -376,6 +377,7 @@ export default function ChatsPage() {
   const changes = useChatPullRequests(chatOpen ? selectedChatId : null, streaming);
   const tasks = useChatTasks(chatOpen ? selectedChatId : null, streaming);
   const subagents = useChatSubagents(chatOpen ? selectedChatId : null, streaming);
+  const spend = useChatTokenUsage(chatOpen ? selectedChatId : null, streaming);
   const displayedMessages = displayedChat?.messages;
   const media = useMemo(() => galleryItems(displayedMessages ?? []), [displayedMessages]);
   const sources = useMemo(() => chatSources(displayedMessages ?? []), [displayedMessages]);
@@ -2122,6 +2124,7 @@ export default function ChatsPage() {
                       error={contextError}
                       previewing={previewing}
                       capacity={meterCapacity}
+                      spend={spend}
                     />
                   </div>
                 </div>

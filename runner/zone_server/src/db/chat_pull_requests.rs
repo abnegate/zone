@@ -391,33 +391,6 @@ pub async fn start_auto_fix(
     }))
 }
 
-/// Says something in `chat_id` as the assistant, marked as auto-fix's own
-/// word rather than a turn somebody typed, and answers with the stored
-/// message for publishing.
-pub async fn announce(
-    pool: &PgPool,
-    chat_id: Uuid,
-    content: &str,
-    metadata: serde_json::Value,
-) -> DbResult<serde_json::Value> {
-    let mut transaction = pool.begin().await?;
-    let stored: serde_json::Value = sqlx::query_scalar(
-        "INSERT INTO messages (chat_id, role, content, metadata) VALUES ($1, 'assistant', $2, $3)
-         RETURNING to_jsonb(messages.*)",
-    )
-    .bind(chat_id)
-    .bind(content)
-    .bind(metadata)
-    .fetch_one(&mut *transaction)
-    .await?;
-    sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
-        .bind(chat_id)
-        .execute(&mut *transaction)
-        .await?;
-    transaction.commit().await?;
-    Ok(stored)
-}
-
 pub async fn retitle<'e, E>(executor: E, id: Uuid, title: &str) -> DbResult<()>
 where
     E: Executor<'e, Database = Postgres>,
@@ -430,6 +403,20 @@ where
     .execute(executor)
     .await?;
     Ok(())
+}
+
+pub async fn complete_auto_fix_task(pool: &PgPool, run_id: Uuid) -> DbResult<bool> {
+    Ok(sqlx::query(
+        "UPDATE tasks SET status = 'complete', completed_at = NOW(), updated_at = NOW() \
+         FROM task_runs run \
+         WHERE tasks.id = run.task_id AND run.id = $1 AND run.status = 'completed' \
+           AND tasks.active_run_id IS NULL AND tasks.status = 'review'",
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 #[cfg(test)]
@@ -757,6 +744,141 @@ mod tests {
             !settled.auto_fixing,
             "a settled run no longer reads as working"
         );
+    }
+
+    #[tokio::test]
+    async fn a_run_that_fixed_its_pull_request_has_its_task_finished() {
+        let pool = pool().await;
+        let watched = watched(&pool, true).await;
+
+        let run = start(&pool, &watched, None)
+            .await
+            .expect("auto-fix is on and nothing is claimed");
+        tasks::complete_task_run(&pool, run.id, "completed", None, None)
+            .await
+            .expect("the run settles");
+        assert_eq!(
+            task_status(&pool, run.task_id).await,
+            "review",
+            "a completed run leaves its task waiting to be looked at"
+        );
+
+        assert!(
+            complete_auto_fix_task(&pool, run.id)
+                .await
+                .expect("the update"),
+            "the pull request passing is what finishes it"
+        );
+        assert_eq!(task_status(&pool, run.task_id).await, "complete");
+
+        assert!(
+            !complete_auto_fix_task(&pool, run.id)
+                .await
+                .expect("the update"),
+            "a task already finished is not finished twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_that_failed_keeps_its_task_blocked() {
+        let pool = pool().await;
+        let watched = watched(&pool, true).await;
+
+        let run = start(&pool, &watched, None)
+            .await
+            .expect("auto-fix is on and nothing is claimed");
+        tasks::complete_task_run(&pool, run.id, "failed", Some("checks still fail"), None)
+            .await
+            .expect("the run settles");
+
+        assert!(
+            !complete_auto_fix_task(&pool, run.id)
+                .await
+                .expect("the update"),
+            "checks that pass for some other reason do not make a failed run a success"
+        );
+        assert_eq!(task_status(&pool, run.task_id).await, "blocked");
+    }
+
+    #[tokio::test]
+    async fn a_run_still_working_has_nothing_to_finish() {
+        let pool = pool().await;
+        let watched = watched(&pool, true).await;
+
+        let run = start(&pool, &watched, None)
+            .await
+            .expect("auto-fix is on and nothing is claimed");
+
+        assert!(
+            !complete_auto_fix_task(&pool, run.id)
+                .await
+                .expect("the update"),
+            "a run that has not settled has not finished its task"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_someone_moved_by_hand_is_not_dragged_back() {
+        let pool = pool().await;
+        let watched = watched(&pool, true).await;
+
+        let run = start(&pool, &watched, None)
+            .await
+            .expect("auto-fix is on and nothing is claimed");
+        tasks::complete_task_run(&pool, run.id, "completed", None, None)
+            .await
+            .expect("the run settles");
+        sqlx::query("UPDATE tasks SET status = 'blocked' WHERE id = $1")
+            .bind(run.task_id)
+            .execute(&pool)
+            .await
+            .expect("a person moves it");
+
+        assert!(
+            !complete_auto_fix_task(&pool, run.id)
+                .await
+                .expect("the update"),
+            "a passing check does not overrule where a person put the task"
+        );
+        assert_eq!(task_status(&pool, run.task_id).await, "blocked");
+    }
+
+    #[tokio::test]
+    async fn a_task_claimed_again_is_left_to_its_new_run() {
+        let pool = pool().await;
+        let watched = watched(&pool, true).await;
+
+        let run = start(&pool, &watched, None)
+            .await
+            .expect("auto-fix is on and nothing is claimed");
+        tasks::complete_task_run(&pool, run.id, "completed", None, None)
+            .await
+            .expect("the first run settles");
+        // The task is working again, on a run of its own.
+        let again = tasks::create_task_run(&pool, run.task_id)
+            .await
+            .expect("a second run");
+        sqlx::query("UPDATE tasks SET status = 'review', active_run_id = $2 WHERE id = $1")
+            .bind(run.task_id)
+            .bind(again.id)
+            .execute(&pool)
+            .await
+            .expect("the second run claims it");
+
+        assert!(
+            !complete_auto_fix_task(&pool, run.id)
+                .await
+                .expect("the update"),
+            "the settled run does not finish a task another run is working on"
+        );
+    }
+
+    async fn task_status(pool: &PgPool, task_id: Uuid) -> String {
+        tasks::get_task(pool, task_id)
+            .await
+            .expect("the read")
+            .expect("the task")
+            .status
     }
 
     #[tokio::test]
