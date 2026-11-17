@@ -880,36 +880,6 @@ impl Drop for ConnectionCleanupGuard {
     }
 }
 
-/// Pull provider-safe image URLs out of a message's stored metadata.
-///
-/// Images ride in `metadata.attachments[]` rather than in `content`, so the
-/// text of a message stays readable and the images survive a reload. Protected
-/// relative artifact URLs require Zone authentication, which LiteLLM does not
-/// receive, so they must never be forwarded on later turns.
-fn image_urls_from_metadata(metadata: Option<&serde_json::Value>) -> Vec<String> {
-    metadata
-        .and_then(|m| m.get("attachments"))
-        .and_then(|a| a.as_array())
-        .map(|attachments| {
-            attachments
-                .iter()
-                .filter(|a| {
-                    a.get("mime")
-                        .and_then(|m| m.as_str())
-                        .is_some_and(|m| m.starts_with("image/"))
-                })
-                .filter_map(|a| a.get("url").and_then(|u| u.as_str()))
-                .filter(|url| {
-                    url.starts_with("data:")
-                        || url.starts_with("https://")
-                        || url.starts_with("http://")
-                })
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn generated_media_attachment(url: &str, mime: &str, index: usize) -> Option<ChatImageAttachment> {
     if url.len() > MAX_GENERATED_IMAGE_URL_LENGTH {
         return None;
@@ -8287,45 +8257,6 @@ cat 'DIR/reply.jsonl'
         assert!(json.contains("\"metadata\""));
         assert!(json.contains("shot.png"));
         assert!(json.contains("image/png"));
-    }
-
-    #[test]
-    fn test_image_urls_from_metadata() {
-        let metadata = serde_json::json!({
-            "attachments": [
-                {
-                    "name": "shot.png",
-                    "mime": "image/png",
-                    "url": "data:image/png;base64,xx"
-                },
-                {
-                    "name": "notes.md",
-                    "mime": "text/markdown",
-                    "url": "https://example.test/notes.md"
-                },
-                {
-                    "name": "protected.png",
-                    "mime": "image/png",
-                    "url": "/api/artifacts/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002/00000000-0000-0000-0000-000000000003/image.png"
-                }
-            ]
-        });
-        assert_eq!(
-            image_urls_from_metadata(Some(&metadata)),
-            vec!["data:image/png;base64,xx".to_string()]
-        );
-        let public = serde_json::json!({
-            "attachments": [{
-                "name": "remote.png",
-                "mime": "image/png",
-                "url": "https://example.test/remote.png"
-            }]
-        });
-        assert_eq!(
-            image_urls_from_metadata(Some(&public)),
-            vec!["https://example.test/remote.png".to_string()]
-        );
-        assert!(image_urls_from_metadata(None).is_empty());
     }
 
     #[test]
