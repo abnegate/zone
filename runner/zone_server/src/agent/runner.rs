@@ -12,8 +12,8 @@ use abnegate_agent::context::{self, ContextStatus, ContextUsage, Entry, Summary}
 use abnegate_agent::tool::{Session, is_vision_url};
 use abnegate_agent_cli::CUT_SHORT;
 use abnegate_llm::{
-    Error, Limit, Message as LlmMessage, RequestOptions, Role as LlmRole, StreamDelta,
-    StreamToolCall, ToolCall as LlmToolCall, Usage, Window,
+    Error, Limit, Message as LlmMessage, RequestOptions, Role as LlmRole, StreamToolCall,
+    ToolCall as LlmToolCall, Usage, Window,
 };
 use futures::{Stream, StreamExt};
 use std::collections::{BTreeMap, BTreeSet};
@@ -368,7 +368,10 @@ pub fn run_with_context(
             let mut pending = ToolCallAccumulator::default();
             let mut images = Vec::new();
             let mut cut_short = false;
-            let mut tally = Tally::default();
+            let mut tally = match runs_own_loop(&llm) {
+                true => Tally::agent(),
+                false => Tally::request(),
+            };
             context.pending_usage = None;
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
@@ -381,9 +384,6 @@ pub fn run_with_context(
                         return;
                     }
                 };
-                if chunk.choices.first().is_some_and(|choice| carries_content(&choice.delta)) {
-                    tally.content();
-                }
                 if let Some(usage) = chunk.usage {
                     tally.observe(usage);
                     context.pending_usage = tally.total();
@@ -744,23 +744,6 @@ impl Parked {
         };
         Some((self.id.clone(), park))
     }
-}
-
-fn carries_content(delta: &StreamDelta) -> bool {
-    delta
-        .content
-        .as_ref()
-        .is_some_and(|content| !content.is_empty())
-        || delta
-            .reasoning_content
-            .as_ref()
-            .is_some_and(|reasoning| !reasoning.is_empty())
-        || delta
-            .tool_calls
-            .as_ref()
-            .is_some_and(|calls| !calls.is_empty())
-        || !delta.thinking_blocks.is_empty()
-        || !delta.generated_images.is_empty()
 }
 
 /// The event a stream that broke off with `error` ends the turn on.

@@ -1,22 +1,41 @@
 use abnegate_llm::Usage;
 
-/// A provider may restate a finished turn's usage after its finish, so a turn
-/// only gives way to the next once the stream carries content again, or
-/// reports less than the finished turn did, which a restatement never does.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Where one turn's usage ends and the next begins differs by backend. An
+/// API request is one stream, so a usage frame after its finish reason
+/// restates that request. A coding agent's stream can hold several agent
+/// turns, and its parser reports each turn's usage before that turn's
+/// `Finished`, so usage after a finish belongs to the next turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Tally {
+    turns: bool,
     finished: Option<Usage>,
     current: Option<Usage>,
-    latest: Option<Usage>,
     closed: bool,
 }
 
 impl Tally {
-    pub(super) fn observe(&mut self, usage: Usage) {
-        if self.closed && self.latest.is_some_and(|latest| !restates(latest, usage)) {
-            self.content();
+    pub(super) fn request() -> Self {
+        Self::new(false)
+    }
+
+    pub(super) fn agent() -> Self {
+        Self::new(true)
+    }
+
+    fn new(turns: bool) -> Self {
+        Self {
+            turns,
+            finished: None,
+            current: None,
+            closed: false,
         }
-        self.latest = Some(usage);
+    }
+
+    pub(super) fn observe(&mut self, usage: Usage) {
+        if self.turns && self.closed {
+            self.finished = self.current;
+            self.closed = false;
+        }
         self.current = Some(self.finished.map_or(usage, |finished| finished.plus(usage)));
     }
 
@@ -24,22 +43,9 @@ impl Tally {
         self.closed = true;
     }
 
-    pub(super) fn content(&mut self) {
-        if self.closed {
-            self.finished = self.current;
-            self.latest = None;
-            self.closed = false;
-        }
-    }
-
     pub(super) fn total(&self) -> Option<Usage> {
         self.current
     }
-}
-
-fn restates(latest: Usage, usage: Usage) -> bool {
-    usage.prompt_tokens >= latest.prompt_tokens
-        && usage.completion_tokens >= latest.completion_tokens
 }
 
 #[cfg(test)]
@@ -48,10 +54,8 @@ mod tests {
 
     #[test]
     fn a_turns_result_replaces_the_messages_that_led_to_it() {
-        let mut tally = Tally::default();
-        tally.content();
+        let mut tally = Tally::agent();
         tally.observe(Usage::new(10, 1));
-        tally.content();
         tally.observe(Usage::new(20, 2));
         tally.observe(Usage::new(30, 3));
         tally.finish();
@@ -60,11 +64,10 @@ mod tests {
     }
 
     #[test]
-    fn finished_turns_add_up() {
-        let mut tally = Tally::default();
+    fn finished_agent_turns_add_up() {
+        let mut tally = Tally::agent();
         tally.observe(Usage::new(10, 1));
         tally.finish();
-        tally.content();
         tally.observe(Usage::new(4, 4));
         tally.observe(Usage::new(5, 5));
         tally.finish();
@@ -74,8 +77,7 @@ mod tests {
 
     #[test]
     fn usage_reported_after_the_finish_is_counted_once() {
-        let mut tally = Tally::default();
-        tally.content();
+        let mut tally = Tally::request();
         tally.observe(Usage::new(7, 2));
         tally.finish();
         tally.observe(Usage::new(7, 3));
@@ -84,22 +86,38 @@ mod tests {
     }
 
     #[test]
-    fn usage_from_a_next_message_that_writes_nothing_first_does_not_replace_the_finished_turn() {
-        let mut tally = Tally::default();
-        tally.content();
+    fn a_usage_only_frame_after_the_finish_is_the_requests_whole_usage() {
+        let mut tally = Tally::request();
+        tally.finish();
+        tally.observe(Usage::new(7, 3));
+
+        assert_eq!(tally.total(), Some(Usage::new(7, 3)));
+    }
+
+    #[test]
+    fn a_next_agent_turn_that_reports_less_before_it_writes_does_not_replace_the_finished_one() {
+        let mut tally = Tally::agent();
         tally.observe(Usage::new(10, 1));
         tally.finish();
         tally.observe(Usage::new(4, 0));
-        tally.content();
         tally.observe(Usage::new(4, 2));
 
         assert_eq!(tally.total(), Some(Usage::new(14, 3)));
     }
 
     #[test]
+    fn a_next_agent_turn_whose_context_grew_is_still_a_turn_of_its_own() {
+        let mut tally = Tally::agent();
+        tally.observe(Usage::new(10_000, 50));
+        tally.finish();
+        tally.observe(Usage::new(10_200, 80));
+
+        assert_eq!(tally.total(), Some(Usage::new(20_200, 130)));
+    }
+
+    #[test]
     fn a_stream_that_reported_nothing_totals_nothing() {
-        let mut tally = Tally::default();
-        tally.content();
+        let mut tally = Tally::agent();
         tally.finish();
 
         assert_eq!(tally.total(), None);

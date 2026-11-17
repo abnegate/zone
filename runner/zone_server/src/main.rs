@@ -255,9 +255,11 @@ async fn main() {
 
     let listener = TcpListener::bind(addr).await.expect("Failed to bind");
 
-    let result = axum::serve(listener, app).await;
-    background.close();
-    let _ = tokio::time::timeout(BACKGROUND_DRAIN, background.wait()).await;
+    let result = tokio::select! {
+        result = axum::serve(listener, app) => Some(result),
+        () = shutdown_requested() => None,
+    };
+    drain(&background, BACKGROUND_DRAIN).await;
     recovery.abort();
     let _ = recovery.await;
     training.abort();
@@ -266,7 +268,30 @@ async fn main() {
         callback.abort();
         let _ = callback.await;
     }
-    result.expect("Server error");
+    if let Some(result) = result {
+        result.expect("Server error");
+    }
+}
+
+/// Resolves on SIGTERM or ctrl-c. Open sockets are not waited for, since a
+/// long-lived one would hold a deploy until it was killed.
+async fn shutdown_requested() {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("Could not listen for SIGTERM");
+    tokio::select! {
+        _ = terminate.recv() => tracing::info!("Stopping on SIGTERM"),
+        result = tokio::signal::ctrl_c() => {
+            result.expect("Could not listen for ctrl-c");
+            tracing::info!("Stopping on ctrl-c");
+        }
+    }
+}
+
+async fn drain(tasks: &tokio_util::task::TaskTracker, within: std::time::Duration) {
+    tasks.close();
+    if tokio::time::timeout(within, tasks.wait()).await.is_err() {
+        tracing::warn!("Background writes were still running when the drain ended");
+    }
 }
 
 /// An embedding width for the startup log; a width of 0 is one the service
@@ -424,7 +449,34 @@ mod tests {
     use super::DIMENSION_LEARNED_ON_FIRST_EMBED;
     use super::Mode;
     use super::dimension_label;
+    use super::drain;
     use super::mode;
+
+    #[tokio::test]
+    async fn the_drain_waits_for_a_write_that_is_still_running() {
+        let tasks = tokio_util::task::TaskTracker::new();
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = finished.clone();
+        tasks.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        drain(&tasks, std::time::Duration::from_secs(5)).await;
+
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn the_drain_gives_up_on_a_write_that_never_ends() {
+        let tasks = tokio_util::task::TaskTracker::new();
+        tasks.spawn(std::future::pending::<()>());
+
+        let started = std::time::Instant::now();
+        drain(&tasks, std::time::Duration::from_millis(100)).await;
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
 
     fn arguments(arguments: &[&str]) -> Vec<String> {
         arguments
