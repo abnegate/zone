@@ -1,5 +1,5 @@
-//! The context window an agent reports, kept on the client for the turn
-//! that ran it.
+//! The context window an agent reports, and the model it reports running on,
+//! kept on the client for the turn that ran them.
 
 use super::*;
 
@@ -123,6 +123,35 @@ async fn codex_occupancy_after_its_finish_is_recorded_once_the_stream_is_drained
         "codex reports its window only after it exits"
     );
     assert_eq!(client.occupancy(), rolled_out());
+}
+
+/// The turn asked for no model in particular, so what claude says it wrote
+/// on is the only account of what ran.
+#[tokio::test]
+async fn claude_names_the_model_it_wrote_the_turn_on() {
+    let stand_in = StandIn::new(CLAUDE_REPORTED);
+    let client = running(AgentKind::Claude, standing_in(&stand_in));
+    assert_eq!(client.reported_model(), None);
+
+    let (_, failure) = asked(&client, AgentKind::Claude).await;
+
+    assert!(failure.is_none(), "{failure:?}");
+    assert_eq!(
+        client.reported_model().as_deref(),
+        Some("claude-sonnet-4-6")
+    );
+}
+
+#[tokio::test]
+async fn codex_names_the_model_its_rollout_reports() {
+    let home = TempDir::new().expect("a codex home");
+    let stand_in = codex(ROLLOUT, None, ANSWERED);
+    let client = homed(&stand_in, &home);
+
+    let (_, failure) = asked(&client, AgentKind::Codex).await;
+
+    assert!(failure.is_none(), "{failure:?}");
+    assert_eq!(client.reported_model().as_deref(), Some("gpt-6.1-sol"));
 }
 
 #[tokio::test]

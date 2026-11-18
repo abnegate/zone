@@ -1562,6 +1562,48 @@ async fn the_context_an_agent_reports_is_kept_on_the_client_not_chunked() {
 }
 
 #[tokio::test]
+async fn the_model_an_agent_reports_is_kept_on_the_client_not_chunked() {
+    let events = agent_events(vec![
+        Ok(AgentEvent::Model("claude-opus-4-5".to_string())),
+        Ok(AgentEvent::Text("Done.".to_string())),
+        Ok(AgentEvent::finished(Some("success".to_string()))),
+    ]);
+    let reported = Reported::default();
+
+    let (delivered, failure) = collected(turn(reported.clone()).chunks(events)).await;
+
+    assert!(failure.is_none(), "a report failed the turn: {failure:?}");
+    assert_eq!(delivered.len(), 2, "no chunk carries the report");
+    assert_eq!(
+        reported.latest_model(),
+        Some((
+            Reporter::Agent(AgentKind::Claude),
+            "claude-opus-4-5".to_string()
+        ))
+    );
+}
+
+/// A turn that moves between models reports each, and the last one is what
+/// it ran on.
+#[tokio::test]
+async fn the_last_model_an_agent_reports_is_the_one_kept() {
+    let events = agent_events(vec![
+        Ok(AgentEvent::Model("claude-opus-4-5".to_string())),
+        Ok(AgentEvent::Model("claude-sonnet-4-6".to_string())),
+        Ok(AgentEvent::finished(Some("success".to_string()))),
+    ]);
+    let reported = Reported::default();
+
+    let (_, failure) = collected(turn(reported.clone()).chunks(events)).await;
+
+    assert!(failure.is_none(), "a report failed the turn: {failure:?}");
+    assert_eq!(
+        reported.latest_model().map(|(_, model)| model).as_deref(),
+        Some("claude-sonnet-4-6")
+    );
+}
+
+#[tokio::test]
 async fn news_of_a_subagent_never_reaches_the_reader_as_a_chunk() {
     let events = agent_events(vec![
         Ok(AgentEvent::Subagent(
@@ -1635,6 +1677,113 @@ fn a_client_reports_only_what_the_agent_it_now_runs_on_reported() {
 
     let http = handed.with_backend(LlmBackend::Http);
     assert_eq!(http.occupancy(), None);
+}
+
+#[test]
+fn a_client_names_the_model_only_the_backend_it_now_runs_on_reported() {
+    let client = LlmClient::new(LlmConfig::new("http://localhost:4000", "auto", "key"))
+        .with_backend(LlmBackend::cli(AgentKind::Claude, settings()));
+    client
+        .reported
+        .record_model(Reporter::Agent(AgentKind::Claude), "claude-opus-4-5");
+    assert_eq!(client.reported_model().as_deref(), Some("claude-opus-4-5"));
+
+    let handed = client.with_backend(LlmBackend::cli(AgentKind::Codex, settings()));
+    assert_eq!(
+        handed.reported_model(),
+        None,
+        "claude's model was kept as codex's after the turn handed over"
+    );
+
+    let http = handed.with_backend(LlmBackend::Http);
+    assert_eq!(
+        http.reported_model(),
+        None,
+        "an agent's model was kept as the endpoint's"
+    );
+}
+
+/// A self-hosted endpoint names the model that answered, which a proxy
+/// resolves to whatever it routed the request to.
+mod endpoint_model {
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    const SERVED: &str = "qwen3.8-27b-uncensored";
+
+    async fn served(body: ResponseTemplate) -> (MockServer, LlmClient) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(body)
+            .mount(&server)
+            .await;
+        let client = LlmClient::new(endpoint(&server.uri(), ""));
+        assert_eq!(client.reported_model(), None);
+        (server, client)
+    }
+
+    #[tokio::test]
+    async fn a_buffered_turn_names_the_model_the_endpoint_answered_under() {
+        let answer = json!({
+            "id": "cmpl-1",
+            "object": "chat.completion",
+            "model": SERVED,
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+        });
+        let (_server, client) = served(ResponseTemplate::new(200).set_body_json(answer)).await;
+
+        let answered = client
+            .chat_with_model("auto", &[Message::user("hi")], None)
+            .await
+            .expect("an answer");
+
+        assert_eq!(answered.model, SERVED);
+        assert_eq!(client.reported_model().as_deref(), Some(SERVED));
+    }
+
+    #[tokio::test]
+    async fn a_streamed_turn_names_the_model_its_chunks_answered_under() {
+        let body = format!(
+            "data: {{\"model\":\"{SERVED}\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"hi\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+        );
+        let (_server, client) = served(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .await;
+
+        let stream = client
+            .chat_stream_with_model("auto", &[Message::user("hi")], None)
+            .await
+            .expect("a stream");
+        let (delivered, failure) = collected(stream).await;
+
+        assert!(failure.is_none(), "{failure:?}");
+        assert_eq!(spoken(&delivered), "hi");
+        assert_eq!(client.reported_model().as_deref(), Some(SERVED));
+    }
+
+    /// A server that names no model has reported nothing, and the run keeps
+    /// the model it asked for rather than recording a blank.
+    #[tokio::test]
+    async fn a_turn_the_endpoint_names_no_model_for_reports_none() {
+        let answer = json!({
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+        });
+        let (_server, client) = served(ResponseTemplate::new(200).set_body_json(answer)).await;
+
+        client
+            .chat_with_model("qwen3.8-27b", &[Message::user("hi")], None)
+            .await
+            .expect("an answer");
+
+        assert_eq!(client.reported_model(), None);
+    }
 }
 
 #[tokio::test]
