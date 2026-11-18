@@ -41,6 +41,8 @@ const UPDATE_ORDER: &str = "3d6e9f21-8a4b-4c1d-9e2f-0a1b2c3d4e03";
 const SUBSCRIPTION: &str = "b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c";
 const PRODUCT: &str = "5f0c8a9e-6b1d-4c2e-9a3f-7d4e1b2c3a40";
 const EMAIL: &str = "billing@acme.test";
+const NO_EMAIL_ORDER: &str = "3d6e9f21-8a4b-4c1d-9e2f-0a1b2c3d4e07";
+const NO_SEATS_ORDER: &str = "3d6e9f21-8a4b-4c1d-9e2f-0a1b2c3d4e06";
 
 fn now() -> DateTime<Utc> {
     Utc.timestamp_opt(TIMESTAMP, 0).unwrap()
@@ -357,6 +359,12 @@ fn unpaid_order_is_ignored() {
     );
 }
 
+fn unaddressed() -> OrderError {
+    OrderError::Email {
+        order: ORDER.to_owned(),
+    }
+}
+
 fn misconfigured(order: &str) -> Result<Decision, OrderError> {
     Err(OrderError::Misconfigured {
         order: order.to_owned(),
@@ -368,7 +376,7 @@ fn misconfigured(order: &str) -> Result<Decision, OrderError> {
 fn a_listed_product_without_seats_is_misconfigured() {
     assert_eq!(
         decide(&event(NO_SEATS), &products()),
-        misconfigured("3d6e9f21-8a4b-4c1d-9e2f-0a1b2c3d4e06")
+        misconfigured(NO_SEATS_ORDER)
     );
 }
 
@@ -382,7 +390,12 @@ fn an_unlisted_product_without_seats_is_ignored() {
 
 #[test]
 fn order_without_email_is_an_error() {
-    assert_eq!(decide(&event(NO_EMAIL), &products()), Err(OrderError::Email));
+    assert_eq!(
+        decide(&event(NO_EMAIL), &products()),
+        Err(OrderError::Email {
+            order: NO_EMAIL_ORDER.to_owned()
+        })
+    );
 }
 
 #[test]
@@ -513,14 +526,14 @@ fn blank_or_absent_email_is_an_error() {
     let blank = edited(CREATE, |value| {
         value["data"]["customer"]["email"] = json!("  ")
     });
-    assert_eq!(decide(&blank, &products()), Err(OrderError::Email));
+    assert_eq!(decide(&blank, &products()), Err(unaddressed()));
     let absent = edited(CREATE, |value| {
         value["data"]["customer"]
             .as_object_mut()
             .unwrap()
             .remove("email");
     });
-    assert_eq!(decide(&absent, &products()), Err(OrderError::Email));
+    assert_eq!(decide(&absent, &products()), Err(unaddressed()));
 }
 
 #[test]

@@ -8,6 +8,7 @@ pub const SENT: &str = "sent";
 pub const IGNORED: &str = "ignored";
 pub const UNSIGNED: &str = "unsigned";
 pub const MALFORMED: &str = "malformed";
+pub const UNADDRESSED: &str = "unaddressed";
 pub const MISCONFIGURED: &str = "misconfigured";
 pub const UNSIGNABLE: &str = "unsignable";
 pub const UNDELIVERED: &str = "undelivered";
@@ -18,6 +19,7 @@ pub enum Outcome {
     Ignored,
     Unsigned,
     Malformed,
+    Unaddressed,
     Misconfigured,
     Unsignable,
     Undelivered,
@@ -28,7 +30,7 @@ impl Outcome {
         match self {
             Self::Sent | Self::Ignored => StatusCode::ACCEPTED,
             Self::Unsigned => StatusCode::UNAUTHORIZED,
-            Self::Malformed | Self::Misconfigured | Self::Unsignable => {
+            Self::Malformed | Self::Unaddressed | Self::Misconfigured | Self::Unsignable => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
             Self::Undelivered => StatusCode::SERVICE_UNAVAILABLE,
@@ -41,6 +43,7 @@ impl Outcome {
             Self::Ignored => IGNORED,
             Self::Unsigned => UNSIGNED,
             Self::Malformed => MALFORMED,
+            Self::Unaddressed => UNADDRESSED,
             Self::Misconfigured => MISCONFIGURED,
             Self::Unsignable => UNSIGNABLE,
             Self::Undelivered => UNDELIVERED,
@@ -51,7 +54,8 @@ impl Outcome {
 impl From<&OrderError> for Outcome {
     fn from(error: &OrderError) -> Self {
         match error {
-            OrderError::Malformed | OrderError::Email => Self::Malformed,
+            OrderError::Malformed => Self::Malformed,
+            OrderError::Email { .. } => Self::Unaddressed,
             OrderError::Misconfigured { .. } => Self::Misconfigured,
         }
     }
@@ -74,6 +78,7 @@ mod tests {
         assert_eq!(Outcome::Unsigned.status(), StatusCode::UNAUTHORIZED);
         for unprocessable in [
             Outcome::Malformed,
+            Outcome::Unaddressed,
             Outcome::Misconfigured,
             Outcome::Unsignable,
         ] {
@@ -97,5 +102,14 @@ mod tests {
         };
         assert_eq!(Outcome::from(&error), Outcome::Misconfigured);
         assert_eq!(Outcome::from(&OrderError::Malformed), Outcome::Malformed);
+    }
+
+    #[test]
+    fn a_missing_email_is_its_own_outcome() {
+        let error = OrderError::Email {
+            order: "order".into(),
+        };
+        assert_eq!(Outcome::from(&error), Outcome::Unaddressed);
+        assert_eq!(Outcome::Unaddressed.as_str(), "unaddressed");
     }
 }

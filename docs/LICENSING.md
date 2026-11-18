@@ -358,7 +358,7 @@ at 2 MB, far above any Polar event.
 
 `serve` writes one JSON object per line to standard error. Each delivery logs
 one line with an `outcome` of `sent`, `ignored`, `unsigned`, `malformed`,
-`misconfigured`, `unsignable` or `undelivered`, matching the
+`unaddressed`, `misconfigured`, `unsignable` or `undelivered`, matching the
 [responses](#responses). Once the
 signature checks out, the line carries the Polar `webhook` id and, once the
 order is read, its `order`, `subscription` and `license` ids. An ignored
@@ -616,8 +616,9 @@ the customer receives the same email twice. Both carry the identical key.
 | Key signed and sent | `202` | `{"license":"<uuid>"}` | Records a success |
 | Event or order deliberately ignored | `202` | `{"ignored":"<reason>"}` | Records a success |
 | Signature missing, wrong, or outside the five-minute window | `401` | | Retries; counts as a failure |
-| A body that isn't a Polar event, or an order the signer can't issue for, such as one without a customer email or with a subscription period that ends before it starts | `422` | | Retries; counts as a failure |
-| An order for a listed product without a seat-based subscription | `422` | | Retries; counts as a failure |
+| A body that isn't a Polar event (`malformed`), or an order with a subscription period that ends before it starts (`unsignable`) | `422` | | Retries; counts as a failure |
+| An order without a customer email (`unaddressed`) | `422` | | Retries; counts as a failure |
+| An order for a listed product without a seat-based subscription (`misconfigured`) | `422` | | Retries; counts as a failure |
 | The email couldn't be sent: the relay refused it or timed out, or the order's address can't be parsed | `503` | | Retries |
 
 The signer answers `2xx` for an issuing order only after the relay has
@@ -646,7 +647,7 @@ quickly.
 | The signer exits at startup | A required variable is missing or invalid, both or neither private key variables are set, the key file is too readable, or the key isn't in this release's keyring | Read the message, which names the variable. For an untrusted key, run a signer built from a release that trusts it. |
 | Every delivery gets `401` | Wrong `POLAR_WEBHOOK_SECRET`, a proxy changing the body, or the host clock more than five minutes off | Copy the secret from the endpoint again, pass the body through unchanged, run NTP. |
 | Deliveries get `503` | The relay is down, slow, or refusing the sender or the recipient | Fix the relay; the `undelivered` log line says whether its error was `retryable`. Polar retries, and you can redeliver anything that ran out of attempts. A recipient that's refused for good needs a [hand-signed](#hand-signing-a-stuck-order) key sent to a corrected address. |
-| Deliveries get `422` | The order can't be issued, usually because it has no customer email | [Hand-sign](#hand-signing-a-stuck-order) it and send the key yourself. |
+| Deliveries get `422` | The order can't be issued, usually because it has no customer email (an `unaddressed` error in the log, naming the order) | [Hand-sign](#hand-signing-a-stuck-order) it and send the key yourself. |
 | A `misconfigured` error in the log | An order for a product in `POLAR_PRODUCT_IDS` had no seat-based subscription | Make the product seat-based, then [hand-sign](#hand-signing-a-stuck-order) the order the log names. |
 | Deliveries get `403` | Cloudflare Bot Fight Mode or another bot filter | Turn it off for the signer's name. |
 | The endpoint is disabled | 10 consecutive events failed | Fix the cause, [re-enable it](#re-enabling-the-endpoint), then redeliver. |

@@ -63,8 +63,15 @@ pub async fn receive(
                     %error,
                     "A paid order for a listed product issued nothing; hand-sign it"
                 ),
-                OrderError::Malformed | OrderError::Email => {
-                    tracing::warn!(webhook, %outcome, %error, "Could not issue for a paid order");
+                OrderError::Email { order } => tracing::error!(
+                    webhook,
+                    order,
+                    %outcome,
+                    %error,
+                    "A paid order has no address to send its license to; hand-sign it"
+                ),
+                OrderError::Malformed => {
+                    tracing::warn!(webhook, %outcome, %error, "Could not read a paid order");
                 }
             }
             return outcome.status().into_response();

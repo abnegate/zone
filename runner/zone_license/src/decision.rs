@@ -31,7 +31,9 @@ pub fn decide(event: &Event, products: &[String]) -> Result<Decision, OrderError
             product: product.to_owned(),
         });
     };
-    let email = order.email().ok_or(OrderError::Email)?;
+    let email = order.email().ok_or_else(|| OrderError::Email {
+        order: order.id.clone(),
+    })?;
     let customer = order.customer_name().unwrap_or(email);
     Ok(Decision::Issue(Grant {
         order: order.id.clone(),
