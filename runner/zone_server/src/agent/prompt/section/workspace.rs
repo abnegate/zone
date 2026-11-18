@@ -22,6 +22,11 @@ const HEADING: &str = "Workspace actions:";
 
 pub(in crate::agent::prompt) const CREATE_PULL_REQUEST: &str = "create_pull_request";
 pub(in crate::agent::prompt) const COMMENT_ON_ISSUE: &str = "comment_on_issue";
+pub(in crate::agent::prompt) const ASSESS_PULL_REQUESTS: &str = "assess_pull_requests";
+/// Named here as well as in [`BULLETS`] because the review a pull request
+/// falls back on is a runner, and the bullet that asks for one may not name a
+/// tool the catalog was never given.
+pub(in crate::agent::prompt) const START_TASK_TOOL: &str = "start_task";
 
 /// A refusal reaches the model as an error result, so without this the
 /// fallback to gh would post what the user refused or never approved.
@@ -203,6 +208,19 @@ fn tracked(context: &Context<'_>) -> Vec<String> {
              so, and give its URL."
         ));
     }
+    if tools.has(CREATE_PULL_REQUEST)
+        && tools.has(ASSESS_PULL_REQUESTS)
+        && tools.has(START_TASK_TOOL)
+    {
+        let assess = tools.qualified(ASSESS_PULL_REQUESTS);
+        let runner = tools.qualified(START_TASK_TOOL);
+        bullets.push(format!(
+            "- A pull request no bot reviewed is unreviewed: once its checks settle, read \
+             {assess}, and when no review bot spoke, send the branch and its worktree to an \
+             independent agent with {runner}. Checks that pass are not a review, and neither is \
+             rereading your own work. Report what it found."
+        ));
+    }
     if tools.has(COMMENT_ON_ISSUE) {
         let comment = tools.qualified(COMMENT_ON_ISSUE);
         bullets.push(format!(
@@ -234,6 +252,7 @@ mod tests {
             .iter()
             .flat_map(|(requires, _, _)| requires.iter().copied())
             .chain(std::iter::once(CREATE_PULL_REQUEST))
+            .chain(std::iter::once(ASSESS_PULL_REQUESTS))
             .collect::<BTreeSet<&'static str>>()
             .into_iter()
             .collect()
@@ -571,6 +590,51 @@ mod tests {
 
     /// Where no pull request can be ended in — a run Zone publishes itself, or
     /// a chat with nothing connected — the restraint is what is left.
+    /// A pull request this workspace opens is reviewed by a bot or by nobody. The bot is a
+    /// workflow like any other: it can be unconfigured, skipped on a fork, or skipped because
+    /// it ran out of quota, and a turn that reads green checks as a review ships unreviewed work.
+    #[test]
+    fn a_pull_request_no_bot_reviewed_is_reviewed_by_an_independent_agent() {
+        let tools = ChatTools::with_names(ToolProfile::Chat, &catalog(), None);
+        let rendered = prompted(&tools, &environment().with_github());
+
+        assert!(
+            rendered.contains("A pull request no bot reviewed is unreviewed"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("to an independent agent with start_task"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Checks that pass are not a review"),
+            "{rendered}"
+        );
+    }
+
+    /// The rule asks for two tools beyond the one that opened the pull request. A catalog
+    /// missing either is told nothing, rather than sent to a tool it does not have.
+    #[test]
+    fn the_fallback_review_is_only_asked_for_where_both_tools_it_needs_exist() {
+        for missing in [ASSESS_PULL_REQUESTS, START_TASK_TOOL] {
+            let names: Vec<&str> = catalog()
+                .into_iter()
+                .filter(|name| *name != missing)
+                .collect();
+            let tools = ChatTools::with_names(ToolProfile::Chat, &names, None);
+            let rendered = prompted(&tools, &environment().with_github());
+
+            assert!(
+                !rendered.contains("A pull request no bot reviewed is unreviewed"),
+                "the fallback review still renders without {missing}: {rendered}"
+            );
+            assert!(
+                rendered.contains("work that changed it ends in a pull request"),
+                "the rule that opens one must survive it: {rendered}"
+            );
+        }
+    }
+
     #[test]
     fn a_catalog_with_nowhere_to_open_one_keeps_the_rule_that_waits_to_be_asked() {
         let tools = ChatTools::with_names(ToolProfile::Chat, &catalog(), None);
