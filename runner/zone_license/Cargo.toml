@@ -1,0 +1,29 @@
+[package]
+name = "zone_license"
+description = "Zone Enterprise license signer and Polar webhook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "zone-license"
+path = "src/main.rs"
+
+[dependencies]
+abnegate-notify = { workspace = true, features = ["smtp"] }
+abnegate-secret = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+lettre = { version = "=0.11.23", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1-native-tls"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+zone_enterprise = { path = "../zone_enterprise", features = ["signing"] }
+
+[dev-dependencies]
+base64 = { workspace = true }

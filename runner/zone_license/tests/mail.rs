@@ -1,0 +1,131 @@
+mod support;
+
+use abnegate_notify::{Sender, SmtpConfig, SmtpSecurity};
+use chrono::{TimeZone, Utc};
+use tokio::net::TcpListener;
+use zone_license::mail::{Letter, MailError, Outbox, Relay};
+
+use crate::support::smtp::{SENDER, SmtpSink};
+
+const RECIPIENT: &str = "billing@acme.test";
+const CUSTOMER: &str = "Acme <Ltd> & Sons";
+const KEY: &str = concat!(
+    "eyJpZCI6IjAxOTM2YjJlLTRmNWEtNWI2Yy04ZDdlLTlmMGExYjJjM2Q0ZSIsImN1c3RvbWVyIjoiQWNtZSBMdGQiLCJz",
+    "ZWF0cyI6NSwiaXNzdWVkX2F0IjoiMjAyNi0xMS0xOFQxMTo1OTo1OFoiLCJleHBpcmVzX2F0IjoiMjAyNy0xMS0xOFQx",
+    "MTo1OTo1OFoiLCJrZXlfaWQiOiIyMDI2LTEifQ.",
+    "3q2-7wABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9A",
+);
+
+fn letter() -> Letter {
+    Letter::license(
+        CUSTOMER,
+        5,
+        Utc.with_ymd_and_hms(2027, 11, 18, 11, 59, 58).unwrap(),
+        KEY,
+    )
+}
+
+async fn closed_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    listener.local_addr().expect("address").port()
+}
+
+#[tokio::test]
+async fn a_license_reaches_the_relay_as_text_and_html_with_the_key_intact() {
+    let sink = SmtpSink::start().await;
+    let relay = Relay::new(&sink.config()).expect("relay");
+
+    relay.send(RECIPIENT, &letter()).await.expect("sent");
+
+    let messages = sink.messages();
+    assert_eq!(messages.len(), 1);
+    let message = &messages[0];
+    assert_eq!(message.recipients, vec![RECIPIENT.to_string()]);
+    assert_eq!(
+        message.header("Subject"),
+        Some("Your Zone Enterprise license key")
+    );
+    assert_eq!(
+        message.header("From"),
+        Some(format!("Zone <{SENDER}>").as_str())
+    );
+    assert!(
+        message
+            .header("Content-Type")
+            .is_some_and(|value| value.starts_with("multipart/alternative")),
+        "{}",
+        message.data
+    );
+
+    let parts = message.parts();
+    assert_eq!(parts.len(), 2, "{parts:?}");
+
+    let text = message.part("text/plain").expect("text part");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines.contains(&KEY), "{text}");
+    assert!(lines.contains(&"Customer: Acme <Ltd> & Sons"), "{text}");
+    assert!(lines.contains(&"Paid through: 18 November 2027"), "{text}");
+
+    let html = message.part("text/html").expect("html part");
+    assert!(html.contains(&format!(">{KEY}</pre>")), "{html}");
+    assert!(
+        html.contains("<td>Acme &lt;Ltd&gt; &amp; Sons</td>"),
+        "{html}"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_connection_is_retryable() {
+    let config = SmtpConfig::unauthenticated("127.0.0.1", closed_port().await, Sender::new(SENDER))
+        .with_security(SmtpSecurity::Plaintext);
+    let relay = Relay::new(&config).expect("relay");
+
+    let error = relay.send(RECIPIENT, &letter()).await.expect_err("refused");
+
+    assert!(matches!(error, MailError::Delivery { .. }), "{error:?}");
+    assert!(error.is_retryable(), "{error}");
+}
+
+#[tokio::test]
+async fn a_transient_rejection_is_retryable() {
+    let sink = SmtpSink::rejecting("451 4.3.0 try again later").await;
+    let relay = Relay::new(&sink.config()).expect("relay");
+
+    let error = relay
+        .send(RECIPIENT, &letter())
+        .await
+        .expect_err("rejected");
+
+    assert!(error.is_retryable(), "{error}");
+    assert!(sink.messages().is_empty());
+}
+
+#[tokio::test]
+async fn a_permanent_rejection_is_not_retryable() {
+    let sink = SmtpSink::rejecting("550 5.1.1 no such user").await;
+    let relay = Relay::new(&sink.config()).expect("relay");
+
+    let error = relay
+        .send(RECIPIENT, &letter())
+        .await
+        .expect_err("rejected");
+
+    assert!(matches!(error, MailError::Delivery { .. }), "{error:?}");
+    assert!(!error.is_retryable(), "{error}");
+    assert!(sink.messages().is_empty());
+}
+
+#[tokio::test]
+async fn an_unparseable_recipient_never_reaches_the_relay() {
+    let sink = SmtpSink::start().await;
+    let relay = Relay::new(&sink.config()).expect("relay");
+
+    let error = relay
+        .send("not an address", &letter())
+        .await
+        .expect_err("refused");
+
+    assert!(matches!(error, MailError::Recipient));
+    assert!(!error.is_retryable());
+    assert!(sink.messages().is_empty());
+}

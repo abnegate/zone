@@ -9786,6 +9786,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "zone_license"
+version = "0.1.0"
+dependencies = [
+ "abnegate-notify",
+ "abnegate-secret",
+ "async-trait",
+ "base64 0.23.1",
+ "chrono",
+ "lettre",
+ "thiserror 2.0.20",
+ "tokio",
+ "zone_enterprise",
+]
+
+[[package]]
 name = "zone_routing"
 version = "0.1.0"
 dependencies = [
