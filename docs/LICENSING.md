@@ -105,7 +105,8 @@ the key:
 - the public key as a Rust byte array, ready to paste into `KEYS` in
   `runner/zone_enterprise/src/production.rs`;
 - the public key in base64, to record beside the key id;
-- a suggested key id, such as `2026-2`, for when you don't pass `--key-id`.
+- the key id: the one you passed with `--key-id`, or else the next free one
+  for the current year, such as `2026-2`.
 
 Without `--output`, the private key goes to standard output instead. Prefer
 `--output`: it keeps the key out of terminal scrollback and out of a shell
@@ -305,10 +306,10 @@ docker run -d --name zone-license --restart unless-stopped \
   zone-license
 ```
 
-The signer refuses a key file that its group or everyone can read, so the file
-must have mode `0600` or `0400` and be owned by the user the container runs
-as. On Kubernetes, mount the secret with `defaultMode: 0400`; the default
-`0644` is refused.
+The signer refuses a key file that gives its group or everyone any access, so
+the file must have mode `0600` or `0400` and be owned by the user the
+container runs as, uid `10001`. On Kubernetes, mount the secret with
+`defaultMode: 0400`; the default `0644` is refused.
 
 The same image runs the other commands:
 
@@ -329,7 +330,7 @@ Values are trimmed, and a blank value counts as unset, except
 |---|---|---|
 | `POLAR_WEBHOOK_SECRET` | Required | The endpoint's secret from Polar, starting `whsec_`. |
 | `POLAR_PRODUCT_IDS` | Any product | Comma-separated Polar product IDs to issue keys for. Orders for other products are acknowledged and ignored. Set it if the organization sells anything else. |
-| `ZONE_LICENSE_PRIVATE_KEY_FILE` | None | Path to the private key file, which must not be group or world readable. Set exactly one of this and `ZONE_LICENSE_PRIVATE_KEY`. |
+| `ZONE_LICENSE_PRIVATE_KEY_FILE` | None | Path to the private key file, which must give its group and everyone else no access. Set exactly one of this and `ZONE_LICENSE_PRIVATE_KEY`. |
 | `ZONE_LICENSE_PRIVATE_KEY` | None | The private key itself: the base64 of the 32-byte seed. Set exactly one of this and `ZONE_LICENSE_PRIVATE_KEY_FILE`. |
 | `ZONE_LICENSE_KEY_ID` | Required | The signing key's id, such as `2026-2`. It must name a key in this release's production keyring, and that key must match the private key. |
 | `ZONE_LICENSE_LISTEN` | `0.0.0.0:8080` | The IP address and port to listen on, such as `127.0.0.1:8080` or `[::]:8080`. A host name is refused. |
@@ -356,9 +357,9 @@ at 2 MB, far above any Polar event.
 
 `serve` writes one JSON object per line to standard error. Each delivery logs
 one line with an `outcome` of `sent`, `ignored`, `unsigned`, `malformed`,
-`unsignable` or `undelivered`, matching the [responses](#responses), along with
-the Polar `webhook` id and, once the order is read, its `order`,
-`subscription` and `license` ids. An ignored delivery also logs the event type
+`unsignable` or `undelivered`, matching the [responses](#responses). Once the
+signature checks out, the line carries the Polar `webhook` id and, once the
+order is read, its `order`, `subscription` and `license` ids. An ignored delivery also logs the event type
 and the `reason`; a failed send logs whether the relay's error was
 `retryable`.
 
@@ -445,7 +446,7 @@ Zone verifies the key on the spot and unlocks the Enterprise features in
 place: the same image and the same data, with no restart or reinstall.
 
 The name on the license is the order's billing name; failing that, the
-customer's name; failing that, their email address.
+customer's billing name, then the customer's name, then their email address.
 
 | What happens in Polar | What the customer gets |
 |---|---|
@@ -476,11 +477,11 @@ zone-license sign --customer "Acme Ltd" --seats 10 --expires-at 2027-06-30
 |---|---|
 | `--customer <name>` | Required. The name shown in Zone. |
 | `--seats <n>` | Required. The licensed seat count. |
-| `--expires-at <time>` | Required. An RFC 3339 timestamp, such as `2027-06-30T00:00:00Z`, or a date, such as `2027-06-30`. Don't add the grace period; Zone adds it. |
+| `--expires-at <time>` | Required. An RFC 3339 timestamp, such as `2027-06-30T00:00:00Z`, or a date, such as `2027-06-30`, meaning midnight UTC. Don't add the grace period; Zone adds it. |
 | `--key-id <id>` | The signing key's id. Defaults to `ZONE_LICENSE_KEY_ID`. |
 | `--private-key-file <path>` | The private key file. Without it, the key comes from `ZONE_LICENSE_PRIVATE_KEY_FILE` or `ZONE_LICENSE_PRIVATE_KEY`. |
-| `--issued-at <time>` | When the license period starts. Leave it out for a new license. |
-| `--id <uuid>` | The license id. Leave it out for a new license. |
+| `--issued-at <time>` | When the license period starts, in either form `--expires-at` takes. Defaults to now; leave it out for a new license. |
+| `--id <uuid>` | The license id. Defaults to a random UUID; leave it out for a new license. |
 
 It prints the license string and nothing else, so it can be piped or copied as
 it is. The private key never goes on the command line, and `sign` refuses a
@@ -576,7 +577,7 @@ expiry and Zone's grace period follows.
 | `seats` | The seat count of the order's subscription |
 | `expires_at` | The subscription's `current_period_end`, with no grace added |
 | `issued_at` | The subscription's `current_period_start` |
-| `customer` | The order's billing name, else the customer's name, else their email |
+| `customer` | The order's billing name, else the customer's billing name, else the customer's name, else their email |
 | `id` | A UUIDv5 over the subscription, the period end and the seat count |
 | `key_id` | `ZONE_LICENSE_KEY_ID` |
 
@@ -679,9 +680,10 @@ and send the key with the installation steps.
 
 ## CI and publishing the image
 
-`.github/workflows/license-signer.yml` runs on changes to the signer. It
-builds, tests and lints `zone_license`, and builds the Docker image without
-pushing it.
+The **License Signer** workflow, `.github/workflows/license-signer.yml`, runs
+on changes to the signer. Its `test` job runs the `zone_license` tests, its
+`clippy` job lints them, and its `image` job builds the Docker image without
+pushing it and checks that the binary starts in it.
 
 To publish the image to the GitHub Container Registry, add a trigger on
 release tags, such as `license-signer-v*`, and a job that runs after the
@@ -696,7 +698,7 @@ on:
 jobs:
   publish:
     name: Publish
-    needs: [test, lint, image]
+    needs: [test, clippy, image]
     if: startsWith(github.ref, 'refs/tags/license-signer-v')
     runs-on: ubuntu-latest
     permissions:
