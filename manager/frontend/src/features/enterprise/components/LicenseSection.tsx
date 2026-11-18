@@ -34,7 +34,7 @@ export function LicenseSection() {
           <p className="section-description">Verify a Zone Enterprise license on this server.</p>
         </div>
         {response && needsLicense(response.status) && (
-          <div className="section-row-actions license-buy-actions">
+          <div className="section-row-actions">
             <a
               className={buttonVariants({ variant: 'secondary', size: 'sm' })}
               href={PRICING_URL}
