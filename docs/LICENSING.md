@@ -296,9 +296,15 @@ docker run -d --name zone-license --restart unless-stopped \
 ```
 
 To give it the private key as a file instead of a variable, mount it read-only
-and point `ZONE_LICENSE_PRIVATE_KEY_FILE` at it:
+and point `ZONE_LICENSE_PRIVATE_KEY_FILE` at it. The signer refuses a key file
+that gives its group or everyone any access, and the container runs as uid
+`10001`, so the file on the host must be owned by uid `10001` with mode `0400`
+or `0600`:
 
 ```sh
+sudo chown 10001:10001 /etc/zone-license/zone-license-2026-2.key
+sudo chmod 0400 /etc/zone-license/zone-license-2026-2.key
+
 docker run -d --name zone-license --restart unless-stopped \
   --env-file /etc/zone-license/signer.env \
   -e ZONE_LICENSE_PRIVATE_KEY_FILE=/run/secrets/zone-license-key \
@@ -307,10 +313,19 @@ docker run -d --name zone-license --restart unless-stopped \
   zone-license
 ```
 
-The signer refuses a key file that gives its group or everyone any access, so
-the file must have mode `0600` or `0400` and be owned by the user the
-container runs as, uid `10001`. On Kubernetes, mount the secret with
-`defaultMode: 0400`; the default `0644` is refused.
+On Kubernetes, pass the key as `ZONE_LICENSE_PRIVATE_KEY` from the secret
+rather than mounting it as a file. The kubelet writes a mounted secret owned
+by root, so uid `10001` can't read it with mode `0400`, and setting `fsGroup`
+to let it in adds group read, which the signer refuses:
+
+```yaml
+env:
+  - name: ZONE_LICENSE_PRIVATE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: zone-license
+        key: private-key
+```
 
 The same image runs the other commands:
 
