@@ -44,7 +44,7 @@ Zone is one platform with three parts: a shared core, and Zone Code and Zone Stu
 - **Private Web Search** (optional): VPN-protected metasearch engine; when the VPN is on, all stack internet traffic uses the same tunnel
 - **Multi-Tenant Architecture**: Organizations and workspaces for team collaboration, with email invitations
 - **Role-Based Access Control**: Fine-grained permissions with users, roles, policies and an audit log
-- **Team and Enterprise controls**: With a Zone Team or Enterprise license, single sign-on ([docs/SSO.md](docs/SSO.md)), agent and model policy ([docs/POLICY.md](docs/POLICY.md)), audit log download (Team), and streaming to a SIEM and retention (Enterprise) ([docs/AUDIT.md](docs/AUDIT.md))
+- **Enterprise controls**: With a Zone Enterprise license, single sign-on ([docs/SSO.md](docs/SSO.md)), agent and model policy ([docs/POLICY.md](docs/POLICY.md)), and audit log download, streaming to a SIEM and retention ([docs/AUDIT.md](docs/AUDIT.md))
 - **Theme Customization**: Workspace-specific theming
 
 ### Zone Code
