@@ -34,11 +34,11 @@ pub fn decide(event: &Event, products: &[String]) -> Result<Decision, OrderError
     let email = order.email().ok_or_else(|| OrderError::Email {
         order: order.id.clone(),
     })?;
-    let customer = order.customer_name().unwrap_or(email);
+    let customer = order.customer_name().unwrap_or_else(|| email.to_owned());
     Ok(Decision::Issue(Grant {
         order: order.id.clone(),
         subscription: subscription.id.clone(),
-        customer: customer.to_owned(),
+        customer,
         email: email.to_owned(),
         seats,
         period_start: subscription.current_period_start,

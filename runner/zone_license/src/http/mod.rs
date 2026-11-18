@@ -207,6 +207,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_license_and_the_letter_carry_the_same_normalised_name() {
+        let outbox = Arc::new(Recording::default());
+        let body = edited(CREATE, |value| {
+            value["data"]["billing_name"] = json!(" Acme\u{1b}[31m\u{200b} \r\n Ltd ");
+        });
+        let (status, _) = answer(app(outbox.clone(), products()), signed(&body)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let (_, letter) = &outbox.sent()[0];
+        let license = letter
+            .text()
+            .lines()
+            .find_map(|line| keyring().verify(line).ok())
+            .expect("the letter carries a license that verifies");
+        assert_eq!(license.payload().customer, "Acme Ltd");
+        assert!(
+            letter.text().contains("Customer: Acme Ltd\n"),
+            "{}",
+            letter.text()
+        );
+    }
+
+    #[tokio::test]
     async fn a_wrong_signature_is_refused() {
         refused(delivery(
             CREATE,

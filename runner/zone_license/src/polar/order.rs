@@ -1,3 +1,4 @@
+use abnegate_secret::sanitize;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
@@ -39,7 +40,10 @@ impl Order {
         filled(self.customer.email.as_deref())
     }
 
-    pub fn customer_name(&self) -> Option<&str> {
+    /// The first name in the fallback chain that is still readable once
+    /// control and invisible characters are stripped and its whitespace is
+    /// collapsed, so the signed license and the email show the same name.
+    pub fn customer_name(&self) -> Option<String> {
         [
             self.billing_name.as_deref(),
             self.customer.billing_name.as_deref(),
@@ -47,12 +51,21 @@ impl Order {
             self.customer.email.as_deref(),
         ]
         .into_iter()
-        .find_map(filled)
+        .flatten()
+        .find_map(normalized)
     }
 }
 
 fn filled(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn normalized(name: &str) -> Option<String> {
+    let name = sanitize(name)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!name.is_empty()).then_some(name)
 }
 
 #[cfg(test)]
@@ -132,19 +145,34 @@ mod tests {
             "billing_name": "Order Ltd",
             "customer": {"billing_name": "Customer Ltd", "name": "Jane", "email": "j@x.test"}
         });
-        assert_eq!(order(full).customer_name(), Some("Order Ltd"));
+        assert_eq!(order(full).customer_name().as_deref(), Some("Order Ltd"));
         let customer_billing = json!({
             "billing_name": " ",
             "customer": {"billing_name": "Customer Ltd", "name": "Jane", "email": "j@x.test"}
         });
         assert_eq!(
-            order(customer_billing).customer_name(),
+            order(customer_billing).customer_name().as_deref(),
             Some("Customer Ltd")
         );
         let name = json!({"customer": {"billing_name": "", "name": "Jane", "email": "j@x.test"}});
-        assert_eq!(order(name).customer_name(), Some("Jane"));
+        assert_eq!(order(name).customer_name().as_deref(), Some("Jane"));
         let email = json!({"customer": {"email": "j@x.test"}});
-        assert_eq!(order(email).customer_name(), Some("j@x.test"));
+        assert_eq!(order(email).customer_name().as_deref(), Some("j@x.test"));
         assert_eq!(order(json!({})).customer_name(), None);
+    }
+
+    #[test]
+    fn customer_name_strips_control_and_invisible_characters_and_collapses_whitespace() {
+        let order = order(json!({"billing_name": " Acme\u{1b}[31m\u{200b} \r\n Ltd\t"}));
+        assert_eq!(order.customer_name().as_deref(), Some("Acme Ltd"));
+    }
+
+    #[test]
+    fn a_name_with_nothing_readable_falls_through_the_chain() {
+        let order = order(json!({
+            "billing_name": "\u{1b}[31m\u{200b}",
+            "customer": {"name": "Jane"}
+        }));
+        assert_eq!(order.customer_name().as_deref(), Some("Jane"));
     }
 }

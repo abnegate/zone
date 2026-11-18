@@ -468,6 +468,8 @@ place: the same image and the same data, with no restart or reinstall.
 
 The name on the license is the order's billing name; failing that, the
 customer's billing name, then the customer's name, then their email address.
+Control and invisible characters are removed and runs of whitespace become one
+space, and the email shows exactly the name the license carries.
 
 | What happens in Polar | What the customer gets |
 |---|---|
