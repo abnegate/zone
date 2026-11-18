@@ -14,6 +14,7 @@ import {
   UNVERIFIED,
 } from '../fixtures';
 import { LicenseRefusal } from '../LicenseRefusal';
+import { PRICING_URL } from '../pricing';
 import { LICENSE_REFUSAL_CODES, UNVERIFIED_CODES } from '../schemas';
 import { refusalMessage, unverifiedReason } from '../status';
 import type { LicenseResponse } from '../types';
@@ -498,5 +499,58 @@ describe('LicenseSection', () => {
       );
       expect(details().Customer).toBe('Acme Ltd');
     });
+  });
+});
+
+describe('LicenseSection buy link', () => {
+  const BUY = 'Buy a license';
+
+  beforeEach(() => {
+    get.mockReset();
+  });
+
+  const unlicensed: readonly (readonly [string, LicenseResponse])[] = [
+    ['a Community install', COMMUNITY],
+    ['a stored key that does not verify', UNVERIFIED],
+    ['a lapsed license', LAPSED],
+  ];
+
+  for (const [name, response] of unlicensed) {
+    it(`links ${name} to pricing in a new tab`, async () => {
+      await loaded(response);
+
+      const link = screen.getByRole('link', { name: BUY });
+      expect(link).toHaveAttribute('href', PRICING_URL);
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link.getAttribute('rel')?.split(' ')).toContain('noopener');
+    });
+  }
+
+  const licensed: readonly (readonly [string, LicenseResponse])[] = [
+    ['an active license', ACTIVE],
+    ['a license in its grace period', GRACE],
+  ];
+
+  for (const [name, response] of licensed) {
+    it(`does not offer a purchase for ${name}`, async () => {
+      await loaded(response);
+
+      expect(screen.queryByRole('link', { name: BUY })).not.toBeInTheDocument();
+    });
+  }
+
+  it('does not offer a purchase while the license fails to load', async () => {
+    get.mockRejectedValue(
+      new ApiError('Failed to load the license: This needs a server admin.', 403)
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LicenseSection />
+      </QueryClientProvider>
+    );
+
+    await screen.findByRole('alert');
+    expect(screen.queryByRole('link', { name: BUY })).not.toBeInTheDocument();
   });
 });
