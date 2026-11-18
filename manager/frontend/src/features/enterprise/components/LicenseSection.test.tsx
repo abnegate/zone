@@ -501,7 +501,8 @@ describe('LicenseSection', () => {
 });
 
 describe('LicenseSection buy link', () => {
-  const BUY = 'Buy a license';
+  const BUY = /Buy a license/;
+  const BUY_NAME = 'Buy a license (opens in a new tab)';
 
   beforeEach(() => {
     get.mockReset();
@@ -518,6 +519,7 @@ describe('LicenseSection buy link', () => {
       await loaded(response);
 
       const link = screen.getByRole('link', { name: BUY });
+      expect(screen.getByRole('link', { name: BUY_NAME })).toBe(link);
       expect(link).toHaveAttribute('href', PRICING_URL);
       expect(link).toHaveAttribute('target', '_blank');
       expect(link.getAttribute('rel')?.split(' ')).toContain('noopener');

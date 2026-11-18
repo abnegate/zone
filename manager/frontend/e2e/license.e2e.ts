@@ -15,7 +15,9 @@ const UNVERIFIED_WARNING = "A license key is stored, but this version of Zone ca
 
 const FORBIDDEN = 'This needs a server admin.';
 
-const BUY = 'Buy a license';
+const BUY = /Buy a license/;
+
+const BUY_NAME = 'Buy a license (opens in a new tab)';
 
 const DESKTOP = { width: 1440, height: 900 };
 const PHONE = { width: 375, height: 812 };
@@ -61,6 +63,7 @@ test.describe('License settings', () => {
 
     const link = page.getByRole('link', { name: BUY });
     await expect(link).toBeVisible();
+    await expect(link).toHaveAccessibleName(BUY_NAME);
     await expect(link).toHaveAttribute('href', PRICING_URL);
     await expect(link).toHaveAttribute('target', '_blank');
     await expect(link).toHaveAttribute('rel', /\bnoopener\b/);

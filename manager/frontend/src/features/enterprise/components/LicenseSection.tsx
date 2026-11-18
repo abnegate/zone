@@ -42,6 +42,7 @@ export function LicenseSection() {
               rel="noopener noreferrer"
             >
               Buy a license
+              <span className="sr-only"> (opens in a new tab)</span>
             </a>
           </div>
         )}
