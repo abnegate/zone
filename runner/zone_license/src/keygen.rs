@@ -119,10 +119,20 @@ mod tests {
 
     const PRODUCTION: &str = include_str!("../../zone_enterprise/src/production.rs");
 
-    fn listed_bytes(text: &str) -> Vec<u8> {
-        text.split("0x")
-            .skip(1)
-            .map(|token| u8::from_str_radix(&token[..2], 16).unwrap())
+    fn listed_bytes(entry: &str) -> Vec<u8> {
+        entry
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("0x"))
+            .flat_map(|line| line.split_terminator(','))
+            .map(|token| {
+                let digits = token.trim().strip_prefix("0x").expect("a 0x byte");
+                assert!(
+                    digits.len() == 2 && digits.bytes().all(|digit| digit.is_ascii_hexdigit()),
+                    "{token:?} is not a 0xNN byte"
+                );
+                u8::from_str_radix(digits, 16).unwrap()
+            })
             .collect()
     }
 
@@ -137,13 +147,29 @@ mod tests {
     }
 
     #[test]
-    fn suggests_the_next_id_after_production() {
-        assert_eq!(suggest(&Keyring::production(), 2026), "2026-2");
+    fn suggests_the_next_free_id_for_this_year_after_production() {
+        let production = Keyring::production();
+        let year = Utc::now().year();
+        let suggested = suggest(&production, year);
+        let (prefix, number) = suggested.split_once(KEY_ID_SEPARATOR).unwrap();
+        let number: u32 = number.parse().unwrap();
+        assert_eq!(prefix, year.to_string());
+        assert!(production.get(&suggested).is_none(), "{suggested} is taken");
+        assert!(
+            number == 1 || production.get(&format!("{year}-{}", number - 1)).is_some(),
+            "{suggested} skips a free id"
+        );
     }
 
     #[test]
-    fn suggests_the_first_id_of_a_new_year() {
-        assert_eq!(suggest(&Keyring::production(), 2027), "2027-1");
+    fn suggests_the_first_id_of_a_year_production_has_no_key_for() {
+        let year = Keyring::production()
+            .ids()
+            .filter_map(|id| id.split_once(KEY_ID_SEPARATOR)?.0.parse::<i32>().ok())
+            .max()
+            .unwrap()
+            + 1;
+        assert_eq!(suggest(&Keyring::production(), year), format!("{year}-1"));
     }
 
     #[test]
@@ -171,6 +197,18 @@ mod tests {
     }
 
     #[test]
+    fn the_array_is_read_apart_from_a_0x_elsewhere_in_the_report() {
+        let public = PrivateKey::new([9; 32]).public();
+        let report = format!(
+            "Wrote the private key to /tmp/0xq9/signing.key.\n\
+             Public key (base64): Ab0xZf+=\n\
+             {}\n",
+            entry("2026-2", &public)
+        );
+        assert_eq!(listed_bytes(&report), public);
+    }
+
+    #[test]
     fn generates_distinct_keys() {
         assert_ne!(generate().unwrap().encode(), generate().unwrap().encode());
     }
@@ -183,9 +221,8 @@ mod tests {
         });
         assert_eq!(stdout.lines().count(), 1, "{stdout}");
         let key = PrivateKey::parse(&stdout).unwrap();
-        assert_eq!(listed_bytes(&stderr), key.public());
+        assert!(stderr.contains(&entry("2026-2", &key.public())), "{stderr}");
         assert!(stderr.contains(&STANDARD.encode(key.public())), "{stderr}");
-        assert!(stderr.contains("\"2026-2\""), "{stderr}");
         assert!(
             !stderr.contains(&key.encode()),
             "the report leaked the private key"
@@ -209,7 +246,7 @@ mod tests {
         });
         assert_eq!(stderr, "");
         let key = PrivateKey::parse(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(listed_bytes(&stdout), key.public());
+        assert!(stdout.contains(&entry("2026-2", &key.public())), "{stdout}");
         assert!(
             !stdout.contains(&key.encode()),
             "stdout leaked the private key"
