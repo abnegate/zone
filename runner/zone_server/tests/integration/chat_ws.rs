@@ -3165,6 +3165,8 @@ async fn test_chat_stream_error_saves_partial_reply_before_one_terminal() {
         "content":"partial reply",
         "images":[{"image_url":{"url":attachment},"index":0,"type":"image_url"}]
     },"finish_reason":null}]});
+    // One broken stream is resumed; a provider that breaks every time is the provider saying
+    // something, and the turn stops and says it to the reader.
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(
@@ -3172,7 +3174,7 @@ async fn test_chat_stream_error_saves_partial_reply_before_one_terminal() {
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(format!("data: {chunk}\n\ndata: invalid-json\n\n")),
         )
-        .expect(1)
+        .expect(3)
         .mount(&provider)
         .await;
     let mut config = test_config();
@@ -3224,7 +3226,16 @@ async fn test_chat_stream_error_saves_partial_reply_before_one_terminal() {
         .iter()
         .find(|message| message["id"] == assistant)
         .expect("partial reply must be saved before error terminal");
-    assert_eq!(saved["content"], "partial reply\n\n[Response interrupted]");
+    let content = saved["content"].as_str().expect("saved content");
+    assert!(
+        content.starts_with("partial reply"),
+        "the answer the turn did stream has to survive the failure: {content}"
+    );
+    assert!(
+        content.contains("[Response interrupted: Stream error"),
+        "an interrupted answer has to say what broke, since the error frame does not survive a \
+         reload: {content}"
+    );
     assert_eq!(terminal["content"], saved["content"]);
     assert_eq!(terminal["metadata"], saved["metadata"]);
     assert_eq!(terminal["metadata"]["attachments"][0]["url"], attachment);
@@ -3232,6 +3243,108 @@ async fn test_chat_stream_error_saves_partial_reply_before_one_terminal() {
         next_frame(&mut socket, Duration::from_millis(300))
             .await
             .is_none()
+    );
+}
+
+/// One broken connection used to end every turn running on it at once, each losing whatever it
+/// had been doing. A stream that breaks now costs the turn a pause.
+#[tokio::test]
+async fn test_chat_stream_error_resumes_the_turn_instead_of_ending_it() {
+    let provider = MockServer::start().await;
+    let half =
+        json!({"choices":[{"index":0,"delta":{"content":"half an answer"},"finish_reason":null}]});
+    let rest =
+        json!({"choices":[{"index":0,"delta":{"content":" and the rest"},"finish_reason":null}]});
+    let done = json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!("data: {half}\n\ndata: invalid-json\n\n")),
+        )
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&provider)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!("data: {rest}\n\ndata: {done}\n\ndata: [DONE]\n\n")),
+        )
+        .expect(1)
+        .mount(&provider)
+        .await;
+    let mut config = test_config();
+    config.litellm_host = provider.uri();
+    let (client, token, chat_id, mut socket) = image_socket(config).await;
+    client
+        .put_json_auth(
+            &format!("/api/chats/{chat_id}"),
+            &json!({"agent_enabled":false}),
+            &token,
+        )
+        .await
+        .assert_status(axum::http::StatusCode::OK);
+    socket
+        .send(WsMessage::Text(
+            json!({"type":"send","content":"Hello"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    let mut assistant = Value::Null;
+    let mut said_so = false;
+    let ended = loop {
+        let frame = next_frame(&mut socket, Duration::from_secs(10))
+            .await
+            .expect("a resumed turn still ends");
+        match frame["type"].as_str() {
+            Some("message_start") => assistant = frame["message_id"].clone(),
+            Some("status") => {
+                said_so |= frame["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("picking the answer up"));
+            }
+            Some("message_end") => break frame,
+            Some("cancelled" | "error") => {
+                panic!("a stream that broke once must not end the turn: {frame}")
+            }
+            _ => {}
+        }
+    };
+    assert!(
+        said_so,
+        "the reader has to be told the turn is waiting rather than left watching nothing"
+    );
+    assert!(
+        ended["error"].is_null(),
+        "a turn that resumed and finished is no failure: {ended}"
+    );
+    let reloaded = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    let saved = reloaded["chat"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == assistant)
+        .expect("the resumed answer is saved")
+        .clone();
+    let content = saved["content"].as_str().expect("saved content");
+    assert!(
+        content.starts_with("half an answer"),
+        "what the broken stream had already written has to be kept: {content}"
+    );
+    assert!(
+        content.contains("and the rest"),
+        "the resumed round's answer has to be kept with it: {content}"
+    );
+    assert!(
+        !content.contains("[Response interrupted"),
+        "a turn that finished must not be marked as interrupted: {content}"
     );
 }
 
