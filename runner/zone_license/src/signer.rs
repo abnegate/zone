@@ -29,7 +29,6 @@ impl Signer {
         let payload = Payload {
             id: terms.id,
             customer: terms.customer.clone(),
-            tier: zone_enterprise::Tier::Enterprise,
             seats: terms.seats,
             issued_at: terms.issued_at,
             expires_at: terms.expires_at,
