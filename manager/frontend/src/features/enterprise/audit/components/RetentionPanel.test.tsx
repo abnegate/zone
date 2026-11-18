@@ -10,9 +10,7 @@ import {
   ENTERPRISE_RETENTION,
   FOREVER_RETENTION,
   LAPSED_RETENTION,
-  LAPSED_TEAM_RETENTION,
   ORGANIZATION_SCOPE,
-  TEAM_RETENTION,
   WAITING_RETENTION,
 } from '../fixtures';
 import {
@@ -20,7 +18,6 @@ import {
   KEEP_FOREVER_LABEL,
   KEPT_FOREVER,
   NOT_SWEPT,
-  READ_ONLY_EDITION,
   READ_ONLY_LAPSED,
   READ_ONLY_UNLICENSED,
   RETENTION_DAYS_LABEL,
@@ -199,16 +196,5 @@ describe('RetentionPanel', () => {
     expect(screen.getAllByText(waitMessage(RetentionWait.Paused))).toHaveLength(2);
     expect(screen.getByText(READ_ONLY_LAPSED)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: SAVE_RETENTION_LABEL })).toBeNull();
-  });
-
-  it('leaves Team without a way to change the period and says it needs Enterprise', () => {
-    for (const retention of [TEAM_RETENTION, LAPSED_TEAM_RETENTION]) {
-      const { unmount } = renderPanel(retention);
-
-      expect(screen.getByText(KEPT_FOREVER)).toBeInTheDocument();
-      expect(screen.getByText(READ_ONLY_EDITION)).toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: SAVE_RETENTION_LABEL })).toBeNull();
-      unmount();
-    }
   });
 });

@@ -1,5 +1,4 @@
 import { absoluteTime } from '../../../shared/utils/time';
-import { LicenseStatus } from '../schemas';
 import { Tone } from '../status';
 import {
   BACKLOG_WAITING,
@@ -10,19 +9,15 @@ import {
   DELETED_COUNT,
   DOWNLOAD_READ_ONLY,
   DOWNLOAD_UNVERIFIED,
-  EDITION_NOTICE,
   ENABLED_DESTINATION_LABEL,
-  ENTERPRISE_NOTICE,
   EVENT_PLURAL,
   EVENT_SINGULAR,
   EXPIRED_COUNT,
   HELD_COUNT,
   KEPT_FOREVER,
   LAPSED_NOTICE,
-  LAPSED_TEAM_NOTICE,
   LICENSE_LINK_LABEL,
   PASTE_KEY_LINK_LABEL,
-  READ_ONLY_EDITION,
   READ_ONLY_LAPSED,
   READ_ONLY_UNLICENSED,
   READ_ONLY_UNVERIFIED,
@@ -110,7 +105,7 @@ export interface Notice {
 
 const REFUSALS: Readonly<Record<AuditCodeValue, string>> = {
   [AuditCode.LicenseRequired]:
-    'This needs a Zone license that covers it: downloads need Team or Enterprise, and streaming and retention need Enterprise, active or in its grace period.',
+    'This needs a Zone Enterprise license that is active or in its grace period.',
   [AuditCode.BodyInvalid]: "Zone couldn't read this change. Reload the page and try again.",
   [AuditCode.DestinationNotFound]:
     'This destination no longer exists. It may have been deleted somewhere else.',
@@ -175,22 +170,15 @@ const FAILURES: Readonly<Record<DeliveryFailureValue, string>> = {
 
 const PAUSES: Readonly<Record<StreamingPauseValue, string>> = {
   [StreamingPause.Unlicensed]: UPGRADE_NOTICE,
-  [StreamingPause.Edition]: EDITION_NOTICE,
   [StreamingPause.Lapsed]: LAPSED_NOTICE,
   [StreamingPause.Unverified]: UNVERIFIED_NOTICE,
 };
 
 const READ_ONLY: Readonly<Record<StreamingPauseValue, string>> = {
   [StreamingPause.Unlicensed]: READ_ONLY_UNLICENSED,
-  [StreamingPause.Edition]: READ_ONLY_EDITION,
   [StreamingPause.Lapsed]: READ_ONLY_LAPSED,
   [StreamingPause.Unverified]: READ_ONLY_UNVERIFIED,
 };
-
-const UPGRADES: ReadonlySet<StreamingPauseValue> = new Set([
-  StreamingPause.Unlicensed,
-  StreamingPause.Edition,
-]);
 
 const WAITS: Readonly<Record<RetentionWaitValue, string>> = {
   [RetentionWait.Backlog]: 'Still delivering events from before the cutoff.',
@@ -348,16 +336,6 @@ export function pauseMessage(pause: StreamingPauseValue): string {
   return PAUSES[pause];
 }
 
-function pausedMessage(standing: Standing, pause: StreamingPauseValue): string {
-  if (pause !== StreamingPause.Edition) {
-    return pauseMessage(pause);
-  }
-  if (standing.status === LicenseStatus.Lapsed) {
-    return LAPSED_TEAM_NOTICE;
-  }
-  return standing.export ? EDITION_NOTICE : ENTERPRISE_NOTICE;
-}
-
 function noticeAction(upgrade: boolean, pause: StreamingPauseValue): string {
   if (upgrade) {
     return LICENSE_LINK_LABEL;
@@ -371,7 +349,7 @@ function noticeMessage(
   upgrade: boolean,
   days: number | null
 ): string {
-  const message = pausedMessage(standing, pause);
+  const message = pauseMessage(pause);
   const retained = !upgrade && standing.applies && days !== null;
   return retained ? `${message} ${RETENTION_STILL_APPLIED}` : message;
 }
@@ -381,7 +359,7 @@ export function standingNotice(standing: Standing, days: number | null): Notice 
   if (pause === null) {
     return null;
   }
-  const upgrade = UPGRADES.has(pause) && standing.status !== LicenseStatus.Lapsed;
+  const upgrade = pause === StreamingPause.Unlicensed;
   return {
     tone: upgrade ? NoticeTone.Upgrade : NoticeTone.Warning,
     message: noticeMessage(standing, pause, upgrade, days),

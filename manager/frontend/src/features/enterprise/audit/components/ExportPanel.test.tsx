@@ -7,7 +7,7 @@ import {
   COMMUNITY_STANDING,
   ENTERPRISE_STANDING,
   EXPORT_FILENAME,
-  LAPSED_TEAM_STANDING,
+  LAPSED_STANDING,
   ORGANIZATION_SCOPE,
 } from '../fixtures';
 import {
@@ -139,7 +139,7 @@ describe('ExportPanel', () => {
   });
 
   it('is read-only without a license that covers downloads', () => {
-    for (const standing of [COMMUNITY_STANDING, LAPSED_TEAM_STANDING]) {
+    for (const standing of [COMMUNITY_STANDING, LAPSED_STANDING]) {
       const { unmount } = renderPanel(standing);
 
       expect(screen.getByRole('button', { name: DOWNLOAD_LABEL })).toBeDisabled();
