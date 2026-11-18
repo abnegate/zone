@@ -14,6 +14,7 @@ import InvitationAcceptPage from './features/auth/pages/InvitationAcceptPage';
 import LoginPage from './features/auth/pages/LoginPage';
 import RegisterPage from './features/auth/pages/RegisterPage';
 import ResetPasswordPage from './features/auth/pages/ResetPasswordPage';
+import SsoCallbackPage from './features/auth/pages/SsoCallbackPage';
 import GitHubCallbackRoute from './features/github/components/GitHubCallbackRoute';
 import SettingsRedirect, { LegacySettings } from './features/settings/navigation/SettingsRedirect';
 import UnauthorizedPage from './pages/UnauthorizedPage';
@@ -105,6 +106,7 @@ function App({
                     <Route path="/forgot-password" element={<ForgotPasswordPage />} />
                     <Route path="/reset-password" element={<ResetPasswordPage />} />
                     <Route path="/invitations" element={<InvitationAcceptPage />} />
+                    <Route path="/sso/callback" element={<SsoCallbackPage />} />
                     <Route path="/unauthorized" element={<UnauthorizedPage />} />
                     <Route
                       element={

@@ -212,12 +212,17 @@ describe('SettingsPage', () => {
       expect(linkLabels('You')).toEqual(['Sessions']);
     });
 
-    it('adds License under This server for a server admin', () => {
+    it('adds License and Single sign-on under This server for a server admin', () => {
       user = { is_admin: true };
 
       renderAt('/settings/workspace/general');
 
-      expect(linkLabels('This server')).toEqual(['Features', 'Connect a device', 'License']);
+      expect(linkLabels('This server')).toEqual([
+        'Features',
+        'Connect a device',
+        'License',
+        'Single sign-on',
+      ]);
     });
 
     it('shows an organization admin with no workspace every organization section and no workspace group', () => {
@@ -377,6 +382,24 @@ describe('SettingsPage', () => {
 
       expect(location()).toBe('/settings/workspace/general');
       expect(screen.queryByRole('link', { name: 'License' })).not.toBeInTheDocument();
+    });
+
+    it('opens Single sign-on for a server admin', () => {
+      user = { is_admin: true };
+
+      renderAt('/settings/server/sso');
+
+      const region = screen.getByRole('region', { name: 'Single sign-on' });
+      expect(within(region).getByTestId('settings-content').textContent).toBe('server/sso');
+    });
+
+    it('sends someone who does not administer the server from Single sign-on to the first visible section', () => {
+      user = { is_admin: false };
+
+      renderAt('/settings/server/sso');
+
+      expect(location()).toBe('/settings/workspace/general');
+      expect(screen.queryByRole('link', { name: 'Single sign-on' })).not.toBeInTheDocument();
     });
 
     it('passes whether the user can read sources to the content', () => {

@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
 import { clientModule } from '../../../test/client';
+import { SsoCode } from '../SsoCode';
+import { SSO_OFFERED, SSO_REQUIRED } from '../ssoFixtures';
+import { SSO_MESSAGES } from '../ssoMessages';
 
-// Mock client
 const mockForgotPassword = mock();
 const mockClient = {
   forgotPassword: mockForgotPassword,
@@ -12,7 +14,14 @@ const mockClient = {
 
 mock.module('../../../api/client', () => clientModule(mockClient));
 
-// Mock useNavigate
+const mockListProviders = mock();
+
+mock.module('../../../api/sso', () => ({
+  authorize: mock(),
+  completeCallback: mock(),
+  listProviders: mockListProviders,
+}));
+
 const mockNavigate = mock();
 mock.module('react-router-dom', () => ({
   BrowserRouter: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -44,6 +53,8 @@ const renderPage = () => {
 describe('ForgotPasswordPage', () => {
   beforeEach(() => {
     mock.clearAllMocks();
+    mockListProviders.mockReset();
+    mockListProviders.mockRejectedValue(new Error('offline'));
   });
 
   describe('Rendering', () => {
@@ -78,7 +89,7 @@ describe('ForgotPasswordPage', () => {
 
       await userEvent.click(screen.getByRole('button', { name: /send reset link/i }));
 
-      expect(screen.getByText(/invalid email address/i)).toBeInTheDocument();
+      expect(await screen.findByText(/invalid email address/i)).toBeInTheDocument();
       expect(mockForgotPassword).not.toHaveBeenCalled();
     });
 
@@ -88,11 +99,9 @@ describe('ForgotPasswordPage', () => {
       const emailInput = screen.getByLabelText(/email/i);
       fireEvent.change(emailInput, { target: { value: 'not-an-email' } });
 
-      // Submit the form
       const form = emailInput.closest('form');
       fireEvent.submit(form!);
 
-      // Wait for the validation error to appear
       await waitFor(() => {
         expect(screen.getByText(/invalid email address/i)).toBeInTheDocument();
       });
@@ -247,7 +256,29 @@ describe('ForgotPasswordPage', () => {
 
       await userEvent.type(screen.getByLabelText(/email/i), 'test@example.com{enter}');
 
-      expect(mockForgotPassword).toHaveBeenCalled();
+      await waitFor(() => {
+        expect(mockForgotPassword).toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('Single sign-on', () => {
+    it('shows the sso_required message and keeps the form for server admins', async () => {
+      mockListProviders.mockResolvedValue(SSO_REQUIRED);
+      renderPage();
+
+      expect(await screen.findByText(SSO_MESSAGES[SsoCode.Required])).toBeInTheDocument();
+      expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /send reset link/i })).toBeInTheDocument();
+    });
+
+    it('shows no notice when single sign-on is not required', async () => {
+      mockListProviders.mockResolvedValue(SSO_OFFERED);
+      renderPage();
+
+      expect(mockListProviders).toHaveBeenCalledTimes(1);
+      await act(() => mockListProviders.mock.results[0]?.value);
+      expect(screen.queryByText(SSO_MESSAGES[SsoCode.Required])).toBeNull();
     });
   });
 });

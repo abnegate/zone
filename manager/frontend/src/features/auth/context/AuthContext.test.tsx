@@ -7,6 +7,7 @@ import { AuthProvider, useAuth } from './AuthContext';
 
 let loginImpl: (request: { email: string; password: string }) => Promise<unknown>;
 let registerImpl: (request: { email: string; password: string }) => Promise<unknown>;
+let completeCallbackImpl: (request: { state: string; code: string }) => Promise<unknown>;
 let refreshTokenImpl: (token: string) => Promise<unknown>;
 let logoutImpl: (token: string) => Promise<void>;
 let setAccessTokenCalls: Array<string | null>;
@@ -32,6 +33,7 @@ const createStorage = () => {
 const mockAuthApi = {
   login: (request: { email: string; password: string }) => loginImpl(request),
   register: (request: { email: string; password: string }) => registerImpl(request),
+  completeCallback: (request: { state: string; code: string }) => completeCallbackImpl(request),
   refreshToken: (token: string) => refreshTokenImpl(token),
   logout: (token: string) => logoutImpl(token),
 };
@@ -58,6 +60,9 @@ beforeEach(() => {
   };
   registerImpl = async () => {
     throw new Error('register not mocked');
+  };
+  completeCallbackImpl = async () => {
+    throw new Error('completeCallback not mocked');
   };
   refreshTokenImpl = async () => {
     throw new Error('refresh not mocked');
@@ -262,6 +267,68 @@ describe('AuthContext', () => {
       });
 
       expect(error).toBeInstanceOf(Error);
+    });
+  });
+
+  describe('Single sign-on', () => {
+    it('completes a callback into a signed-in session', async () => {
+      const response = {
+        access_token: 'sso-access-token',
+        refresh_token: 'sso-refresh-token',
+        expires_in: 900,
+        user: {
+          id: '7',
+          email: 'ada@acme.com',
+          display_name: 'Ada',
+          is_admin: false,
+          is_active: true,
+          email_verified: true,
+          created_at: '2026-01-01T00:00:00Z',
+          updated_at: '2026-01-01T00:00:00Z',
+          last_login_at: null,
+        },
+        roles: ['user'],
+        permissions: ['chats:read'],
+      };
+      const requests: Array<{ state: string; code: string }> = [];
+      completeCallbackImpl = async (request) => {
+        requests.push(request);
+        return response;
+      };
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      await act(async () => {
+        await result.current.completeSso({ state: 'state-1', code: 'code-1' });
+      });
+
+      expect(requests).toEqual([{ state: 'state-1', code: 'code-1' }]);
+      expect(result.current.isAuthenticated).toBe(true);
+      expect(result.current.user).toEqual(response.user);
+      expect(storage.getItem('manager_access_token')).toBe('sso-access-token');
+      expect(storage.getItem('manager_refresh_token')).toBe('sso-refresh-token');
+      expect(setAccessTokenCalls).toContain('sso-access-token');
+    });
+
+    it('stays signed out when the callback is refused', async () => {
+      completeCallbackImpl = async () => {
+        throw new Error('Refused');
+      };
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      let error: unknown;
+      await act(async () => {
+        try {
+          await result.current.completeSso({ state: 'state-1', code: 'code-1' });
+        } catch (caught) {
+          error = caught;
+        }
+      });
+
+      expect((error as Error).message).toBe('Refused');
+      expect(result.current.isAuthenticated).toBe(false);
+      expect(storage.getItem('manager_access_token')).toBeNull();
     });
   });
 

@@ -1,9 +1,3 @@
-//! Guard for routes that act on the whole server rather than a tenant.
-//!
-//! The admin flag in an access token stays as it was when the token was
-//! issued, so the guard reads the user's row on every request: an admin who is
-//! demoted or deactivated loses access at once, not when their token refreshes.
-
 use axum::{
     extract::{FromRef, FromRequestParts},
     http::{StatusCode, request::Parts},
@@ -23,7 +17,11 @@ const UNCHECKED: &str = "Could not check server admin access";
 pub struct ServerAdmin(pub UserRow);
 
 fn permits(user: &UserRow) -> bool {
-    user.is_admin == Some(true) && user.is_active != Some(false)
+    administers(user.is_admin, user.is_active)
+}
+
+pub fn administers(is_admin: Option<bool>, is_active: Option<bool>) -> bool {
+    is_admin == Some(true) && is_active != Some(false)
 }
 
 fn refused() -> AuthError {

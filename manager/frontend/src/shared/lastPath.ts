@@ -10,6 +10,7 @@ const AUTH_PATHS = new Set([
   '/invitations',
   '/unauthorized',
   '/agent-sign-in',
+  '/sso/callback',
 ]);
 
 export type PathLike = {

@@ -28,6 +28,7 @@ pub mod refresh_query;
 pub mod releases;
 pub mod sessions;
 pub mod sources;
+pub mod sso;
 pub mod sync;
 pub mod tasks;
 pub mod webhooks;
@@ -102,6 +103,12 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/auth/forgot-password", post(auth::forgot_password))
         .route("/api/auth/reset-password", post(auth::reset_password))
+        .route("/api/auth/sso/providers", get(sso::sign_in::providers))
+        .route(
+            "/api/auth/sso/providers/{provider_id}/authorizations",
+            post(sso::sign_in::authorize),
+        )
+        .route("/api/auth/sso/callbacks", post(sso::sign_in::callback))
         // Public invitation route (to view invitation details)
         .route("/api/invitations/{token}", get(invitations::get_invitation))
         // Artifact reads (public - a bearer header or an HMAC-signed URL, checked
@@ -256,6 +263,13 @@ pub fn create_router(state: AppState) -> Router {
             "/api/license",
             get(license::get).put(license::set).delete(license::remove),
         )
+        .route("/api/sso", get(sso::settings::get))
+        .route("/api/sso/providers", post(sso::providers::create))
+        .route(
+            "/api/sso/providers/{provider_id}",
+            patch(sso::providers::update).delete(sso::providers::delete),
+        )
+        .route("/api/sso/enforcement", put(sso::enforcement::put))
         .route("/api/host-mounts", get(host_mounts::instance))
         .route(
             "/api/workspaces/{workspace_id}/host-directories",

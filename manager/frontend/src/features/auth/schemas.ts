@@ -1,9 +1,5 @@
 import { z } from 'zod';
 
-// =============================================================================
-// Auth Schemas
-// =============================================================================
-
 export const UserSchema = z.object({
   id: z.string(),
   email: z.string().email(),
@@ -30,7 +26,6 @@ export const LoginRequestSchema = z.object({
   password: z.string().min(1, 'Password is required'),
 });
 
-// Password validation helper
 const passwordSchema = z
   .string()
   .min(8, 'Password must be at least 8 characters')
@@ -91,9 +86,28 @@ export const JwtPayloadSchema = z.object({
   jti: z.string(),
 });
 
-// =============================================================================
-// Session Schemas
-// =============================================================================
+const WEB_URL = /^https?:\/\//i;
+
+export const SsoPublicProviderSchema = z.object({
+  id: z.string().min(1),
+  display_name: z.string(),
+});
+
+export const SsoPublicProvidersSchema = z.object({
+  required: z.boolean(),
+  callback_origin: z.string(),
+  providers: z.array(SsoPublicProviderSchema),
+});
+
+export const SsoAuthorizationSchema = z.object({
+  url: z.string().regex(WEB_URL, 'The identity provider URL must use http or https'),
+  state: z.string().min(1),
+});
+
+export const SsoCallbackRequestSchema = z.object({
+  state: z.string().min(1),
+  code: z.string().min(1),
+});
 
 export const SessionSchema = z.object({
   id: z.string().min(1),
@@ -111,10 +125,6 @@ export const SessionSchema = z.object({
 export const SessionsResponseSchema = z.object({
   sessions: z.array(SessionSchema),
 });
-
-// =============================================================================
-// Invitation Schemas (closely related to auth/registration)
-// =============================================================================
 
 export const OrgRoleSchema = z.enum(['owner', 'admin', 'member']);
 export const WorkspaceRoleSchema = z.enum(['owner', 'admin', 'member', 'viewer']);
@@ -142,10 +152,6 @@ export const InvitationDetailsSchema = z.object({
   expires_at: z.string().datetime({ offset: true }),
 });
 
-// =============================================================================
-// Type Exports (inferred from schemas)
-// =============================================================================
-
 export type UserZ = z.infer<typeof UserSchema>;
 export type AuthResponseZ = z.infer<typeof AuthResponseSchema>;
 export type LoginRequestZ = z.infer<typeof LoginRequestSchema>;
@@ -157,3 +163,6 @@ export type OrgRoleZ = z.infer<typeof OrgRoleSchema>;
 export type WorkspaceRoleZ = z.infer<typeof WorkspaceRoleSchema>;
 export type InvitationZ = z.infer<typeof InvitationSchema>;
 export type InvitationDetailsZ = z.infer<typeof InvitationDetailsSchema>;
+export type SsoPublicProvidersZ = z.infer<typeof SsoPublicProvidersSchema>;
+export type SsoAuthorizationZ = z.infer<typeof SsoAuthorizationSchema>;
+export type SsoCallbackRequestZ = z.infer<typeof SsoCallbackRequestSchema>;

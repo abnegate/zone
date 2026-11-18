@@ -76,6 +76,9 @@ pub struct Config {
     pub jwt_access_lifetime: u64,
     /// JWT refresh token lifetime in seconds (default: 604800 = 7 days)
     pub jwt_refresh_lifetime: u64,
+    /// How long a session lasts from sign-in, however often it refreshes, in seconds (default:
+    /// 2592000 = 30 days)
+    pub session_lifetime: u64,
     /// The instance-wide default backend.
     pub model_backend: ModelBackend,
     /// Coding agent CLIs that organizations sign in to.
@@ -1296,6 +1299,10 @@ impl Config {
         chrono::Duration::seconds(self.jwt_refresh_lifetime as i64)
     }
 
+    pub fn session_lifetime(&self) -> chrono::Duration {
+        chrono::Duration::seconds(self.session_lifetime as i64)
+    }
+
     /// Get the encryption key
     pub fn encryption_key(&self) -> &str {
         &self.encryption_key
@@ -1421,6 +1428,10 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(604_800),
+            session_lifetime: env::var("SESSION_LIFETIME")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(2_592_000),
             model_backend,
             agents,
             clones,
@@ -1479,6 +1490,7 @@ impl std::fmt::Debug for Config {
             .field("jwt_secret", &"[REDACTED]")
             .field("jwt_access_lifetime", &self.jwt_access_lifetime)
             .field("jwt_refresh_lifetime", &self.jwt_refresh_lifetime)
+            .field("session_lifetime", &self.session_lifetime)
             .field("model_backend", &self.model_backend)
             .field("agents", &self.agents)
             .field("litellm_host", &self.litellm_host)
@@ -1560,6 +1572,7 @@ mod tests {
         "JWT_ACCESS_LIFETIME",
         "JWT_REFRESH_LIFETIME",
         "JWT_SECRET",
+        "SESSION_LIFETIME",
         "LITELLM_HOST",
         "LITELLM_KEY",
         "MODEL_SEARCH_PROXY_URL",
@@ -1643,6 +1656,7 @@ mod tests {
             jwt_secret: "test-secret-key-with-at-least-32-chars".to_string(),
             jwt_access_lifetime: 900,
             jwt_refresh_lifetime: 604800,
+            session_lifetime: 2_592_000,
             model_backend: ModelBackend::default(),
             agents: AgentConfig::default(),
             clones: std::env::temp_dir().join(DEFAULT_CLONES),
@@ -2675,6 +2689,7 @@ mod tests {
         assert_eq!(defaults.port, 8000);
         assert_eq!(defaults.jwt_access_lifetime, 900);
         assert_eq!(defaults.jwt_refresh_lifetime, 604_800);
+        assert_eq!(defaults.session_lifetime, 2_592_000);
         assert_eq!(defaults.ollama_host, "http://ollama:11434");
         assert_eq!(defaults.cors_origins, ["*"]);
         assert!(!defaults.cors_allow_credentials);
@@ -2699,6 +2714,7 @@ mod tests {
         environment.set("PORT", "9001");
         environment.set("JWT_ACCESS_LIFETIME", "1200");
         environment.set("JWT_REFRESH_LIFETIME", "not-a-number");
+        environment.set("SESSION_LIFETIME", "86400");
         environment.set("OLLAMA_HOST", "http://ollama.test:11434");
         environment.set("GPT4ALL_MODELS_URL", "http://catalog.test/gpt4all");
         environment.set("HUGGINGFACE_MODELS_URL", "http://catalog.test/huggingface");
@@ -2733,6 +2749,7 @@ mod tests {
         assert_eq!(configured.port, 9001);
         assert_eq!(configured.jwt_access_lifetime, 1200);
         assert_eq!(configured.jwt_refresh_lifetime, 604_800);
+        assert_eq!(configured.session_lifetime, 86_400);
         assert_eq!(configured.ollama_host, "http://ollama.test:11434");
         assert_eq!(configured.gpt4all_models_url, "http://catalog.test/gpt4all");
         assert_eq!(

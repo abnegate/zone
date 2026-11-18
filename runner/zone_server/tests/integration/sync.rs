@@ -62,6 +62,7 @@ async fn setup_test_state() -> AppState {
         jwt_secret: "test-secret-key-with-at-least-32-chars".to_string(),
         jwt_access_lifetime: 900,
         jwt_refresh_lifetime: 604800,
+        session_lifetime: 2_592_000,
         model_backend: Default::default(),
         agents: common::agents(),
         litellm_host: "http://localhost:4000".to_string(),

@@ -23,6 +23,7 @@ import '../features/models/components/TrainPanel.css';
 import '../features/models/pages/ModelsPage.css';
 import '../features/settings/server/components/ConnectDevicesSection.css';
 import '../features/enterprise/components/LicenseSection.css';
+import '../features/enterprise/sso/components/SsoSection.css';
 import '../features/settings/workspace/components/HostFoldersPanel.css';
 import '../features/settings/workspace/components/InheritedField.css';
 import '../features/settings/organization/components/OrgMembersSection.css';

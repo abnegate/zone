@@ -34,6 +34,7 @@ fn test_config() -> Config {
         jwt_secret: "test-secret-key-must-be-at-least-32-chars-long".to_string(),
         jwt_access_lifetime: 900,
         jwt_refresh_lifetime: 604800,
+        session_lifetime: 2_592_000,
         model_backend: Default::default(),
         agents: common::agents(),
         litellm_host: "http://localhost:4000".to_string(),

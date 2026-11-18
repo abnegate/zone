@@ -2,9 +2,20 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
+import { AuthRequestError } from '../../../api/auth';
 import { LAST_PATH_KEY, persistLastPath } from '../../../shared/lastPath';
+import { SsoCode } from '../SsoCode';
+import { NO_SSO, SSO_OFFERED, SSO_REQUIRED } from '../ssoFixtures';
+import { SSO_MESSAGES } from '../ssoMessages';
 
 const mockUseAuth = mock();
+const mockListProviders = mock();
+
+mock.module('../../../api/sso', () => ({
+  authorize: mock(),
+  completeCallback: mock(),
+  listProviders: mockListProviders,
+}));
 
 mock.module('../context', () => ({
   useAuth: mockUseAuth,
@@ -52,6 +63,8 @@ describe('LoginPage', () => {
 
   beforeEach(() => {
     mock.clearAllMocks();
+    mockListProviders.mockReset();
+    mockListProviders.mockRejectedValue(new Error('offline'));
     persistLastPath('/__reset__');
     localStorage.removeItem(LAST_PATH_KEY);
     mockUseLocation.mockReturnValue({
@@ -398,6 +411,106 @@ describe('LoginPage', () => {
       await waitFor(() => {
         expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true });
       });
+    });
+  });
+
+  describe('Single sign-on', () => {
+    it('offers a button per provider above the form, with the divider', async () => {
+      mockListProviders.mockResolvedValue(SSO_OFFERED);
+      const { container } = renderLoginPage();
+
+      expect(await screen.findByRole('button', { name: 'Sign in with Okta' })).toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: 'Sign in with Microsoft Entra ID' })
+      ).toBeInTheDocument();
+      const divider = container.querySelector('.auth-divider');
+      expect(divider).toHaveTextContent('or');
+      expect(divider?.compareDocumentPosition(container.querySelector('form') as Node) ?? 0).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING
+      );
+    });
+
+    it('shows no buttons and no divider while the providers load', () => {
+      mockListProviders.mockReturnValue(new Promise(() => {}));
+      const { container } = renderLoginPage();
+
+      expect(screen.queryByRole('button', { name: /sign in with/i })).toBeNull();
+      expect(container.querySelector('.auth-divider')).toBeNull();
+    });
+
+    it('shows no buttons and no divider when no provider is enabled', async () => {
+      mockListProviders.mockResolvedValue(NO_SSO);
+      const { container } = renderLoginPage();
+
+      await waitFor(() => expect(mockListProviders).toHaveBeenCalled());
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(screen.queryByRole('button', { name: /sign in with/i })).toBeNull();
+      expect(container.querySelector('.auth-divider')).toBeNull();
+      expect(screen.getByRole('link', { name: /forgot password/i })).toBeInTheDocument();
+    });
+
+    it('shows no buttons when the providers fail to load', async () => {
+      const { container } = renderLoginPage();
+
+      await waitFor(() => expect(mockListProviders).toHaveBeenCalled());
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(screen.queryByRole('button', { name: /sign in with/i })).toBeNull();
+      expect(container.querySelector('.auth-divider')).toBeNull();
+    });
+
+    it('keeps the password links when single sign-on is offered but not required', async () => {
+      mockListProviders.mockResolvedValue(SSO_OFFERED);
+      renderLoginPage();
+
+      await screen.findByRole('button', { name: 'Sign in with Okta' });
+      expect(screen.getByRole('link', { name: /forgot password/i })).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: /create one/i })).toBeInTheDocument();
+      expect(screen.queryByText('Password sign-in is for server admins.')).toBeNull();
+    });
+
+    it('keeps the forgot-password link for admins and hides register when single sign-on is required', async () => {
+      mockListProviders.mockResolvedValue(SSO_REQUIRED);
+      renderLoginPage();
+
+      expect(await screen.findByText('Password sign-in is for server admins.')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Sign in with Okta' })).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: 'Server admin? Forgot password?' })).toHaveAttribute(
+        'href',
+        '/forgot-password'
+      );
+      expect(screen.queryByRole('link', { name: /create one/i })).toBeNull();
+      expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
+    });
+
+    it('shows the sso_required message when a password sign-in is refused', async () => {
+      mockLogin.mockRejectedValue(
+        new AuthRequestError(
+          'This server requires single sign-on. Sign in from the Zone console in your browser; only server admins can sign in with a password.',
+          SsoCode.Required
+        )
+      );
+      renderLoginPage();
+
+      await userEvent.type(screen.getByLabelText(/email/i), 'test@example.com');
+      await userEvent.type(screen.getByLabelText(/password/i), 'password123');
+      await userEvent.click(screen.getByRole('button', { name: /^sign in$/i }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(SSO_MESSAGES[SsoCode.Required]);
+    });
+
+    it('shows the account_disabled message when the account is turned off', async () => {
+      mockLogin.mockRejectedValue(
+        new AuthRequestError('Account disabled', SsoCode.AccountDisabled)
+      );
+      renderLoginPage();
+
+      await userEvent.type(screen.getByLabelText(/email/i), 'test@example.com');
+      await userEvent.type(screen.getByLabelText(/password/i), 'password123');
+      await userEvent.click(screen.getByRole('button', { name: /^sign in$/i }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        SSO_MESSAGES[SsoCode.AccountDisabled]
+      );
     });
   });
 

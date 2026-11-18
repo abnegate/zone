@@ -1,0 +1,257 @@
+.sso-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-4);
+  min-width: 0;
+}
+
+.sso-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ui-space-3);
+  min-width: 0;
+}
+
+.sso-card-title {
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+}
+
+.sso-hint,
+.sso-notice p,
+.sso-lapsed p,
+.sso-dialog p {
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
+}
+
+.sso-hint {
+  color: var(--ui-text-muted);
+}
+
+.sso-notice,
+.sso-lapsed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ui-space-3);
+  min-width: 0;
+}
+
+.sso-notice p {
+  color: var(--ui-text-secondary);
+}
+
+.sso-redirect,
+.sso-providers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-3);
+  min-width: 0;
+}
+
+.sso-redirect-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-3);
+  min-width: 0;
+}
+
+.sso-redirect-uri {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.sso-provider-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sso-provider {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--ui-space-3);
+  padding: var(--ui-space-3) 0;
+  min-width: 0;
+}
+
+.sso-provider + .sso-provider {
+  border-top: 1px solid var(--ui-border);
+}
+
+.sso-provider:first-child {
+  padding-top: 0;
+}
+
+.sso-provider:last-child {
+  padding-bottom: 0;
+}
+
+.sso-provider-identity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  min-width: 0;
+}
+
+.sso-provider-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-2);
+  min-width: 0;
+}
+
+.sso-provider-name {
+  min-width: 0;
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.sso-provider-issuer {
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.sso-provider-meta {
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.sso-provider-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-1);
+}
+
+.sso-provider-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-field-gap);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.sso-provider-form .sso-notice {
+  margin-top: var(--ui-space-4);
+}
+
+.sso-dialog p {
+  color: var(--ui-text-primary);
+}
+
+.sso-dialog .modal-actions {
+  margin-top: var(--ui-space-4);
+}
+
+.sso-switch {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ui-space-2-5);
+  min-width: 0;
+}
+
+.sso-switch-control {
+  position: relative;
+  flex-shrink: 0;
+  width: 2rem;
+  height: 1.125rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ui-radius-full);
+  background-color: var(--ui-bg-active);
+  cursor: pointer;
+  transition: background-color var(--ui-duration-fast);
+}
+
+.sso-switch-control[aria-checked='true'] {
+  background-color: var(--ui-accent);
+}
+
+.sso-switch-control:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
+}
+
+.sso-switch-control:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sso-switch-thumb {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 50%;
+  background-color: var(--ui-bg-elevated);
+  box-shadow: var(--ui-shadow-sm);
+  transition: transform var(--ui-duration-fast);
+}
+
+.sso-switch-control[aria-checked='true'] .sso-switch-thumb {
+  transform: translateX(0.875rem);
+}
+
+.sso-switch-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-0-5);
+  min-width: 0;
+}
+
+.sso-switch-label {
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  font-weight: 500;
+  line-height: 1.125rem;
+  color: var(--ui-text-primary);
+  cursor: pointer;
+}
+
+.sso-switch-description {
+  margin: 0;
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-muted);
+}
+
+@media (max-width: 768px) {
+  .sso-card-header,
+  .sso-redirect-row {
+    flex-wrap: wrap;
+  }
+
+  .sso-provider {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sso-provider-actions {
+    margin-inline-start: calc(-1 * var(--ui-space-2-5));
+  }
+}

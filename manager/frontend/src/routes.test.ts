@@ -13,7 +13,13 @@ describe('route preloading', () => {
   });
 
   it('loads nothing for the eager signed out forms', async () => {
-    for (const path of ['/login', '/register', '/forgot-password', '/unauthorized']) {
+    for (const path of [
+      '/login',
+      '/register',
+      '/forgot-password',
+      '/unauthorized',
+      '/sso/callback',
+    ]) {
       expect(await preloadRoute(path, storageWith(ACCESS_TOKEN_KEY))).toEqual([]);
     }
   });

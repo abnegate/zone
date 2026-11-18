@@ -1,4 +1,3 @@
-// Auth Types
 export interface User {
   id: string;
   email: string;
@@ -78,7 +77,27 @@ export interface JwtPayload {
   jti: string;
 }
 
-// Session Types
+export interface SsoPublicProvider {
+  id: string;
+  display_name: string;
+}
+
+export interface SsoPublicProviders {
+  required: boolean;
+  callback_origin: string;
+  providers: SsoPublicProvider[];
+}
+
+export interface SsoAuthorization {
+  url: string;
+  state: string;
+}
+
+export interface SsoCallbackRequest {
+  state: string;
+  code: string;
+}
+
 export interface Session {
   id: string;
   user_id?: string;
@@ -96,7 +115,6 @@ export interface SessionsResponse {
   sessions: Session[];
 }
 
-// Invitation Types
 export type OrgRole = 'owner' | 'admin' | 'member';
 export type WorkspaceRole = 'owner' | 'admin' | 'member' | 'viewer';
 

@@ -1,11 +1,15 @@
 //! User database queries
 
 use chrono::NaiveDateTime;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use uuid::Uuid;
+use zone_enterprise::sso::Account;
 
 use super::DbResult;
 use crate::services::time_zone::{self, TimeZone};
+
+pub const EMAIL_KEY: &str = "users_email_key";
+pub const EMAIL_LOWER_KEY: &str = "users_email_lower_key";
 
 const ADMINISTRATOR_ROLE: &str = "admin";
 
@@ -53,7 +57,7 @@ const ADMINISTRATOR_PERMISSIONS: [&str; 40] = [
 ];
 
 /// User row from database
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct UserRow {
     pub id: Uuid,
     pub email: String,
@@ -64,6 +68,17 @@ pub struct UserRow {
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
     pub last_login_at: Option<NaiveDateTime>,
+}
+
+impl UserRow {
+    pub fn account(&self) -> Account {
+        Account {
+            id: self.id,
+            active: self.is_active.unwrap_or(true),
+            email_verified: self.email_verified,
+            admin: self.is_admin.unwrap_or(false),
+        }
+    }
 }
 
 /// User with password hash (for authentication)
@@ -100,7 +115,7 @@ pub async fn count_users(pool: &PgPool) -> DbResult<i64> {
 
 /// Create a new user
 pub async fn create_user(
-    pool: &PgPool,
+    executor: impl PgExecutor<'_>,
     email: &str,
     password_hash: &str,
     display_name: Option<&str>,
@@ -118,7 +133,7 @@ pub async fn create_user(
         display_name,
         is_admin
     )
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     Ok(UserRow {
@@ -144,7 +159,7 @@ pub async fn get_user_by_email(
         SELECT id, email, display_name, is_active, is_admin, email_verified,
                created_at, updated_at, last_login_at, password_hash
         FROM users
-        WHERE email = $1
+        WHERE lower(email) = lower($1)
         "#,
         email
     )
@@ -261,7 +276,11 @@ pub async fn get_user_with_permissions(
 }
 
 /// Assign a role to a user
-pub async fn assign_user_role(pool: &PgPool, user_id: Uuid, role_name: &str) -> DbResult<()> {
+pub async fn assign_user_role(
+    executor: impl PgExecutor<'_>,
+    user_id: Uuid,
+    role_name: &str,
+) -> DbResult<()> {
     sqlx::query!(
         r#"
         INSERT INTO user_roles (user_id, role_id)
@@ -271,10 +290,65 @@ pub async fn assign_user_role(pool: &PgPool, user_id: Uuid, role_name: &str) -> 
         user_id,
         role_name
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
 
     Ok(())
+}
+
+pub async fn find_by_email_ignoring_case(
+    executor: impl PgExecutor<'_>,
+    email: &str,
+) -> DbResult<Vec<UserRow>> {
+    sqlx::query_as(
+        "SELECT id, email, display_name, is_active, is_admin, email_verified, \
+                created_at, updated_at, last_login_at \
+         FROM users WHERE lower(email) = lower($1) ORDER BY created_at, id",
+    )
+    .bind(email)
+    .fetch_all(executor)
+    .await
+}
+
+/// The row stays locked `FOR UPDATE` until the caller's transaction ends, so no session or
+/// refresh token can be inserted for the account meanwhile. `false` when the account is gone, or
+/// was verified or made an admin after the sign-in resolved it.
+pub async fn reclaim(
+    connection: &mut PgConnection,
+    user_id: Uuid,
+    password_hash: &str,
+) -> DbResult<bool> {
+    let reclaimable: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM users \
+         WHERE id = $1 AND email_verified IS NOT TRUE AND is_admin IS NOT TRUE \
+         FOR UPDATE",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    if reclaimable.is_none() {
+        return Ok(false);
+    }
+    sqlx::query(
+        "UPDATE users SET password_hash = $1, email_verified = TRUE, updated_at = NOW() WHERE id = $2",
+    )
+    .bind(password_hash)
+    .bind(user_id)
+    .execute(&mut *connection)
+    .await?;
+    Ok(true)
+}
+
+/// The account's password hash, share-locked until the caller's transaction ends so a reclaim
+/// can't replace it underneath a sign-in that verified it.
+pub async fn lock_password_hash(
+    connection: &mut PgConnection,
+    user_id: Uuid,
+) -> DbResult<Option<String>> {
+    sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1 FOR SHARE")
+        .bind(user_id)
+        .fetch_optional(connection)
+        .await
 }
 
 /// Set user active status
@@ -305,10 +379,7 @@ pub async fn delete_user(pool: &PgPool, user_id: Uuid) -> DbResult<()> {
 
 /// The zone the person's console last reported, or `None` when it never has
 /// or what it reported is no longer a zone this build knows.
-pub async fn time_zone(
-    executor: impl sqlx::PgExecutor<'_>,
-    user_id: Uuid,
-) -> DbResult<Option<TimeZone>> {
+pub async fn time_zone(executor: impl PgExecutor<'_>, user_id: Uuid) -> DbResult<Option<TimeZone>> {
     let stored: Option<String> = sqlx::query_scalar("SELECT time_zone FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_optional(executor)

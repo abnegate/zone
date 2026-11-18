@@ -6,25 +6,29 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use uuid::Uuid;
+use zone_enterprise::sso::{self, PasswordAccess};
 
-use crate::auth::{
-    AuthUser, create_refresh_token, create_session_access_token, hash_password, verify_password,
-};
-use crate::db::{
-    devices::{self, Device},
-    organization_members::{self, OrgRole},
-    organizations, refresh_tokens, sessions, users,
-    workspace_members::{self, WorkspaceRole},
-    workspaces,
-};
+use crate::auth::{AuthUser, account, admin_guard, hash_password, verify_password};
+use crate::db::DbResult;
+use crate::db::audit::{actions, resources};
+use crate::db::users::UserRow;
+use crate::db::{password_reset, refresh_tokens, sessions, users};
+use crate::services::account::{AuthResponse, Credential, Grant, Refusal, provision, session};
 use crate::services::mail::Template;
+use crate::services::sso::enforcement;
 use crate::state::AppState;
 use crate::utils::crypto::hash_token;
 
-use super::common::{ErrorResponse, Timestamps};
+use super::common::{AuditEvent, ErrorResponse, audit};
+use super::sso::refusal::{self, Stage};
+
+const LOGIN_OK: &str = "ok";
+const LOGIN_DISABLED: &str = "disabled";
+const LOGIN_ERROR: &str = "error";
+const LOGIN_INVALID_CREDENTIALS: &str = "invalid_credentials";
+const EMAIL_REGISTERED: &str = "Email already registered";
 
 /// Register request
 #[derive(Debug, Deserialize)]
@@ -47,61 +51,23 @@ pub struct RefreshRequest {
     refresh_token: String,
 }
 
-/// Auth response
-#[derive(Debug, Serialize)]
-pub struct AuthResponse {
-    access_token: String,
-    refresh_token: String,
-    token_type: &'static str,
-    expires_in: u64,
-    user: UserResponse,
-    roles: Vec<String>,
-    permissions: Vec<String>,
-}
-
-/// User response
-#[derive(Debug, Serialize)]
-pub struct UserResponse {
-    id: Uuid,
-    email: String,
-    display_name: Option<String>,
-    is_admin: bool,
-    is_active: bool,
-    email_verified: bool,
-    #[serde(flatten)]
-    timestamps: Timestamps,
-    last_login_at: Option<String>,
-}
-
-impl UserResponse {
-    /// Create a UserResponse from UserWithPermissions
-    pub fn from_user(user: &users::UserWithPermissions) -> Self {
-        Self {
-            id: user.user.id,
-            email: user.user.email.clone(),
-            display_name: user.user.display_name.clone(),
-            is_admin: user.user.is_admin.unwrap_or(false),
-            is_active: user.user.is_active.unwrap_or(true),
-            email_verified: user.user.email_verified,
-            timestamps: Timestamps::from_naive(user.user.created_at, user.user.updated_at),
-            last_login_at: user.user.last_login_at.map(|dt| dt.and_utc().to_rfc3339()),
-        }
-    }
-}
-
 /// POST /api/auth/register
 pub async fn register(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<RegisterRequest>,
+    Json(request): Json<RegisterRequest>,
 ) -> impl IntoResponse {
-    // Validate email with proper regex
-    // RFC 5322 simplified: local@domain with basic constraints
+    match enforcement::access(state.db(), false).await {
+        Ok(PasswordAccess::Refused) => return sso_required(),
+        Ok(PasswordAccess::Allowed | PasswordAccess::BreakGlass) => {}
+        Err(error) => return unavailable(&error),
+    }
+
     let email_regex = regex::Regex::new(
         r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"
     ).unwrap();
 
-    if !email_regex.is_match(&req.email) || req.email.len() > 254 {
+    if !email_regex.is_match(&request.email) || request.email.len() > 254 {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new("Invalid email format")),
@@ -109,8 +75,7 @@ pub async fn register(
             .into_response();
     }
 
-    // Validate password - require length, uppercase, lowercase, and number
-    if req.password.len() < 8 {
+    if request.password.len() < 8 {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new("Password must be at least 8 characters")),
@@ -118,9 +83,12 @@ pub async fn register(
             .into_response();
     }
 
-    let has_uppercase = req.password.chars().any(|c| c.is_uppercase());
-    let has_lowercase = req.password.chars().any(|c| c.is_lowercase());
-    let has_digit = req.password.chars().any(|c| c.is_ascii_digit());
+    let has_uppercase = request.password.chars().any(char::is_uppercase);
+    let has_lowercase = request.password.chars().any(char::is_lowercase);
+    let has_digit = request
+        .password
+        .chars()
+        .any(|character| character.is_ascii_digit());
 
     if !has_uppercase || !has_lowercase || !has_digit {
         return (
@@ -132,359 +100,223 @@ pub async fn register(
             .into_response();
     }
 
-    // Check if user already exists
-    match users::get_user_by_email(state.db(), &req.email).await {
-        Ok(Some(_)) => {
-            return (
-                StatusCode::CONFLICT,
-                Json(ErrorResponse::new("Email already registered")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+    match users::get_user_by_email(state.db(), &request.email.to_lowercase()).await {
+        Ok(Some(_)) => return already_registered(),
+        Err(error) => return unavailable(&error),
         Ok(None) => {}
     }
 
-    // Hash password
-    let password_hash = match hash_password(&req.password) {
+    let password_hash = match hash_password(&request.password) {
         Ok(hash) => hash,
-        Err(e) => {
-            tracing::error!("Password hashing error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+        Err(error) => {
+            tracing::error!("Password hashing error: {}", error);
+            return internal_error();
         }
     };
 
-    // Check if this is the first user (make admin)
     let is_admin = match users::count_users(state.db()).await {
         Ok(0) => true,
         Ok(_) => false,
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+        Err(error) => return unavailable(&error),
     };
 
-    // Create user
-    let user = match users::create_user(
-        state.db(),
-        &req.email,
-        &password_hash,
-        req.display_name.as_deref(),
-        is_admin,
-    )
-    .await
-    {
+    let user = match insert(&state, &request, &password_hash, is_admin).await {
         Ok(user) => user,
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+        Err(error) if registered(&error) => return already_registered(),
+        Err(error) => return unavailable(&error),
     };
 
-    // Assign the default "user" role to give basic permissions
-    if let Err(e) = users::assign_user_role(state.db(), user.id, "user").await {
-        tracing::error!(
-            "Failed to assign user role: {}. User may have limited permissions.",
-            e
-        );
+    provision::furnish(state.db(), &user).await;
+
+    match session::issue(&state, user.id, &headers, Credential::Registration).await {
+        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+        Err(refusal) => refusal.into_response(),
     }
+}
 
-    // Create a default organization and workspace for every new user
-    {
-        // Generate organization name based on user's display name or email
-        let org_name = req
-            .display_name
-            .as_ref()
-            .map(|name| format!("{}'s Organization", name))
-            .unwrap_or_else(|| "My Organization".to_string());
-
-        // Generate slug from organization name with user id suffix for uniqueness
-        let base_slug = org_name
-            .to_lowercase()
-            .replace(' ', "-")
-            .replace('\'', "")
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-')
-            .collect::<String>();
-
-        // Add a short unique suffix to ensure slug uniqueness across users
-        let org_slug = format!("{}-{}", base_slug, &user.id.to_string()[..8]);
-
-        // Create the default organization
-        match organizations::create_organization(state.db(), &org_name, &org_slug, None).await {
-            Ok(org) => {
-                tracing::info!(
-                    "Created default organization '{}' for user {}",
-                    org.name,
-                    user.id
-                );
-
-                // Add user as owner of the organization
-                if let Err(e) = organization_members::add_member(
-                    state.db(),
-                    org.id,
-                    user.id,
-                    OrgRole::Owner,
-                    None,
-                )
-                .await
-                {
-                    tracing::error!(
-                        "Failed to add user as organization owner: {}. User can manually create organization.",
-                        e
-                    );
-                } else {
-                    tracing::info!("Added user {} as owner of organization {}", user.id, org.id);
-
-                    // Create a default workspace within the organization
-                    match workspaces::create_workspace(
-                        state.db(),
-                        org.id,
-                        "Default Workspace",
-                        "default",
-                        Some("Your default workspace"),
-                    )
-                    .await
-                    {
-                        Ok(workspace) => {
-                            tracing::info!(
-                                "Created default workspace '{}' in organization {}",
-                                workspace.name,
-                                org.id
-                            );
-
-                            // Add user as owner of the workspace
-                            if let Err(e) = workspace_members::add_member(
-                                state.db(),
-                                workspace.id,
-                                user.id,
-                                WorkspaceRole::Owner,
-                                None,
-                            )
-                            .await
-                            {
-                                tracing::error!(
-                                    "Failed to add user as workspace owner: {}. User can manually join workspace.",
-                                    e
-                                );
-                            } else {
-                                tracing::info!(
-                                    "Added user {} as owner of workspace {}",
-                                    user.id,
-                                    workspace.id
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "Failed to create default workspace: {}. User can manually create workspace.",
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to create default organization: {}. User can manually create organization.",
-                    e
-                );
-            }
-        }
-    }
-
-    // Get user with permissions
-    let user_perms = match users::get_user_with_permissions(state.db(), user.id).await {
-        Ok(Some(u)) => u,
-        Ok(None) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("User not found after creation")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
-
-    let device = match admit_device(&state, user_perms.user.id, &headers, None).await {
-        Ok(device) => device,
-        Err(response) => return *response,
-    };
-
-    // Generate tokens
-    let (access_token, refresh_token) =
-        match generate_tokens(&state, &user_perms, &headers, &device, None).await {
-            Ok(tokens) => tokens,
-            Err(response) => return response.into_response(),
-        };
-
-    (
-        StatusCode::CREATED,
-        Json(AuthResponse {
-            access_token,
-            refresh_token,
-            token_type: "Bearer",
-            expires_in: state.config().jwt_access_lifetime,
-            user: UserResponse::from_user(&user_perms),
-            roles: user_perms.roles.clone(),
-            permissions: user_perms.permissions.clone(),
-        }),
+async fn insert(
+    state: &AppState,
+    request: &RegisterRequest,
+    password_hash: &str,
+    is_admin: bool,
+) -> DbResult<UserRow> {
+    let mut transaction = state.db().begin().await?;
+    let user = provision::insert(
+        &mut transaction,
+        &request.email,
+        password_hash,
+        request.display_name.as_deref(),
+        is_admin,
+        false,
     )
-        .into_response()
+    .await?;
+    transaction.commit().await?;
+    Ok(user)
 }
 
 /// POST /api/auth/login
 pub async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<LoginRequest>,
+    Json(request): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    // Get user by email
-    let user = match users::get_user_by_email(state.db(), &req.email).await {
-        Ok(Some(user)) => user,
-        Ok(None) => {
-            crate::metrics::record_login("invalid_credentials");
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid email or password")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            crate::metrics::record_login("error");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+    let user = match users::get_user_by_email(state.db(), &request.email.to_lowercase()).await {
+        Ok(user) => user,
+        Err(error) => {
+            crate::metrics::record_login(LOGIN_ERROR);
+            return unavailable(&error);
         }
     };
 
-    // Verify password
-    match verify_password(&req.password, &user.password_hash) {
+    let administers = user
+        .as_ref()
+        .is_some_and(|user| admin_guard::administers(user.is_admin, user.is_active));
+    let access = match enforcement::access(state.db(), administers).await {
+        Ok(access) => access,
+        Err(error) => {
+            crate::metrics::record_login(LOGIN_ERROR);
+            return unavailable(&error);
+        }
+    };
+    if access == PasswordAccess::Refused {
+        crate::metrics::record_login(sso::SSO_REQUIRED);
+        return sso_required();
+    }
+
+    let Some(user) = user else {
+        crate::metrics::record_login(LOGIN_INVALID_CREDENTIALS);
+        return invalid_credentials();
+    };
+
+    match verify_password(&request.password, &user.password_hash) {
         Ok(true) => {}
         Ok(false) => {
-            crate::metrics::record_login("invalid_credentials");
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid email or password")),
-            )
-                .into_response();
+            crate::metrics::record_login(LOGIN_INVALID_CREDENTIALS);
+            return invalid_credentials();
         }
-        Err(e) => {
-            tracing::error!("Password verification error: {}", e);
-            crate::metrics::record_login("error");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+        Err(error) => {
+            tracing::error!(%error, "Password verification error");
+            crate::metrics::record_login(LOGIN_ERROR);
+            return internal_error();
         }
     }
 
-    // Check if user is active
     if !user.is_active.unwrap_or(true) {
-        crate::metrics::record_login("disabled");
+        crate::metrics::record_login(LOGIN_DISABLED);
         return (
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new("Account is disabled")),
+            Json(ErrorResponse::with_code(
+                "Account is disabled",
+                account::DISABLED,
+            )),
         )
             .into_response();
     }
 
-    // Update last login
-    if let Err(e) = users::update_last_login(state.db(), user.id).await {
-        tracing::warn!("Failed to update last login: {}", e);
+    if let Err(error) = users::update_last_login(state.db(), user.id).await {
+        tracing::warn!(%error, "Failed to update last login");
     }
 
-    // Get user with permissions
-    let user_perms = match users::get_user_with_permissions(state.db(), user.id).await {
-        Ok(Some(u)) => u,
-        Ok(None) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("User not found")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
-
-    let device = match admit_device(&state, user_perms.user.id, &headers, None).await {
-        Ok(device) => device,
-        Err(response) => {
-            crate::metrics::record_login("disabled");
-            return *response;
-        }
-    };
-
-    // Generate tokens
-    let (access_token, refresh_token) =
-        match generate_tokens(&state, &user_perms, &headers, &device, None).await {
-            Ok(tokens) => tokens,
-            Err(response) => {
-                crate::metrics::record_login("error");
-                return response.into_response();
+    match session::issue(
+        &state,
+        user.id,
+        &headers,
+        Credential::Password(&user.password_hash),
+    )
+    .await
+    {
+        Ok(response) => {
+            crate::metrics::record_login(LOGIN_OK);
+            if access == PasswordAccess::BreakGlass {
+                record_break_glass(&state, user.id, &user.email).await;
             }
-        };
+            Json(response).into_response()
+        }
+        Err(refusal) => {
+            crate::metrics::record_login(login_outcome(refusal));
+            refusal.into_response()
+        }
+    }
+}
 
-    crate::metrics::record_login("ok");
-    Json(AuthResponse {
-        access_token,
-        refresh_token,
-        token_type: "Bearer",
-        expires_in: state.config().jwt_access_lifetime,
-        user: UserResponse::from_user(&user_perms),
-        roles: user_perms.roles.clone(),
-        permissions: user_perms.permissions.clone(),
+/// A server admin signing in with a password while single sign-on is required is the way back in
+/// when the identity provider is down, so every such sign-in is on the record.
+async fn record_break_glass(state: &AppState, user_id: Uuid, email: &str) {
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: None,
+            workspace_id: None,
+            actor_id: user_id,
+            actor_email: email,
+            action: actions::USER_BREAK_GLASS_SIGNED_IN,
+            resource_type: resources::USER,
+            resource_id: Some(user_id),
+            old_values: None,
+            new_values: None,
+        },
+    )
+    .await;
+}
+
+fn registered(error: &sqlx::Error) -> bool {
+    error.as_database_error().is_some_and(|database| {
+        database.is_unique_violation()
+            && database.constraint().is_some_and(|constraint| {
+                [users::EMAIL_KEY, users::EMAIL_LOWER_KEY].contains(&constraint)
+            })
     })
-    .into_response()
+}
+
+fn already_registered() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ErrorResponse::new(EMAIL_REGISTERED)),
+    )
+        .into_response()
+}
+
+fn sso_required() -> Response {
+    refusal::respond(&sso::Error::Required, Stage::SignIn)
+}
+
+fn invalid_credentials() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse::new("Invalid email or password")),
+    )
+        .into_response()
+}
+
+fn internal_error() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse::new("Internal server error")),
+    )
+        .into_response()
+}
+
+fn unavailable(error: &sqlx::Error) -> Response {
+    tracing::error!("Database error: {}", error);
+    internal_error()
+}
+
+fn login_outcome(refusal: Refusal) -> &'static str {
+    match refusal {
+        Refusal::DevicePending | Refusal::DeviceBlocked => LOGIN_DISABLED,
+        Refusal::Superseded => LOGIN_INVALID_CREDENTIALS,
+        Refusal::Missing | Refusal::Unavailable => LOGIN_ERROR,
+    }
 }
 
 /// POST /api/auth/refresh
 pub async fn refresh(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<RefreshRequest>,
+    Json(request): Json<RefreshRequest>,
 ) -> impl IntoResponse {
-    // Hash the refresh token to look it up
-    let token_hash = hash_token(&req.refresh_token);
+    let token_hash = hash_token(&request.refresh_token);
 
-    // Validate the refresh token in the database
     let user_id = match refresh_tokens::validate_refresh_token(state.db(), &token_hash).await {
         Ok(Some(id)) => id,
         Ok(None) => {
@@ -494,18 +326,11 @@ pub async fn refresh(
             )
                 .into_response();
         }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+        Err(error) => return unavailable(&error),
     };
 
-    let session = match sessions::get_session_by_token(state.db(), &token_hash).await {
-        Ok(Some(session)) if session.user_id == user_id => session,
+    let current = match sessions::get_session_by_token(state.db(), &token_hash).await {
+        Ok(Some(current)) if current.user_id == user_id => current,
         Ok(_) => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -513,24 +338,11 @@ pub async fn refresh(
             )
                 .into_response();
         }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+        Err(error) => return unavailable(&error),
     };
 
-    // Revoke the old refresh token
-    if let Err(e) = refresh_tokens::revoke_refresh_token(state.db(), &token_hash).await {
-        tracing::warn!("Failed to revoke old refresh token: {}", e);
-    }
-
-    // Get user with permissions
-    let user_perms = match users::get_user_with_permissions(state.db(), user_id).await {
-        Ok(Some(u)) => u,
+    let user = match users::get_user_with_permissions(state.db(), user_id).await {
+        Ok(Some(user)) => user,
         Ok(None) => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -538,43 +350,47 @@ pub async fn refresh(
             )
                 .into_response();
         }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+        Err(error) => return unavailable(&error),
+    };
+
+    if current.sso_provider_id.is_none() {
+        let administers = admin_guard::administers(user.user.is_admin, user.user.is_active);
+        match enforcement::access(state.db(), administers).await {
+            Ok(PasswordAccess::Refused) => {
+                if let Err(error) = sessions::revoke_session(state.db(), current.id).await {
+                    return unavailable(&error);
+                }
+                return sso_required();
+            }
+            Ok(PasswordAccess::Allowed | PasswordAccess::BreakGlass) => {}
+            Err(error) => return unavailable(&error),
         }
-    };
+    }
 
-    let device = match admit_device(&state, user_id, &headers, session.device_id).await {
+    if let Err(error) = refresh_tokens::revoke_refresh_token(state.db(), &token_hash).await {
+        tracing::warn!(%error, "Failed to revoke old refresh token");
+    }
+
+    let device = match session::admit_device(&state, user_id, &headers, current.device_id).await {
         Ok(device) => device,
-        Err(response) => return *response,
+        Err(refusal) => return refusal.into_response(),
     };
 
-    // Generate new tokens
-    let (access_token, refresh_token) =
-        match generate_tokens(&state, &user_perms, &headers, &device, Some(session.id)).await {
-            Ok(tokens) => tokens,
-            Err(response) => return response.into_response(),
-        };
-
-    Json(AuthResponse {
-        access_token,
-        refresh_token,
-        token_type: "Bearer",
-        expires_in: state.config().jwt_access_lifetime,
-        user: UserResponse::from_user(&user_perms),
-        roles: user_perms.roles.clone(),
-        permissions: user_perms.permissions.clone(),
-    })
-    .into_response()
+    match session::generate_tokens(&state, &user, &headers, &device, Grant::Refresh(current.id))
+        .await
+    {
+        Ok(tokens) => Json(AuthResponse::new(
+            &user,
+            tokens,
+            state.config().jwt_access_lifetime,
+        ))
+        .into_response(),
+        Err(refusal) => refusal.into_response(),
+    }
 }
 
 /// POST /api/auth/logout
 pub async fn logout(State(state): State<AppState>, auth: AuthUser) -> impl IntoResponse {
-    // Revoke all refresh tokens and sessions for this user
     let user_id = match auth.0.user_id() {
         Ok(id) => id,
         Err(_) => {
@@ -586,192 +402,16 @@ pub async fn logout(State(state): State<AppState>, auth: AuthUser) -> impl IntoR
         }
     };
 
-    if let Err(e) = refresh_tokens::revoke_all_user_tokens(state.db(), user_id).await {
-        tracing::warn!("Failed to revoke refresh tokens: {}", e);
+    if let Err(error) = refresh_tokens::revoke_all_user_tokens(state.db(), user_id).await {
+        tracing::warn!("Failed to revoke refresh tokens: {}", error);
     }
 
-    if let Err(e) = sessions::revoke_all_user_sessions(state.db(), user_id).await {
-        tracing::warn!("Failed to revoke sessions: {}", e);
+    if let Err(error) = sessions::revoke_all_user_sessions(state.db(), user_id).await {
+        tracing::warn!("Failed to revoke sessions: {}", error);
     }
 
     StatusCode::NO_CONTENT.into_response()
 }
-
-async fn admit_device(
-    state: &AppState,
-    user_id: Uuid,
-    headers: &HeaderMap,
-    existing_device_id: Option<Uuid>,
-) -> Result<Device, Box<Response>> {
-    let mut claim = crate::auth::device::claim(headers);
-    if claim.public_id.is_none()
-        && let Some(device_id) = existing_device_id
-    {
-        match devices::get(state.db(), device_id).await {
-            Ok(Some(device)) => {
-                claim.public_id = Some(device.public_id);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::error!(%error, "Failed to load the session device");
-                return Err(device_unavailable());
-            }
-        }
-    }
-
-    match devices::admit(state.db(), user_id, &claim).await {
-        Ok(devices::Admission::Allowed(device)) => Ok(device),
-        Ok(devices::Admission::Pending(_)) => Err(device_refused(
-            "This device is waiting for an admin to allow it",
-            crate::auth::device::PENDING,
-        )),
-        Ok(devices::Admission::Blocked(_)) => Err(device_refused(
-            "This device is blocked",
-            crate::auth::device::BLOCKED,
-        )),
-        Err(error) => {
-            tracing::error!(%error, "Failed to admit a device");
-            Err(device_unavailable())
-        }
-    }
-}
-
-fn device_refused(message: &'static str, code: &'static str) -> Box<Response> {
-    Box::new(
-        (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::with_code(message, code)),
-        )
-            .into_response(),
-    )
-}
-
-fn device_unavailable() -> Box<Response> {
-    Box::new(
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("Internal server error")),
-        )
-            .into_response(),
-    )
-}
-
-/// Generate access and refresh tokens
-/// Issue a fresh refresh token and an access token bound to a session: a new
-/// session for a login, or the caller's existing one when `session` names it.
-async fn generate_tokens(
-    state: &AppState,
-    user: &users::UserWithPermissions,
-    headers: &HeaderMap,
-    device: &Device,
-    session: Option<Uuid>,
-) -> Result<(String, String), (StatusCode, Json<ErrorResponse>)> {
-    let config = state.config();
-    if let Some(zone) = crate::auth::time_zone::claim(headers)
-        && let Err(error) = users::set_time_zone(state.db(), user.user.id, zone).await
-    {
-        tracing::warn!(user_id = %user.user.id, %error, "Failed to record the console's time zone");
-    }
-    let claim = crate::auth::device::claim(headers);
-    let ip_address = claim.ip_address.as_deref();
-    let user_agent = claim.user_agent.as_deref();
-    let device_info = crate::auth::device::info(&claim, device);
-
-    let refresh_token = create_refresh_token(
-        user.user.id,
-        config.jwt_secret(),
-        config.refresh_token_lifetime(),
-    )
-    .map_err(|e| {
-        tracing::error!("Token creation error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("Internal server error")),
-        )
-    })?;
-
-    // Store refresh token hash in database
-    let token_hash = hash_token(&refresh_token);
-    let expires_at = Utc::now() + config.refresh_token_lifetime();
-
-    if let Err(e) = refresh_tokens::create_refresh_token(
-        state.db(),
-        user.user.id,
-        &token_hash,
-        expires_at.naive_utc(),
-        user_agent,
-        ip_address,
-    )
-    .await
-    {
-        tracing::error!("Failed to store refresh token: {}", e);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("Internal server error")),
-        ));
-    }
-
-    let session = match session {
-        Some(session_id) => {
-            sessions::rotate_session(state.db(), session_id, &token_hash, expires_at.naive_utc())
-                .await
-                .and_then(|rotated| rotated.ok_or(sqlx::Error::RowNotFound))
-        }
-        None => {
-            sessions::create_session(
-                state.db(),
-                user.user.id,
-                &token_hash,
-                ip_address,
-                user_agent,
-                Some(device_info),
-                expires_at.naive_utc(),
-            )
-            .await
-        }
-    };
-    let session = match session {
-        Ok(session) => session,
-        Err(error) => {
-            tracing::error!("Failed to bind session: {}", error);
-            let _ = refresh_tokens::revoke_refresh_token(state.db(), &token_hash).await;
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            ));
-        }
-    };
-    if let Err(error) = sessions::attach_device(state.db(), session.id, device.id).await {
-        tracing::error!(%error, "Failed to bind the session to its device");
-        let _ = refresh_tokens::revoke_refresh_token(state.db(), &token_hash).await;
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("Internal server error")),
-        ));
-    }
-
-    let access_token = create_session_access_token(
-        user.user.id,
-        &user.user.email,
-        user.roles.clone(),
-        user.permissions.clone(),
-        user.user.is_admin.unwrap_or(false),
-        session.id,
-        config.jwt_secret(),
-        config.access_token_lifetime(),
-    )
-    .map_err(|error| {
-        tracing::error!("Token creation error: {}", error);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("Internal server error")),
-        )
-    })?;
-
-    Ok((access_token, refresh_token))
-}
-
-// Email Verification Endpoints
 
 /// Request to verify an email address
 #[derive(Debug, Deserialize)]
@@ -788,7 +428,7 @@ pub struct ResendVerificationRequest {
 /// POST /api/auth/verify-email
 pub async fn verify_email(
     State(state): State<AppState>,
-    Json(req): Json<VerifyEmailRequest>,
+    Json(request): Json<VerifyEmailRequest>,
 ) -> impl IntoResponse {
     use crate::db::email_verification;
 
@@ -797,18 +437,20 @@ pub async fn verify_email(
         "message": "Email verified successfully"
     });
 
-    let user_id = match email_verification::verify_token(state.db(), &req.token).await {
+    let user_id = match email_verification::verify_token(state.db(), &request.token).await {
         Ok(id) => id,
         Err(_) => {
-            return match email_verification::recently_verified_user(state.db(), &req.token).await {
+            return match email_verification::recently_verified_user(state.db(), &request.token)
+                .await
+            {
                 Ok(Some(_)) => (StatusCode::OK, Json(verified)).into_response(),
                 Ok(None) => (
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse::new("Invalid or expired verification token")),
                 )
                     .into_response(),
-                Err(e) => {
-                    tracing::error!("Failed to look up verification token: {}", e);
+                Err(error) => {
+                    tracing::error!("Failed to look up verification token: {}", error);
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(ErrorResponse::new("Internal server error")),
@@ -819,8 +461,8 @@ pub async fn verify_email(
         }
     };
 
-    if let Err(e) = email_verification::mark_email_verified(state.db(), user_id).await {
-        tracing::error!("Failed to mark email as verified: {}", e);
+    if let Err(error) = email_verification::mark_email_verified(state.db(), user_id).await {
+        tracing::error!("Failed to mark email as verified: {}", error);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::new("Internal server error")),
@@ -839,12 +481,11 @@ fn verification_url(base_url: &str, token: &str) -> String {
 /// POST /api/auth/resend-verification
 pub async fn resend_verification(
     State(state): State<AppState>,
-    Json(req): Json<ResendVerificationRequest>,
+    Json(request): Json<ResendVerificationRequest>,
 ) -> impl IntoResponse {
     use crate::db::email_verification;
 
-    // Get user by email
-    let user = match users::get_user_by_email(state.db(), &req.email).await {
+    let user = match users::get_user_by_email(state.db(), &request.email).await {
         Ok(Some(user)) => user,
         Ok(None) => {
             // Don't reveal whether email exists
@@ -857,8 +498,8 @@ pub async fn resend_verification(
             )
                 .into_response();
         }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
+        Err(error) => {
+            tracing::error!("Database error: {}", error);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Internal server error")),
@@ -880,12 +521,11 @@ pub async fn resend_verification(
             .into_response();
     }
 
-    // Create new verification token
     let (token, _expires_at) =
         match email_verification::create_verification_token(state.db(), user.id).await {
             Ok(result) => result,
-            Err(e) => {
-                tracing::error!("Failed to create verification token: {}", e);
+            Err(error) => {
+                tracing::error!("Failed to create verification token: {}", error);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse::new("Internal server error")),
@@ -921,8 +561,6 @@ pub async fn resend_verification(
         .into_response()
 }
 
-// Password Reset Endpoints
-
 /// Request to initiate password reset
 #[derive(Debug, Deserialize)]
 pub struct ForgotPasswordRequest {
@@ -939,44 +577,30 @@ pub struct ResetPasswordRequest {
 /// POST /api/auth/forgot-password
 pub async fn forgot_password(
     State(state): State<AppState>,
-    Json(req): Json<ForgotPasswordRequest>,
+    Json(request): Json<ForgotPasswordRequest>,
 ) -> impl IntoResponse {
-    use crate::db::password_reset;
-
-    // Get user by email
-    let user = match users::get_user_by_email(state.db(), &req.email).await {
+    let user = match users::get_user_by_email(state.db(), &request.email).await {
         Ok(Some(user)) => user,
-        Ok(None) => {
-            // Don't reveal whether email exists for security
-            return (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "success": true,
-                    "message": "If the email exists, a password reset email has been sent"
-                })),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+        Ok(None) => return reset_requested(),
+        Err(error) => return unavailable(&error),
     };
 
-    // Create reset token
+    match enforcement::access(
+        state.db(),
+        admin_guard::administers(user.is_admin, user.is_active),
+    )
+    .await
+    {
+        Ok(PasswordAccess::Refused) => return reset_requested(),
+        Ok(PasswordAccess::Allowed | PasswordAccess::BreakGlass) => {}
+        Err(error) => return unavailable(&error),
+    }
+
     let (token, _expires_at) = match password_reset::create_reset_token(state.db(), user.id).await {
         Ok(result) => result,
-        Err(e) => {
-            tracing::error!("Failed to create reset token: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+        Err(error) => {
+            tracing::error!("Failed to create reset token: {}", error);
+            return internal_error();
         }
     };
 
@@ -1001,11 +625,17 @@ pub async fn forgot_password(
         );
     }
 
+    reset_requested()
+}
+
+/// The same answer whether or not the email has an account, or may reset its password, so the
+/// endpoint can't be used to find out either.
+fn reset_requested() -> Response {
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "success": true,
-                    "message": "If the email exists, a password reset email has been sent"
+            "message": "If the email exists, a password reset email has been sent"
         })),
     )
         .into_response()
@@ -1014,12 +644,9 @@ pub async fn forgot_password(
 /// POST /api/auth/reset-password
 pub async fn reset_password(
     State(state): State<AppState>,
-    Json(req): Json<ResetPasswordRequest>,
+    Json(request): Json<ResetPasswordRequest>,
 ) -> impl IntoResponse {
-    use crate::db::password_reset;
-
-    // Validate new password
-    if req.new_password.len() < 8 {
+    if request.new_password.len() < 8 {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new("Password must be at least 8 characters")),
@@ -1027,34 +654,25 @@ pub async fn reset_password(
             .into_response();
     }
 
-    // Verify and consume the reset token atomically to prevent race conditions
-    let user_id = match password_reset::verify_and_consume_reset_token(state.db(), &req.token).await
-    {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new("Invalid or expired reset token")),
-            )
-                .into_response();
-        }
-    };
+    if let Err(refusal) = reset_allowed(&state, &request.token).await {
+        return refusal.into_response();
+    }
 
-    // Hash the new password
-    let password_hash = match hash_password(&req.new_password) {
+    let user_id =
+        match password_reset::verify_and_consume_reset_token(state.db(), &request.token).await {
+            Ok(id) => id,
+            Err(_) => return invalid_reset_token(),
+        };
+
+    let password_hash = match hash_password(&request.new_password) {
         Ok(hash) => hash,
-        Err(e) => {
-            tracing::error!("Password hashing error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+        Err(error) => {
+            tracing::error!("Password hashing error: {}", error);
+            return internal_error();
         }
     };
 
-    // Update the password
-    if let Err(e) = sqlx::query!(
+    if let Err(error) = sqlx::query!(
         "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
         password_hash,
         user_id
@@ -1062,24 +680,19 @@ pub async fn reset_password(
     .execute(state.db())
     .await
     {
-        tracing::error!("Failed to update password: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("Internal server error")),
-        )
-            .into_response();
+        tracing::error!("Failed to update password: {}", error);
+        return internal_error();
     }
 
-    // Revoke all existing refresh tokens and sessions for security
-    if let Err(e) = refresh_tokens::revoke_all_user_tokens(state.db(), user_id).await {
+    if let Err(error) = refresh_tokens::revoke_all_user_tokens(state.db(), user_id).await {
         tracing::warn!(
             "Failed to revoke refresh tokens after password reset: {}",
-            e
+            error
         );
     }
 
-    if let Err(e) = sessions::revoke_all_user_sessions(state.db(), user_id).await {
-        tracing::warn!("Failed to revoke sessions after password reset: {}", e);
+    if let Err(error) = sessions::revoke_all_user_sessions(state.db(), user_id).await {
+        tracing::warn!("Failed to revoke sessions after password reset: {}", error);
     }
 
     (
@@ -1092,9 +705,84 @@ pub async fn reset_password(
         .into_response()
 }
 
+/// Looks at the token without using it, so a refused reset leaves the token and the password as
+/// they were.
+async fn reset_allowed(state: &AppState, token: &str) -> Result<(), ResetRefusal> {
+    let user_id = password_reset::verify_reset_token(state.db(), token)
+        .await
+        .map_err(|_| ResetRefusal::InvalidToken)?;
+    let user = users::get_user_by_id(state.db(), user_id)
+        .await?
+        .ok_or(ResetRefusal::InvalidToken)?;
+    match enforcement::access(
+        state.db(),
+        admin_guard::administers(user.is_admin, user.is_active),
+    )
+    .await?
+    {
+        PasswordAccess::Refused => Err(ResetRefusal::Required),
+        PasswordAccess::Allowed | PasswordAccess::BreakGlass => Ok(()),
+    }
+}
+
+enum ResetRefusal {
+    InvalidToken,
+    Required,
+    Unavailable(sqlx::Error),
+}
+
+impl From<sqlx::Error> for ResetRefusal {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Unavailable(error)
+    }
+}
+
+impl IntoResponse for ResetRefusal {
+    fn into_response(self) -> Response {
+        match self {
+            Self::InvalidToken => invalid_reset_token(),
+            Self::Required => sso_required(),
+            Self::Unavailable(error) => unavailable(&error),
+        }
+    }
+}
+
+fn invalid_reset_token() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse::new("Invalid or expired reset token")),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::verification_url;
+    use zone_enterprise::sso;
+
+    use super::{
+        LOGIN_DISABLED, LOGIN_ERROR, LOGIN_INVALID_CREDENTIALS, Refusal, login_outcome,
+        verification_url,
+    };
+
+    #[test]
+    fn a_refused_session_keeps_the_login_metric_labels() {
+        assert_eq!(login_outcome(Refusal::DevicePending), LOGIN_DISABLED);
+        assert_eq!(login_outcome(Refusal::DeviceBlocked), LOGIN_DISABLED);
+        assert_eq!(login_outcome(Refusal::Missing), LOGIN_ERROR);
+        assert_eq!(login_outcome(Refusal::Unavailable), LOGIN_ERROR);
+        assert_eq!(
+            login_outcome(Refusal::Superseded),
+            LOGIN_INVALID_CREDENTIALS
+        );
+        assert_eq!(LOGIN_DISABLED, "disabled");
+        assert_eq!(LOGIN_ERROR, "error");
+        assert_eq!(LOGIN_INVALID_CREDENTIALS, "invalid_credentials");
+    }
+
+    #[test]
+    fn a_password_refused_for_single_sign_on_has_its_own_login_metric_label() {
+        assert_eq!(sso::SSO_REQUIRED, "sso_required");
+    }
 
     /// The console routes the verification page at /verify-email, so the mail
     /// must point there.

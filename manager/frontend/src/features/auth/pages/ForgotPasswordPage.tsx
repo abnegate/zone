@@ -3,6 +3,9 @@ import type React from 'react';
 import { type FormEvent, useState } from 'react';
 import { Link } from 'react-router-dom';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
+import { useSsoProviders } from '../hooks/useSsoProviders';
+import { SsoCode } from '../SsoCode';
+import { SSO_MESSAGES } from '../ssoMessages';
 import './AuthPage.css';
 
 export default function ForgotPasswordPage() {
@@ -11,6 +14,7 @@ export default function ForgotPasswordPage() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const sso = useSsoProviders();
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -93,6 +97,8 @@ export default function ForgotPasswordPage() {
         </div>
 
         <form className="auth-form" onSubmit={handleSubmit}>
+          {sso?.required && <p className="auth-notice">{SSO_MESSAGES[SsoCode.Required]}</p>}
+
           <Input
             label="Email"
             type="email"

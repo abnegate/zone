@@ -116,7 +116,7 @@
   font-size: var(--ui-text-sm);
 }
 
-.invitation-actions {
+.invitation-accept-page .invitation-actions {
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -124,25 +124,25 @@
   text-align: center;
 }
 
-.invitation-actions .ui-btn {
+.invitation-accept-page .invitation-actions .ui-btn {
   height: var(--ui-control-height-lg);
   font-size: var(--ui-text-md);
   font-weight: 600;
 }
 
-.auth-notice {
+.invitation-notice {
   margin: 0;
   font-size: var(--ui-text-sm);
   line-height: var(--ui-space-5);
   color: var(--ui-text-secondary);
 }
 
-.auth-buttons {
+.invitation-buttons {
   display: flex;
   gap: var(--ui-space-2);
 }
 
-.auth-buttons button {
+.invitation-buttons .ui-btn {
   flex: 1;
 }
 
@@ -156,7 +156,11 @@
     margin-bottom: var(--ui-space-2);
   }
 
-  .auth-buttons {
+  .invitation-buttons {
     flex-direction: column;
+  }
+
+  .invitation-buttons .ui-btn {
+    flex: none;
   }
 }
