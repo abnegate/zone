@@ -23,12 +23,12 @@ impl Feature {
         Self::AuditRetention,
     ];
 
-    pub fn enforced(self, license: Option<&License>) -> bool {
+    pub fn enforced(license: Option<&License>) -> bool {
         license.is_some()
     }
 
     pub fn entitled(self, license: Option<&License>, now: DateTime<Utc>) -> bool {
-        self.enforced(license) && matches!(status(license, now), Status::Active | Status::Grace)
+        Self::enforced(license) && matches!(status(license, now), Status::Active | Status::Grace)
     }
 }
 
@@ -62,9 +62,7 @@ mod tests {
 
     #[test]
     fn community_enforces_nothing() {
-        for feature in Feature::ALL {
-            assert!(!feature.enforced(None), "{feature:?}");
-        }
+        assert!(!Feature::enforced(None));
     }
 
     #[test]
@@ -83,17 +81,8 @@ mod tests {
     }
 
     #[test]
-    fn a_license_enforces_every_feature_whatever_the_status() {
-        let license = license();
-        for feature in Feature::ALL {
-            for (now, status) in moments(&license) {
-                assert_eq!(license.status(now), status);
-                assert!(
-                    feature.enforced(Some(&license)),
-                    "{feature:?} while {status:?}"
-                );
-            }
-        }
+    fn a_license_enforces_every_feature_whatever_its_status() {
+        assert!(Feature::enforced(Some(&license())));
     }
 
     #[test]

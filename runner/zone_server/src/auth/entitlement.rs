@@ -15,6 +15,7 @@ pub struct Unentitled(pub Feature);
 
 impl IntoResponse for Unentitled {
     fn into_response(self) -> Response {
+        tracing::debug!(feature = ?self.0, "Refused a change the license doesn't allow");
         (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::with_code(MESSAGE, LICENSE_REQUIRED)),
@@ -33,10 +34,43 @@ pub async fn require(state: &AppState, feature: Feature) -> Result<(), Unentitle
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
+    use tracing::Level;
 
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the captured log")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn logged(refusal: Unentitled) -> String {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_max_level(Level::DEBUG)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || refusal.into_response());
+        String::from_utf8_lossy(&captured.0.lock().expect("the captured log")).into_owned()
+    }
 
     #[test]
     fn the_message_names_the_one_paid_edition() {
@@ -57,6 +91,15 @@ mod tests {
                 json!({ "error": MESSAGE, "code": "license_required" }),
                 "{feature:?}"
             );
+        }
+    }
+
+    #[test]
+    fn every_refusal_logs_the_feature_it_refused() {
+        for feature in Feature::ALL {
+            let log = logged(Unentitled(feature));
+            assert!(log.contains("DEBUG"), "{log}");
+            assert!(log.contains(&format!("feature={feature:?}")), "{log}");
         }
     }
 
