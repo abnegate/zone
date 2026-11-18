@@ -15,6 +15,7 @@ pub enum Variable {
 }
 
 impl Variable {
+    #[cfg(test)]
     pub const ALL: [Self; 12] = [
         Self::PrivateKeyFile,
         Self::PrivateKey,

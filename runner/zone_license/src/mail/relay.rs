@@ -60,10 +60,6 @@ impl Relay {
         })
     }
 
-    pub fn host(&self) -> &str {
-        &self.host
-    }
-
     fn compose(&self, recipient: &str, letter: &Letter) -> Result<Message, MailError> {
         let to: Address = recipient.parse().map_err(|_| MailError::Recipient)?;
         Message::builder()

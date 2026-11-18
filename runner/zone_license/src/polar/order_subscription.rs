@@ -11,7 +11,6 @@ pub struct OrderSubscription {
     pub seats: Option<i64>,
     pub current_period_start: DateTime<Utc>,
     pub current_period_end: DateTime<Utc>,
-    pub cancel_at_period_end: bool,
 }
 
 #[cfg(test)]

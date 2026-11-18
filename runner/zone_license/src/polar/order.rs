@@ -1,5 +1,4 @@
 use abnegate_secret::sanitize;
-use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use super::billing_reason::BillingReason;
@@ -9,16 +8,12 @@ use super::order_subscription::OrderSubscription;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Order {
     pub id: String,
-    pub status: String,
     pub paid: bool,
     pub billing_reason: BillingReason,
     #[serde(default)]
     pub billing_name: Option<String>,
     #[serde(default)]
     pub product_id: Option<String>,
-    #[serde(default)]
-    pub subscription_id: Option<String>,
-    pub created_at: DateTime<Utc>,
     pub customer: Customer,
     #[serde(default)]
     pub subscription: Option<OrderSubscription>,

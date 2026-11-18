@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -9,8 +8,6 @@ use crate::order_error::OrderError;
 pub struct Event {
     #[serde(rename = "type")]
     pub kind: EventType,
-    pub timestamp: DateTime<Utc>,
-    pub api_version: String,
     pub data: Value,
 }
 
@@ -22,8 +19,6 @@ impl Event {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
-
     use super::*;
 
     #[test]
@@ -31,13 +26,13 @@ mod tests {
         let body = br#"{"type":"order.paid","timestamp":"2026-11-18T11:59:58.123456Z","api_version":"2026-10","data":{"id":"x"}}"#;
         let event = Event::parse(body).unwrap();
         assert_eq!(event.kind, EventType::OrderPaid);
-        assert_eq!(
-            event.timestamp,
-            Utc.with_ymd_and_hms(2026, 11, 18, 11, 59, 58).unwrap()
-                + chrono::Duration::microseconds(123_456)
-        );
-        assert_eq!(event.api_version, "2026-10");
         assert_eq!(event.data["id"], "x");
+    }
+
+    #[test]
+    fn needs_only_the_type_and_the_data() {
+        let event = Event::parse(br#"{"type":"order.paid","data":{}}"#).unwrap();
+        assert_eq!(event.kind, EventType::OrderPaid);
     }
 
     #[test]

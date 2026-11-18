@@ -585,6 +585,25 @@ fn subscription_status_does_not_gate_issuing() {
 }
 
 #[test]
+fn fields_the_signer_never_reads_may_be_absent() {
+    let mut value: Value = serde_json::from_slice(CREATE).unwrap();
+    for field in ["timestamp", "api_version"] {
+        value.as_object_mut().unwrap().remove(field);
+    }
+    let data = value["data"].as_object_mut().unwrap();
+    for field in ["status", "subscription_id", "created_at", "seats"] {
+        data.remove(field);
+    }
+    data["customer"].as_object_mut().unwrap().remove("id");
+    data["subscription"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cancel_at_period_end");
+    let event = Event::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(issued(&event), first_year());
+}
+
+#[test]
 fn malformed_order_is_an_error() {
     let event = edited(CREATE, |value| value["data"]["paid"] = json!("yes"));
     assert_eq!(decide(&event, &products()), Err(OrderError::Malformed));
