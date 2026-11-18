@@ -7,13 +7,11 @@ import type {
   LicenseStatusSchema,
   SeatsSchema,
   SetLicenseRequestSchema,
-  TierSchema,
   UnverifiedSchema,
 } from './schemas';
 
 export type Edition = z.infer<typeof EditionSchema>;
 export type LicenseStatus = z.infer<typeof LicenseStatusSchema>;
-export type Tier = z.infer<typeof TierSchema>;
 export type LicenseDetails = z.infer<typeof LicenseDetailsSchema>;
 export type Seats = z.infer<typeof SeatsSchema>;
 export type LicenseResponse = z.infer<typeof LicenseResponseSchema>;

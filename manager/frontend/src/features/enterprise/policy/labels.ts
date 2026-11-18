@@ -12,7 +12,7 @@ export const LAPSED_NOTICE =
   'Your Zone license has lapsed. Policies are still enforced; editing needs an active or grace license.';
 
 export const UPGRADE_NOTICE =
-  'Agent policy is part of Zone Team and Enterprise. Add a license to choose which providers, models and coding agents people can use, and when tools need approval.';
+  'Agent policy is part of Zone Enterprise. Add a license to choose which providers, models and coding agents people can use, and when tools need approval.';
 
 export const SOURCE_LABELS: Readonly<Record<PolicySource, string>> = {
   [PolicySource.Organization]: 'Inherited from organization',

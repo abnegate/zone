@@ -97,7 +97,7 @@ const DENIALS: Readonly<Record<PolicyDenialCode, (subject: string | undefined) =
 
 const REFUSALS: Readonly<Record<PolicyAdminCode, string>> = {
   [PolicyCode.LicenseRequired]:
-    'Changing the agent policy needs an active Zone Team or Enterprise license.',
+    'Changing the agent policy needs an active Zone Enterprise license.',
   [PolicyCode.Wider]:
     "A workspace can only narrow its organization's policy. Remove anything the organization doesn't allow.",
   [PolicyCode.ModelInvalid]:
