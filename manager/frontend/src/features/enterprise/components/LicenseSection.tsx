@@ -36,7 +36,7 @@ export function LicenseSection() {
         {response && needsLicense(response.status) && (
           <div className="section-row-actions license-buy-actions">
             <a
-              className={`license-buy ${buttonVariants({ variant: 'secondary', size: 'sm' })}`}
+              className={buttonVariants({ variant: 'secondary', size: 'sm' })}
               href={PRICING_URL}
               target="_blank"
               rel="noopener noreferrer"

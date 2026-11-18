@@ -64,6 +64,9 @@ test.describe('License settings', () => {
     await expect(link).toHaveAttribute('href', PRICING_URL);
     await expect(link).toHaveAttribute('target', '_blank');
     await expect(link).toHaveAttribute('rel', /\bnoopener\b/);
+
+    await link.hover();
+    await expect(link).toHaveCSS('text-decoration-line', 'none');
   });
 
   test('does not offer a purchase to an active install', async ({ page }) => {

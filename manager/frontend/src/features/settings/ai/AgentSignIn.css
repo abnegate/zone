@@ -122,10 +122,6 @@
   margin: 0;
 }
 
-.agent-sign-in a.ui-btn:hover {
-  text-decoration: none;
-}
-
 .agent-sign-in-link {
   font-family: var(--ui-font-mono);
   font-size: var(--ui-text-xs);

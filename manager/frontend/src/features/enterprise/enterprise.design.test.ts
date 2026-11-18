@@ -55,10 +55,6 @@ describe('license section surfaces', () => {
     expect(rule(css, '.license-detail dd')).toContain('overflow-wrap: anywhere');
   });
 
-  it('keeps the buy link looking like a button when hovered', () => {
-    expect(rule(css, '.license-buy:hover')).toContain('text-decoration: none');
-  });
-
   it('stacks the details and wraps the header and actions on a phone so nothing scrolls sideways', () => {
     const phone = media(css, PHONE);
     expect(rule(phone, '.license-details')).toContain('grid-template-columns: minmax(0, 1fr)');
