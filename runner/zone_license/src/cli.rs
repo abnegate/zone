@@ -109,6 +109,20 @@ mod tests {
     }
 
     #[test]
+    fn keygen_help_shows_the_suggested_key_id_on_one_line() {
+        let mut cli = Cli::command();
+        let help = cli
+            .find_subcommand_mut("keygen")
+            .expect("keygen is a subcommand")
+            .render_help()
+            .to_string();
+        assert!(
+            help.contains("the next free one for this year, such as 2026-2"),
+            "{help}"
+        );
+    }
+
+    #[test]
     fn parses_a_keygen_command() {
         let cli = Cli::try_parse_from([
             "zone-license",
