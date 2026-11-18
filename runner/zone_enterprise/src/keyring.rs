@@ -89,7 +89,6 @@ mod tests {
     use crate::encoding::SEPARATOR;
     use crate::fixtures;
     use crate::signing::{sign, sign_bytes};
-    use crate::tier::Tier;
 
     fn signed() -> String {
         sign(&fixtures::payload(), &fixtures::first())
@@ -120,7 +119,6 @@ mod tests {
     fn records_the_key_that_verified() {
         let payload = Payload {
             key_id: fixtures::SECOND.into(),
-            tier: Tier::Enterprise,
             ..fixtures::payload()
         };
         let license = fixtures::keyring()
@@ -452,6 +450,20 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("support".into(), json!({ "level": "priority" }));
+        let text = sign_bytes(&serde_json::to_vec(&value).unwrap(), &fixtures::first());
+        assert_eq!(
+            fixtures::keyring().verify(&text).unwrap().payload(),
+            &fixtures::payload()
+        );
+    }
+
+    #[test]
+    fn verifies_a_legacy_license_that_names_a_tier() {
+        let mut value = payload_value();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("tier".into(), json!("team"));
         let text = sign_bytes(&serde_json::to_vec(&value).unwrap(), &fixtures::first());
         assert_eq!(
             fixtures::keyring().verify(&text).unwrap().payload(),
