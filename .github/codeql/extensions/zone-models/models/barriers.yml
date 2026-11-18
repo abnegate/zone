@@ -40,3 +40,4 @@ extensions:
       - ["<zone_server::pull::comfy_reference::ComfyReference>::parse", "ReturnValue", "path-injection", "manual"]
       - ["<zone_server::pull::comfy_reference::ComfyReference>::parse", "ReturnValue", "request-url", "manual"]
       - ["zone_server::setup::confined_relative", "ReturnValue", "path-injection", "manual"]
+      - ["zone_license::private_key::secured", "ReturnValue", "path-injection", "manual"]
