@@ -9790,16 +9790,21 @@ dependencies = [
 name = "zone_license"
 version = "0.1.0"
 dependencies = [
+ "abnegate-notify",
+ "abnegate-secret",
+ "async-trait",
  "base64 0.23.1",
  "chrono",
  "clap",
  "getrandom 0.3.4",
  "hmac",
+ "lettre",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",

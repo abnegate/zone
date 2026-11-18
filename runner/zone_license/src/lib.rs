@@ -9,6 +9,7 @@ pub mod keygen;
 mod keygen_arguments;
 mod keygen_error;
 pub mod license_id;
+pub mod mail;
 pub mod order_error;
 pub mod polar;
 pub mod private_key;
