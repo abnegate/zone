@@ -372,6 +372,11 @@ Point your platform's health check or uptime monitor at `/health`. Only
 `/webhooks/polar` needs to be reachable from Polar. Request bodies are capped
 at 2 MB, far above any Polar event.
 
+The image has no Docker `HEALTHCHECK`: the slim runtime image carries no HTTP
+client to run one with. Have your orchestrator or load balancer probe
+`GET /health` from outside the container instead, such as a Kubernetes
+`httpGet` liveness and readiness probe on port 8080.
+
 ### Logs
 
 `serve` writes one JSON object per line to standard error. Each delivery logs
