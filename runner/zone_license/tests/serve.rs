@@ -32,6 +32,7 @@ const KEY_ID: &str = "test-serve-1";
 const WEBHOOK: &str = "msg_2kWm9Q4tYpS3vB7xN1cR8dLe";
 const EMAIL: &str = "billing@acme.test";
 const CUSTOMER: &str = "Acme Ltd";
+const PRODUCT: &str = "5f0c8a9e-6b1d-4c2e-9a3f-7d4e1b2c3a40";
 
 struct Service {
     address: SocketAddr,
@@ -49,6 +50,7 @@ impl Service {
         let keyring = Keyring::new([TrustedKey::new(KEY_ID, key.public()).unwrap()]).unwrap();
         let variables = HashMap::from([
             (Variable::WebhookSecret, SECRET.to_owned()),
+            (Variable::Products, PRODUCT.to_owned()),
             (Variable::PrivateKey, key.encode()),
             (Variable::KeyId, KEY_ID.to_owned()),
             (Variable::Listen, "127.0.0.1:0".to_owned()),

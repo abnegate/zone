@@ -84,8 +84,12 @@ fn first_year() -> Grant {
     grant(ORDER, 5, "2026-11-18T11:59:58Z", "2027-11-18T11:59:58Z")
 }
 
+fn products() -> [String; 1] {
+    [PRODUCT.to_owned()]
+}
+
 fn issued(event: &Event) -> Grant {
-    match decide(event, &[]) {
+    match decide(event, &products()) {
         Ok(Decision::Issue(grant)) => grant,
         other => panic!("expected a grant, got {other:?}"),
     }
@@ -306,7 +310,7 @@ fn secret_debug_hides_the_keys() {
 #[test]
 fn subscription_create_issues_the_first_year() {
     assert_eq!(
-        decide(&event(CREATE), &[]),
+        decide(&event(CREATE), &products()),
         Ok(Decision::Issue(first_year()))
     );
 }
@@ -314,7 +318,7 @@ fn subscription_create_issues_the_first_year() {
 #[test]
 fn subscription_cycle_issues_the_next_period() {
     assert_eq!(
-        decide(&event(CYCLE), &[]),
+        decide(&event(CYCLE), &products()),
         Ok(Decision::Issue(grant(
             CYCLE_ORDER,
             5,
@@ -327,7 +331,7 @@ fn subscription_cycle_issues_the_next_period() {
 #[test]
 fn subscription_update_issues_the_new_seat_count() {
     assert_eq!(
-        decide(&event(UPDATE), &[]),
+        decide(&event(UPDATE), &products()),
         Ok(Decision::Issue(grant(
             UPDATE_ORDER,
             8,
@@ -340,7 +344,7 @@ fn subscription_update_issues_the_new_seat_count() {
 #[test]
 fn one_time_purchase_is_ignored() {
     assert_eq!(
-        decide(&event(PURCHASE), &[]),
+        decide(&event(PURCHASE), &products()),
         Ok(Decision::Ignore(Ignored::BillingReason))
     );
 }
@@ -348,7 +352,7 @@ fn one_time_purchase_is_ignored() {
 #[test]
 fn unpaid_order_is_ignored() {
     assert_eq!(
-        decide(&event(UNPAID), &[]),
+        decide(&event(UNPAID), &products()),
         Ok(Decision::Ignore(Ignored::Unpaid))
     );
 }
@@ -356,14 +360,14 @@ fn unpaid_order_is_ignored() {
 #[test]
 fn order_without_seats_is_ignored() {
     assert_eq!(
-        decide(&event(NO_SEATS), &[]),
+        decide(&event(NO_SEATS), &products()),
         Ok(Decision::Ignore(Ignored::NotSeatBased))
     );
 }
 
 #[test]
 fn order_without_email_is_an_error() {
-    assert_eq!(decide(&event(NO_EMAIL), &[]), Err(OrderError::Email));
+    assert_eq!(decide(&event(NO_EMAIL), &products()), Err(OrderError::Email));
 }
 
 #[test]
@@ -375,7 +379,7 @@ fn other_event_types_are_ignored() {
         ORDER_CREATED,
     ] {
         assert_eq!(
-            decide(&event(body), &[]),
+            decide(&event(body), &products()),
             Ok(Decision::Ignore(Ignored::EventType))
         );
     }
@@ -396,7 +400,7 @@ fn meter_cycle_and_unknown_reasons_are_ignored() {
             value["data"]["billing_reason"] = json!(reason)
         });
         assert_eq!(
-            decide(&event, &[]),
+            decide(&event, &products()),
             Ok(Decision::Ignore(Ignored::BillingReason)),
             "reason {reason}"
         );
@@ -451,10 +455,17 @@ fn unlisted_product_is_ignored() {
 fn order_without_a_product_is_ignored_when_products_are_listed() {
     let event = edited(CREATE, |value| value["data"]["product_id"] = Value::Null);
     assert_eq!(
-        decide(&event, &[PRODUCT.to_owned()]),
+        decide(&event, &products()),
         Ok(Decision::Ignore(Ignored::Product))
     );
-    assert_eq!(issued(&event), first_year());
+}
+
+#[test]
+fn an_empty_product_list_issues_nothing() {
+    assert_eq!(
+        decide(&event(CREATE), &[]),
+        Ok(Decision::Ignore(Ignored::Product))
+    );
 }
 
 #[test]
@@ -472,7 +483,7 @@ fn zero_seats_are_ignored() {
         value["data"]["subscription"]["seats"] = json!(0);
     });
     assert_eq!(
-        decide(&event, &[]),
+        decide(&event, &products()),
         Ok(Decision::Ignore(Ignored::NotSeatBased))
     );
 }
@@ -483,7 +494,7 @@ fn null_subscription_is_not_seat_based() {
         value["data"]["subscription"] = Value::Null;
     });
     assert_eq!(
-        decide(&event, &[]),
+        decide(&event, &products()),
         Ok(Decision::Ignore(Ignored::NotSeatBased))
     );
 }
@@ -493,14 +504,14 @@ fn blank_or_absent_email_is_an_error() {
     let blank = edited(CREATE, |value| {
         value["data"]["customer"]["email"] = json!("  ")
     });
-    assert_eq!(decide(&blank, &[]), Err(OrderError::Email));
+    assert_eq!(decide(&blank, &products()), Err(OrderError::Email));
     let absent = edited(CREATE, |value| {
         value["data"]["customer"]
             .as_object_mut()
             .unwrap()
             .remove("email");
     });
-    assert_eq!(decide(&absent, &[]), Err(OrderError::Email));
+    assert_eq!(decide(&absent, &products()), Err(OrderError::Email));
 }
 
 #[test]
@@ -514,11 +525,11 @@ fn subscription_status_does_not_gate_issuing() {
 #[test]
 fn malformed_order_is_an_error() {
     let event = edited(CREATE, |value| value["data"]["paid"] = json!("yes"));
-    assert_eq!(decide(&event, &[]), Err(OrderError::Malformed));
+    assert_eq!(decide(&event, &products()), Err(OrderError::Malformed));
     let event = edited(CREATE, |value| {
         value["data"]["subscription"]["current_period_end"] = json!("next year")
     });
-    assert_eq!(decide(&event, &[]), Err(OrderError::Malformed));
+    assert_eq!(decide(&event, &products()), Err(OrderError::Malformed));
 }
 
 #[test]

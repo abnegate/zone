@@ -63,6 +63,7 @@ mod tests {
     const WEBHOOK: &str = "msg_router";
     const SUBSCRIPTION: &str = "b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c";
     const EMAIL: &str = "billing@acme.test";
+    const PRODUCT: &str = "5f0c8a9e-6b1d-4c2e-9a3f-7d4e1b2c3a40";
 
     #[derive(Default)]
     struct Recording {
@@ -95,6 +96,10 @@ mod tests {
                 host: "smtp.example.test".to_owned(),
             })
         }
+    }
+
+    fn products() -> Vec<String> {
+        vec![PRODUCT.to_owned()]
     }
 
     fn signer() -> Signer {
@@ -145,7 +150,7 @@ mod tests {
 
     async fn refused(request: Request<Body>) {
         let outbox = Arc::new(Recording::default());
-        let (status, body) = answer(app(outbox.clone(), vec![]), request).await;
+        let (status, body) = answer(app(outbox.clone(), products()), request).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body, None);
         assert!(outbox.sent().is_empty());
@@ -161,7 +166,7 @@ mod tests {
 
     async fn unprocessable(body: &[u8]) {
         let outbox = Arc::new(Recording::default());
-        let (status, answered) = answer(app(outbox.clone(), vec![]), signed(body)).await;
+        let (status, answered) = answer(app(outbox.clone(), products()), signed(body)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(answered, None);
         assert!(outbox.sent().is_empty());
@@ -170,7 +175,7 @@ mod tests {
     #[tokio::test]
     async fn a_paid_order_sends_a_license_and_names_it() {
         let outbox = Arc::new(Recording::default());
-        let (status, body) = answer(app(outbox.clone(), vec![]), signed(CREATE)).await;
+        let (status, body) = answer(app(outbox.clone(), products()), signed(CREATE)).await;
 
         let period_end = "2027-11-18T11:59:58Z".parse().unwrap();
         let id = license_id::derive(SUBSCRIPTION, period_end, 5);
@@ -189,15 +194,6 @@ mod tests {
         assert_eq!(license.payload().id, id);
         assert_eq!(license.payload().customer, "Acme Ltd");
         assert_eq!(license.payload().seats, 5);
-    }
-
-    #[tokio::test]
-    async fn a_listed_product_issues() {
-        let outbox = Arc::new(Recording::default());
-        let products = vec!["5f0c8a9e-6b1d-4c2e-9a3f-7d4e1b2c3a40".to_owned()];
-        let (status, _) = answer(app(outbox.clone(), products), signed(CREATE)).await;
-        assert_eq!(status, StatusCode::ACCEPTED);
-        assert_eq!(outbox.sent().len(), 1);
     }
 
     #[tokio::test]
@@ -245,17 +241,17 @@ mod tests {
 
     #[tokio::test]
     async fn another_event_type_is_ignored() {
-        ignored(SUBSCRIPTION_UPDATED, vec![], "event_type").await;
+        ignored(SUBSCRIPTION_UPDATED, products(), "event_type").await;
     }
 
     #[tokio::test]
     async fn a_one_off_purchase_is_ignored() {
-        ignored(PURCHASE, vec![], "billing_reason").await;
+        ignored(PURCHASE, products(), "billing_reason").await;
     }
 
     #[tokio::test]
     async fn an_unpaid_order_is_ignored() {
-        ignored(UNPAID, vec![], "unpaid").await;
+        ignored(UNPAID, products(), "unpaid").await;
     }
 
     #[tokio::test]
@@ -285,7 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_send_is_unavailable_so_polar_retries() {
-        let (status, body) = answer(app(Arc::new(Failing), vec![]), signed(CREATE)).await;
+        let (status, body) = answer(app(Arc::new(Failing), products()), signed(CREATE)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body, None);
     }
@@ -296,7 +292,7 @@ mod tests {
             .uri(HEALTH_PATH)
             .body(Body::empty())
             .unwrap();
-        let (status, body) = answer(app(Arc::new(Failing), vec![]), request).await;
+        let (status, body) = answer(app(Arc::new(Failing), products()), request).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, Some(json!({ "status": "ok" })));
     }
@@ -307,7 +303,7 @@ mod tests {
             .uri(WEBHOOK_PATH)
             .body(Body::empty())
             .unwrap();
-        let (status, _) = answer(app(Arc::new(Failing), vec![]), request).await;
+        let (status, _) = answer(app(Arc::new(Failing), products()), request).await;
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     }
 }

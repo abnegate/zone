@@ -189,7 +189,8 @@ seat assignment in Polar's portal.
 Polar caps a subscription at 1,000 seats. Sell larger deals by invoice and
 [hand-sign](#hand-signing-a-license) their keys.
 
-Copy the product's ID. It's the value for `POLAR_PRODUCT_IDS` if you set it.
+Copy the product's ID. It's the value for `POLAR_PRODUCT_IDS`, which the
+signer requires.
 
 ### 3. The minimum seat count
 
@@ -329,7 +330,7 @@ Values are trimmed, and a blank value counts as unset, except
 | Variable | Default | Meaning |
 |---|---|---|
 | `POLAR_WEBHOOK_SECRET` | Required | The endpoint's secret from Polar, starting `whsec_`. |
-| `POLAR_PRODUCT_IDS` | Any product | Comma-separated Polar product IDs to issue keys for. Orders for other products are acknowledged and ignored. Set it if the organization sells anything else. |
+| `POLAR_PRODUCT_IDS` | Required | Comma-separated Polar product IDs to issue keys for, at least one. Orders for other products are acknowledged and ignored, so nothing else the organization sells, or adds later, ever gets a key. |
 | `ZONE_LICENSE_PRIVATE_KEY_FILE` | None | Path to the private key file, which must give its group and everyone else no access. Set exactly one of this and `ZONE_LICENSE_PRIVATE_KEY`. |
 | `ZONE_LICENSE_PRIVATE_KEY` | None | The private key itself: the base64 of the 32-byte seed. Set exactly one of this and `ZONE_LICENSE_PRIVATE_KEY_FILE`. |
 | `ZONE_LICENSE_KEY_ID` | Required | The signing key's id, such as `2026-2`. It must name a key in this release's production keyring, and that key must match the private key. |
@@ -554,7 +555,7 @@ It issues a key when all of these hold:
 - the order's `paid` is true;
 - its `billing_reason` is `subscription_create` (a new subscription),
   `subscription_cycle` (a renewal) or `subscription_update` (a seat change);
-- its product is in `POLAR_PRODUCT_IDS`, when that's set;
+- its product is in `POLAR_PRODUCT_IDS`;
 - it's for a seat-based subscription with at least one seat.
 
 It ignores, with `202` and `{"ignored":"<reason>"}`, a one-off `purchase`, a

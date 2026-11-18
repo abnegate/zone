@@ -42,11 +42,10 @@ pub fn decide(event: &Event, products: &[String]) -> Result<Decision, OrderError
 }
 
 fn sold(order: &Order, products: &[String]) -> bool {
-    products.is_empty()
-        || order
-            .product_id
-            .as_ref()
-            .is_some_and(|product| products.contains(product))
+    order
+        .product_id
+        .as_ref()
+        .is_some_and(|product| products.contains(product))
 }
 
 #[cfg(test)]
