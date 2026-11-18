@@ -19,19 +19,18 @@ pub struct Order {
     #[serde(default)]
     pub subscription_id: Option<String>,
     pub created_at: DateTime<Utc>,
-    #[serde(default)]
-    pub seats: Option<i64>,
     pub customer: Customer,
     #[serde(default)]
     pub subscription: Option<OrderSubscription>,
 }
 
 impl Order {
+    /// Only the subscription's seats count: the order's own `seats` is for
+    /// one-time orders and may be a proration delta.
     pub fn seats(&self) -> Option<u32> {
         self.subscription
             .as_ref()
             .and_then(|subscription| subscription.seats)
-            .or(self.seats)
             .and_then(|seats| u32::try_from(seats).ok())
             .filter(|seats| *seats >= 1)
     }
@@ -111,23 +110,22 @@ mod tests {
     }
 
     #[test]
-    fn subscription_seats_win_over_order_seats() {
+    fn seats_come_from_the_subscription() {
         let order = order(json!({"seats": 3, "subscription": {"seats": 7}}));
         assert_eq!(order.seats(), Some(7));
     }
 
     #[test]
-    fn falls_back_to_order_seats() {
-        let order = order(json!({"seats": 3}));
-        assert_eq!(order.seats(), Some(3));
+    fn order_seats_alone_are_none() {
+        assert_eq!(order(json!({"seats": 3})).seats(), None);
     }
 
     #[test]
     fn zero_negative_or_missing_seats_are_none() {
-        assert_eq!(order(json!({"subscription": {"seats": 0}})).seats(), None);
-        assert_eq!(order(json!({"seats": -2})).seats(), None);
-        assert_eq!(order(json!({})).seats(), None);
-        assert_eq!(order(json!({"seats": 5_000_000_000_i64})).seats(), None);
+        for seats in [json!(0), json!(-2), json!(null), json!(5_000_000_000_i64)] {
+            let order = order(json!({"subscription": {"seats": seats}}));
+            assert_eq!(order.seats(), None, "{seats}");
+        }
     }
 
     #[test]

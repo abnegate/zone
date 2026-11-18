@@ -497,12 +497,20 @@ fn an_empty_product_list_issues_nothing() {
 }
 
 #[test]
-fn seats_fall_back_to_the_order() {
+fn order_seats_without_subscription_seats_are_misconfigured() {
     let event = edited(CREATE, |value| {
         value["data"]["subscription"]["seats"] = Value::Null;
         value["data"]["seats"] = json!(3);
     });
-    assert_eq!(issued(&event).seats, 3);
+    assert_eq!(decide(&event, &products()), misconfigured(ORDER));
+}
+
+#[test]
+fn a_proration_delta_on_the_order_does_not_change_the_seats() {
+    let event = edited(UPDATE, |value| {
+        value["data"]["seats"] = json!(3);
+    });
+    assert_eq!(issued(&event).seats, 8);
 }
 
 #[test]
