@@ -618,8 +618,8 @@ expiry and Zone's grace period follows.
 | License field | Taken from |
 |---|---|
 | `seats` | The seat count of the order's subscription, never the order's own `seats`, which Polar fills only for one-time orders |
-| `expires_at` | The subscription's `current_period_end`, with no grace added |
-| `issued_at` | The subscription's `current_period_start` |
+| `expires_at` | The subscription's `current_period_end` in whole seconds, with no grace added |
+| `issued_at` | The subscription's `current_period_start` in whole seconds |
 | `customer` | The order's billing name, else the customer's billing name, else the customer's name, else their email |
 | `id` | A UUIDv5 over the subscription, the period end and the seat count |
 | `key_id` | `ZONE_LICENSE_KEY_ID` |
