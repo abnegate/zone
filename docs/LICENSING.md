@@ -382,10 +382,11 @@ client to run one with. Have your orchestrator or load balancer probe
 `serve` writes one JSON object per line to standard error. Each delivery logs
 one line with an `outcome` of `sent`, `ignored`, `unsigned`, `malformed`,
 `unaddressed`, `misconfigured`, `unsignable`, `unsendable` or `undelivered`,
-matching the
-[responses](#responses). Once the
-signature checks out, the line carries the Polar `webhook` id and, once the
-order is read, its `order`, `subscription` and `license` ids. An ignored
+matching the [responses](#responses). Once the signature checks out, the line
+carries the Polar `webhook` id and, once the order is read, its `order`,
+`subscription` and `license` ids, or the `product` id for `misconfigured`. A
+refused signature is logged at `info`, since anyone can post to the endpoint;
+an order a paying customer is left waiting on is logged as an error. An ignored
 delivery also logs the event type and the `reason`. A failed send logs what
 went wrong (`rejected`, `response`, `client`, `tls`, `timeout` or
 `connection`), the relay's SMTP status code if it gave one, and whether the
