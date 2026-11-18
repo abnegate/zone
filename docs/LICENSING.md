@@ -359,9 +359,12 @@ at 2 MB, far above any Polar event.
 one line with an `outcome` of `sent`, `ignored`, `unsigned`, `malformed`,
 `unsignable` or `undelivered`, matching the [responses](#responses). Once the
 signature checks out, the line carries the Polar `webhook` id and, once the
-order is read, its `order`, `subscription` and `license` ids. An ignored delivery also logs the event type
-and the `reason`; a failed send logs whether the relay's error was
-`retryable`.
+order is read, its `order`, `subscription` and `license` ids. An ignored
+delivery also logs the event type and the `reason`. A failed send logs what
+went wrong (`rejected`, `response`, `client`, `tls`, `timeout` or
+`connection`), the relay's SMTP status code if it gave one, and whether the
+error was `retryable`. It never logs the text of the relay's reply, because
+relays often quote the recipient's address in it.
 
 The logs never contain the license key, the webhook secret, the private key,
 the SMTP password, or the customer's name or email address. Set `RUST_LOG`,

@@ -2,9 +2,10 @@ use abnegate_secret::sanitize_owned;
 use thiserror::Error;
 
 use crate::mail::SEND_TIMEOUT;
+use crate::mail::failure::Failure;
 
 /// Addresses are personal data and these messages head for log lines, so no
-/// variant quotes the address it refused.
+/// variant quotes an address or keeps the text of a relay's reply.
 #[derive(Debug, Error)]
 pub enum MailError {
     #[error("the recipient address could not be parsed")]
@@ -15,11 +16,16 @@ pub enum MailError {
     Configuration { host: String, message: String },
     #[error("the message could not be composed: {0}")]
     Compose(String),
-    #[error("the relay at {host} did not take the message: {message}")]
+    #[error(
+        "the relay at {host} did not take the message: {failure}, {}, {}",
+        status.map_or_else(|| "no status".to_owned(), |code| format!("status {code}")),
+        if *permanent { "permanent" } else { "transient" }
+    )]
     Delivery {
         host: String,
-        message: String,
-        retryable: bool,
+        failure: Failure,
+        status: Option<u16>,
+        permanent: bool,
     },
     #[error("the relay at {host} did not take the message within {}s", SEND_TIMEOUT.as_secs())]
     Timeout { host: String },
@@ -28,7 +34,7 @@ pub enum MailError {
 impl MailError {
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Delivery { retryable, .. } => *retryable,
+            Self::Delivery { permanent, .. } => !permanent,
             Self::Timeout { .. } => true,
             Self::Recipient | Self::Sender | Self::Configuration { .. } | Self::Compose(_) => false,
         }
@@ -44,8 +50,9 @@ impl MailError {
     pub(crate) fn delivery(host: &str, error: &lettre::transport::smtp::Error) -> Self {
         Self::Delivery {
             host: host.to_string(),
-            message: sanitize_owned(error.to_string()),
-            retryable: !(error.is_permanent() || error.is_client()),
+            failure: Failure::of(error),
+            status: error.status().map(u16::from),
+            permanent: error.is_permanent() || error.is_client(),
         }
     }
 }
@@ -54,11 +61,12 @@ impl MailError {
 mod tests {
     use super::*;
 
-    fn delivery(retryable: bool) -> MailError {
+    fn delivery(permanent: bool) -> MailError {
         MailError::Delivery {
             host: "smtp.example.test".to_string(),
-            message: "refused".to_string(),
-            retryable,
+            failure: Failure::Rejected,
+            status: Some(if permanent { 550 } else { 451 }),
+            permanent,
         }
     }
 
@@ -75,9 +83,27 @@ mod tests {
     }
 
     #[test]
-    fn a_delivery_failure_is_retried_only_when_it_says_so() {
-        assert!(delivery(true).is_retryable());
-        assert!(!delivery(false).is_retryable());
+    fn a_delivery_failure_is_retried_only_when_it_is_transient() {
+        assert!(delivery(false).is_retryable());
+        assert!(!delivery(true).is_retryable());
+    }
+
+    #[test]
+    fn a_delivery_failure_names_its_kind_and_status() {
+        assert_eq!(
+            delivery(true).to_string(),
+            "the relay at smtp.example.test did not take the message: rejected, status 550, permanent"
+        );
+        let unreachable = MailError::Delivery {
+            host: "smtp.example.test".to_string(),
+            failure: Failure::Connection,
+            status: None,
+            permanent: false,
+        };
+        assert_eq!(
+            unreachable.to_string(),
+            "the relay at smtp.example.test did not take the message: connection, no status, transient"
+        );
     }
 
     #[test]

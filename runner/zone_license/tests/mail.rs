@@ -3,7 +3,7 @@ mod support;
 use abnegate_notify::{Sender, SmtpConfig, SmtpSecurity};
 use chrono::{TimeZone, Utc};
 use tokio::net::TcpListener;
-use zone_license::mail::{Letter, MailError, Outbox, Relay};
+use zone_license::mail::{Failure, Letter, MailError, Outbox, Relay};
 
 use crate::support::smtp::{SENDER, SmtpSink};
 
@@ -113,6 +113,39 @@ async fn a_permanent_rejection_is_not_retryable() {
     assert!(matches!(error, MailError::Delivery { .. }), "{error:?}");
     assert!(!error.is_retryable(), "{error}");
     assert!(sink.messages().is_empty());
+}
+
+#[tokio::test]
+async fn a_rejection_that_quotes_the_recipient_keeps_only_its_status() {
+    let sink =
+        SmtpSink::rejecting("550 5.1.1 <billing@acme.test>: Recipient address rejected").await;
+    let relay = Relay::new(&sink.config()).expect("relay");
+
+    let error = relay
+        .send(RECIPIENT, &letter())
+        .await
+        .expect_err("rejected");
+
+    for shown in [
+        error.to_string(),
+        format!("{error:?}"),
+        format!("{error:#?}"),
+    ] {
+        assert!(!shown.contains("billing@acme.test"), "{shown}");
+        assert!(!shown.contains("Recipient address rejected"), "{shown}");
+    }
+    assert!(
+        matches!(
+            error,
+            MailError::Delivery {
+                failure: Failure::Rejected,
+                status: Some(550),
+                permanent: true,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]
