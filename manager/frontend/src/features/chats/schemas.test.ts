@@ -392,6 +392,17 @@ describe('a pull request status', () => {
       expect(PullRequestStatusSchema.parse({ ...status, threads }).threads).toBeNull();
     }
   });
+
+  it('keeps the conversation comment count the server sent', () => {
+    const parsed = PullRequestStatusSchema.parse({ ...status, comments: 2 });
+    expect(parsed.comments).toBe(2);
+  });
+
+  it('reads a comment count no server could send, or none at all, as unknown', () => {
+    for (const comments of [-1, 1.5, undefined]) {
+      expect(PullRequestStatusSchema.parse({ ...status, comments }).comments).toBeNull();
+    }
+  });
 });
 
 describe('a chat pull request', () => {

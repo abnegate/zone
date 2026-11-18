@@ -337,18 +337,22 @@ async fn observe(
         (false, _) => State::Open,
     };
     let mergeable = Mergeable::from(detail.mergeable_state);
-    let (checks, (auto_merge, methods), threads) = match lifecycle {
-        State::Open => tokio::join!(
-            checks(service, reference, token, &detail.head_sha, row),
-            automation(service, reference, token, mergeable, row),
-            threads(service, reference, token, row, reading),
-        ),
+    let (checks, (auto_merge, methods)) = match lifecycle {
+        State::Open => {
+            tokio::join!(
+                checks(service, reference, token, &detail.head_sha, row),
+                automation(service, reference, token, mergeable, row),
+            )
+        }
         State::Closed | State::Merged => (
             Checks::None,
             (AutoMerge::unavailable(AutoMerge::SETTLED), Vec::new()),
-            None,
         ),
     };
+    let (threads, comments) = tokio::join!(
+        threads(service, reference, token, row, reading),
+        comments(service, reference, token, row, reading),
+    );
     let draft_unavailable = match lifecycle {
         State::Open => None,
         State::Closed | State::Merged => Some(AutoMerge::SETTLED.to_string()),
@@ -368,6 +372,7 @@ async fn observe(
             draft_unavailable,
             merge_unavailable,
             threads,
+            comments,
             observed_at: chrono::Utc::now(),
         },
         node_id: detail.node_id,
@@ -415,6 +420,28 @@ async fn threads(
     }
 }
 
+/// How many comments the pull request's conversation carries, which is where
+/// a review bot like CodeRabbit posts its walkthrough rather than as an
+/// inline review comment.
+async fn comments(
+    service: &PullRequestService,
+    reference: &PullRequestReference,
+    token: &SecretValue,
+    row: &PullRequestRow,
+    reading: Reading,
+) -> Option<u32> {
+    if reading == Reading::Change {
+        return None;
+    }
+    match service.fetch_issue_comments(reference, token).await {
+        Ok(comments) => Some(comments.len() as u32),
+        Err(error) => {
+            tracing::debug!(pull_request = %row.id, %error, "could not read a pull request's conversation comments");
+            None
+        }
+    }
+}
+
 /// Whether auto-merge is set or can be, and the ways its repository lets it
 /// merge, most preferred first.
 async fn automation(
@@ -440,6 +467,13 @@ async fn automation(
 mod tests {
     use super::*;
     use crate::services::github::testing::connected::Connected;
+    use serde_json::json;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::any;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
 
     #[tokio::test]
     async fn nothing_reads_or_changes_an_offline_chats_pull_request_on_github() {
@@ -469,5 +503,194 @@ mod tests {
         );
 
         connected.github.verify().await;
+    }
+
+    fn stub_row() -> PullRequestRow {
+        PullRequestRow {
+            id: Uuid::new_v4(),
+            chat_id: Uuid::new_v4(),
+            provider: "github".to_string(),
+            owner: "acme".to_string(),
+            repo: "shop".to_string(),
+            number: 7,
+            url: "https://github.com/acme/shop/pull/7".to_string(),
+            title: None,
+            source_id: None,
+            dismissed_at: None,
+            created_at: chrono::Utc::now(),
+            auto_fix: false,
+            auto_fix_run_id: None,
+            auto_fix_by: None,
+            auto_fix_head: None,
+            auto_fixing: false,
+            offline: false,
+        }
+    }
+
+    fn stub_reference() -> PullRequestReference {
+        PullRequestService::new()
+            .expect("GitHub's own origin")
+            .pull_request("https://github.com/acme/shop/pull/7")
+            .expect("a pull request URL")
+    }
+
+    fn stub_token() -> abnegate_secret::SecretValue {
+        abnegate_secret::SecretValue::new("token")
+    }
+
+    #[tokio::test]
+    async fn a_reading_of_change_asks_github_nothing_for_conversation_comments() {
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let service =
+            PullRequestService::standing_in_for("github.com", &server.uri()).expect("a stand-in");
+
+        let count = comments(
+            &service,
+            &stub_reference(),
+            &stub_token(),
+            &stub_row(),
+            Reading::Change,
+        )
+        .await;
+
+        assert_eq!(count, None);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_comment_list_is_none_rather_than_zero() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/shop/issues/7/comments"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let service =
+            PullRequestService::standing_in_for("github.com", &server.uri()).expect("a stand-in");
+
+        let count = comments(
+            &service,
+            &stub_reference(),
+            &stub_token(),
+            &stub_row(),
+            Reading::Listing,
+        )
+        .await;
+
+        assert_eq!(count, None);
+    }
+
+    #[tokio::test]
+    async fn the_conversation_comments_github_lists_are_counted() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/shop/issues/7/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {
+                    "id": 1,
+                    "body": "Walkthrough",
+                    "html_url": "https://github.com/acme/shop/pull/7#issuecomment-1",
+                    "created_at": "2026-09-05T00:00:00Z",
+                    "user": {"login": "coderabbitai[bot]"},
+                },
+                {
+                    "id": 2,
+                    "body": "Updated",
+                    "html_url": "https://github.com/acme/shop/pull/7#issuecomment-2",
+                    "created_at": "2026-09-05T00:05:00Z",
+                    "user": {"login": "coderabbitai[bot]"},
+                },
+            ])))
+            .mount(&server)
+            .await;
+        let service =
+            PullRequestService::standing_in_for("github.com", &server.uri()).expect("a stand-in");
+
+        let count = comments(
+            &service,
+            &stub_reference(),
+            &stub_token(),
+            &stub_row(),
+            Reading::Listing,
+        )
+        .await;
+
+        assert_eq!(count, Some(2));
+    }
+
+    /// A merged or closed pull request used to carry no review threads at
+    /// all, because 63b40398 stopped reading them there for cost. Both
+    /// threads and the conversation comment count have to survive that
+    /// branch now.
+    #[tokio::test]
+    async fn a_settled_pull_request_still_carries_its_threads_and_comments() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/shop/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "node_id": "PR_7",
+                "number": 7,
+                "title": "Add a cart",
+                "state": "closed",
+                "head": {"ref": "widgets", "sha": "a".repeat(40)},
+                "base": {"ref": "main", "sha": "b".repeat(40)},
+                "html_url": "https://github.com/acme/shop/pull/7",
+                "merged": true,
+                "merge_commit_sha": "c".repeat(40),
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/shop/issues/7/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {
+                    "id": 1,
+                    "body": "Walkthrough",
+                    "html_url": "https://github.com/acme/shop/pull/7#issuecomment-1",
+                    "created_at": "2026-09-05T00:00:00Z",
+                    "user": {"login": "coderabbitai[bot]"},
+                },
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"repository": {"pullRequest": {
+                    "number": 7,
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": false, "endCursor": null},
+                        "nodes": [{"id": "PRRT_1", "isResolved": true}],
+                    },
+                }}},
+            })))
+            .mount(&server)
+            .await;
+        let service =
+            PullRequestService::standing_in_for("github.com", &server.uri()).expect("a stand-in");
+
+        let observation = observe(
+            &service,
+            &stub_reference(),
+            &stub_token(),
+            &stub_row(),
+            Reading::Listing,
+        )
+        .await
+        .expect("a merged pull request reads back");
+
+        assert_eq!(observation.status.state, State::Merged);
+        assert_eq!(
+            observation.status.threads,
+            Some(Threads {
+                open: 0,
+                resolved: 1
+            })
+        );
+        assert_eq!(observation.status.comments, Some(1));
     }
 }

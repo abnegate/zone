@@ -21,6 +21,7 @@ const STATUS: PullRequestStatus = {
   draft_unavailable: null,
   merge_unavailable: null,
   threads: null,
+  comments: null,
   observed_at: '2026-11-05T10:00:00Z',
 };
 
@@ -86,14 +87,34 @@ describe('pull request kinds', () => {
 
 describe('threadsLabel', () => {
   it('names open and resolved review threads apart', () => {
-    expect(threadsLabel({ open: 2, resolved: 3 })).toBe('2 open review threads, 3 resolved');
+    expect(threadsLabel({ comments: null, threads: { open: 2, resolved: 3 } })).toBe(
+      '2 open review threads, 3 resolved'
+    );
   });
 
   it('names a lone open review thread in the singular', () => {
-    expect(threadsLabel({ open: 1, resolved: 4 })).toBe('1 open review thread, 4 resolved');
+    expect(threadsLabel({ comments: null, threads: { open: 1, resolved: 4 } })).toBe(
+      '1 open review thread, 4 resolved'
+    );
   });
 
   it('names no open review threads in the plural', () => {
-    expect(threadsLabel({ open: 0, resolved: 1 })).toBe('0 open review threads, 1 resolved');
+    expect(threadsLabel({ comments: null, threads: { open: 0, resolved: 1 } })).toBe(
+      '0 open review threads, 1 resolved'
+    );
+  });
+
+  it('names the conversation comment count beside the review thread counts', () => {
+    expect(threadsLabel({ comments: 2, threads: { open: 0, resolved: 0 } })).toBe(
+      '2 comments, 0 open review threads, 0 resolved'
+    );
+  });
+
+  it('names a lone comment in the singular', () => {
+    expect(threadsLabel({ comments: 1, threads: null })).toBe('1 comment');
+  });
+
+  it('names nothing for a count that was never read', () => {
+    expect(threadsLabel({ comments: null, threads: null })).toBe('');
   });
 });

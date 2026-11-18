@@ -359,6 +359,7 @@ mod tests {
             draft_unavailable: None,
             merge_unavailable: None,
             threads: open_threads.map(|open| Threads { open, resolved: 0 }),
+            comments: None,
             observed_at: Utc::now(),
         }
     }

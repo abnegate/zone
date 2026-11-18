@@ -78,9 +78,22 @@ export function mergeReading(status: PullRequestStatus | null): MergeReading | n
   }
 }
 
-export function threadsLabel({ open, resolved }: PullRequestThreads): string {
-  const noun = open === 1 ? 'review thread' : 'review threads';
-  return `${open} open ${noun}, ${resolved} resolved`;
+export interface ReviewCounts {
+  comments: number | null;
+  threads: PullRequestThreads | null;
+}
+
+/** Names whichever of the comment and review thread counts were read, each pluralised on its own count. */
+export function threadsLabel({ comments, threads }: ReviewCounts): string {
+  const parts: string[] = [];
+  if (comments !== null) {
+    parts.push(`${comments} ${comments === 1 ? 'comment' : 'comments'}`);
+  }
+  if (threads !== null) {
+    const noun = threads.open === 1 ? 'review thread' : 'review threads';
+    parts.push(`${threads.open} open ${noun}`, `${threads.resolved} resolved`);
+  }
+  return parts.join(', ');
 }
 
 export function pullRequestTitle(pullRequest: ChatPullRequest): string {

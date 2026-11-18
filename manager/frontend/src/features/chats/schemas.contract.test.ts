@@ -663,6 +663,15 @@ describe('a chat pull request reads as the server describes it', () => {
     const source = readFileSync(join(PULL_REQUEST_RS, 'status.rs'), 'utf8');
     expect(Object.keys(rustStructFields(source, 'Status'))).toContain('merge_unavailable');
   });
+
+  /// The reader's only evidence of a conversation comment, where a review bot
+  /// like CodeRabbit posts its walkthrough. A field the server stopped
+  /// sending would leave every chat's row showing no comment count at all,
+  /// so the name is pinned here.
+  test('the status carries the conversation comment count it is read from', () => {
+    const source = readFileSync(join(PULL_REQUEST_RS, 'status.rs'), 'utf8');
+    expect(Object.keys(rustStructFields(source, 'Status'))).toContain('comments');
+  });
 });
 
 const CHATS_DB_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/db/chats/sort.rs');

@@ -133,6 +133,7 @@ function status(overrides: Record<string, unknown>) {
     auto_merge: { enabled: false, unavailable: PENDING_RELEASE },
     draft_unavailable: PENDING_RELEASE,
     threads: { open: 0, resolved: 0 },
+    comments: null,
     observed_at: sentAt,
     ...overrides,
   };
@@ -160,6 +161,7 @@ const PULL_REQUESTS = [
     mergeable: 'blocked',
     checks: 'pending',
     threads: { open: 2, resolved: 3 },
+    comments: 2,
   }),
   pullRequest(13, 'Fix the price rounding in the cart', {
     checks: 'failing',
@@ -353,7 +355,7 @@ test.describe('Chat changes and gallery panel', () => {
     await expect(panel.getByRole('img', { name: 'Checks failing' })).toBeVisible();
     await expect(panel.getByRole('img', { name: 'Merged' })).toBeVisible();
     await expect(
-      panel.getByRole('img', { name: '2 open review threads, 3 resolved' })
+      panel.getByRole('img', { name: '2 comments, 2 open review threads, 3 resolved' })
     ).toBeVisible();
     await expect(
       panel.getByRole('img', { name: '0 open review threads, 4 resolved' })
