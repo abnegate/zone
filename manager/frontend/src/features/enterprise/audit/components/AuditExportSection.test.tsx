@@ -17,8 +17,6 @@ import {
   HEALTHY_S3,
   LAPSED_DESTINATIONS,
   LAPSED_RETENTION,
-  LAPSED_TEAM_DESTINATIONS,
-  LAPSED_TEAM_RETENTION,
   ORGANIZATION_SCOPE,
   PAUSED_SYSLOG,
   PLAIN_HTTP_WEBHOOK,
@@ -26,8 +24,6 @@ import {
   SERVER_RETENTION,
   SERVER_SYSLOG,
   STALLED_DESTINATIONS,
-  TEAM_DESTINATIONS,
-  TEAM_RETENTION,
   UNVERIFIED_DESTINATIONS,
   UNVERIFIED_RETENTION,
   WAITING_RETENTION,
@@ -41,11 +37,8 @@ import {
   DOWNLOAD_TITLE,
   DOWNLOAD_UNVERIFIED,
   EDIT_DESTINATION_TITLE,
-  EDITION_NOTICE,
   HOLDERS_LABEL,
-  KEPT_FOREVER,
   LAPSED_NOTICE,
-  LAPSED_TEAM_NOTICE,
   LICENSE_LINK_LABEL,
   LOADING_LABEL,
   NEVER_DELIVERED,
@@ -53,7 +46,6 @@ import {
   NO_DESTINATIONS_READ_ONLY,
   ORGANIZATION_DESCRIPTION,
   PASTE_KEY_LINK_LABEL,
-  READ_ONLY_EDITION,
   READ_ONLY_LAPSED,
   READ_ONLY_UNLICENSED,
   READ_ONLY_UNVERIFIED,
@@ -199,37 +191,6 @@ describe('AuditExportSection', () => {
       expect(screen.getByRole('button', { name: DOWNLOAD_LABEL })).toBeDisabled();
       expect(within(card(RETENTION_TITLE)).getByText(READ_ONLY_UNLICENSED)).toBeInTheDocument();
       expect(within(card(DOWNLOAD_TITLE)).getByText(DOWNLOAD_READ_ONLY)).toBeInTheDocument();
-    });
-
-    it('lets Team download but keeps streaming and retention behind the Enterprise upgrade', async () => {
-      await loaded(TEAM_DESTINATIONS, TEAM_RETENTION);
-
-      expect(screen.getByRole('note')).toHaveTextContent(EDITION_NOTICE);
-      expect(screen.queryByRole('button', { name: ADD_DESTINATION_LABEL })).not.toBeInTheDocument();
-      const syslog = row(PAUSED_SYSLOG.name);
-      expect(within(syslog).getByText('Paused')).toBeInTheDocument();
-      expect(
-        within(syslog).queryByRole('button', { name: testLabel(PAUSED_SYSLOG.name) })
-      ).not.toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: SAVE_RETENTION_LABEL })).not.toBeInTheDocument();
-      expect(within(card(RETENTION_TITLE)).getByText(READ_ONLY_EDITION)).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: DOWNLOAD_LABEL })).toBeEnabled();
-    });
-
-    it('warns a lapsed Team license that downloads stopped, without offering them', async () => {
-      await loaded(LAPSED_TEAM_DESTINATIONS, LAPSED_TEAM_RETENTION);
-
-      const warning = screen.getByRole('status', { name: '' });
-      expect(warning).toHaveClass('alert-warning');
-      expect(warning).toHaveTextContent(LAPSED_TEAM_NOTICE);
-      expect(warning).not.toHaveTextContent(RETENTION_STILL_APPLIED);
-      expect(within(card(RETENTION_TITLE)).getByText(KEPT_FOREVER)).toBeInTheDocument();
-      expect(within(warning).getByRole('link', { name: RENEW_LINK_LABEL })).toBeInTheDocument();
-      expect(screen.queryByRole('note')).not.toBeInTheDocument();
-      expect(screen.queryByText(EDITION_NOTICE)).not.toBeInTheDocument();
-      expect(screen.getByRole('button', { name: DOWNLOAD_LABEL })).toBeDisabled();
-      expect(within(card(DOWNLOAD_TITLE)).getByText(DOWNLOAD_READ_ONLY)).toBeInTheDocument();
-      expect(within(card(RETENTION_TITLE)).getByText(READ_ONLY_EDITION)).toBeInTheDocument();
     });
 
     it('warns that a lapsed license pauses streaming and keeps the backlog, read-only', async () => {

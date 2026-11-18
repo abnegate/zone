@@ -69,22 +69,6 @@ export const LAPSED_STANDING: Standing = {
   pause: StreamingPause.Lapsed,
 };
 
-export const TEAM_STANDING: Standing = {
-  edition: Edition.Team,
-  status: LicenseStatus.Active,
-  export: true,
-  streaming: false,
-  retention: false,
-  applies: true,
-  pause: StreamingPause.Edition,
-};
-
-export const LAPSED_TEAM_STANDING: Standing = {
-  ...TEAM_STANDING,
-  status: LicenseStatus.Lapsed,
-  export: false,
-};
-
 export const UNVERIFIED_STANDING: Standing = {
   edition: Edition.Community,
   status: LicenseStatus.Community,
@@ -243,17 +227,6 @@ export const LAPSED_DESTINATIONS: DestinationsResponse = {
   destinations: [PAUSED_SYSLOG, PAUSED_S3],
 };
 
-export const TEAM_DESTINATIONS: DestinationsResponse = {
-  standing: TEAM_STANDING,
-  stalled_since: null,
-  destinations: [PAUSED_SYSLOG],
-};
-
-export const LAPSED_TEAM_DESTINATIONS: DestinationsResponse = {
-  ...TEAM_DESTINATIONS,
-  standing: LAPSED_TEAM_STANDING,
-};
-
 export const UNVERIFIED_DESTINATIONS: DestinationsResponse = {
   ...LAPSED_DESTINATIONS,
   standing: UNVERIFIED_STANDING,
@@ -365,16 +338,6 @@ export const UNVERIFIED_RETENTION: RetentionResponse = {
 export const COMMUNITY_SAVED_RETENTION: RetentionResponse = {
   ...ENTERPRISE_RETENTION,
   standing: COMMUNITY_STANDING,
-};
-
-export const TEAM_RETENTION: RetentionResponse = {
-  ...COMMUNITY_RETENTION,
-  standing: TEAM_STANDING,
-};
-
-export const LAPSED_TEAM_RETENTION: RetentionResponse = {
-  ...TEAM_RETENTION,
-  standing: LAPSED_TEAM_STANDING,
 };
 
 export const SERVER_RETENTION: RetentionResponse = {

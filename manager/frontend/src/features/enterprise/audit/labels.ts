@@ -9,19 +9,10 @@ export const SERVER_DESCRIPTION =
 export const AUDIT_LOG_LINK = 'Export, streaming and retention';
 
 export const UPGRADE_NOTICE =
-  'Audit export is part of Zone Team and Enterprise. Add a license to download the audit log, and Enterprise to stream it to a webhook, S3 or syslog and set a retention period.';
-
-export const EDITION_NOTICE =
-  'Your Team license covers downloading the audit log. Streaming to a SIEM and retention need Zone Enterprise, so destinations stay paused until you upgrade.';
-
-export const ENTERPRISE_NOTICE =
-  'Streaming to a SIEM and retention need Zone Enterprise, so destinations stay paused until you upgrade.';
+  'Audit export is part of Zone Enterprise. Add a license to download the audit log, stream it to a webhook, S3 or syslog, and set a retention period.';
 
 export const LAPSED_NOTICE =
   'Your Zone license has lapsed. Streaming is paused and its backlog is kept until you renew, and downloads are unavailable.';
-
-export const LAPSED_TEAM_NOTICE =
-  'Your Zone Team license has lapsed, so downloads are unavailable until you renew. Streaming to a SIEM and changing retention also need Zone Enterprise.';
 
 export const UNVERIFIED_NOTICE =
   "Zone can't verify the stored license key, so streaming is paused and downloads are unavailable.";
@@ -31,14 +22,11 @@ export const RETENTION_STILL_APPLIED = 'The retention period already set is stil
 export const READ_ONLY_UNLICENSED =
   'You can see these settings, but changing them needs a Zone Enterprise license.';
 
-export const READ_ONLY_EDITION =
-  "Changing these settings needs Zone Enterprise; a Team license doesn't include them.";
-
 export const READ_ONLY_LAPSED = 'Renew your Zone license to change these settings.';
 
 export const READ_ONLY_UNVERIFIED = 'Paste the license key again to change these settings.';
 
-export const DOWNLOAD_READ_ONLY = 'Downloads need an active Team or Enterprise license.';
+export const DOWNLOAD_READ_ONLY = 'Downloads need an active Zone Enterprise license.';
 
 export const DOWNLOAD_UNVERIFIED = 'Paste the license key again to download the audit log.';
 

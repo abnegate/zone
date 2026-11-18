@@ -10,24 +10,18 @@ import {
   GRACE_STANDING,
   HEALTHY_S3,
   LAPSED_STANDING,
-  LAPSED_TEAM_STANDING,
   PAUSED_SYSLOG,
   PLAIN_HTTP_WEBHOOK,
   STALLED_DESTINATIONS,
-  TEAM_STANDING,
   UNVERIFIED_STANDING,
 } from './fixtures';
 import {
   DOWNLOAD_READ_ONLY,
   DOWNLOAD_UNVERIFIED,
-  EDITION_NOTICE,
-  ENTERPRISE_NOTICE,
   KEPT_FOREVER,
   LAPSED_NOTICE,
-  LAPSED_TEAM_NOTICE,
   LICENSE_LINK_LABEL,
   PASTE_KEY_LINK_LABEL,
-  READ_ONLY_EDITION,
   READ_ONLY_LAPSED,
   READ_ONLY_UNLICENSED,
   READ_ONLY_UNVERIFIED,
@@ -113,9 +107,10 @@ describe('refusalMessage', () => {
     distinct(AUDIT_ADMIN_CODES.map(refusalMessage));
   });
 
-  it('names Team for downloads and Enterprise for streaming when a license is required', () => {
-    expect(refusalMessage(AuditCode.LicenseRequired)).toContain('Team or Enterprise');
-    expect(refusalMessage(AuditCode.LicenseRequired)).toContain('need Enterprise');
+  it('names Zone Enterprise as the license every audit feature needs', () => {
+    expect(refusalMessage(AuditCode.LicenseRequired)).toBe(
+      'This needs a Zone Enterprise license that is active or in its grace period.'
+    );
   });
 
   it('recognises only audit codes', () => {
@@ -255,7 +250,6 @@ describe('standing copy', () => {
     expect(standingNotice(ENTERPRISE_STANDING, null)).toBeNull();
     expect(standingNotice(GRACE_STANDING, null)).toBeNull();
     expect(standingNotice(COMMUNITY_STANDING, null)).toEqual(upgrade(UPGRADE_NOTICE));
-    expect(standingNotice(TEAM_STANDING, null)).toEqual(upgrade(EDITION_NOTICE));
     expect(standingNotice(LAPSED_STANDING, null)).toEqual(renew(LAPSED_NOTICE));
   });
 
@@ -268,23 +262,13 @@ describe('standing copy', () => {
     expect(PASTE_KEY_LINK_LABEL).not.toContain('Renew');
   });
 
-  it('warns a lapsed Team license that downloads stopped instead of offering them', () => {
-    expect(standingNotice(LAPSED_TEAM_STANDING, null)).toEqual({
-      tone: NoticeTone.Warning,
-      message: LAPSED_TEAM_NOTICE,
-      action: RENEW_LINK_LABEL,
-    });
-    expect(LAPSED_TEAM_NOTICE).toContain('downloads are unavailable');
-    expect(LAPSED_TEAM_NOTICE).toContain('Enterprise');
-  });
-
-  it('claims downloads only when the license covers them', () => {
-    expect(standingNotice({ ...TEAM_STANDING, export: false }, null)).toEqual({
-      tone: NoticeTone.Upgrade,
-      message: ENTERPRISE_NOTICE,
-      action: LICENSE_LINK_LABEL,
-    });
-    expect(ENTERPRISE_NOTICE).not.toContain('download');
+  it('offers every audit feature with Zone Enterprise alone', () => {
+    expect(UPGRADE_NOTICE).toBe(
+      'Audit export is part of Zone Enterprise. Add a license to download the audit log, stream it to a webhook, S3 or syslog, and set a retention period.'
+    );
+    for (const pause of STREAMING_PAUSES) {
+      expect(pauseMessage(pause)).not.toContain('Team');
+    }
   });
 
   it('tells a lapsed admin that the backlog is kept', () => {
@@ -292,7 +276,7 @@ describe('standing copy', () => {
   });
 
   it('says the retention period is still applied only when one is set', () => {
-    for (const standing of [LAPSED_STANDING, LAPSED_TEAM_STANDING, UNVERIFIED_STANDING]) {
+    for (const standing of [LAPSED_STANDING, UNVERIFIED_STANDING]) {
       const kept = standingNotice(standing, null)?.message;
       const retained = standingNotice(standing, RETAINED_DAYS)?.message;
       expect(kept).not.toContain(RETENTION_STILL_APPLIED);
@@ -301,11 +285,9 @@ describe('standing copy', () => {
   });
 
   it('never claims retention is applied where it does not apply', () => {
-    for (const standing of [COMMUNITY_STANDING, TEAM_STANDING]) {
-      expect(standingNotice(standing, RETAINED_DAYS)?.message).not.toContain(
-        RETENTION_STILL_APPLIED
-      );
-    }
+    expect(standingNotice(COMMUNITY_STANDING, RETAINED_DAYS)?.message).not.toContain(
+      RETENTION_STILL_APPLIED
+    );
     expect(standingNotice({ ...LAPSED_STANDING, applies: false }, RETAINED_DAYS)?.message).toBe(
       LAPSED_NOTICE
     );
@@ -317,23 +299,21 @@ describe('readOnlyMessage', () => {
     for (const feature of Object.values(LicensedFeature)) {
       expect(readOnlyMessage(ENTERPRISE_STANDING, feature)).toBeNull();
     }
-    expect(readOnlyMessage(TEAM_STANDING, LicensedFeature.Export)).toBeNull();
   });
 
   it('says what would let each license change streaming and retention', () => {
     for (const feature of [LicensedFeature.Streaming, LicensedFeature.Retention]) {
       expect(readOnlyMessage(COMMUNITY_STANDING, feature)).toBe(READ_ONLY_UNLICENSED);
-      expect(readOnlyMessage(TEAM_STANDING, feature)).toBe(READ_ONLY_EDITION);
-      expect(readOnlyMessage(LAPSED_TEAM_STANDING, feature)).toBe(READ_ONLY_EDITION);
       expect(readOnlyMessage(LAPSED_STANDING, feature)).toBe(READ_ONLY_LAPSED);
       expect(readOnlyMessage(UNVERIFIED_STANDING, feature)).toBe(READ_ONLY_UNVERIFIED);
     }
   });
 
   it('gives downloads their own wording', () => {
-    for (const standing of [COMMUNITY_STANDING, LAPSED_STANDING, LAPSED_TEAM_STANDING]) {
+    for (const standing of [COMMUNITY_STANDING, LAPSED_STANDING]) {
       expect(readOnlyMessage(standing, LicensedFeature.Export)).toBe(DOWNLOAD_READ_ONLY);
     }
+    expect(DOWNLOAD_READ_ONLY).toBe('Downloads need an active Zone Enterprise license.');
   });
 
   it('asks for the key again to download when the stored key cannot be verified', () => {
