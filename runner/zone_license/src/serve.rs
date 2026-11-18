@@ -17,12 +17,25 @@ pub fn run(keyring: &Keyring) -> Result<(), ServeError> {
         .enable_all()
         .build()
         .map_err(ServeError::Runtime)?
-        .block_on(serve(config))
+        .block_on(async {
+            let stopped = signals().map_err(ServeError::Signal)?;
+            serve(config, stopped).await
+        })
 }
 
-async fn serve(config: Config) -> Result<(), ServeError> {
+/// Serves until `shutdown` resolves, then lets deliveries in flight finish.
+pub async fn serve(
+    config: Config,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), ServeError> {
+    start(config).await?.run(shutdown).await?;
+    tracing::info!("Stopped");
+    Ok(())
+}
+
+/// Builds the relay and binds the listener, without serving yet.
+pub async fn start(config: Config) -> Result<Server, ServeError> {
     let relay = Relay::new(&config.smtp)?;
-    let stopped = shutdown().map_err(ServeError::Signal)?;
     let key_id = config.signer.key_id().to_owned();
     let products = config.products.len();
     let context = Context::new(
@@ -39,15 +52,13 @@ async fn serve(config: Config) -> Result<(), ServeError> {
         relay = %config.smtp.host,
         "Listening for Polar webhooks"
     );
-    server.run(stopped).await?;
-    tracing::info!("Stopped");
-    Ok(())
+    Ok(server)
 }
 
 /// The container runs the signer as PID 1, which the kernel gives no default
 /// SIGTERM handler, so without this `docker stop` waits out its timeout.
 #[cfg(unix)]
-fn shutdown() -> io::Result<impl Future<Output = ()> + Send + 'static> {
+fn signals() -> io::Result<impl Future<Output = ()> + Send + 'static> {
     use tokio::signal::unix::{SignalKind, signal};
 
     let mut terminate = signal(SignalKind::terminate())?;
@@ -61,7 +72,7 @@ fn shutdown() -> io::Result<impl Future<Output = ()> + Send + 'static> {
 }
 
 #[cfg(not(unix))]
-fn shutdown() -> io::Result<impl Future<Output = ()> + Send + 'static> {
+fn signals() -> io::Result<impl Future<Output = ()> + Send + 'static> {
     Ok(async {
         if tokio::signal::ctrl_c().await.is_ok() {
             tracing::info!("Stopping on ctrl-c");
