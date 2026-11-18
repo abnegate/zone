@@ -5,8 +5,8 @@ use futures_util::TryStreamExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
+use zone_enterprise::LICENSE_REQUIRED;
 use zone_enterprise::audit::{Event, Format, csv};
-use zone_enterprise::{LICENSE_REQUIRED, Tier};
 use zone_server::db::audit::events::Range;
 use zone_server::db::audit::scope::Scope;
 use zone_server::db::audit::{actions, resources};
@@ -124,7 +124,7 @@ async fn get(fixture: &Fixture, path: &str, account: &Account) -> crate::common:
 #[tokio::test]
 async fn thousands_of_events_stream_in_order_as_ndjson_and_csv() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     seed(
         fixture.pool(),
         Some(fixture.organization),
@@ -213,7 +213,7 @@ async fn the_export_is_read_one_page_at_a_time() {
 #[tokio::test]
 async fn an_empty_range_is_a_header_or_nothing() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     let path = organization_path(fixture.organization);
 
     let response = get(&fixture, &format!("{path}?{WHOLE_YEAR}"), &fixture.owner).await;
@@ -234,7 +234,7 @@ async fn an_empty_range_is_a_header_or_nothing() {
 #[tokio::test]
 async fn a_date_range_covers_whole_days_and_an_instant_range_is_inclusive() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     let organization = Some(fixture.organization);
     let pool = fixture.pool();
     let start = Utc.with_ymd_and_hms(2020, 3, 1, 0, 0, 0).unwrap();
@@ -278,7 +278,7 @@ async fn a_date_range_covers_whole_days_and_an_instant_range_is_inclusive() {
 #[tokio::test]
 async fn an_organization_export_holds_only_its_own_rows_and_the_server_export_only_server_rows() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let stranger = fixture.stranger().await;
     let (other, _) = fixture.another_organization(&stranger).await;
     let at = year_start() + TimeDelta::days(10);
@@ -320,7 +320,7 @@ async fn an_organization_export_holds_only_its_own_rows_and_the_server_export_on
 }
 
 #[tokio::test]
-async fn export_needs_a_team_or_enterprise_license_that_is_active_or_in_grace() {
+async fn export_needs_an_enterprise_license_that_is_active_or_in_grace() {
     let fixture = Fixture::new(PREFIX).await;
     let path = format!("{}?{WHOLE_YEAR}", organization_path(fixture.organization));
     let refused = |response: crate::common::TestResponse| {
@@ -338,17 +338,17 @@ async fn export_needs_a_team_or_enterprise_license_that_is_active_or_in_grace() 
         .await,
     );
 
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     get(&fixture, &path, &fixture.owner)
         .await
         .assert_status(StatusCode::OK);
 
-    fixture.install(&sso::grace(Tier::Enterprise)).await;
+    fixture.install(&sso::grace()).await;
     get(&fixture, &path, &fixture.owner)
         .await
         .assert_status(StatusCode::OK);
 
-    fixture.store_license(&sso::lapsed(Tier::Enterprise)).await;
+    fixture.store_license(&sso::lapsed()).await;
     refused(get(&fixture, &path, &fixture.owner).await);
     refused(
         get(
@@ -366,7 +366,7 @@ async fn export_needs_a_team_or_enterprise_license_that_is_active_or_in_grace() 
 #[tokio::test]
 async fn only_owners_and_admins_export_and_outsiders_are_told_nothing() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     let path = format!("{}?{WHOLE_YEAR}", organization_path(fixture.organization));
     let admin = fixture.member(OrgRole::Admin, None).await;
     let member = fixture.member(OrgRole::Member, None).await;
@@ -398,7 +398,7 @@ async fn only_owners_and_admins_export_and_outsiders_are_told_nothing() {
 #[tokio::test]
 async fn an_invalid_format_or_range_is_refused_with_its_code() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     let path = organization_path(fixture.organization);
     let cases = [
         (
@@ -426,7 +426,7 @@ async fn an_invalid_format_or_range_is_refused_with_its_code() {
 #[tokio::test]
 async fn a_malformed_organization_or_repeated_parameter_is_refused_as_json() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
 
     let missing = get(
         &fixture,
@@ -464,7 +464,7 @@ async fn a_malformed_organization_or_repeated_parameter_is_refused_as_json() {
 #[tokio::test]
 async fn every_export_is_audited_before_it_streams() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
 
     get(
         &fixture,
@@ -516,7 +516,7 @@ async fn every_export_is_audited_before_it_streams() {
 #[tokio::test]
 async fn an_export_whose_audit_row_cannot_be_written_is_refused_without_a_body() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     seed(fixture.pool(), Some(fixture.organization), year_start(), 3).await;
     for statement in REFUSE_EXPORT_AUDIT {
         sqlx::query(statement)
@@ -549,7 +549,7 @@ async fn an_export_whose_audit_row_cannot_be_written_is_refused_without_a_body()
 #[tokio::test]
 async fn csv_neutralises_formulas() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     sqlx::query(
         "INSERT INTO audit_logs (organization_id, actor_email, action, resource_type, user_agent, created_at)
          VALUES ($1, '+1@example.com', '=HYPERLINK(\"http://evil\")', 'member', '@SUM(A1)', $2)",

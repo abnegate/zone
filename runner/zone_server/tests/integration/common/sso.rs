@@ -10,7 +10,7 @@ use chrono::{SubsecRound, TimeDelta, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
-use zone_enterprise::{GRACE_DAYS, Keyring, Payload, SigningKey, Tier, TrustedKey, sign};
+use zone_enterprise::{GRACE_DAYS, Keyring, Payload, SigningKey, TrustedKey, sign};
 use zone_server::db::{licenses, migrations};
 use zone_server::services::mail::AccountMail;
 use zone_server::state::AppState;
@@ -109,9 +109,9 @@ impl Fixture {
             .await
     }
 
-    /// Installs a Team or Enterprise license that is active, as the admin would.
-    pub async fn license(&self, admin: &Account, tier: Tier) {
-        self.install(admin, &active(tier)).await;
+    /// Installs an Enterprise license that is active, as the admin would.
+    pub async fn license(&self, admin: &Account) {
+        self.install(admin, &active()).await;
     }
 
     pub async fn install(&self, admin: &Account, key: &str) {
@@ -226,13 +226,12 @@ pub fn keyring() -> Keyring {
     Keyring::new([TrustedKey::new(KEY_ID, signing.verifying_key().to_bytes()).unwrap()]).unwrap()
 }
 
-fn expiring(tier: Tier, expires_in: TimeDelta) -> String {
+fn expiring(expires_in: TimeDelta) -> String {
     let expires_at = Utc::now().trunc_subsecs(0) + expires_in;
     sign(
         &Payload {
             id: Uuid::new_v4(),
             customer: "Acme Ltd".into(),
-            tier,
             seats: SEATS,
             issued_at: expires_at - TimeDelta::days(365),
             expires_at,
@@ -242,14 +241,14 @@ fn expiring(tier: Tier, expires_in: TimeDelta) -> String {
     )
 }
 
-pub fn active(tier: Tier) -> String {
-    expiring(tier, TimeDelta::days(365))
+pub fn active() -> String {
+    expiring(TimeDelta::days(365))
 }
 
-pub fn grace(tier: Tier) -> String {
-    expiring(tier, -TimeDelta::days(1))
+pub fn grace() -> String {
+    expiring(-TimeDelta::days(1))
 }
 
-pub fn lapsed(tier: Tier) -> String {
-    expiring(tier, -TimeDelta::days(GRACE_DAYS + 1))
+pub fn lapsed() -> String {
+    expiring(-TimeDelta::days(GRACE_DAYS + 1))
 }

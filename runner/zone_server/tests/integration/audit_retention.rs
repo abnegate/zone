@@ -6,8 +6,8 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
+use zone_enterprise::LICENSE_REQUIRED;
 use zone_enterprise::audit::{RETENTION_INVALID, Wait};
-use zone_enterprise::{LICENSE_REQUIRED, Tier};
 use zone_server::db::audit::position::Position;
 use zone_server::db::audit::retentions;
 use zone_server::db::audit::scope::Scope;
@@ -20,7 +20,7 @@ use zone_server::services::audit::retention;
 use crate::common::TestResponse;
 use crate::common::audit::{Destination, UNVERIFIABLE, position, refused, settle};
 use crate::common::policy::Fixture;
-use crate::common::sso::{active, lapsed};
+use crate::common::sso::lapsed;
 
 const PREFIX: &str = "audit_retention";
 const SERVER: &str = "/api/audit-retention";
@@ -161,7 +161,7 @@ async fn admins_read_and_change_the_period_and_others_are_refused() {
         LICENSE_REQUIRED,
     );
 
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let member = fixture.member(OrgRole::Member, None).await;
     let stranger = fixture.stranger().await;
 
@@ -290,7 +290,7 @@ async fn the_sweep_deletes_only_expired_rows_every_enabled_destination_delivered
     let pool = fixture.pool();
     let owner = &fixture.owner;
     let organization = path(fixture.organization);
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let (other, _) = fixture.another_organization(owner).await;
 
     let delivered = row(pool, Some(fixture.organization), EXPIRED_DAYS).await;
@@ -408,12 +408,8 @@ async fn community_applies_no_period() {
 }
 
 #[tokio::test]
-async fn a_lapsed_downgraded_or_unverified_license_keeps_applying_but_cannot_change_the_period() {
-    for key in [
-        lapsed(Tier::Enterprise),
-        active(Tier::Team),
-        UNVERIFIABLE.to_owned(),
-    ] {
+async fn a_lapsed_or_unverified_license_keeps_applying_but_cannot_change_the_period() {
+    for key in [lapsed(), UNVERIFIABLE.to_owned()] {
         let fixture = Fixture::new(PREFIX).await;
         let pool = fixture.pool();
         let owner = &fixture.owner;
@@ -461,7 +457,7 @@ async fn the_server_period_applies_only_to_rows_without_an_organization() {
     let fixture = Fixture::new(PREFIX).await;
     let pool = fixture.pool();
     let owner = &fixture.owner;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let server = row(pool, None, EXPIRED_DAYS).await;
     let organization = row(pool, Some(fixture.organization), EXPIRED_DAYS).await;
     settle(pool).await;
@@ -496,7 +492,7 @@ async fn a_failed_rebase_aborts_the_sweep_before_anything_is_deleted() {
     let fixture = Fixture::new(PREFIX).await;
     let pool = fixture.pool();
     let scope = Scope::Organization(fixture.organization);
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let expired = row(pool, Some(fixture.organization), EXPIRED_DAYS).await;
     retentions::set(pool, scope, PERIOD, fixture.owner.id)
         .await
@@ -551,7 +547,7 @@ async fn a_sweep_while_another_instance_sweeps_deletes_and_records_nothing() {
     let fixture = Fixture::new(PREFIX).await;
     let pool = fixture.pool();
     let scope = Scope::Organization(fixture.organization);
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let expired = row(pool, Some(fixture.organization), EXPIRED_DAYS).await;
     retentions::set(pool, scope, PERIOD, fixture.owner.id)
         .await

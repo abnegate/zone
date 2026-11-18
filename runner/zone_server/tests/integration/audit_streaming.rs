@@ -21,7 +21,6 @@ use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
-use zone_enterprise::Tier;
 use zone_enterprise::audit::signature::{SIGNATURE_HEADER, TIMESTAMP_HEADER, verify};
 use zone_enterprise::audit::{Event, Format, object_key};
 use zone_server::db::audit::deliveries::{self, Delivery};
@@ -223,7 +222,7 @@ struct Stream {
 impl Stream {
     async fn new() -> Self {
         let fixture = Fixture::new(PREFIX).await;
-        fixture.license(Tier::Enterprise).await;
+        fixture.license().await;
         let open = Transports::new(
             Arc::clone(fixture.state().master_key()),
             fixture.state().config().endpoint_hosts.clone(),
@@ -780,10 +779,7 @@ async fn a_lapsed_license_pauses_streaming_while_the_backlog_grows_until_renewal
     let streamed = receiver.hook.received().len();
     assert_eq!(streamed, stream.since(scope, start).await.len());
 
-    stream
-        .fixture
-        .store_license(&lapsed(Tier::Enterprise))
-        .await;
+    stream.fixture.store_license(&lapsed()).await;
     let mut backlog = 0;
     for count in [4, 5] {
         stream.written(scope, count).await;
@@ -798,7 +794,7 @@ async fn a_lapsed_license_pauses_streaming_while_the_backlog_grows_until_renewal
     }
     assert_eq!(receiver.hook.received().len(), streamed);
 
-    stream.fixture.install(&active(Tier::Enterprise)).await;
+    stream.fixture.install(&active()).await;
     stream.due(destination).await;
     assert_eq!(stream.drain().await, backlog, "renewal drains the backlog");
     assert_eq!(

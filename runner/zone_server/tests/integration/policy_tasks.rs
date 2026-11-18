@@ -13,7 +13,6 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-use zone_enterprise::Tier;
 use zone_enterprise::policy::{self, Denial};
 use zone_server::config::AutoProjectConfig;
 use zone_server::db::auto_projects::{self, Kind, PlannedTask, ProjectPlan};
@@ -221,7 +220,7 @@ fn failed_with(announced: &[ProgressMessage], message: &str) -> bool {
 #[tokio::test]
 async fn a_run_on_a_model_the_policy_denies_fails_with_the_denial_and_is_audited() {
     let fixture = Fixture::new(SELF_HOSTED).await;
-    fixture.license(&active(Tier::Team)).await;
+    fixture.license(&active()).await;
     fixture.restrict(json!({"models": ["llama*"]})).await;
     let task = fixture.task(REQUESTED).await;
 
@@ -259,7 +258,7 @@ async fn a_run_on_a_model_the_policy_denies_fails_with_the_denial_and_is_audited
 #[tokio::test]
 async fn a_run_routed_to_an_agent_the_policy_denies_fails_with_the_denial_and_is_audited() {
     let fixture = Fixture::new(CLAUDE).await;
-    fixture.license(&active(Tier::Enterprise)).await;
+    fixture.license(&active()).await;
     fixture.restrict(json!({"agents": []})).await;
     let task = fixture.task("sonnet").await;
 
@@ -283,7 +282,7 @@ async fn a_run_routed_to_an_agent_the_policy_denies_fails_with_the_denial_and_is
 #[tokio::test]
 async fn a_lapsed_license_still_refuses_a_run() {
     let fixture = Fixture::new(SELF_HOSTED).await;
-    fixture.license(&lapsed(Tier::Team)).await;
+    fixture.license(&lapsed()).await;
     fixture.restrict(json!({"models": ["llama*"]})).await;
     let task = fixture.task(REQUESTED).await;
 
@@ -299,7 +298,7 @@ async fn a_lapsed_license_still_refuses_a_run() {
 #[tokio::test]
 async fn a_run_on_a_model_the_policy_admits_runs() {
     let fixture = Fixture::new(SELF_HOSTED).await;
-    fixture.license(&active(Tier::Team)).await;
+    fixture.license(&active()).await;
     fixture.restrict(json!({"models": ["gpt-*"]})).await;
     let task = fixture.task(REQUESTED).await;
 
@@ -321,7 +320,7 @@ async fn a_run_on_a_model_the_policy_admits_runs() {
 #[tokio::test]
 async fn a_title_whose_fast_model_the_policy_denies_falls_back_to_one_it_admits() {
     let fixture = Fixture::new(SELF_HOSTED).await;
-    fixture.license(&active(Tier::Team)).await;
+    fixture.license(&active()).await;
     fixture.restrict(json!({"models": ["qwen*"]})).await;
     let task = fixture.task(REQUESTED).await;
 
@@ -346,7 +345,7 @@ async fn a_title_whose_fast_model_the_policy_denies_falls_back_to_one_it_admits(
 #[tokio::test]
 async fn a_title_whose_fast_model_and_fallbacks_the_policy_denies_is_skipped_and_audited() {
     let fixture = Fixture::new(SELF_HOSTED).await;
-    fixture.license(&active(Tier::Team)).await;
+    fixture.license(&active()).await;
     fixture.restrict(json!({"models": ["mistral*"]})).await;
     let task = fixture.task(REQUESTED).await;
 
@@ -381,7 +380,7 @@ async fn a_title_whose_fast_model_and_fallbacks_the_policy_denies_is_skipped_and
 #[tokio::test]
 async fn an_auto_project_on_a_route_the_policy_denies_starts_nothing() {
     let fixture = Fixture::new(CLAUDE).await;
-    fixture.license(&active(Tier::Team)).await;
+    fixture.license(&active()).await;
     fixture.restrict(json!({"agents": []})).await;
     let finalized = auto_projects::finalize(
         fixture.pool(),
