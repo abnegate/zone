@@ -68,7 +68,9 @@ const RENOVATE: &str = "renovate[bot]";
 const BOT_SUFFIX: &str = "[bot]";
 const REPOSITORY_ID: &str = "R_acme_widgets";
 const ELSEWHERE: &str = "R_elsewhere";
-const OPEN_PAGE: u64 = 50;
+/// Every listing page asks GitHub for a whole page of open pull requests.
+const OPEN_PAGE: u64 = 100;
+const CURSOR: &str = "Y3Vyc29y";
 const LISTING_LOGS: &str = "zone_server::services::github=info";
 const EVIDENCE_BATCH: usize = 10;
 const EXPECTED: &str = "expected";
@@ -347,16 +349,18 @@ impl Hub {
 
     /// The page of open pull requests GitHub's GraphQL API lists.
     async fn open(&self, pulls: &[Pull]) {
-        self.open_page(OPEN_PAGE, pulls, None).await;
+        self.open_page(None, pulls, None).await;
     }
 
-    async fn open_page(&self, first: u64, pulls: &[Pull], next: Option<&str>) {
+    /// A page of open pull requests read `after` a cursor, followed by the
+    /// page after `next`.
+    async fn open_page(&self, after: Option<&str>, pulls: &[Pull], next: Option<&str>) {
         let rows: Vec<Value> = pulls.iter().map(|pull| self.open_row(pull)).collect();
         Mock::given(method("POST"))
             .and(path(self.graphql))
             .and(body_string_contains(LISTING))
             .and(body_partial_json(json!({"variables": {
-                "owner": OWNER, "name": REPOSITORY, "first": first,
+                "owner": OWNER, "name": REPOSITORY, "first": OPEN_PAGE, "after": after,
             }})))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
                 "repository": {
@@ -2611,13 +2615,12 @@ async fn overflowing_checks_are_read_again_for_that_pull_requests_head_only() {
     assert_eq!(board.hub.thread_counts().await, 0);
 }
 
+/// A repository is listed to its last page however many open pull requests
+/// it has: no count of Zone's own cuts it short.
 #[tokio::test]
-async fn a_listing_past_its_limit_keeps_the_most_recently_updated_pull_requests() {
-    let hub = Hub::hosted().await;
-    let mut config = hub.config();
-    config.github.open_pull_request_limit = 2;
-    let board = Board::configured(hub, config).await;
-    let newest = [
+async fn a_listing_longer_than_one_page_reads_every_open_pull_request() {
+    let board = Board::new(Hub::hosted().await).await;
+    let every = [
         Pull {
             updated_at: "2026-11-14T09:00:00Z".to_string(),
             ..Pull::numbered(5)
@@ -2626,18 +2629,27 @@ async fn a_listing_past_its_limit_keeps_the_most_recently_updated_pull_requests(
             updated_at: "2026-11-14T08:00:00Z".to_string(),
             ..Pull::numbered(4)
         },
+        Pull {
+            updated_at: "2026-11-14T07:00:00Z".to_string(),
+            ..Pull::numbered(3)
+        },
     ];
-    board.hub.open_page(2, &newest, Some("Y3Vyc29y")).await;
-    board.hub.evidence(&newest).await;
+    board.hub.open_page(None, &every[..2], Some(CURSOR)).await;
+    board.hub.open_page(Some(CURSOR), &every[2..], None).await;
+    board.hub.evidence(&every).await;
 
     let listing = board.listed("").await;
 
     assert_eq!(
         numbers(&listing),
-        [(5, "ready".to_string(), 1), (4, "ready".to_string(), 2)]
+        [
+            (5, "ready".to_string(), 1),
+            (4, "ready".to_string(), 2),
+            (3, "ready".to_string(), 3)
+        ]
     );
-    assert_eq!(listing["partial"], json!(true));
-    assert_eq!(board.hub.opens().await, 1);
+    assert_eq!(listing["partial"], json!(false));
+    assert_eq!(board.hub.opens().await, 2);
     assert_eq!(board.hub.requests_to("/repos/acme/widgets/pulls").await, 0);
 }
 

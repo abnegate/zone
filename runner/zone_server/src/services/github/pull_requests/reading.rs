@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::num::NonZeroU8;
 use std::num::NonZeroU32;
 use std::num::NonZeroU64;
 use std::sync::atomic::AtomicBool;
@@ -21,6 +20,8 @@ use abnegate_vcs::StateFilter;
 use chrono::DateTime;
 use chrono::Utc;
 use tokio::sync::Semaphore;
+use tokio::time::Instant;
+use tokio::time::timeout_at;
 
 use super::Commit;
 use super::DIFF_BUDGET;
@@ -42,27 +43,40 @@ pub(super) const NOT_ACCEPTABLE: u16 = 406;
 pub(super) const MOVED_REPOSITORY: &str =
     "GitHub listed open pull requests of another repository part way through.";
 pub(super) const STALLED_CURSOR: &str = "GitHub said more open pull requests follow a page that listed none it had not, or pointed back to a page already read.";
+pub(super) const LATE_LISTING: &str =
+    "GitHub did not list this repository's open pull requests in time.";
 
 impl Github {
+    /// Every open pull request of the repository, read through REST a page
+    /// at a time, with whether that was all of them. Paging ends at
+    /// `deadline`, and the pages read by then stand as the part of the
+    /// listing they are: a repository is never cut off at a count of Zone's
+    /// choosing. A first page that misses the deadline is a fault, because
+    /// nothing was read at all.
     pub(crate) async fn open_pulls(
         &self,
-        limit: u32,
+        deadline: Instant,
     ) -> Result<(Vec<ListedPullRequest>, bool), Fault> {
-        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
         let mut pulls = Vec::new();
         let mut numbers = HashSet::new();
         let mut page = NonZeroU32::MIN;
         loop {
-            let listed = self
-                .service()
-                .list_pull_requests(
+            let read = timeout_at(
+                deadline,
+                self.service().list_pull_requests(
                     self.repository(),
                     self.token(),
                     StateFilter::Open,
                     page,
                     PER_PAGE,
-                )
-                .await?;
+                ),
+            )
+            .await;
+            let listed = match read {
+                Ok(listed) => listed?,
+                Err(_) if pulls.is_empty() => return Err(Fault::upstream(LATE_LISTING)),
+                Err(_) => return Ok((pulls, false)),
+            };
             pulls.extend(
                 listed
                     .items
@@ -70,41 +84,51 @@ impl Github {
                     .filter(|row| numbers.insert(row.reference.number())),
             );
             match listed.next {
-                Some(next) if pulls.len() < limit => page = next,
-                next => {
-                    let complete = next.is_none() && pulls.len() <= limit;
-                    pulls.truncate(limit);
-                    return Ok((pulls, complete));
-                }
+                Some(next) if Instant::now() < deadline => page = next,
+                next => return Ok((pulls, next.is_none())),
             }
         }
     }
 
-    /// Up to `limit` of the repository's open pull requests, the most
-    /// recently updated first, read through GraphQL a page at a time under
-    /// one of `permits` each, with the repository's node id and whether that
-    /// was every open pull request.
+    /// The repository's open pull requests, the most recently updated first,
+    /// read through GraphQL a page at a time under one of `permits` each,
+    /// with the repository's node id and whether that was every open pull
+    /// request. Paging ends at `deadline` rather than at a count, so a
+    /// listing is short only when GitHub ran out of time to finish it.
     pub(crate) async fn open_pull_requests(
         &self,
         permits: &Semaphore,
-        limit: u32,
+        deadline: Instant,
     ) -> Result<(RepositoryId, Vec<ListedPullRequest>, bool), Fault> {
-        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
         let mut pulls: Vec<ListedPullRequest> = Vec::new();
         let mut listed = HashSet::new();
         let mut repository: Option<RepositoryId> = None;
         let mut after: Option<String> = None;
         let mut cursors = HashSet::new();
         loop {
-            let page = {
+            let read = timeout_at(deadline, async {
                 let _permit = admitted(permits).await?;
-                self.bounded(self.service().list_open_pull_requests(
-                    self.repository(),
-                    self.token(),
-                    page_size(limit.saturating_sub(pulls.len())),
-                    after.as_deref(),
-                ))
-                .await??
+                let page = self
+                    .bounded(self.service().list_open_pull_requests(
+                        self.repository(),
+                        self.token(),
+                        PER_PAGE,
+                        after.as_deref(),
+                    ))
+                    .await??;
+                Ok::<_, Fault>(page)
+            })
+            .await;
+            let page = match read {
+                Ok(page) => page?,
+                // Nothing read at all is a fault; pages already read stand as
+                // the part of the listing they are.
+                Err(_) => {
+                    return match repository {
+                        Some(identified) => Ok((identified, pulls, false)),
+                        None => Err(Fault::upstream(LATE_LISTING)),
+                    };
+                }
             };
             let identified = repository.get_or_insert_with(|| page.repository_id.clone());
             if *identified != page.repository_id {
@@ -120,13 +144,12 @@ impl Github {
                 Some(next) if pulls.len() == read || cursors.contains(&next) => {
                     return Err(Fault::upstream(STALLED_CURSOR));
                 }
-                Some(next) if pulls.len() < limit => {
+                Some(next) if Instant::now() < deadline => {
                     cursors.insert(next.clone());
                     after = Some(next);
                 }
                 next => {
-                    let complete = next.is_none() && pulls.len() <= limit;
-                    pulls.truncate(limit);
+                    let complete = next.is_none();
                     return Ok((page.repository_id, pulls, complete));
                 }
             }
@@ -352,14 +375,6 @@ pub(super) fn budgeted(files: &[ChangedFile], budget: usize) -> Vec<Entry<'_>> {
             }
         })
         .collect()
-}
-
-fn page_size(remaining: usize) -> NonZeroU8 {
-    let size = remaining.clamp(1, usize::from(PER_PAGE.get()));
-    u8::try_from(size)
-        .ok()
-        .and_then(NonZeroU8::new)
-        .unwrap_or(PER_PAGE)
 }
 
 fn answers(read: &PullRequestEvidence, row: &ListedPullRequest) -> bool {

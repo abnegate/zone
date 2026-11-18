@@ -22,6 +22,7 @@ use crate::services::github::client::REQUEST_FAILED;
 use crate::services::github::pull_requests::GRAPHQL_LIMIT;
 use crate::services::github::pull_requests::Readiness;
 use crate::services::github::pull_requests::SURVEY_DEADLINE;
+use crate::services::github::pull_requests::reading::LATE_LISTING;
 use crate::services::github::readiness::BlockerCode;
 use crate::services::github::readiness::Mergeability;
 use crate::services::github::testing::mocked;
@@ -34,7 +35,8 @@ const ELSEWHERE: &str = "R_elsewhere";
 const WEB: &str = "https://github.com/owner/repository";
 const UPDATED_AT: &str = "2026-11-14T03:00:00Z";
 const CHANGED_AT: &str = "2026-11-14T04:00:00Z";
-const LIMIT: u32 = 50;
+/// Every listing page asks GitHub for a whole page of open pull requests.
+const PAGE: u64 = 100;
 const UNMATCHED: u8 = u8::MAX;
 const LISTING: &str = "states:OPEN";
 const BUDGET: Duration = Duration::from_secs(20);
@@ -178,12 +180,44 @@ async fn open(server: &MockServer, first: u64, rows: Vec<Value>, next: Option<&s
         .await;
 }
 
+/// A page of open pull requests read `after` a cursor, answered `delay`
+/// late, followed by the page after `next`.
+async fn open_page(
+    server: &MockServer,
+    after: Option<&str>,
+    rows: Vec<Value>,
+    next: Option<&str>,
+    delay: Duration,
+) {
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains(LISTING))
+        .and(body_partial_json(
+            json!({"variables": {"owner": OWNER, "name": NAME, "first": PAGE, "after": after}}),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": {
+                    "repository": {
+                        "id": REPOSITORY_ID,
+                        "pullRequests": {
+                            "pageInfo": {"hasNextPage": next.is_some(), "endCursor": next},
+                            "nodes": rows,
+                        },
+                    },
+                }}))
+                .set_delay(delay),
+        )
+        .mount(server)
+        .await;
+}
+
 async fn opened(server: &MockServer, numbers: impl IntoIterator<Item = u64>) {
     let rows: Vec<Value> = numbers
         .into_iter()
         .map(|number| open_row(number, UPDATED_AT))
         .collect();
-    open(server, u64::from(LIMIT), rows, None).await;
+    open(server, PAGE, rows, None).await;
 }
 
 /// An evidence read that answers each id asked with what `answer` says of
@@ -325,9 +359,8 @@ async fn surveyed(
     server: &MockServer,
     permits: &Semaphore,
     previous: Option<&Listing>,
-    limit: u32,
 ) -> Result<Listing, Fault> {
-    surveyed_within(server, permits, previous, limit, GRAPHQL_LIMIT).await
+    surveyed_within(server, permits, previous, GRAPHQL_LIMIT).await
 }
 
 /// A listing whose evidence batches GitHub has `patience` to answer.
@@ -335,10 +368,9 @@ async fn surveyed_within(
     server: &MockServer,
     permits: &Semaphore,
     previous: Option<&Listing>,
-    limit: u32,
     patience: Duration,
 ) -> Result<Listing, Fault> {
-    surveyed_by(server, permits, previous, limit, patience, SURVEY_DEADLINE).await
+    surveyed_by(server, permits, previous, patience, SURVEY_DEADLINE).await
 }
 
 /// A listing that has `patience` for each GraphQL read and `deadline` for
@@ -347,7 +379,6 @@ async fn surveyed_by(
     server: &MockServer,
     permits: &Semaphore,
     previous: Option<&Listing>,
-    limit: u32,
     patience: Duration,
     deadline: Duration,
 ) -> Result<Listing, Fault> {
@@ -361,7 +392,7 @@ async fn surveyed_by(
         patience,
         tokio::time::Instant::now() + deadline,
     );
-    tokio::time::timeout(BUDGET, survey.listing(limit))
+    tokio::time::timeout(BUDGET, survey.listing())
         .await
         .expect("a listing finishes")
 }
@@ -381,7 +412,7 @@ async fn a_cold_listing_reads_one_page_and_a_batch_of_evidence_per_ten_pull_requ
     evidenced(&server).await;
     let permits = Semaphore::new(CREDENTIAL_PERMITS);
 
-    let listing = surveyed(&server, &permits, None, LIMIT).await.unwrap();
+    let listing = surveyed(&server, &permits, None).await.unwrap();
 
     assert_eq!(numbers(&listing), (1..=23).collect::<Vec<u64>>());
     assert!(listing.complete);
@@ -414,10 +445,8 @@ async fn evidence_read_in_a_batch_reaches_the_verdict_reading_each_alone_does() 
     }
     let permits = Semaphore::new(CREDENTIAL_PERMITS);
 
-    let batched = surveyed(&batched_server, &permits, None, LIMIT)
-        .await
-        .unwrap();
-    let rest = surveyed(&rest_server, &permits, None, LIMIT).await.unwrap();
+    let batched = surveyed(&batched_server, &permits, None).await.unwrap();
+    let rest = surveyed(&rest_server, &permits, None).await.unwrap();
 
     assert_eq!(batched, rest);
     assert!(
@@ -438,12 +467,10 @@ async fn a_warm_refresh_of_settled_pull_requests_reads_only_the_listing() {
     opened(&server, 1..=23).await;
     evidenced(&server).await;
     let permits = Semaphore::new(CREDENTIAL_PERMITS);
-    let first = surveyed(&server, &permits, None, LIMIT).await.unwrap();
+    let first = surveyed(&server, &permits, None).await.unwrap();
     let asked = received(&server).await.len();
 
-    let again = surveyed(&server, &permits, Some(&first), LIMIT)
-        .await
-        .unwrap();
+    let again = surveyed(&server, &permits, Some(&first)).await.unwrap();
 
     assert_eq!(again, first);
     assert_eq!(received(&server).await.len(), asked + 1);
@@ -457,12 +484,12 @@ async fn a_pull_request_that_changed_is_the_only_one_whose_evidence_is_read_agai
     opened(&server, 1..=3).await;
     evidenced(&server).await;
     let permits = Semaphore::new(CREDENTIAL_PERMITS);
-    let first = surveyed(&server, &permits, None, LIMIT).await.unwrap();
+    let first = surveyed(&server, &permits, None).await.unwrap();
     server.reset().await;
     unmatched(&server).await;
     open(
         &server,
-        u64::from(LIMIT),
+        PAGE,
         vec![
             open_row(1, UPDATED_AT),
             open_row(2, CHANGED_AT),
@@ -473,9 +500,7 @@ async fn a_pull_request_that_changed_is_the_only_one_whose_evidence_is_read_agai
     .await;
     evidenced(&server).await;
 
-    let again = surveyed(&server, &permits, Some(&first), LIMIT)
-        .await
-        .unwrap();
+    let again = surveyed(&server, &permits, Some(&first)).await.unwrap();
 
     assert_eq!(numbers(&again), [1, 2, 3]);
     assert_eq!(opens(&server).await, 1);
@@ -484,25 +509,42 @@ async fn a_pull_request_that_changed_is_the_only_one_whose_evidence_is_read_agai
     server.verify().await;
 }
 
+/// Nothing is listed in part because Zone stopped at a count of its own. A
+/// listing that runs out of time part way through keeps the pages it read
+/// and says it is not every open pull request, rather than failing whole.
 #[tokio::test]
-async fn a_listing_past_its_limit_keeps_the_most_recently_updated_pull_requests() {
+async fn a_listing_out_of_time_part_way_through_is_the_part_it_read() {
     let server = silent().await;
-    open(
+    open_page(
         &server,
-        2,
-        vec![open_row(9, CHANGED_AT), open_row(4, UPDATED_AT)],
+        None,
+        vec![open_row(9, CHANGED_AT)],
         Some("Y3Vyc29y"),
+        Duration::ZERO,
+    )
+    .await;
+    open_page(
+        &server,
+        Some("Y3Vyc29y"),
+        vec![open_row(4, UPDATED_AT)],
+        None,
+        SLOW,
     )
     .await;
     evidenced(&server).await;
     let permits = Semaphore::new(CREDENTIAL_PERMITS);
+    let started = Instant::now();
 
-    let listing = surveyed(&server, &permits, None, 2).await.unwrap();
+    let listing = surveyed_by(&server, &permits, None, GRAPHQL_LIMIT, HURRIED)
+        .await
+        .expect("the page already read stands");
 
-    assert_eq!(numbers(&listing), [9, 4]);
-    assert!(!listing.complete);
-    assert_eq!(opens(&server).await, 1);
-    server.verify().await;
+    assert!(started.elapsed() < SLOW, "{:?}", started.elapsed());
+    assert!(
+        !listing.complete,
+        "a page GitHub still had to give is missing"
+    );
+    assert_eq!(opens(&server).await, 2, "the late page was asked for");
 }
 
 #[tokio::test]
@@ -531,7 +573,7 @@ async fn a_pull_request_the_batch_could_not_vouch_for_is_read_through_rest_alone
     }
     let permits = Semaphore::new(CREDENTIAL_PERMITS);
 
-    let listing = surveyed(&server, &permits, None, LIMIT).await.unwrap();
+    let listing = surveyed(&server, &permits, None).await.unwrap();
 
     assert_eq!(numbers(&listing), [1, 2, 3, 4, 5]);
     assert!(listing.complete, "{:?}", listing.warnings);
@@ -590,7 +632,7 @@ async fn a_batch_github_refuses_is_read_through_rest_for_its_own_pull_requests()
         }
         let permits = Semaphore::new(CREDENTIAL_PERMITS);
 
-        let listing = surveyed(&server, &permits, None, LIMIT)
+        let listing = surveyed(&server, &permits, None)
             .await
             .unwrap_or_else(|fault| panic!("{name}: {fault}"));
 
@@ -633,7 +675,7 @@ async fn a_listing_graphql_cannot_answer_is_read_through_rest_in_full() {
         }
         let permits = Semaphore::new(CREDENTIAL_PERMITS);
 
-        let listing = surveyed(&server, &permits, None, LIMIT)
+        let listing = surveyed(&server, &permits, None)
             .await
             .unwrap_or_else(|fault| panic!("{name}: {fault}"));
 
@@ -664,7 +706,7 @@ async fn a_secondary_rate_limit_halts_the_listing() {
         .await;
     let permits = Semaphore::new(CREDENTIAL_PERMITS);
 
-    let listing = surveyed(&server, &permits, None, LIMIT).await;
+    let listing = surveyed(&server, &permits, None).await;
 
     assert!(
         matches!(listing, Err(Fault::RateLimited { .. })),
@@ -682,7 +724,7 @@ async fn a_secondary_rate_limit_halts_the_listing() {
         .mount(&server)
         .await;
 
-    let listing = surveyed(&server, &permits, None, LIMIT).await;
+    let listing = surveyed(&server, &permits, None).await;
 
     assert!(
         matches!(listing, Err(Fault::RateLimited { .. })),
@@ -698,7 +740,7 @@ async fn eight_batches_of_overflowing_pull_requests_finish_under_the_credentials
     let server = silent().await;
     open(
         &server,
-        u64::from(LIMIT * 2),
+        PAGE,
         (1..=count)
             .map(|number| open_row(number, UPDATED_AT))
             .collect(),
@@ -714,7 +756,7 @@ async fn eight_batches_of_overflowing_pull_requests_finish_under_the_credentials
         .await;
     let permits = Semaphore::new(CREDENTIAL_PERMITS);
 
-    let listing = surveyed(&server, &permits, None, LIMIT * 2).await.unwrap();
+    let listing = surveyed(&server, &permits, None).await.unwrap();
 
     assert_eq!(listing.pull_requests.len(), 80);
     assert!(listing.complete, "{:?}", listing.warnings);
@@ -742,7 +784,7 @@ async fn a_kept_verdict_on_a_failing_pull_request_is_read_again_once_it_ages() {
     })
     .await;
     let permits = Semaphore::new(CREDENTIAL_PERMITS);
-    let mut first = surveyed(&server, &permits, None, LIMIT).await.unwrap();
+    let mut first = surveyed(&server, &permits, None).await.unwrap();
     assert!(
         first.pull_requests[0]
             .blockers
@@ -752,9 +794,7 @@ async fn a_kept_verdict_on_a_failing_pull_request_is_read_again_once_it_ages() {
     );
     first.pull_requests[0].assessed_at = now() - chrono::TimeDelta::minutes(3);
 
-    surveyed(&server, &permits, Some(&first), LIMIT)
-        .await
-        .unwrap();
+    surveyed(&server, &permits, Some(&first)).await.unwrap();
 
     assert_eq!(batches(&server).await, [vec![1], vec![1]]);
     server.verify().await;
@@ -843,7 +883,7 @@ async fn no_more_requests_reach_github_at_once_than_the_listing_allows() {
     let server = silent().await;
     open(
         &server,
-        u64::from(LIMIT * 2),
+        PAGE,
         (1..=count)
             .map(|number| open_row(number, UPDATED_AT))
             .collect(),
@@ -854,7 +894,7 @@ async fn no_more_requests_reach_github_at_once_than_the_listing_allows() {
     recorded(&server, &arrivals, |_| HELD).await;
     let permits = Semaphore::new(CREDENTIAL_PERMITS);
 
-    let listing = surveyed(&server, &permits, None, LIMIT * 2).await.unwrap();
+    let listing = surveyed(&server, &permits, None).await.unwrap();
 
     assert_eq!(listing.pull_requests.len(), 80);
     assert!(listing.complete, "{:?}", listing.warnings);
@@ -883,7 +923,7 @@ async fn a_batch_is_assessed_as_soon_as_its_evidence_arrives() {
     .await;
     let permits = Semaphore::new(CREDENTIAL_PERMITS);
 
-    let listing = surveyed(&server, &permits, None, LIMIT).await.unwrap();
+    let listing = surveyed(&server, &permits, None).await.unwrap();
 
     assert_eq!(listing.pull_requests.len(), 20);
     let slow = arrivals
@@ -929,7 +969,7 @@ async fn a_batch_github_takes_too_long_over_is_read_through_rest_for_its_own_pul
     let permits = Semaphore::new(1);
     let started = Instant::now();
 
-    let listing = surveyed_within(&server, &permits, None, LIMIT, PATIENCE)
+    let listing = surveyed_within(&server, &permits, None, PATIENCE)
         .await
         .unwrap();
 
@@ -1053,7 +1093,7 @@ async fn a_batch_every_later_batch_would_fail_alike_stops_them_for_that_listing_
         }
         let permits = Semaphore::new(1);
 
-        let listing = surveyed(&server, &permits, None, LIMIT)
+        let listing = surveyed(&server, &permits, None)
             .await
             .unwrap_or_else(|fault| panic!("{name}: {fault}"));
 
@@ -1073,7 +1113,7 @@ async fn a_batch_every_later_batch_would_fail_alike_stops_them_for_that_listing_
         }
         let sent = batches(&server).await.len();
 
-        surveyed(&server, &permits, None, LIMIT)
+        surveyed(&server, &permits, None)
             .await
             .unwrap_or_else(|fault| panic!("{name}: {fault}"));
 
@@ -1108,7 +1148,7 @@ async fn a_listing_finishes_under_a_single_permit() {
         .await;
     let permits = Semaphore::new(1);
 
-    let listing = surveyed(&server, &permits, None, LIMIT).await.unwrap();
+    let listing = surveyed(&server, &permits, None).await.unwrap();
 
     assert_eq!(numbers(&listing), (1..=23).collect::<Vec<u64>>());
     assert!(listing.complete, "{:?}", listing.warnings);
@@ -1123,7 +1163,7 @@ async fn a_listing_under_a_closed_credential_reads_no_evidence_and_assesses_noth
     let permits = Semaphore::new(0);
     permits.close();
 
-    let listing = surveyed(&server, &permits, None, LIMIT).await.unwrap();
+    let listing = surveyed(&server, &permits, None).await.unwrap();
 
     assert!(listing.pull_requests.is_empty(), "{listing:?}");
     assert!(!listing.complete);
@@ -1148,7 +1188,7 @@ async fn settled(numbers: std::ops::RangeInclusive<u64>) -> Listing {
     let fast = silent().await;
     opened(&fast, numbers.clone()).await;
     evidenced(&fast).await;
-    let listing = surveyed(&fast, &Semaphore::new(CREDENTIAL_PERMITS), None, LIMIT)
+    let listing = surveyed(&fast, &Semaphore::new(CREDENTIAL_PERMITS), None)
         .await
         .unwrap();
     assert!(listing.complete, "{:?}", listing.warnings);
@@ -1182,7 +1222,7 @@ async fn a_listing_page_github_is_slow_over_is_read_through_rest_in_time_and_cha
     let permits = Semaphore::new(CREDENTIAL_PERMITS);
     let started = Instant::now();
 
-    let again = surveyed_within(&server, &permits, Some(&first), LIMIT, PATIENCE)
+    let again = surveyed_within(&server, &permits, Some(&first), PATIENCE)
         .await
         .unwrap();
 
@@ -1220,7 +1260,7 @@ async fn a_thread_count_github_is_slow_over_leaves_the_pull_request_listed_with_
     let server = silent().await;
     open(
         &server,
-        u64::from(LIMIT),
+        PAGE,
         vec![open_row(1, CHANGED_AT), open_row(2, CHANGED_AT)],
         None,
     )
@@ -1243,7 +1283,7 @@ async fn a_thread_count_github_is_slow_over_leaves_the_pull_request_listed_with_
     let permits = Semaphore::new(1);
     let started = Instant::now();
 
-    let again = surveyed_within(&server, &permits, Some(&first), LIMIT, PATIENCE)
+    let again = surveyed_within(&server, &permits, Some(&first), PATIENCE)
         .await
         .unwrap();
 
@@ -1282,7 +1322,7 @@ async fn a_listing_past_its_deadline_keeps_the_last_verdicts_of_what_it_had_not_
     let server = silent().await;
     open(
         &server,
-        u64::from(LIMIT),
+        PAGE,
         (1..=3).map(|number| open_row(number, CHANGED_AT)).collect(),
         None,
     )
@@ -1303,17 +1343,10 @@ async fn a_listing_past_its_deadline_keeps_the_last_verdicts_of_what_it_had_not_
     let permits = Semaphore::new(CREDENTIAL_PERMITS);
     let started = Instant::now();
 
-    let again = surveyed_by(
-        &server,
-        &permits,
-        Some(&first),
-        LIMIT,
-        GRAPHQL_LIMIT,
-        HURRIED,
-    )
-    .await
-    .unwrap();
-    let cold = surveyed_by(&server, &permits, None, LIMIT, GRAPHQL_LIMIT, HURRIED)
+    let again = surveyed_by(&server, &permits, Some(&first), GRAPHQL_LIMIT, HURRIED)
+        .await
+        .unwrap();
+    let cold = surveyed_by(&server, &permits, None, GRAPHQL_LIMIT, HURRIED)
         .await
         .unwrap();
 
@@ -1367,7 +1400,7 @@ async fn a_thread_count_github_halts_on_halts_the_listing_under_the_guard() {
             .await;
         let permits = Semaphore::new(CREDENTIAL_PERMITS);
 
-        let listing = surveyed(&server, &permits, None, LIMIT).await;
+        let listing = surveyed(&server, &permits, None).await;
 
         assert_eq!(listing, Err(expected), "{name}");
         server.verify().await;
@@ -1416,7 +1449,7 @@ async fn a_listing_github_does_not_finish_by_the_deadline_fails_as_a_late_listin
         let permits = Semaphore::new(CREDENTIAL_PERMITS);
         let started = Instant::now();
 
-        let listing = surveyed_by(&server, &permits, None, LIMIT, GRAPHQL_LIMIT, HURRIED).await;
+        let listing = surveyed_by(&server, &permits, None, GRAPHQL_LIMIT, HURRIED).await;
 
         assert!(started.elapsed() < SLOW, "{name}: {:?}", started.elapsed());
         assert_eq!(listing, Err(Fault::upstream(LATE_LISTING)), "{name}");
