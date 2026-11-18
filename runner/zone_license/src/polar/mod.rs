@@ -8,6 +8,7 @@ mod order_subscription;
 mod secret;
 mod signature;
 mod signature_error;
+mod subscription_status;
 
 pub use billing_reason::BillingReason;
 pub use customer::Customer;
@@ -19,3 +20,4 @@ pub use order_subscription::OrderSubscription;
 pub use secret::WebhookSecret;
 pub use signature::{TOLERANCE_SECONDS, VERSION, signature, verify};
 pub use signature_error::SignatureError;
+pub use subscription_status::SubscriptionStatus;

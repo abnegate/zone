@@ -545,6 +545,38 @@ fn blank_or_absent_email_is_an_error() {
 }
 
 #[test]
+fn a_trialing_subscription_is_ignored() {
+    let event = edited(CREATE, |value| {
+        value["data"]["subscription"]["status"] = json!("trialing");
+        value["data"]["total_amount"] = json!(0);
+    });
+    assert_eq!(
+        decide(&event, &products()),
+        Ok(Decision::Ignore(Ignored::Trial))
+    );
+}
+
+#[test]
+fn the_final_order_of_a_canceled_subscription_is_ignored() {
+    let event = edited(CYCLE, |value| {
+        value["data"]["subscription"]["status"] = json!("canceled");
+        value["data"]["subscription"]["cancel_at_period_end"] = json!(true);
+    });
+    assert_eq!(
+        decide(&event, &products()),
+        Ok(Decision::Ignore(Ignored::Canceled))
+    );
+}
+
+#[test]
+fn a_subscription_due_to_cancel_still_issues_while_active() {
+    let event = edited(UPDATE, |value| {
+        value["data"]["subscription"]["cancel_at_period_end"] = json!(true);
+    });
+    assert_eq!(issued(&event).seats, 8);
+}
+
+#[test]
 fn subscription_status_does_not_gate_issuing() {
     let event = edited(CREATE, |value| {
         value["data"]["subscription"]["status"] = json!("past_due");

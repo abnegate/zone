@@ -232,8 +232,9 @@ customer portal if you want them to change seats themselves.
 ### 5. No free trial
 
 Don't offer a trial on the product or the checkout link. A trial starts the
-subscription with a `subscription_create` order, and the signer would issue a
-key valid until the trial ends. Offer evaluations with a
+subscription with a `subscription_create` order while the subscription is
+`trialing`; the signer ignores that order, so a trial customer gets no key
+until the first paid renewal, when the trial ends. Offer evaluations with a
 [hand-signed](#hand-signing-a-license) short license instead.
 
 ### 6. The checkout link
@@ -575,11 +576,21 @@ It issues a key when all of these hold:
 - its `billing_reason` is `subscription_create` (a new subscription),
   `subscription_cycle` (a renewal) or `subscription_update` (a seat change);
 - its product is in `POLAR_PRODUCT_IDS`;
+- its subscription is neither `trialing` nor `canceled`;
 - it's for a seat-based subscription with at least one seat.
 
-It ignores, with `202` and `{"ignored":"<reason>"}`, a one-off `purchase`, a
-`subscription_meter_cycle`, an unpaid order, another product, and every other
-event type.
+It ignores, with `202` and `{"ignored":"<reason>"}`, a one-off `purchase`
+(`billing_reason`), a `subscription_meter_cycle` (`billing_reason`), an unpaid
+order (`unpaid`), another product (`product`), an order for a `trialing`
+subscription (`trial`), an order for a `canceled` subscription (`canceled`),
+and every other event type (`event_type`).
+
+A subscription set to cancel at the end of its period ends with a final
+order. Polar marks the subscription `canceled` before creating it and reports
+its `billing_reason` as `subscription_cycle`, the same as a renewal, and pays
+it when there's anything left to bill, such as seats added under `prorate`.
+The signer ignores it, because the subscription is over. A subscription that
+is only due to cancel is still `active`, and its orders issue as usual.
 
 An order for a product in `POLAR_PRODUCT_IDS` that has no subscription, or a
 subscription without seats, isn't ignored: the customer has paid for a product

@@ -1,10 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
+use super::subscription_status::SubscriptionStatus;
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct OrderSubscription {
     pub id: String,
-    pub status: String,
+    pub status: SubscriptionStatus,
     #[serde(default)]
     pub seats: Option<i64>,
     pub current_period_start: DateTime<Utc>,

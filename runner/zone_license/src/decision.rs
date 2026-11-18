@@ -3,7 +3,7 @@ use serde::Deserialize;
 use crate::grant::Grant;
 use crate::ignored::Ignored;
 use crate::order_error::OrderError;
-use crate::polar::{Event, EventType, Order};
+use crate::polar::{Event, EventType, Order, SubscriptionStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -25,12 +25,17 @@ pub fn decide(event: &Event, products: &[String]) -> Result<Decision, OrderError
     let Some(product) = sold(&order, products) else {
         return Ok(Decision::Ignore(Ignored::Product));
     };
-    let (Some(subscription), Some(seats)) = (&order.subscription, order.seats()) else {
-        return Err(OrderError::Misconfigured {
-            order: order.id.clone(),
-            product: product.to_owned(),
-        });
+    let misconfigured = || OrderError::Misconfigured {
+        order: order.id.clone(),
+        product: product.to_owned(),
     };
+    let subscription = order.subscription.as_ref().ok_or_else(misconfigured)?;
+    match subscription.status {
+        SubscriptionStatus::Trialing => return Ok(Decision::Ignore(Ignored::Trial)),
+        SubscriptionStatus::Canceled => return Ok(Decision::Ignore(Ignored::Canceled)),
+        _ => {}
+    }
+    let seats = order.seats().ok_or_else(misconfigured)?;
     let email = order.email().ok_or_else(|| OrderError::Email {
         order: order.id.clone(),
     })?;
