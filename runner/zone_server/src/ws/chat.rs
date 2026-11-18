@@ -119,6 +119,25 @@ const TRUNCATED_NOTE: &str = "\n\n[Response truncated due to length limit]";
 
 const INTERRUPTED_NOTE: &str = "\n\n[Response interrupted]";
 
+/// How many times one turn goes on from a stream that broke under it.
+///
+/// A provider that drops a connection usually answers the next one, so a
+/// turn that has run for half an hour is worth two more tries. A failure
+/// that keeps coming back is the provider saying something, and saying it to
+/// the reader beats spending their wait on it.
+const MOST_RESUMES: u32 = 2;
+
+/// What the reader is told while the turn waits to go on. The turn is not
+/// over, so this is a status rather than an error.
+const RESUMING_STATUS: &str =
+    "The model connection dropped; picking the answer up where it stopped…";
+
+/// How long the turn waits before going on, doubling per attempt. Short
+/// enough that a blip costs the reader a pause rather than the turn.
+fn resume_backoff(attempt: u32) -> Duration {
+    Duration::from_secs(1) * 2_u32.pow(attempt.saturating_sub(1).min(4))
+}
+
 /// The answer a coding agent gave before it was stopped stands, so the turn is no failure, but
 /// the reader is told it did not end on its own.
 const CUT_SHORT_NOTE: &str = "\n\n[Cut short: the agent was stopped before it finished]";
@@ -587,6 +606,43 @@ fn failure(endpoint: &Endpoint, backend: &LlmBackend, message: String) -> String
         endpoint,
         crate::services::backend::remedied(backend, message).message,
     )
+}
+
+/// A tool set for a round that resumes a turn.
+///
+/// [`ChatTools`] is not [`Clone`] and the run took the set it was given by value, so whatever
+/// goes on from it needs one of its own.
+async fn rebuilt(
+    state: &AppState,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    offline: bool,
+    origin: crate::db::tasks::Origin,
+    directory: &std::path::Path,
+) -> ChatTools {
+    let tools = ChatTools::build(WorkspaceScope {
+        state: state.clone(),
+        workspace_id,
+        chat_id: Some(chat_id),
+        user_id,
+        offline,
+        origin,
+    })
+    .await
+    .starting_in(Some(directory.to_path_buf()))
+    .await;
+    // A planner chat keeps its two closing calls across a rebuilt catalog, as `session::build`
+    // gave them to the first turn.
+    match crate::db::chats::link(state.db(), chat_id).await {
+        Ok(Some(link))
+            if link.purpose == crate::db::chats::ChatPurpose::ProjectPlanner
+                && link.project_id.is_none() =>
+        {
+            tools.with_planner()
+        }
+        _ => tools,
+    }
 }
 
 /// `message` as the reader sees it: a gateway's report that it reached
@@ -3785,6 +3841,10 @@ async fn handle_chat_generation(
     // Whether the round is the answer going on from what another login wrote of it, which a
     // refused resume replays with that part and the instruction to go on.
     let mut continuing = false;
+    // Why the stream broke, when it broke in a way the turn can go on from, and how many times
+    // this turn has already gone on from one.
+    let mut resuming: Option<String> = None;
+    let mut resumed = 0_u32;
 
     if let Some(notice) = displaced {
         emit_chunk(
@@ -4109,6 +4169,11 @@ async fn handle_chat_generation(
                             let remedied = crate::services::backend::remedied(llm_client.backend(), message);
                             if remedied.signed_out && handover.is_some() {
                                 handing = Some(Cause::signed_out(remedied.message));
+                            } else if !remedied.signed_out
+                                && resumed < MOST_RESUMES
+                                && crate::services::failure::resumable(&remedied.message)
+                            {
+                                resuming = Some(reported(&endpoint, remedied.message));
                             } else {
                                 failure = Some(reported(&endpoint, remedied.message));
                             }
@@ -4307,6 +4372,115 @@ async fn handle_chat_generation(
             last_snapshot = Some(Instant::now());
             continue;
         }
+        // A stream that broke between the provider and here says nothing about the turn, and
+        // one broken connection can take every turn running on it at once. What the turn has
+        // written is already persisted, so go on from there rather than throw away work that
+        // may have been running for half an hour.
+        if let Some(reason) = resuming.take() {
+            if cancelled {
+                break;
+            }
+            resumed += 1;
+            tracing::warn!(
+                %chat_id,
+                attempt = resumed,
+                %reason,
+                "The model stream broke; resuming the turn where it stopped"
+            );
+            publish(
+                stream,
+                ServerMessage::Status {
+                    message: RESUMING_STATUS.to_string(),
+                },
+            )
+            .await;
+            let leftover = token_filter.finish();
+            if !leftover.is_empty() {
+                pending_content.push_str(&leftover);
+                let _ = emit_chunk(
+                    stream,
+                    &mut full_content,
+                    &mut chunk_index,
+                    leftover,
+                    &mut response_truncated,
+                )
+                .await;
+            }
+            let wrote = (full_content.len(), tool_calls.len()) != written;
+            if let Some(entry) = handover::partial(&std::mem::take(&mut pending_content)) {
+                if let Err(error) = session
+                    .store
+                    .append(&session.lease, session.turn, std::slice::from_ref(&entry))
+                    .await
+                {
+                    failure = Some(error.to_string());
+                    break;
+                }
+                replay.append(&entry);
+                if let Some(pinned) = pinned.as_mut() {
+                    pinned.extend(&entry);
+                }
+            }
+            // Back off before trying the same provider again, and hand the chat straight back
+            // if the reader cancels or the lease goes while waiting.
+            let waiting = tokio::time::sleep(resume_backoff(resumed));
+            tokio::select! {
+                biased;
+                _ = session.guard.lost() => { failure = Some(OWNERSHIP_LOST.to_string()); break; }
+                _ = generation.cancel.recv() => { cancelled = true; break; }
+                () = waiting => {}
+            }
+            // The agent's own session still holds the transcript, so a resumed round is sent the
+            // instruction to go on and nothing else; an endpoint's turn is sent what it wrote.
+            let carried = pinned.as_ref().is_some_and(|pinned| pinned.id().is_some());
+            let whole = pinned
+                .as_ref()
+                .and_then(|pinned| pinned.transcript().cloned())
+                .unwrap_or_else(|| replay.clone());
+            tools = match agent_tools.is_some() {
+                true => ChatTools::empty(),
+                false => {
+                    rebuilt(
+                        state,
+                        chat_id,
+                        workspace_id,
+                        user_id,
+                        offline,
+                        origin,
+                        &directory,
+                    )
+                    .await
+                }
+            };
+            continuing = wrote;
+            context = match (wrote, carried) {
+                (true, true) => handover::carried(&whole),
+                (true, false) => handover::replayed(&whole),
+                (false, true) => context,
+                (false, false) => whole,
+            };
+            if let Err(error) = publish_live_assistant(
+                session,
+                &full_content,
+                &tool_calls,
+                &citations,
+                &action_receipts,
+                &generated_images,
+                &round_reasoning,
+                &handovers,
+                ledger.total(),
+            )
+            .await
+            {
+                tracing::warn!("Failed to persist the resumed answer: {error}");
+                if error.contains("ownership") || error.contains("expired") {
+                    failure = Some(error);
+                    break;
+                }
+            }
+            last_snapshot = Some(Instant::now());
+            continue;
+        }
         if cancelled || failure.is_some() {
             break;
         }
@@ -4387,30 +4561,16 @@ async fn handle_chat_generation(
         }
         last_snapshot = Some(Instant::now());
 
-        // ChatTools is not Clone and the run took the set it was given by
-        // value, so the run that resumes the turn needs one of its own.
-        tools = ChatTools::build(WorkspaceScope {
-            state: state.clone(),
+        tools = rebuilt(
+            state,
+            chat_id,
             workspace_id,
-            chat_id: Some(chat_id),
             user_id,
             offline,
             origin,
-        })
-        .await
-        .starting_in(Some(directory.clone()))
+            &directory,
+        )
         .await;
-        // A planner chat keeps its two closing calls across a rebuilt
-        // catalog, as `session::build` gave them to the first turn.
-        tools = match crate::db::chats::link(state.db(), chat_id).await {
-            Ok(Some(link))
-                if link.purpose == crate::db::chats::ChatPurpose::ProjectPlanner
-                    && link.project_id.is_none() =>
-            {
-                tools.with_planner()
-            }
-            _ => tools,
-        };
         context = replay.clone();
         budget = budget.less(spent);
     }
@@ -4498,15 +4658,15 @@ async fn handle_chat_generation(
 
     let ending = if response_truncated {
         Ending::Truncated
-    } else if failure.is_some() {
-        Ending::Interrupted
+    } else if let Some(reason) = failure.as_deref() {
+        Ending::Interrupted(Some(reason))
     } else if cut_short {
         Ending::CutShort
     } else {
         Ending::Finished
     };
     if let Some(note) = ending.note() {
-        full_content.push_str(note);
+        full_content.push_str(&note);
     }
 
     // Tools can run without the model ever producing prose. The turn is still
@@ -9498,11 +9658,13 @@ cat 'DIR/reply.jsonl'
     }
 
     #[test]
-    fn an_answer_cut_short_is_marked_as_neither_finished_nor_failed() {
-        assert_eq!(Ending::Finished.note(), None);
-        assert_eq!(Ending::CutShort.note(), Some(CUT_SHORT_NOTE));
-        assert_ne!(Ending::CutShort.note(), Ending::Interrupted.note());
-        assert_ne!(Ending::CutShort.note(), Ending::Truncated.note());
+    fn a_turn_waits_longer_before_each_resume_and_never_long_enough_to_be_a_wait() {
+        assert_eq!(resume_backoff(1), Duration::from_secs(1));
+        assert_eq!(resume_backoff(2), Duration::from_secs(2));
+        assert!(
+            (1..=MOST_RESUMES).all(|attempt| resume_backoff(attempt) <= Duration::from_secs(5)),
+            "the reader is waiting on this turn, so every resume it allows has to be quick"
+        );
     }
 
     #[test]

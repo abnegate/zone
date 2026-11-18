@@ -10,16 +10,10 @@ use abnegate_agent::context::Entry;
 use abnegate_agent::tool::MAXIMUM_SLEEP;
 use abnegate_agent::tool::Session;
 use abnegate_agent::tool::job::Jobs;
-use abnegate_agent_cli::CREDITS_REQUIRED;
-use abnegate_agent_cli::LONG_CONTEXT_CREDITS_REQUIRED;
-use abnegate_agent_cli::PROSE_EXCEEDED;
 use abnegate_http::Backoff;
-use abnegate_http::RetryAfter;
-use abnegate_http::contains_standalone_status;
 use abnegate_llm::Limit;
 use abnegate_llm::Message as LlmMessage;
 use futures::StreamExt;
-use reqwest::StatusCode;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::future::Future;
@@ -61,6 +55,9 @@ use crate::services::backend::Resolved;
 use crate::services::chat::session;
 use crate::services::chat::session::RunContext;
 use crate::services::endpoint::Endpoint;
+use crate::services::failure::Failure;
+use crate::services::failure::classify;
+use crate::services::failure::classify_agent;
 use crate::services::failure::unreachable;
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router;
@@ -198,41 +195,6 @@ impl Permit {
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-/// How a failed attempt may be recovered.
-///
-/// A terminal failure is one a byte-identical retry cannot survive: bad
-/// credentials, a malformed or oversized request, a missing model, a refusal,
-/// or a run that already burned its whole budget. Retrying those spends the
-/// budget again and can duplicate the side effects the attempt already had.
-///
-/// A usage limit that another of the organization's logins can run past is
-/// rerouted: the run moves to that login at once, at no cost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Failure {
-    Terminal,
-    Transient,
-    RateLimited { retry_after: Option<Duration> },
-    Rerouted,
-}
-
-impl Failure {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Terminal => "terminal",
-            Self::Transient => "transient",
-            Self::RateLimited { .. } => "rate_limited",
-            Self::Rerouted => "rerouted",
-        }
-    }
-
-    fn retry_after(self) -> Option<Duration> {
-        match self {
-            Self::RateLimited { retry_after } => retry_after,
-            Self::Terminal | Self::Transient | Self::Rerouted => None,
-        }
     }
 }
 
@@ -610,113 +572,6 @@ struct Stopped {
     fault: Fault,
     attempts: u32,
     exhausted: bool,
-}
-
-const RATE_LIMIT_MARKERS: &[&str] = &[
-    "quota exceeded",
-    "rate limit",
-    "rate_limit",
-    "ratelimit",
-    "resource exhausted",
-    "retry-after",
-    "retry_after",
-    "too many requests",
-];
-
-/// How abnegate-agent-cli begins a coding agent's failure that a retry of the
-/// same prompt meets again: prose past the output limit, and a model or a
-/// context the signed-in account cannot spend usage credits on.
-const AGENT_TERMINAL_MARKERS: &[&str] = &[
-    PROSE_EXCEEDED,
-    CREDITS_REQUIRED,
-    LONG_CONTEXT_CREDITS_REQUIRED,
-];
-
-const TERMINAL_MARKERS: &[&str] = &[
-    "access denied",
-    "authentication",
-    "bad request",
-    "budget exhausted",
-    "canceled",
-    "cancelled",
-    "content policy",
-    "content_filter",
-    "content_policy",
-    "context length",
-    "context window",
-    "invalid api key",
-    "invalid model",
-    "invalid request",
-    "invalid_api_key",
-    "invalid_request_error",
-    "malformed",
-    "maximum context",
-    "model not found",
-    "model_not_found",
-    "no such model",
-    "not supported",
-    "permission denied",
-    "unauthorized",
-    "unsupported",
-];
-
-const TERMINAL_STATUSES: &[StatusCode] = &[
-    StatusCode::BAD_REQUEST,
-    StatusCode::UNAUTHORIZED,
-    StatusCode::FORBIDDEN,
-    StatusCode::NOT_FOUND,
-    StatusCode::UNPROCESSABLE_ENTITY,
-];
-
-/// Rate limits are matched first: a throttled request is recoverable even when
-/// the provider dresses it up in the same vocabulary as a rejected one.
-fn classify(message: &str) -> Failure {
-    let lowered = message.to_ascii_lowercase();
-    if RATE_LIMIT_MARKERS
-        .iter()
-        .any(|marker| lowered.contains(marker))
-        || contains_standalone_status(&lowered, StatusCode::TOO_MANY_REQUESTS.as_u16())
-    {
-        return Failure::RateLimited {
-            retry_after: hint(&lowered),
-        };
-    }
-    if TERMINAL_MARKERS
-        .iter()
-        .any(|marker| lowered.contains(marker))
-        || TERMINAL_STATUSES
-            .iter()
-            .any(|status| contains_standalone_status(&lowered, status.as_u16()))
-    {
-        return Failure::Terminal;
-    }
-    Failure::Transient
-}
-
-/// The wait `text` asks for. A zero wait is still a rate limit, so it takes
-/// the rate-limit curve rather than retrying at once.
-fn hint(text: &str) -> Option<Duration> {
-    RetryAfter::from_text(text).filter(|delay| !delay.is_zero())
-}
-
-/// [`classify`] for a coding agent's own words, where a failure no retry
-/// survives is terminal and a subscription that ran out, in any of
-/// [`abnegate_llm::provider::LIMIT_WORDINGS`], backs off like any rate
-/// limit. Only a coding agent's own words are read for those: an endpoint's
-/// failure that happens to use them is judged by [`classify`] alone.
-fn classify_agent(words: &str) -> Failure {
-    if AGENT_TERMINAL_MARKERS
-        .iter()
-        .any(|marker| words.contains(marker))
-    {
-        return Failure::Terminal;
-    }
-    if Limit::worded(words) {
-        return Failure::RateLimited {
-            retry_after: hint(words),
-        };
-    }
-    classify(words)
 }
 
 /// Callback that persists task execution events to the database
@@ -4960,8 +4815,10 @@ mod tests {
 #[cfg(test)]
 mod retry_tests {
     use super::*;
+    use crate::services::failure::AGENT_TERMINAL_MARKERS;
     use abnegate_agent_cli::{
-        AgentEvent, AgentKind, CREDITS_UNCONFIRMED, DEFAULT_OUTPUT_LIMIT, STDERR_HEADING,
+        AgentEvent, AgentKind, CREDITS_REQUIRED, CREDITS_UNCONFIRMED, DEFAULT_OUTPUT_LIMIT,
+        LONG_CONTEXT_CREDITS_REQUIRED, PROSE_EXCEEDED, STDERR_HEADING,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -8054,7 +7911,7 @@ mod cli_tests {
     use crate::services::agent::home::CLAUDE_CODE_OAUTH_TOKEN;
     use crate::services::login::claude::Sealed;
     use abnegate_agent_cli::login::claude::Tokens;
-    use abnegate_agent_cli::{AgentKind, CliSettings};
+    use abnegate_agent_cli::{AgentKind, CREDITS_REQUIRED, CliSettings};
     use abnegate_llm::{Credential, LlmConfig};
     use abnegate_secret::SecretValue;
     use axum::http::{HeaderMap, HeaderValue, header};
