@@ -1,11 +1,16 @@
 mod cli;
 mod command;
+pub mod decision;
+pub mod grant;
+pub mod ignored;
 pub mod instant;
 mod instant_error;
 pub mod keygen;
 mod keygen_arguments;
 mod keygen_error;
 pub mod license_id;
+pub mod order_error;
+pub mod polar;
 pub mod private_key;
 mod private_key_error;
 pub mod sign;
