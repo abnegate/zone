@@ -457,8 +457,8 @@ zone/
 │   ├── zone_context/        # Source adapters, embeddings and context gathering
 │   ├── zone_cli/            # CLI tool
 │   ├── zone_desktop/        # Tauri desktop, Android and iOS client
-│   ├── zone_installer/      # Client shell that serves the console and proxies the API
 │   ├── zone_enterprise/     # Enterprise features and license verification (Zone Enterprise License)
+│   ├── zone_installer/      # Client shell that serves the console and proxies the API
 │   ├── zone_license/        # License signer and Polar webhook (MIT)
 │   ├── zone_routing/        # Proxy routing for tool, MCP and command runs
 │   └── zone_runner/         # Daemon binary (command execution via abnegate-exec)
