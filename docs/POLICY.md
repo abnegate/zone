@@ -547,7 +547,7 @@ Content-Type: application/json
 | Field | Meaning |
 |---|---|
 | `entitled` | The license allows editing: Enterprise, active or in grace. |
-| `enforced` | The license enforces policies: Enterprise, in any state. |
+| `enforced` | The license enforces policies: Enterprise in any state, or a stored key that no longer verifies. |
 | `edition` | `community` or `enterprise`. |
 | `status` | `community`, `active`, `grace` or `lapsed`. |
 | `editable` | The license allows editing and you may change this policy. |

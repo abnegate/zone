@@ -31,9 +31,10 @@ rows), unchanged and with no license.
 | Stored key that no longer verifies | Refused | Paused (`unverified`), backlog kept | Still applied | Refused, except disabling and deleting |
 
 Install the license under **Settings → This server → License**. Grace is the
-30 days after the license expires. Download, streaming and retention each
-need a Zone Enterprise license that verifies and is active or in its grace
-period; a lapse never loosens anything, it only pauses them.
+30 days after the license expires. Downloading, streaming and changing the
+retention period each need a Zone Enterprise license that verifies and is
+active or in its grace period. A lapse never loosens anything: downloads and
+streaming pause, and a period already set keeps applying.
 
 **A lapse pauses, it doesn't lose.** While streaming is paused, every enabled
 destination keeps its place in the log. Events written meanwhile wait, and

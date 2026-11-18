@@ -11,6 +11,7 @@ use zone_enterprise::sso::{
     DOMAIN_INVALID, ISSUER_INVALID, PROVIDER_DUPLICATE, PROVIDER_NOT_FOUND,
 };
 use zone_server::auth::admin_guard::REQUIRED;
+use zone_server::auth::entitlement::MESSAGE;
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::sso::providers;
 
@@ -37,10 +38,7 @@ fn assert_code(response: &TestResponse, status: StatusCode, code: &str) {
 
 fn assert_license_required(response: &TestResponse) {
     assert_code(response, StatusCode::FORBIDDEN, LICENSE_REQUIRED);
-    assert_eq!(
-        response.json_value()["error"],
-        "This needs a Zone Enterprise license that is active or in its grace period."
-    );
+    assert_eq!(response.json_value()["error"], MESSAGE);
 }
 
 async fn licensed(fixture: &Fixture) -> Account {

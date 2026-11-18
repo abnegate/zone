@@ -188,6 +188,20 @@ async fn community_and_lapsed_licenses_cannot_configure_but_can_always_disable_a
     assert_eq!(listed["destinations"], json!([]));
 
     fixture.license().await;
+    let listed = client.get_auth(&path, &owner.token).await;
+    listed.assert_status(StatusCode::OK);
+    assert_eq!(
+        listed.json_value()["standing"],
+        json!({
+            "edition": "enterprise",
+            "status": "active",
+            "export": true,
+            "streaming": true,
+            "retention": true,
+            "applies": true,
+            "pause": null,
+        })
+    );
     let created = post(
         client,
         &path,

@@ -22,8 +22,9 @@ install the license under **Settings → This server → License**.
 | Lapsed (past grace) | Keeps working | Keeps working | Read-only, with a renewal warning |
 | Removed, or never installed (Community) | Keeps working for providers already set up | Keeps working if it was on | Read-only, with an upgrade notice |
 
-Without an active or grace license, a change is refused with
-`license_required`, except for changes that only reduce what SSO can do:
+Without a Zone Enterprise license that is active or in its grace period, a
+change is refused with `license_required`, except for changes that only reduce
+what SSO can do:
 
 - disabling a provider, with a request that changes nothing else
 - deleting a provider
@@ -503,7 +504,8 @@ Rules for turning it on and off:
 - You can turn enforcement on only while at least one provider is enabled.
 - While it's on, you can't disable or delete the last enabled provider.
   Either change is refused with `sso_provider_required`.
-- Turning it on needs an active or grace license. Turning it off doesn't.
+- Turning it on needs a Zone Enterprise license that is active or in its
+  grace period. Turning it off doesn't.
 
 Things to know:
 
