@@ -1,5 +1,5 @@
 //! Agent and model policies for an organization and each of its workspaces. Members read them;
-//! changing them takes an administrator and a Team or Enterprise license, and every change is
+//! changing them takes an administrator and an Enterprise license, and every change is
 //! audited.
 
 pub mod access;

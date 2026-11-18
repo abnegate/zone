@@ -242,7 +242,7 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use tokio::time::timeout;
     use uuid::Uuid;
-    use zone_enterprise::{Payload, SigningKey, Tier, TrustedKey, sign};
+    use zone_enterprise::{Payload, SigningKey, TrustedKey, sign};
 
     use super::*;
     use crate::state::unreachable_pool;
@@ -275,7 +275,6 @@ mod tests {
             &Payload {
                 id: Uuid::new_v4(),
                 customer: "Acme Ltd".into(),
-                tier: Tier::Team,
                 seats: 5,
                 issued_at: now - TimeDelta::days(400),
                 expires_at: now + expires_in,

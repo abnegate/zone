@@ -2,12 +2,13 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
-use zone_enterprise::{Edition, Feature, LICENSE_REQUIRED};
+use zone_enterprise::{Feature, LICENSE_REQUIRED};
 
 use crate::routes::common::ErrorResponse;
 use crate::state::AppState;
 
-const SEPARATOR: &str = " or ";
+pub const MESSAGE: &str =
+    "This needs a Zone Enterprise license that is active or in its grace period.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unentitled(pub Feature);
@@ -16,7 +17,7 @@ impl IntoResponse for Unentitled {
     fn into_response(self) -> Response {
         (
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::with_code(message(self.0), LICENSE_REQUIRED)),
+            Json(ErrorResponse::with_code(MESSAGE, LICENSE_REQUIRED)),
         )
             .into_response()
     }
@@ -30,22 +31,6 @@ pub async fn require(state: &AppState, feature: Feature) -> Result<(), Unentitle
     Err(Unentitled(feature))
 }
 
-pub fn message(feature: Feature) -> String {
-    let editions: Vec<&str> = feature.editions().iter().copied().map(name).collect();
-    format!(
-        "This needs a Zone {} license that is active or in its grace period.",
-        editions.join(SEPARATOR)
-    )
-}
-
-fn name(edition: Edition) -> &'static str {
-    match edition {
-        Edition::Community => "Community",
-        Edition::Team => "Team",
-        Edition::Enterprise => "Enterprise",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use http_body_util::BodyExt;
@@ -54,41 +39,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_message_names_the_editions_that_include_the_feature() {
+    fn the_message_names_the_one_paid_edition() {
         assert_eq!(
-            message(Feature::Sso),
-            "This needs a Zone Team or Enterprise license that is active or in its grace period."
-        );
-    }
-
-    #[test]
-    fn audit_streaming_and_retention_name_only_enterprise() {
-        for feature in [Feature::AuditStreaming, Feature::AuditRetention] {
-            assert_eq!(
-                message(feature),
-                "This needs a Zone Enterprise license that is active or in its grace period.",
-                "{feature:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn audit_export_names_team_or_enterprise() {
-        assert_eq!(
-            message(Feature::AuditExport),
-            "This needs a Zone Team or Enterprise license that is active or in its grace period."
+            MESSAGE,
+            "This needs a Zone Enterprise license that is active or in its grace period."
         );
     }
 
     #[tokio::test]
-    async fn a_refusal_is_forbidden_with_the_license_code() {
-        let response = Unentitled(Feature::Sso).into_response();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            serde_json::from_slice::<Value>(&bytes).unwrap(),
-            json!({ "error": message(Feature::Sso), "code": "license_required" })
-        );
+    async fn every_feature_is_refused_as_forbidden_with_the_license_code() {
+        for feature in [
+            Feature::Sso,
+            Feature::Policy,
+            Feature::AuditExport,
+            Feature::AuditStreaming,
+            Feature::AuditRetention,
+        ] {
+            let response = Unentitled(feature).into_response();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{feature:?}");
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes).unwrap(),
+                json!({ "error": MESSAGE, "code": "license_required" }),
+                "{feature:?}"
+            );
+        }
     }
 
     #[tokio::test]
