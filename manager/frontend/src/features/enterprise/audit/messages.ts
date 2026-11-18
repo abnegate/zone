@@ -105,7 +105,7 @@ export interface Notice {
 
 const REFUSALS: Readonly<Record<AuditCodeValue, string>> = {
   [AuditCode.LicenseRequired]:
-    'This needs a Zone Enterprise license that is active or in its grace period.',
+    'Downloading the audit log or changing its destinations or retention needs a Zone Enterprise license that is active or in its grace period.',
   [AuditCode.BodyInvalid]: "Zone couldn't read this change. Reload the page and try again.",
   [AuditCode.DestinationNotFound]:
     'This destination no longer exists. It may have been deleted somewhere else.',

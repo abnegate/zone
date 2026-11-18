@@ -146,6 +146,7 @@
       border-color var(--ui-duration-fast) var(--ui-ease-out);
     cursor: pointer;
     border: 1px solid transparent;
+    text-decoration: none;
   }
 
   .ui-btn:focus-visible {

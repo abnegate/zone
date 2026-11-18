@@ -109,7 +109,7 @@ describe('refusalMessage', () => {
 
   it('names Zone Enterprise as the license every audit feature needs', () => {
     expect(refusalMessage(AuditCode.LicenseRequired)).toBe(
-      'This needs a Zone Enterprise license that is active or in its grace period.'
+      'Downloading the audit log or changing its destinations or retention needs a Zone Enterprise license that is active or in its grace period.'
     );
   });
 
@@ -313,7 +313,9 @@ describe('readOnlyMessage', () => {
     for (const standing of [COMMUNITY_STANDING, LAPSED_STANDING]) {
       expect(readOnlyMessage(standing, LicensedFeature.Export)).toBe(DOWNLOAD_READ_ONLY);
     }
-    expect(DOWNLOAD_READ_ONLY).toBe('Downloads need an active Zone Enterprise license.');
+    expect(DOWNLOAD_READ_ONLY).toBe(
+      'Downloads need a Zone Enterprise license that is active or in its grace period.'
+    );
   });
 
   it('asks for the key again to download when the stored key cannot be verified', () => {

@@ -182,7 +182,9 @@ describe('refusalMessage', () => {
   });
 
   it('names Zone Enterprise when a license is required', () => {
-    expect(refusalMessage(PolicyCode.LicenseRequired)).toContain('Zone Enterprise license');
+    expect(refusalMessage(PolicyCode.LicenseRequired)).toBe(
+      'Changing the agent policy needs a Zone Enterprise license that is active or in its grace period.'
+    );
   });
 });
 

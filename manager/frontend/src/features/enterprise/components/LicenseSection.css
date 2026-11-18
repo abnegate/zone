@@ -5,10 +5,6 @@
   min-width: 0;
 }
 
-.license-buy:hover {
-  text-decoration: none;
-}
-
 .license-summary {
   display: flex;
   flex-direction: column;

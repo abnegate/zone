@@ -3,11 +3,13 @@ import type { LicenseStatus as LicenseStatusValue } from './types';
 
 export const PRICING_URL = 'https://zone.abnegate.dev/pricing';
 
-const UNLICENSED_STATUSES: ReadonlySet<LicenseStatusValue> = new Set([
-  LicenseStatus.Community,
-  LicenseStatus.Lapsed,
-]);
+const OFFERS_PURCHASE: Readonly<Record<LicenseStatusValue, boolean>> = {
+  [LicenseStatus.Community]: true,
+  [LicenseStatus.Active]: false,
+  [LicenseStatus.Grace]: false,
+  [LicenseStatus.Lapsed]: true,
+};
 
-export function needsLicense(status: LicenseStatusValue): boolean {
-  return UNLICENSED_STATUSES.has(status);
+export function offersPurchase(status: LicenseStatusValue): boolean {
+  return OFFERS_PURCHASE[status];
 }

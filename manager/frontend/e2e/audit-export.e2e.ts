@@ -1,5 +1,4 @@
 import { readFile } from 'node:fs/promises';
-import path from 'node:path';
 import type { Locator, Page, Route } from '@playwright/test';
 import { exportFilename } from '../src/features/enterprise/audit/filename';
 import {
@@ -114,6 +113,7 @@ import type {
   UpdateRetentionRequest,
 } from '../src/features/enterprise/audit/types';
 import { expect, test } from './fixtures';
+import { shoot } from './helpers/screenshots';
 import { routeWorkspaceRole, setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
 
@@ -148,6 +148,8 @@ const SCHEMES = ['light', 'dark'] as const;
 type Scheme = (typeof SCHEMES)[number];
 
 const SCREENSHOTS = process.env.AUDIT_SCREENSHOTS;
+
+const SCROLLERS = '.audit-section, [role="dialog"]';
 
 const Resource = {
   Destinations: 'destinations',
@@ -481,51 +483,6 @@ function retentionCard(page: Page): Locator {
   return page.locator('.audit-retention');
 }
 
-async function expectNoSidewaysScroll(page: Page): Promise<void> {
-  const overflow = await page.evaluate(() =>
-    Math.max(
-      document.documentElement.scrollWidth - document.documentElement.clientWidth,
-      ...Array.from(
-        document.querySelectorAll('.audit-section, [role="dialog"]'),
-        (element) => element.scrollWidth - element.clientWidth
-      )
-    )
-  );
-  expect(overflow, 'the page never scrolls sideways').toBeLessThanOrEqual(0);
-}
-
-function screenshotPath(name: string): string {
-  const file = `${name}.png`;
-  return SCREENSHOTS ? path.join(SCREENSHOTS, file) : test.info().outputPath(file);
-}
-
-function contentHeight(page: Page): Promise<number> {
-  return page.evaluate(() =>
-    Math.ceil(
-      Math.max(
-        ...Array.from(
-          document.querySelectorAll('*'),
-          (element) => element.getBoundingClientRect().top + element.scrollHeight
-        )
-      )
-    )
-  );
-}
-
-async function shoot(page: Page, name: string): Promise<void> {
-  await expectNoSidewaysScroll(page);
-  const viewport = page.viewportSize() ?? DESKTOP;
-  let height = viewport.height;
-  for (let measured = await contentHeight(page); measured > height; ) {
-    height = measured;
-    await page.setViewportSize({ width: viewport.width, height });
-    measured = await contentHeight(page);
-  }
-  await expectNoSidewaysScroll(page);
-  await page.screenshot({ path: screenshotPath(name), animations: 'disabled' });
-  await page.setViewportSize(viewport);
-}
-
 async function download(page: Page, query: ExportQuery): Promise<SavedDownload> {
   await page.getByLabel(START_DATE_LABEL, { exact: true }).fill(query.start_date);
   await page.getByLabel(END_DATE_LABEL, { exact: true }).fill(query.end_date);
@@ -825,14 +782,14 @@ test.describe('Audit export layout', () => {
           { scheme }
         );
         await expect(row(page, FAILING_WEBHOOK.name)).toBeVisible();
-        await shoot(page, `organization-${suffix}`);
+        await shoot(page, SCREENSHOTS, `organization-${suffix}`, SCROLLERS);
 
         await page.getByRole('button', { name: ADD_DESTINATION_LABEL }).click();
         const form = page.getByRole('dialog', { name: NEW_DESTINATION_TITLE });
         await form.getByRole('textbox', { name: NAME_LABEL }).fill(WEBHOOK_NAME);
         await form.getByRole('textbox', { name: URL_LABEL }).fill(PLAIN_URL);
         await expect(form.getByRole('status')).toHaveText(UNENCRYPTED_HTTP_WARNING);
-        await shoot(page, `destination-form-${suffix}`);
+        await shoot(page, SCREENSHOTS, `destination-form-${suffix}`, SCROLLERS);
       });
 
       test(`lays the server section out at ${viewport.width}px in ${scheme}`, async ({ page }) => {
@@ -843,7 +800,7 @@ test.describe('Audit export layout', () => {
           { scheme }
         );
         await expect(row(page, SERVER_SYSLOG.name)).toBeVisible();
-        await shoot(page, `server-${suffix}`);
+        await shoot(page, SCREENSHOTS, `server-${suffix}`, SCROLLERS);
       });
     }
   }
@@ -869,7 +826,7 @@ test.describe('Audit export layout', () => {
           await serveAudit(page, ORGANIZATION_API, setup);
           await page.goto(ORGANIZATION_PATH, { waitUntil: 'domcontentloaded' });
           await expect(page.getByRole('heading', { name: SECTION_TITLE, level: 2 })).toBeVisible();
-          await shoot(page, `${name}-${scheme}-${viewport.width}`);
+          await shoot(page, SCREENSHOTS, `${name}-${scheme}-${viewport.width}`, SCROLLERS);
         }
       });
     }
