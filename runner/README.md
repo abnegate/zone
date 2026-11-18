@@ -56,6 +56,8 @@ runner/
 ├── zone_routing/    # Proxy routing for tool, MCP and command runs
 ├── zone_cli/        # User-facing CLI tool
 ├── zone_installer/  # Desktop/mobile client HTTP shell
+├── zone_enterprise/ # Enterprise features and license verification (Zone Enterprise License)
+├── zone_license/    # License signer and Polar webhook (MIT)
 └── zone_desktop/    # Tauri desktop, Android, and iOS client
 ```
 
@@ -209,4 +211,6 @@ See [API Documentation](./docs/api.md) for full endpoint reference.
 ## License
 
 MIT, except `zone_enterprise/`, which is under the Zone Enterprise License in
-`zone_enterprise/LICENSE`. See [LICENSE](../LICENSE) for details.
+`zone_enterprise/LICENSE`. `zone_license/` is MIT; it links `zone_enterprise` to
+build and sign licenses. See [LICENSE](../LICENSE) for details, and
+[docs/LICENSING.md](../docs/LICENSING.md) for selling and issuing licenses.
