@@ -28,14 +28,14 @@ A template that uses a value `config.ts` does not have fails the build.
 - **`checkoutURL`**: create the Zone Enterprise product in Polar, create a checkout link for it, and paste the link here. Set the checkout link's success URL to `https://<domain>/thanks/`.
 - **`price`**: the price on the site must match the Polar product.
 - **`contactEmail`**: a mailbox that someone reads.
-- **`domain`**: used for canonical links. It must match the custom domain configured for GitHub Pages.
+- **`domain`**: the custom domain configured for GitHub Pages. Deployed builds take canonical links from the base URL Pages reports (`SITE_BASE_URL`), so until the custom domain is live they point at `https://abnegate.github.io/zone/`. Local builds and the preview server fall back to `https://<domain>/`.
 
 ## Deploying
 
 `.github/workflows/website.yml` lints, typechecks and tests every pull request that touches `website/`, and on pushes to `main` builds the site and deploys it to GitHub Pages.
 
 1. In the repository's **Settings → Pages**, set **Source** to **GitHub Actions**. Until then the deploy job fails.
-2. Without a custom domain the site is served at `https://abnegate.github.io/zone/`. The build reads that base path from Pages, so links work there too.
+2. Without a custom domain the site is served at `https://abnegate.github.io/zone/`. The build reads that base URL from Pages, so links and canonical links work there too.
 
 ### Adding a custom domain
 
