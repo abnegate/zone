@@ -20,6 +20,7 @@ COPY runner/zone_runner/Cargo.toml ./runner/zone_runner/
 COPY runner/zone_core/Cargo.toml ./runner/zone_core/
 COPY runner/zone_routing/Cargo.toml ./runner/zone_routing/
 COPY runner/zone_enterprise/Cargo.toml ./runner/zone_enterprise/
+COPY runner/zone_license/Cargo.toml ./runner/zone_license/
 COPY runner/zone_context/Cargo.toml ./runner/zone_context/
 COPY runner/zone_server/Cargo.toml ./runner/zone_server/
 COPY runner/zone_cli/Cargo.toml ./runner/zone_cli/
@@ -28,13 +29,15 @@ COPY runner/zone_desktop/Cargo.toml ./runner/zone_desktop/
 
 # Create dummy source files for dependency compilation
 RUN mkdir -p runner/zone_runner/src runner/zone_core/src \
-    runner/zone_routing/src runner/zone_enterprise/src \
+    runner/zone_routing/src runner/zone_enterprise/src runner/zone_license/src \
     runner/zone_context/src runner/zone_server/src runner/zone_cli/src \
     runner/zone_installer/src runner/zone_desktop/src && \
     echo "fn main() {}" > runner/zone_runner/src/main.rs && \
     echo "fn main() {}" > runner/zone_core/src/lib.rs && \
     echo "fn main() {}" > runner/zone_routing/src/lib.rs && \
     echo "fn main() {}" > runner/zone_enterprise/src/lib.rs && \
+    echo "fn main() {}" > runner/zone_license/src/lib.rs && \
+    echo "fn main() {}" > runner/zone_license/src/main.rs && \
     echo "fn main() {}" > runner/zone_context/src/lib.rs && \
     echo "fn main() {}" > runner/zone_server/src/lib.rs && \
     echo "fn main() {}" > runner/zone_server/src/main.rs && \
