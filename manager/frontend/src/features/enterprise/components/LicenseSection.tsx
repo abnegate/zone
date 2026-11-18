@@ -1,6 +1,7 @@
-import { Button } from '@zone/ui';
+import { Button, buttonVariants } from '@zone/ui';
 import { useId, useState } from 'react';
 import { useLicense, useLicenseChanging } from '../hooks';
+import { needsLicense, PRICING_URL } from '../pricing';
 import { LicenseStatus } from '../schemas';
 import { overSeatNotice, statusNotice, storesLicense } from '../status';
 import type { LicenseResponse } from '../types';
@@ -32,6 +33,18 @@ export function LicenseSection() {
           </h2>
           <p className="section-description">Verify a Zone Enterprise license on this server.</p>
         </div>
+        {response && needsLicense(response.status) && (
+          <div className="section-row-actions license-buy-actions">
+            <a
+              className={`license-buy ${buttonVariants({ variant: 'secondary', size: 'sm' })}`}
+              href={PRICING_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Buy a license
+            </a>
+          </div>
+        )}
       </div>
       {error && (
         <div className="alert alert-error alert-inline" role="alert">
