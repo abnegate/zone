@@ -26,7 +26,8 @@ export const READ_ONLY_LAPSED = 'Renew your Zone license to change these setting
 
 export const READ_ONLY_UNVERIFIED = 'Paste the license key again to change these settings.';
 
-export const DOWNLOAD_READ_ONLY = 'Downloads need an active Zone Enterprise license.';
+export const DOWNLOAD_READ_ONLY =
+  'Downloads need a Zone Enterprise license that is active or in its grace period.';
 
 export const DOWNLOAD_UNVERIFIED = 'Paste the license key again to download the audit log.';
 

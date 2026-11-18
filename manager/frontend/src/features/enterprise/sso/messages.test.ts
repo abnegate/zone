@@ -37,7 +37,9 @@ describe('refusalMessage', () => {
   });
 
   it('names Zone Enterprise when a license is required', () => {
-    expect(refusalMessage(SsoAdminCode.LicenseRequired)).toContain('Zone Enterprise license');
+    expect(refusalMessage(SsoAdminCode.LicenseRequired)).toBe(
+      'Changing single sign-on needs a Zone Enterprise license that is active or in its grace period.'
+    );
   });
 });
 
