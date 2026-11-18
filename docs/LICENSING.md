@@ -318,10 +318,12 @@ docker run --rm zone-license --help
 
 ### Environment
 
-`serve` reads its settings from the environment and checks all of them at
-startup. A missing or invalid setting stops it before it listens, with a
-message naming the variable, and so does a key the release doesn't trust. A
-blank value counts as unset.
+`zone-license serve` takes no flags. It reads its settings from the
+environment and checks all of them at startup. Every missing or invalid
+setting, and a key the release doesn't trust, is listed in one message naming
+each variable, and the process exits with a non-zero status before it listens.
+Values are trimmed, and a blank value counts as unset, except
+`SMTP_PASSWORD`, which is taken exactly as given.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -330,13 +332,14 @@ blank value counts as unset.
 | `ZONE_LICENSE_PRIVATE_KEY_FILE` | None | Path to the private key file, which must not be group or world readable. Set exactly one of this and `ZONE_LICENSE_PRIVATE_KEY`. |
 | `ZONE_LICENSE_PRIVATE_KEY` | None | The private key itself: the base64 of the 32-byte seed. Set exactly one of this and `ZONE_LICENSE_PRIVATE_KEY_FILE`. |
 | `ZONE_LICENSE_KEY_ID` | Required | The signing key's id, such as `2026-2`. It must name a key in this release's production keyring, and that key must match the private key. |
-| `ZONE_LICENSE_LISTEN` | `0.0.0.0:8080` | The address and port to listen on. |
+| `ZONE_LICENSE_LISTEN` | `0.0.0.0:8080` | The IP address and port to listen on, such as `127.0.0.1:8080` or `[::]:8080`. A host name is refused. |
 | `SMTP_HOST` | Required | The mail relay. See [SMTP](#smtp). |
-| `SMTP_PORT` | `587` | The relay's port. |
+| `SMTP_PORT` | `587` | The relay's port, from 1 to 65535. |
 | `SMTP_USER` | Required | The relay account. |
-| `SMTP_PASSWORD` | Required | The relay password. |
-| `SMTP_FROM` | Required | The address keys are sent from. |
-| `SMTP_FROM_NAME` | `Zone` | The sender name. |
+| `SMTP_PASSWORD` | Required | The relay password. It may be blank, but must be set. |
+| `SMTP_FROM` | Required | The address keys are sent from: a bare address, such as `licenses@example.com`, without a name. |
+| `SMTP_FROM_NAME` | `Zone` | The sender name, on one line. |
+| `RUST_LOG` | `info` | The log filter. See [Logs](#logs). |
 
 ### Routes
 
@@ -346,7 +349,29 @@ blank value counts as unset.
 | `GET /health` | `200` with `{"status":"ok"}` while the process is serving. It doesn't check the mail relay. |
 
 Point your platform's health check or uptime monitor at `/health`. Only
-`/webhooks/polar` needs to be reachable from Polar.
+`/webhooks/polar` needs to be reachable from Polar. Request bodies are capped
+at 2 MB, far above any Polar event.
+
+### Logs
+
+`serve` writes one JSON object per line to standard error. Each delivery logs
+one line with an `outcome` of `sent`, `ignored`, `unsigned`, `malformed`,
+`unsignable` or `undelivered`, matching the [responses](#responses), along with
+the Polar `webhook` id and, once the order is read, its `order`,
+`subscription` and `license` ids. An ignored delivery also logs the event type
+and the `reason`; a failed send logs whether the relay's error was
+`retryable`.
+
+The logs never contain the license key, the webhook secret, the private key,
+the SMTP password, or the customer's name or email address. Set `RUST_LOG`,
+such as `RUST_LOG=debug`, to change what's logged.
+
+### Stopping
+
+`serve` stops on `SIGTERM` or ctrl-c. It stops accepting connections, lets a
+delivery in progress finish sending its email, and then exits, so
+`docker stop` and a rolling deploy don't cut a send off half way. The image
+runs the binary directly as PID 1, so the signer handles `SIGTERM` itself.
 
 ### TLS and DNS
 
@@ -378,10 +403,13 @@ rules as Zone's own mail (see
   `SMTP_PASSWORD` is taken exactly as given, blank included, because a relay
   may accept an empty one.
 - `SMTP_PORT` defaults to 587. Port 465 connects with implicit TLS; any other
-  port must upgrade with STARTTLS before signing in.
+  port must upgrade with STARTTLS before signing in. **Unlike Zone, a port
+  that isn't a number from 1 to 65535 stops the signer** instead of falling
+  back to 587, so a typo can't send keys to the wrong port.
 - **`SMTP_FROM` is required.** Unlike Zone, the signer has no fallback sender
-  address: a license email has to come from an address you own.
-- `SMTP_FROM_NAME` defaults to `Zone`.
+  address: a license email has to come from an address you own. It must be a
+  bare address; the name goes in `SMTP_FROM_NAME`.
+- `SMTP_FROM_NAME` defaults to `Zone`, and must be a single line.
 
 A send that hasn't finished after 7 seconds counts as failed. That leaves room
 inside Polar's 10-second delivery timeout to answer `503`, so that Polar
@@ -575,8 +603,8 @@ the customer receives the same email twice. Both carry the identical key.
 | Key signed and sent | `202` | `{"license":"<uuid>"}` | Records a success |
 | Event or order deliberately ignored | `202` | `{"ignored":"<reason>"}` | Records a success |
 | Signature missing, wrong, or outside the five-minute window | `401` | | Retries; counts as a failure |
-| An order the signer can't issue for, such as one without a customer email | `422` | | Retries; counts as a failure |
-| The mail relay refused the message or timed out | `503` | | Retries |
+| A body that isn't a Polar event, or an order the signer can't issue for, such as one without a customer email or with a subscription period that ends before it starts | `422` | | Retries; counts as a failure |
+| The email couldn't be sent: the relay refused it or timed out, or the order's address can't be parsed | `503` | | Retries |
 
 The signer answers `2xx` for an issuing order only after the relay has
 accepted the email. A `2xx` means the customer has their key, or the event
@@ -603,7 +631,7 @@ quickly.
 |---|---|---|
 | The signer exits at startup | A required variable is missing or invalid, both or neither private key variables are set, the key file is too readable, or the key isn't in this release's keyring | Read the message, which names the variable. For an untrusted key, run a signer built from a release that trusts it. |
 | Every delivery gets `401` | Wrong `POLAR_WEBHOOK_SECRET`, a proxy changing the body, or the host clock more than five minutes off | Copy the secret from the endpoint again, pass the body through unchanged, run NTP. |
-| Deliveries get `503` | The relay is down, slow, or refusing the sender | Fix the relay. Polar retries, and you can redeliver anything that ran out of attempts. |
+| Deliveries get `503` | The relay is down, slow, or refusing the sender or the recipient | Fix the relay; the `undelivered` log line says whether its error was `retryable`. Polar retries, and you can redeliver anything that ran out of attempts. A recipient that's refused for good needs a [hand-signed](#hand-signing-a-stuck-order) key sent to a corrected address. |
 | Deliveries get `422` | The order can't be issued, usually because it has no customer email | [Hand-sign](#hand-signing-a-stuck-order) it and send the key yourself. |
 | Deliveries get `403` | Cloudflare Bot Fight Mode or another bot filter | Turn it off for the signer's name. |
 | The endpoint is disabled | 10 consecutive events failed | Fix the cause, [re-enable it](#re-enabling-the-endpoint), then redeliver. |

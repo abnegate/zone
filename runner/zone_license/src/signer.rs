@@ -1,3 +1,7 @@
+use std::fmt;
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use zone_enterprise::{Keyring, Payload, SigningKey};
 
 use crate::private_key::PrivateKey;
@@ -50,6 +54,16 @@ impl Signer {
             });
         }
         Ok(())
+    }
+}
+
+impl fmt::Debug for Signer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Signer")
+            .field("key_id", &self.key_id)
+            .field("public", &STANDARD.encode(self.public()))
+            .finish_non_exhaustive()
     }
 }
 
@@ -197,6 +211,18 @@ mod tests {
         assert_eq!(
             signer().trusted_by(&keyring(KEY_ID, other)),
             Err(Untrusted::PublicKeyMismatch { id: KEY_ID.into() })
+        );
+    }
+
+    #[test]
+    fn debug_shows_the_public_key_but_never_the_seed() {
+        let shown = format!("{:?} {:#?}", signer(), signer());
+        assert!(!shown.contains(&PrivateKey::new(SEED).encode()), "{shown}");
+        assert!(!shown.contains("3, 3, 3"), "{shown}");
+        assert!(shown.contains(KEY_ID), "{shown}");
+        assert!(
+            shown.contains(&STANDARD.encode(signer().public())),
+            "{shown}"
         );
     }
 
