@@ -23,6 +23,7 @@ const LISTEN_REASON: &str = "it must be an IP address and port, such as 0.0.0.0:
 const PORT_REASON: &str = "it must be a port number from 1 to 65535";
 const FROM_REASON: &str = "it must be a bare email address, such as licenses@example.com";
 const FROM_NAME_REASON: &str = "it must be a single line";
+const PRODUCTS_REASON: &str = "it must list at least one Polar product ID, separated by commas";
 
 pub struct Config {
     pub signer: Signer,
@@ -57,7 +58,15 @@ impl Config {
             Variable::WebhookSecret,
             &mut problems,
         );
-        let products = value(Variable::Products).map_or_else(Vec::new, |list| products(&list));
+        let products = required(value(Variable::Products), Variable::Products, &mut problems)
+            .and_then(|list| {
+                let products = products(&list);
+                if products.is_empty() {
+                    problems.push(invalid(Variable::Products, PRODUCTS_REASON));
+                    return None;
+                }
+                Some(products)
+            });
         let listen = parsed(
             value(Variable::Listen),
             Variable::Listen,
@@ -106,7 +115,7 @@ impl Config {
             Some(Self {
                 signer: signer?,
                 secret: WebhookSecret::new(&secret?),
-                products,
+                products: products?,
                 listen: listen?,
                 smtp: SmtpConfig::new(
                     host?,
@@ -236,8 +245,10 @@ mod tests {
     const KEY_ID: &str = "test-1";
     const SECRET: &str = "whsec_config-test-secret";
     const PASSWORD: &str = "hunter2-not-a-real-password";
-    const REQUIRED: [Variable; 6] = [
+    const PRODUCT: &str = "prod_a";
+    const REQUIRED: [Variable; 7] = [
         Variable::WebhookSecret,
+        Variable::Products,
         Variable::KeyId,
         Variable::SmtpHost,
         Variable::SmtpUser,
@@ -252,6 +263,7 @@ mod tests {
     fn complete() -> HashMap<Variable, String> {
         HashMap::from([
             (Variable::WebhookSecret, SECRET.to_owned()),
+            (Variable::Products, PRODUCT.to_owned()),
             (Variable::PrivateKey, PrivateKey::new(SEED).encode()),
             (Variable::KeyId, KEY_ID.to_owned()),
             (Variable::SmtpHost, "smtp.example.test".to_owned()),
@@ -298,7 +310,7 @@ mod tests {
         let config = load(&complete()).unwrap();
         assert_eq!(config.signer.key_id(), KEY_ID);
         assert_eq!(config.signer.public(), PrivateKey::new(SEED).public());
-        assert!(config.products.is_empty());
+        assert_eq!(config.products, [PRODUCT]);
         assert_eq!(config.listen, "0.0.0.0:8080".parse().unwrap());
         assert_eq!(config.smtp.host, "smtp.example.test");
         assert_eq!(config.smtp.port, DEFAULT_SMTP_PORT);
@@ -313,13 +325,11 @@ mod tests {
     #[test]
     fn every_optional_variable_is_honoured() {
         let config = load(&with(&[
-            (Variable::Products, "prod_a"),
             (Variable::Listen, "127.0.0.1:9000"),
             (Variable::SmtpPort, "465"),
             (Variable::SmtpFromName, "Zone Licensing"),
         ]))
         .unwrap();
-        assert_eq!(config.products, ["prod_a"]);
         assert_eq!(config.listen, "127.0.0.1:9000".parse().unwrap());
         assert_eq!(config.smtp.port, 465);
         assert_eq!(config.smtp.sender.name.as_deref(), Some("Zone Licensing"));
@@ -482,8 +492,14 @@ mod tests {
     fn parses_the_product_list() {
         let config = load(&with(&[(Variable::Products, " prod_a, ,prod_b ,,prod_c,")])).unwrap();
         assert_eq!(config.products, ["prod_a", "prod_b", "prod_c"]);
-        let config = load(&with(&[(Variable::Products, " , ")])).unwrap();
-        assert!(config.products.is_empty());
+    }
+
+    #[test]
+    fn refuses_a_product_list_without_a_product() {
+        for list in [",", " , ,"] {
+            let problems = problems(&with(&[(Variable::Products, list)]));
+            assert_eq!(invalid(&problems), [Variable::Products], "{list:?}");
+        }
     }
 
     #[test]

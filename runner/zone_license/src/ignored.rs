@@ -2,7 +2,8 @@ pub const EVENT_TYPE: &str = "event_type";
 pub const BILLING_REASON: &str = "billing_reason";
 pub const UNPAID: &str = "unpaid";
 pub const PRODUCT: &str = "product";
-pub const NOT_SEAT_BASED: &str = "not_seat_based";
+pub const TRIAL: &str = "trial";
+pub const CANCELED: &str = "canceled";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ignored {
@@ -10,7 +11,8 @@ pub enum Ignored {
     BillingReason,
     Unpaid,
     Product,
-    NotSeatBased,
+    Trial,
+    Canceled,
 }
 
 impl Ignored {
@@ -20,7 +22,8 @@ impl Ignored {
             Self::BillingReason => BILLING_REASON,
             Self::Unpaid => UNPAID,
             Self::Product => PRODUCT,
-            Self::NotSeatBased => NOT_SEAT_BASED,
+            Self::Trial => TRIAL,
+            Self::Canceled => CANCELED,
         }
     }
 }
@@ -35,6 +38,7 @@ mod tests {
         assert_eq!(Ignored::BillingReason.as_str(), "billing_reason");
         assert_eq!(Ignored::Unpaid.as_str(), "unpaid");
         assert_eq!(Ignored::Product.as_str(), "product");
-        assert_eq!(Ignored::NotSeatBased.as_str(), "not_seat_based");
+        assert_eq!(Ignored::Trial.as_str(), "trial");
+        assert_eq!(Ignored::Canceled.as_str(), "canceled");
     }
 }

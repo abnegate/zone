@@ -2,8 +2,8 @@ mod support;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
+use abnegate_notify::{Sender, SmtpSecurity};
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
 use reqwest::header::CONTENT_TYPE;
@@ -12,10 +12,10 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 use zone_enterprise::{Keyring, License, TrustedKey};
-use zone_license::http::{Context, HEALTH_PATH, Server, WEBHOOK_PATH, router};
-use zone_license::mail::Relay;
+use zone_license::http::{HEALTH_PATH, WEBHOOK_PATH};
+use zone_license::mail::MailError;
 use zone_license::polar::{ID_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, signature};
-use zone_license::{Config, PrivateKey, ServeError, Variable};
+use zone_license::{Config, PrivateKey, ServeError, Variable, serve};
 
 use crate::support::smtp::{Delivered, SENDER, SmtpSink};
 
@@ -32,6 +32,7 @@ const KEY_ID: &str = "test-serve-1";
 const WEBHOOK: &str = "msg_2kWm9Q4tYpS3vB7xN1cR8dLe";
 const EMAIL: &str = "billing@acme.test";
 const CUSTOMER: &str = "Acme Ltd";
+const PRODUCT: &str = "5f0c8a9e-6b1d-4c2e-9a3f-7d4e1b2c3a40";
 
 struct Service {
     address: SocketAddr,
@@ -41,33 +42,42 @@ struct Service {
     task: JoinHandle<Result<(), ServeError>>,
 }
 
+/// The sink speaks plain SMTP without sign-in, which the environment can't
+/// configure, so only the relay's security is overridden.
+fn config(sink: &SmtpSink, key: &PrivateKey, keyring: &Keyring) -> Config {
+    let variables = HashMap::from([
+        (Variable::WebhookSecret, SECRET.to_owned()),
+        (Variable::Products, PRODUCT.to_owned()),
+        (Variable::PrivateKey, key.encode()),
+        (Variable::KeyId, KEY_ID.to_owned()),
+        (Variable::Listen, "127.0.0.1:0".to_owned()),
+        (Variable::SmtpHost, sink.address().ip().to_string()),
+        (Variable::SmtpPort, sink.address().port().to_string()),
+        (Variable::SmtpUser, "unused".to_owned()),
+        (Variable::SmtpPassword, String::new()),
+        (Variable::SmtpFrom, SENDER.to_owned()),
+    ]);
+    let mut config =
+        Config::from_variables(|variable| variables.get(&variable).cloned(), keyring).unwrap();
+    config.smtp = config
+        .smtp
+        .with_security(SmtpSecurity::Plaintext)
+        .without_credentials();
+    config
+}
+
+fn signing_key() -> (PrivateKey, Keyring) {
+    let mut seed = [0; 32];
+    getrandom::fill(&mut seed).unwrap();
+    let key = PrivateKey::new(seed);
+    let keyring = Keyring::new([TrustedKey::new(KEY_ID, key.public()).unwrap()]).unwrap();
+    (key, keyring)
+}
+
 impl Service {
     async fn start(sink: &SmtpSink) -> Self {
-        let mut seed = [0; 32];
-        getrandom::fill(&mut seed).unwrap();
-        let key = PrivateKey::new(seed);
-        let keyring = Keyring::new([TrustedKey::new(KEY_ID, key.public()).unwrap()]).unwrap();
-        let variables = HashMap::from([
-            (Variable::WebhookSecret, SECRET.to_owned()),
-            (Variable::PrivateKey, key.encode()),
-            (Variable::KeyId, KEY_ID.to_owned()),
-            (Variable::Listen, "127.0.0.1:0".to_owned()),
-            (Variable::SmtpHost, sink.address().ip().to_string()),
-            (Variable::SmtpPort, sink.address().port().to_string()),
-            (Variable::SmtpUser, "unused".to_owned()),
-            (Variable::SmtpPassword, String::new()),
-            (Variable::SmtpFrom, SENDER.to_owned()),
-        ]);
-        let config =
-            Config::from_variables(|variable| variables.get(&variable).cloned(), &keyring).unwrap();
-        let relay = Relay::new(&sink.config()).unwrap();
-        let context = Context::new(
-            config.signer,
-            config.secret,
-            config.products,
-            Arc::new(relay),
-        );
-        let server = Server::bind(config.listen, router(context)).await.unwrap();
+        let (key, keyring) = signing_key();
+        let server = serve::start(config(sink, &key, &keyring)).await.unwrap();
         let address = server.address().unwrap();
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(server.run(async {
@@ -198,14 +208,17 @@ async fn a_seat_change_in_the_same_period_gets_a_new_license() {
 }
 
 #[tokio::test]
-async fn a_relay_that_refuses_the_message_gets_polar_to_retry() {
-    for reply in ["451 4.3.0 try again later", "550 5.1.1 no such user"] {
+async fn a_relay_refusal_is_unavailable_only_while_it_may_pass() {
+    for (reply, expected) in [
+        ("451 4.3.0 try again later", StatusCode::SERVICE_UNAVAILABLE),
+        ("550 5.1.1 no such user", StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
         let sink = SmtpSink::rejecting(reply).await;
         let service = Service::start(&sink).await;
 
         let (status, answer) = service.deliver(CREATE, now()).await;
 
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{reply}");
+        assert_eq!(status, expected, "{reply}");
         assert_eq!(answer, Value::Null);
         assert!(sink.messages().is_empty());
         service.stop().await;
@@ -234,6 +247,31 @@ async fn a_forged_delivery_sends_nothing() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert!(sink.messages().is_empty());
     service.stop().await;
+}
+
+#[tokio::test]
+async fn serve_starts_from_a_config_and_stops_cleanly_when_told_to() {
+    let sink = SmtpSink::start().await;
+    let (key, keyring) = signing_key();
+
+    serve::serve(config(&sink, &key, &keyring), async {})
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn serve_refuses_a_relay_it_cannot_send_from() {
+    let sink = SmtpSink::start().await;
+    let (key, keyring) = signing_key();
+    let mut config = config(&sink, &key, &keyring);
+    config.smtp.sender = Sender::new("not an address");
+
+    let error = serve::serve(config, async {}).await.unwrap_err();
+
+    assert!(
+        matches!(error, ServeError::Mail(MailError::Sender)),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]

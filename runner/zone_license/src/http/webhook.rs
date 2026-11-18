@@ -13,6 +13,7 @@ use crate::http::issued::Issued;
 use crate::http::outcome::Outcome;
 use crate::http::skipped::Skipped;
 use crate::mail::Letter;
+use crate::order_error::OrderError;
 use crate::polar::{self, Event, Headers};
 
 /// Answers `2xx` for an issuing order only once the relay has taken the
@@ -25,7 +26,7 @@ pub async fn receive(
     let signed = Headers::read(|name| headers.get(name).and_then(|value| value.to_str().ok()));
     if let Err(error) = polar::verify(&context.secret, &signed, &body, Utc::now()) {
         let outcome = Outcome::Unsigned;
-        tracing::warn!(%outcome, %error, "Refused a webhook delivery");
+        tracing::info!(%outcome, %error, "Refused a webhook delivery");
         return outcome.status().into_response();
     }
     let webhook = signed.id.as_deref().unwrap_or_default();
@@ -52,8 +53,27 @@ pub async fn receive(
             return (outcome.status(), Json(Skipped::from(reason))).into_response();
         }
         Err(error) => {
-            let outcome = Outcome::Malformed;
-            tracing::warn!(webhook, %outcome, %error, "Could not issue for a paid order");
+            let outcome = Outcome::from(&error);
+            match &error {
+                OrderError::Misconfigured { order, product } => tracing::error!(
+                    webhook,
+                    order,
+                    product,
+                    %outcome,
+                    %error,
+                    "A paid order for a listed product issued nothing; hand-sign it"
+                ),
+                OrderError::Email { order } => tracing::error!(
+                    webhook,
+                    order,
+                    %outcome,
+                    %error,
+                    "A paid order has no address to send its license to; hand-sign it"
+                ),
+                OrderError::Malformed => {
+                    tracing::warn!(webhook, %outcome, %error, "Could not read a paid order");
+                }
+            }
             return outcome.status().into_response();
         }
     };
@@ -73,7 +93,7 @@ pub async fn receive(
 
     let letter = Letter::license(&terms.customer, terms.seats, terms.expires_at, &key);
     if let Err(error) = context.outbox.send(&grant.email, &letter).await {
-        let outcome = Outcome::Undelivered;
+        let outcome = Outcome::from(&error);
         tracing::error!(
             webhook,
             order,
@@ -82,7 +102,7 @@ pub async fn receive(
             %outcome,
             retryable = error.is_retryable(),
             %error,
-            "Could not email a license; Polar will retry"
+            "Could not email a license"
         );
         return outcome.status().into_response();
     }

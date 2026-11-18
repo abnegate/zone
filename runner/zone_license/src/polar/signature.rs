@@ -1,6 +1,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
+use hmac::digest::{CtOutput, Output};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
@@ -28,11 +29,10 @@ pub fn verify(
     if now.timestamp().abs_diff(timestamp) > TOLERANCE_SECONDS {
         return Err(SignatureError::Stale);
     }
-    let tags: Vec<Vec<u8>> = header.split_whitespace().filter_map(tag).collect();
+    let tags: Vec<CtOutput<HmacSha256>> = header.split_whitespace().filter_map(tag).collect();
     let matches = secret.keys().iter().any(|key| {
-        let expected = mac(key, id, timestamp, body);
-        tags.iter()
-            .any(|tag| expected.clone().verify_slice(tag).is_ok())
+        let expected = mac(key, id, timestamp, body).finalize();
+        tags.contains(&expected)
     });
     if matches {
         Ok(())
@@ -46,12 +46,16 @@ pub fn signature(key: &[u8], id: &str, timestamp: i64, body: &[u8]) -> String {
     format!("{VERSION}{VERSION_SEPARATOR}{}", STANDARD.encode(tag))
 }
 
-fn tag(entry: &str) -> Option<Vec<u8>> {
+/// Compared as a `CtOutput`, whose equality is constant time.
+fn tag(entry: &str) -> Option<CtOutput<HmacSha256>> {
     let (version, encoded) = entry.split_once(VERSION_SEPARATOR)?;
     if version != VERSION {
         return None;
     }
-    STANDARD.decode(encoded).ok()
+    let bytes = STANDARD.decode(encoded).ok()?;
+    Output::<HmacSha256>::try_from(bytes.as_slice())
+        .ok()
+        .map(CtOutput::new)
 }
 
 fn mac(key: &[u8], id: &str, timestamp: i64, body: &[u8]) -> HmacSha256 {
@@ -111,6 +115,23 @@ mod tests {
         let valid = signature(KEY, ID, TIMESTAMP, BODY);
         let header = format!("v1,not*base64 {valid}");
         assert_eq!(verify(&secret, &headers(header), BODY, now()), Ok(()));
+    }
+
+    #[test]
+    fn refuses_a_tag_of_the_wrong_length() {
+        let secret = WebhookSecret::new("whsec_unit");
+        let full = mac(KEY, ID, TIMESTAMP, BODY).finalize().into_bytes();
+        let mut longer = full.to_vec();
+        longer.push(0);
+        for bytes in [&full[..16], &longer[..], &[][..]] {
+            let header = format!("{VERSION}{VERSION_SEPARATOR}{}", STANDARD.encode(bytes));
+            assert_eq!(
+                verify(&secret, &headers(header), BODY, now()),
+                Err(SignatureError::Mismatch),
+                "{} bytes",
+                bytes.len()
+            );
+        }
     }
 
     #[test]

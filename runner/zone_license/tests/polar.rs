@@ -41,6 +41,8 @@ const UPDATE_ORDER: &str = "3d6e9f21-8a4b-4c1d-9e2f-0a1b2c3d4e03";
 const SUBSCRIPTION: &str = "b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c";
 const PRODUCT: &str = "5f0c8a9e-6b1d-4c2e-9a3f-7d4e1b2c3a40";
 const EMAIL: &str = "billing@acme.test";
+const NO_EMAIL_ORDER: &str = "3d6e9f21-8a4b-4c1d-9e2f-0a1b2c3d4e07";
+const NO_SEATS_ORDER: &str = "3d6e9f21-8a4b-4c1d-9e2f-0a1b2c3d4e06";
 
 fn now() -> DateTime<Utc> {
     Utc.timestamp_opt(TIMESTAMP, 0).unwrap()
@@ -84,8 +86,12 @@ fn first_year() -> Grant {
     grant(ORDER, 5, "2026-11-18T11:59:58Z", "2027-11-18T11:59:58Z")
 }
 
+fn products() -> [String; 1] {
+    [PRODUCT.to_owned()]
+}
+
 fn issued(event: &Event) -> Grant {
-    match decide(event, &[]) {
+    match decide(event, &products()) {
         Ok(Decision::Issue(grant)) => grant,
         other => panic!("expected a grant, got {other:?}"),
     }
@@ -306,7 +312,7 @@ fn secret_debug_hides_the_keys() {
 #[test]
 fn subscription_create_issues_the_first_year() {
     assert_eq!(
-        decide(&event(CREATE), &[]),
+        decide(&event(CREATE), &products()),
         Ok(Decision::Issue(first_year()))
     );
 }
@@ -314,7 +320,7 @@ fn subscription_create_issues_the_first_year() {
 #[test]
 fn subscription_cycle_issues_the_next_period() {
     assert_eq!(
-        decide(&event(CYCLE), &[]),
+        decide(&event(CYCLE), &products()),
         Ok(Decision::Issue(grant(
             CYCLE_ORDER,
             5,
@@ -327,7 +333,7 @@ fn subscription_cycle_issues_the_next_period() {
 #[test]
 fn subscription_update_issues_the_new_seat_count() {
     assert_eq!(
-        decide(&event(UPDATE), &[]),
+        decide(&event(UPDATE), &products()),
         Ok(Decision::Issue(grant(
             UPDATE_ORDER,
             8,
@@ -340,7 +346,7 @@ fn subscription_update_issues_the_new_seat_count() {
 #[test]
 fn one_time_purchase_is_ignored() {
     assert_eq!(
-        decide(&event(PURCHASE), &[]),
+        decide(&event(PURCHASE), &products()),
         Ok(Decision::Ignore(Ignored::BillingReason))
     );
 }
@@ -348,22 +354,48 @@ fn one_time_purchase_is_ignored() {
 #[test]
 fn unpaid_order_is_ignored() {
     assert_eq!(
-        decide(&event(UNPAID), &[]),
+        decide(&event(UNPAID), &products()),
         Ok(Decision::Ignore(Ignored::Unpaid))
     );
 }
 
+fn unaddressed() -> OrderError {
+    OrderError::Email {
+        order: ORDER.to_owned(),
+    }
+}
+
+fn misconfigured(order: &str) -> Result<Decision, OrderError> {
+    Err(OrderError::Misconfigured {
+        order: order.to_owned(),
+        product: PRODUCT.to_owned(),
+    })
+}
+
 #[test]
-fn order_without_seats_is_ignored() {
+fn a_listed_product_without_seats_is_misconfigured() {
     assert_eq!(
-        decide(&event(NO_SEATS), &[]),
-        Ok(Decision::Ignore(Ignored::NotSeatBased))
+        decide(&event(NO_SEATS), &products()),
+        misconfigured(NO_SEATS_ORDER)
+    );
+}
+
+#[test]
+fn an_unlisted_product_without_seats_is_ignored() {
+    assert_eq!(
+        decide(&event(NO_SEATS), &["another-product".to_owned()]),
+        Ok(Decision::Ignore(Ignored::Product))
     );
 }
 
 #[test]
 fn order_without_email_is_an_error() {
-    assert_eq!(decide(&event(NO_EMAIL), &[]), Err(OrderError::Email));
+    assert_eq!(
+        decide(&event(NO_EMAIL), &products()),
+        Err(OrderError::Email {
+            order: NO_EMAIL_ORDER.to_owned()
+        })
+    );
 }
 
 #[test]
@@ -375,18 +407,10 @@ fn other_event_types_are_ignored() {
         ORDER_CREATED,
     ] {
         assert_eq!(
-            decide(&event(body), &[]),
+            decide(&event(body), &products()),
             Ok(Decision::Ignore(Ignored::EventType))
         );
     }
-}
-
-#[test]
-fn cancellation_fixture_is_marked_to_cancel_at_period_end() {
-    assert_eq!(
-        event(SUBSCRIPTION_CANCELED).data["cancel_at_period_end"],
-        json!(true)
-    );
 }
 
 #[test]
@@ -396,7 +420,7 @@ fn meter_cycle_and_unknown_reasons_are_ignored() {
             value["data"]["billing_reason"] = json!(reason)
         });
         assert_eq!(
-            decide(&event, &[]),
+            decide(&event, &products()),
             Ok(Decision::Ignore(Ignored::BillingReason)),
             "reason {reason}"
         );
@@ -451,41 +475,50 @@ fn unlisted_product_is_ignored() {
 fn order_without_a_product_is_ignored_when_products_are_listed() {
     let event = edited(CREATE, |value| value["data"]["product_id"] = Value::Null);
     assert_eq!(
-        decide(&event, &[PRODUCT.to_owned()]),
+        decide(&event, &products()),
         Ok(Decision::Ignore(Ignored::Product))
     );
-    assert_eq!(issued(&event), first_year());
 }
 
 #[test]
-fn seats_fall_back_to_the_order() {
+fn an_empty_product_list_issues_nothing() {
+    assert_eq!(
+        decide(&event(CREATE), &[]),
+        Ok(Decision::Ignore(Ignored::Product))
+    );
+}
+
+#[test]
+fn order_seats_without_subscription_seats_are_misconfigured() {
     let event = edited(CREATE, |value| {
         value["data"]["subscription"]["seats"] = Value::Null;
         value["data"]["seats"] = json!(3);
     });
-    assert_eq!(issued(&event).seats, 3);
+    assert_eq!(decide(&event, &products()), misconfigured(ORDER));
 }
 
 #[test]
-fn zero_seats_are_ignored() {
+fn a_proration_delta_on_the_order_does_not_change_the_seats() {
+    let event = edited(UPDATE, |value| {
+        value["data"]["seats"] = json!(3);
+    });
+    assert_eq!(issued(&event).seats, 8);
+}
+
+#[test]
+fn zero_seats_are_misconfigured() {
     let event = edited(CREATE, |value| {
         value["data"]["subscription"]["seats"] = json!(0);
     });
-    assert_eq!(
-        decide(&event, &[]),
-        Ok(Decision::Ignore(Ignored::NotSeatBased))
-    );
+    assert_eq!(decide(&event, &products()), misconfigured(ORDER));
 }
 
 #[test]
-fn null_subscription_is_not_seat_based() {
+fn a_listed_product_without_a_subscription_is_misconfigured() {
     let event = edited(CREATE, |value| {
         value["data"]["subscription"] = Value::Null;
     });
-    assert_eq!(
-        decide(&event, &[]),
-        Ok(Decision::Ignore(Ignored::NotSeatBased))
-    );
+    assert_eq!(decide(&event, &products()), misconfigured(ORDER));
 }
 
 #[test]
@@ -493,14 +526,46 @@ fn blank_or_absent_email_is_an_error() {
     let blank = edited(CREATE, |value| {
         value["data"]["customer"]["email"] = json!("  ")
     });
-    assert_eq!(decide(&blank, &[]), Err(OrderError::Email));
+    assert_eq!(decide(&blank, &products()), Err(unaddressed()));
     let absent = edited(CREATE, |value| {
         value["data"]["customer"]
             .as_object_mut()
             .unwrap()
             .remove("email");
     });
-    assert_eq!(decide(&absent, &[]), Err(OrderError::Email));
+    assert_eq!(decide(&absent, &products()), Err(unaddressed()));
+}
+
+#[test]
+fn a_trialing_subscription_is_ignored() {
+    let event = edited(CREATE, |value| {
+        value["data"]["subscription"]["status"] = json!("trialing");
+        value["data"]["total_amount"] = json!(0);
+    });
+    assert_eq!(
+        decide(&event, &products()),
+        Ok(Decision::Ignore(Ignored::Trial))
+    );
+}
+
+#[test]
+fn the_final_order_of_a_canceled_subscription_is_ignored() {
+    let event = edited(CYCLE, |value| {
+        value["data"]["subscription"]["status"] = json!("canceled");
+        value["data"]["subscription"]["cancel_at_period_end"] = json!(true);
+    });
+    assert_eq!(
+        decide(&event, &products()),
+        Ok(Decision::Ignore(Ignored::Canceled))
+    );
+}
+
+#[test]
+fn a_subscription_due_to_cancel_still_issues_while_active() {
+    let event = edited(UPDATE, |value| {
+        value["data"]["subscription"]["cancel_at_period_end"] = json!(true);
+    });
+    assert_eq!(issued(&event).seats, 8);
 }
 
 #[test]
@@ -512,13 +577,32 @@ fn subscription_status_does_not_gate_issuing() {
 }
 
 #[test]
+fn fields_the_signer_never_reads_may_be_absent() {
+    let mut value: Value = serde_json::from_slice(CREATE).unwrap();
+    for field in ["timestamp", "api_version"] {
+        value.as_object_mut().unwrap().remove(field);
+    }
+    let data = value["data"].as_object_mut().unwrap();
+    for field in ["status", "subscription_id", "created_at", "seats"] {
+        data.remove(field);
+    }
+    data["customer"].as_object_mut().unwrap().remove("id");
+    data["subscription"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cancel_at_period_end");
+    let event = Event::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(issued(&event), first_year());
+}
+
+#[test]
 fn malformed_order_is_an_error() {
     let event = edited(CREATE, |value| value["data"]["paid"] = json!("yes"));
-    assert_eq!(decide(&event, &[]), Err(OrderError::Malformed));
+    assert_eq!(decide(&event, &products()), Err(OrderError::Malformed));
     let event = edited(CREATE, |value| {
         value["data"]["subscription"]["current_period_end"] = json!("next year")
     });
-    assert_eq!(decide(&event, &[]), Err(OrderError::Malformed));
+    assert_eq!(decide(&event, &products()), Err(OrderError::Malformed));
 }
 
 #[test]

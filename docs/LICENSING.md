@@ -106,7 +106,9 @@ the key:
   `runner/zone_enterprise/src/production.rs`;
 - the public key in base64, to record beside the key id;
 - the key id: the one you passed with `--key-id`, or else the next free one
-  for the current year, such as `2026-2`.
+  for the current year, such as `2026-2`. An id may use only letters, digits,
+  `-`, `_` and `.`, because it's pasted into Rust source; `keygen` refuses any
+  other before it generates or prints anything.
 
 Without `--output`, the private key goes to standard output instead. Prefer
 `--output`: it keeps the key out of terminal scrollback and out of a shell
@@ -189,7 +191,8 @@ seat assignment in Polar's portal.
 Polar caps a subscription at 1,000 seats. Sell larger deals by invoice and
 [hand-sign](#hand-signing-a-license) their keys.
 
-Copy the product's ID. It's the value for `POLAR_PRODUCT_IDS` if you set it.
+Copy the product's ID. It's the value for `POLAR_PRODUCT_IDS`, which the
+signer requires.
 
 ### 3. The minimum seat count
 
@@ -231,8 +234,9 @@ customer portal if you want them to change seats themselves.
 ### 5. No free trial
 
 Don't offer a trial on the product or the checkout link. A trial starts the
-subscription with a `subscription_create` order, and the signer would issue a
-key valid until the trial ends. Offer evaluations with a
+subscription with a `subscription_create` order while the subscription is
+`trialing`; the signer ignores that order, so a trial customer gets no key
+until the first paid renewal, when the trial ends. Offer evaluations with a
 [hand-signed](#hand-signing-a-license) short license instead.
 
 ### 6. The checkout link
@@ -295,9 +299,15 @@ docker run -d --name zone-license --restart unless-stopped \
 ```
 
 To give it the private key as a file instead of a variable, mount it read-only
-and point `ZONE_LICENSE_PRIVATE_KEY_FILE` at it:
+and point `ZONE_LICENSE_PRIVATE_KEY_FILE` at it. The signer refuses a key file
+that gives its group or everyone any access, and the container runs as uid
+`10001`, so the file on the host must be owned by uid `10001` with mode `0400`
+or `0600`:
 
 ```sh
+sudo chown 10001:10001 /etc/zone-license/zone-license-2026-2.key
+sudo chmod 0400 /etc/zone-license/zone-license-2026-2.key
+
 docker run -d --name zone-license --restart unless-stopped \
   --env-file /etc/zone-license/signer.env \
   -e ZONE_LICENSE_PRIVATE_KEY_FILE=/run/secrets/zone-license-key \
@@ -306,10 +316,19 @@ docker run -d --name zone-license --restart unless-stopped \
   zone-license
 ```
 
-The signer refuses a key file that gives its group or everyone any access, so
-the file must have mode `0600` or `0400` and be owned by the user the
-container runs as, uid `10001`. On Kubernetes, mount the secret with
-`defaultMode: 0400`; the default `0644` is refused.
+On Kubernetes, pass the key as `ZONE_LICENSE_PRIVATE_KEY` from the secret
+rather than mounting it as a file. The kubelet writes a mounted secret owned
+by root, so uid `10001` can't read it with mode `0400`, and setting `fsGroup`
+to let it in adds group read, which the signer refuses:
+
+```yaml
+env:
+  - name: ZONE_LICENSE_PRIVATE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: zone-license
+        key: private-key
+```
 
 The same image runs the other commands:
 
@@ -329,7 +348,7 @@ Values are trimmed, and a blank value counts as unset, except
 | Variable | Default | Meaning |
 |---|---|---|
 | `POLAR_WEBHOOK_SECRET` | Required | The endpoint's secret from Polar, starting `whsec_`. |
-| `POLAR_PRODUCT_IDS` | Any product | Comma-separated Polar product IDs to issue keys for. Orders for other products are acknowledged and ignored. Set it if the organization sells anything else. |
+| `POLAR_PRODUCT_IDS` | Required | Comma-separated Polar product IDs to issue keys for, at least one. Orders for other products are acknowledged and ignored, so nothing else the organization sells, or adds later, ever gets a key. |
 | `ZONE_LICENSE_PRIVATE_KEY_FILE` | None | Path to the private key file, which must give its group and everyone else no access. Set exactly one of this and `ZONE_LICENSE_PRIVATE_KEY`. |
 | `ZONE_LICENSE_PRIVATE_KEY` | None | The private key itself: the base64 of the 32-byte seed. Set exactly one of this and `ZONE_LICENSE_PRIVATE_KEY_FILE`. |
 | `ZONE_LICENSE_KEY_ID` | Required | The signing key's id, such as `2026-2`. It must name a key in this release's production keyring, and that key must match the private key. |
@@ -353,15 +372,26 @@ Point your platform's health check or uptime monitor at `/health`. Only
 `/webhooks/polar` needs to be reachable from Polar. Request bodies are capped
 at 2 MB, far above any Polar event.
 
+The image has no Docker `HEALTHCHECK`: the slim runtime image carries no HTTP
+client to run one with. Have your orchestrator or load balancer probe
+`GET /health` from outside the container instead, such as a Kubernetes
+`httpGet` liveness and readiness probe on port 8080.
+
 ### Logs
 
 `serve` writes one JSON object per line to standard error. Each delivery logs
 one line with an `outcome` of `sent`, `ignored`, `unsigned`, `malformed`,
-`unsignable` or `undelivered`, matching the [responses](#responses). Once the
-signature checks out, the line carries the Polar `webhook` id and, once the
-order is read, its `order`, `subscription` and `license` ids. An ignored delivery also logs the event type
-and the `reason`; a failed send logs whether the relay's error was
-`retryable`.
+`unaddressed`, `misconfigured`, `unsignable`, `unsendable` or `undelivered`,
+matching the [responses](#responses). Once the signature checks out, the line
+carries the Polar `webhook` id and, once the order is read, its `order`,
+`subscription` and `license` ids, or the `product` id for `misconfigured`. A
+refused signature is logged at `info`, since anyone can post to the endpoint;
+an order a paying customer is left waiting on is logged as an error. An ignored
+delivery also logs the event type and the `reason`. A failed send logs what
+went wrong (`rejected`, `response`, `client`, `tls`, `timeout` or
+`connection`), the relay's SMTP status code if it gave one, and whether the
+error was `retryable`. It never logs the text of the relay's reply, because
+relays often quote the recipient's address in it.
 
 The logs never contain the license key, the webhook secret, the private key,
 the SMTP password, or the customer's name or email address. Set `RUST_LOG`,
@@ -447,6 +477,8 @@ place: the same image and the same data, with no restart or reinstall.
 
 The name on the license is the order's billing name; failing that, the
 customer's billing name, then the customer's name, then their email address.
+Control and invisible characters are removed and runs of whitespace become one
+space, and the email shows exactly the name the license carries.
 
 | What happens in Polar | What the customer gets |
 |---|---|
@@ -551,12 +583,29 @@ It issues a key when all of these hold:
 - the order's `paid` is true;
 - its `billing_reason` is `subscription_create` (a new subscription),
   `subscription_cycle` (a renewal) or `subscription_update` (a seat change);
-- its product is in `POLAR_PRODUCT_IDS`, when that's set;
+- its product is in `POLAR_PRODUCT_IDS`;
+- its subscription is neither `trialing` nor `canceled`;
 - it's for a seat-based subscription with at least one seat.
 
-It ignores, with `202` and `{"ignored":"<reason>"}`, a one-off `purchase`, a
-`subscription_meter_cycle`, an unpaid order, another product, an order that
-isn't seat-based, and every other event type.
+It ignores, with `202` and `{"ignored":"<reason>"}`, a one-off `purchase`
+(`billing_reason`), a `subscription_meter_cycle` (`billing_reason`), an unpaid
+order (`unpaid`), another product (`product`), an order for a `trialing`
+subscription (`trial`), an order for a `canceled` subscription (`canceled`),
+and every other event type (`event_type`).
+
+A subscription set to cancel at the end of its period ends with a final
+order. Polar marks the subscription `canceled` before creating it and reports
+its `billing_reason` as `subscription_cycle`, the same as a renewal, and pays
+it when there's anything left to bill, such as seats added under `prorate`.
+The signer ignores it, because the subscription is over. A subscription that
+is only due to cancel is still `active`, and its orders issue as usual.
+
+An order for a product in `POLAR_PRODUCT_IDS` that has no subscription, or a
+subscription without seats, isn't ignored: the customer has paid for a product
+you said is Zone Enterprise and would otherwise get nothing. The signer
+answers `422` and logs an error with the outcome `misconfigured`, naming the
+order and the product. Fix the product's pricing so it's seat-based, then
+[hand-sign](#hand-signing-a-stuck-order) the order's key.
 
 Other events look tempting but can't be trusted alone:
 
@@ -574,9 +623,9 @@ expiry and Zone's grace period follows.
 
 | License field | Taken from |
 |---|---|
-| `seats` | The seat count of the order's subscription |
-| `expires_at` | The subscription's `current_period_end`, with no grace added |
-| `issued_at` | The subscription's `current_period_start` |
+| `seats` | The seat count of the order's subscription, never the order's own `seats`, which Polar fills only for one-time orders |
+| `expires_at` | The subscription's `current_period_end` in whole seconds, with no grace added |
+| `issued_at` | The subscription's `current_period_start` in whole seconds |
 | `customer` | The order's billing name, else the customer's billing name, else the customer's name, else their email |
 | `id` | A UUIDv5 over the subscription, the period end and the seat count |
 | `key_id` | `ZONE_LICENSE_KEY_ID` |
@@ -604,12 +653,19 @@ the customer receives the same email twice. Both carry the identical key.
 | Key signed and sent | `202` | `{"license":"<uuid>"}` | Records a success |
 | Event or order deliberately ignored | `202` | `{"ignored":"<reason>"}` | Records a success |
 | Signature missing, wrong, or outside the five-minute window | `401` | | Retries; counts as a failure |
-| A body that isn't a Polar event, or an order the signer can't issue for, such as one without a customer email or with a subscription period that ends before it starts | `422` | | Retries; counts as a failure |
-| The email couldn't be sent: the relay refused it or timed out, or the order's address can't be parsed | `503` | | Retries |
+| A body that isn't a Polar event (`malformed`), or an order with a subscription period that ends before it starts (`unsignable`) | `422` | | Retries; counts as a failure |
+| An order without a customer email (`unaddressed`) | `422` | | Retries; counts as a failure |
+| An order for a listed product without a seat-based subscription (`misconfigured`) | `422` | | Retries; counts as a failure |
+| The email can never be sent as it is: the relay refused it for good with a `5xx` reply, or the order's address can't be parsed (`unsendable`) | `422` | | Retries; counts as a failure |
+| The email couldn't be sent yet: the relay was unreachable, timed out, or refused it for now with a `4xx` reply (`undelivered`) | `503` | | Retries; counts as a failure |
 
 The signer answers `2xx` for an issuing order only after the relay has
 accepted the email. A `2xx` means the customer has their key, or the event
 needed none.
+
+Polar treats every non-`2xx` answer the same way, so the split between `422`
+and `503` is for you, not for Polar: `422` means retrying the same delivery
+can't help, and `503` means it might.
 
 ### Polar's delivery rules
 
@@ -626,14 +682,24 @@ Polar recommends answering within 2 seconds and may lower its timeout. The
 signer answers only once the relay does, so use a relay that accepts mail
 quickly.
 
+Polar delivers an endpoint's events in order: while an earlier event is still
+pending, later ones wait behind it, up to an age limit Polar sets. So one
+order that keeps failing delays every later customer's key until it succeeds,
+runs out of retries or ages out. Don't wait for that. As soon as the log shows
+an order that can't be issued or sent, [hand-sign](#hand-signing-a-stuck-order)
+its key with `zone-license sign` and send it yourself, then fix the cause, or
+redeliver the order once it's fixed.
+
 ### What to do
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | The signer exits at startup | A required variable is missing or invalid, both or neither private key variables are set, the key file is too readable, or the key isn't in this release's keyring | Read the message, which names the variable. For an untrusted key, run a signer built from a release that trusts it. |
 | Every delivery gets `401` | Wrong `POLAR_WEBHOOK_SECRET`, a proxy changing the body, or the host clock more than five minutes off | Copy the secret from the endpoint again, pass the body through unchanged, run NTP. |
-| Deliveries get `503` | The relay is down, slow, or refusing the sender or the recipient | Fix the relay; the `undelivered` log line says whether its error was `retryable`. Polar retries, and you can redeliver anything that ran out of attempts. A recipient that's refused for good needs a [hand-signed](#hand-signing-a-stuck-order) key sent to a corrected address. |
-| Deliveries get `422` | The order can't be issued, usually because it has no customer email | [Hand-sign](#hand-signing-a-stuck-order) it and send the key yourself. |
+| Deliveries get `503` | The relay is down, slow, or refusing mail for now | Fix the relay; the `undelivered` log line gives the failure and the SMTP status. Polar retries, and you can redeliver anything that ran out of attempts. |
+| Deliveries get `422` with an `unsendable` log line | The relay refused the message for good, such as an unknown recipient or a refused sender, or the order's address can't be parsed | If the sender or the relay account is at fault, fix it and redeliver. If the recipient is, [hand-sign](#hand-signing-a-stuck-order) the key and send it to a corrected address. |
+| Deliveries get `422` | The order can't be issued, usually because it has no customer email (an `unaddressed` error in the log, naming the order) | [Hand-sign](#hand-signing-a-stuck-order) it and send the key yourself. |
+| A `misconfigured` error in the log | An order for a product in `POLAR_PRODUCT_IDS` had no seat-based subscription | Make the product seat-based, then [hand-sign](#hand-signing-a-stuck-order) the order the log names. |
 | Deliveries get `403` | Cloudflare Bot Fight Mode or another bot filter | Turn it off for the signer's name. |
 | The endpoint is disabled | 10 consecutive events failed | Fix the cause, [re-enable it](#re-enabling-the-endpoint), then redeliver. |
 | A customer says no email arrived | Spam filtering, or a mistyped address | Check SPF and DKIM, redeliver the order, or hand-sign it to a corrected address. |

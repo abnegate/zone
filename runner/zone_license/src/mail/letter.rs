@@ -1,6 +1,5 @@
 use std::fmt;
 
-use abnegate_secret::sanitize;
 use chrono::{DateTime, Utc};
 use zone_enterprise::GRACE_DAYS;
 
@@ -19,8 +18,8 @@ const RENEWAL: &str = "Each time your subscription renews you get a new key by e
 
 const SIGN_OFF: &str = "The Zone Team";
 
-/// The key is never sanitised: redaction would eat it, and it is the whole
-/// point of the letter.
+/// The customer name arrives already normalised by the order, so the letter
+/// shows exactly the name the license carries; it is only escaped for HTML.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Letter {
     subject: String,
@@ -30,12 +29,11 @@ pub struct Letter {
 
 impl Letter {
     pub fn license(customer: &str, seats: u32, expires_at: DateTime<Utc>, key: &str) -> Self {
-        let customer = sanitize(customer);
         let date = expires_at.format(DATE_FORMAT).to_string();
         Self {
             subject: SUBJECT.to_string(),
-            text: text(&customer, seats, &date, key),
-            html: html(&customer, seats, &date, key),
+            text: text(customer, seats, &date, key),
+            html: html(customer, seats, &date, key),
         }
     }
 
@@ -212,13 +210,6 @@ mod tests {
                 .text()
                 .contains("Customer: Tom & Jerry's <script>\"Co\"</script>\n")
         );
-    }
-
-    #[test]
-    fn control_sequences_in_the_customer_name_are_stripped() {
-        let letter = letter("Acme\u{1b}[31m Ltd");
-        assert!(!letter.text().contains('\u{1b}'));
-        assert!(!letter.html().contains('\u{1b}'));
     }
 
     #[test]

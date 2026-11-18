@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 
 use crate::license_id;
 use crate::terms::Terms;
@@ -16,14 +16,16 @@ pub struct Grant {
 
 impl Grant {
     /// Every term comes from the subscription period, so a retried or
-    /// redelivered order signs to the same bytes.
+    /// redelivered order signs to the same bytes. The period is cut to whole
+    /// seconds, the precision the license id hashes.
     pub fn terms(&self) -> Terms {
+        let expires_at = self.period_end.trunc_subsecs(0);
         Terms {
-            id: license_id::derive(&self.subscription, self.period_end, self.seats),
+            id: license_id::derive(&self.subscription, expires_at, self.seats),
             customer: self.customer.clone(),
             seats: self.seats,
-            issued_at: self.period_start,
-            expires_at: self.period_end,
+            issued_at: self.period_start.trunc_subsecs(0),
+            expires_at,
         }
     }
 }
@@ -69,6 +71,16 @@ mod tests {
             ..grant()
         };
         assert_eq!(other.terms(), grant().terms());
+    }
+
+    #[test]
+    fn the_terms_keep_whole_seconds_like_the_id() {
+        let precise = Grant {
+            period_start: at("2026-11-18T11:59:58.123456Z"),
+            period_end: at("2027-11-18T11:59:58.654321Z"),
+            ..grant()
+        };
+        assert_eq!(precise.terms(), grant().terms());
     }
 
     #[test]

@@ -54,6 +54,7 @@ mod tests {
     const PURCHASE: &[u8] = include_bytes!("../../tests/fixtures/polar/order_paid_purchase.json");
     const UNPAID: &[u8] = include_bytes!("../../tests/fixtures/polar/order_paid_unpaid.json");
     const NO_EMAIL: &[u8] = include_bytes!("../../tests/fixtures/polar/order_paid_no_email.json");
+    const NO_SEATS: &[u8] = include_bytes!("../../tests/fixtures/polar/order_paid_no_seats.json");
     const SUBSCRIPTION_UPDATED: &[u8] =
         include_bytes!("../../tests/fixtures/polar/subscription_updated.json");
 
@@ -63,6 +64,7 @@ mod tests {
     const WEBHOOK: &str = "msg_router";
     const SUBSCRIPTION: &str = "b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c";
     const EMAIL: &str = "billing@acme.test";
+    const PRODUCT: &str = "5f0c8a9e-6b1d-4c2e-9a3f-7d4e1b2c3a40";
 
     #[derive(Default)]
     struct Recording {
@@ -95,6 +97,19 @@ mod tests {
                 host: "smtp.example.test".to_owned(),
             })
         }
+    }
+
+    struct Unsendable;
+
+    #[async_trait]
+    impl Outbox for Unsendable {
+        async fn send(&self, _: &str, _: &Letter) -> Result<(), MailError> {
+            Err(MailError::Recipient)
+        }
+    }
+
+    fn products() -> Vec<String> {
+        vec![PRODUCT.to_owned()]
     }
 
     fn signer() -> Signer {
@@ -145,7 +160,7 @@ mod tests {
 
     async fn refused(request: Request<Body>) {
         let outbox = Arc::new(Recording::default());
-        let (status, body) = answer(app(outbox.clone(), vec![]), request).await;
+        let (status, body) = answer(app(outbox.clone(), products()), request).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body, None);
         assert!(outbox.sent().is_empty());
@@ -161,7 +176,7 @@ mod tests {
 
     async fn unprocessable(body: &[u8]) {
         let outbox = Arc::new(Recording::default());
-        let (status, answered) = answer(app(outbox.clone(), vec![]), signed(body)).await;
+        let (status, answered) = answer(app(outbox.clone(), products()), signed(body)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(answered, None);
         assert!(outbox.sent().is_empty());
@@ -170,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn a_paid_order_sends_a_license_and_names_it() {
         let outbox = Arc::new(Recording::default());
-        let (status, body) = answer(app(outbox.clone(), vec![]), signed(CREATE)).await;
+        let (status, body) = answer(app(outbox.clone(), products()), signed(CREATE)).await;
 
         let period_end = "2027-11-18T11:59:58Z".parse().unwrap();
         let id = license_id::derive(SUBSCRIPTION, period_end, 5);
@@ -192,12 +207,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_listed_product_issues() {
+    async fn the_license_and_the_letter_carry_the_same_normalised_name() {
         let outbox = Arc::new(Recording::default());
-        let products = vec!["5f0c8a9e-6b1d-4c2e-9a3f-7d4e1b2c3a40".to_owned()];
-        let (status, _) = answer(app(outbox.clone(), products), signed(CREATE)).await;
+        let body = edited(CREATE, |value| {
+            value["data"]["billing_name"] = json!(" Acme\u{1b}[31m\u{200b} \r\n Ltd ");
+        });
+        let (status, _) = answer(app(outbox.clone(), products()), signed(&body)).await;
         assert_eq!(status, StatusCode::ACCEPTED);
-        assert_eq!(outbox.sent().len(), 1);
+
+        let (_, letter) = &outbox.sent()[0];
+        let license = letter
+            .text()
+            .lines()
+            .find_map(|line| keyring().verify(line).ok())
+            .expect("the letter carries a license that verifies");
+        assert_eq!(license.payload().customer, "Acme Ltd");
+        assert!(
+            letter.text().contains("Customer: Acme Ltd\n"),
+            "{}",
+            letter.text()
+        );
     }
 
     #[tokio::test]
@@ -228,6 +257,41 @@ mod tests {
         refused(request).await;
     }
 
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unsigned_delivery_is_not_a_warning() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        refused(delivery(
+            CREATE,
+            Utc::now().timestamp(),
+            b"whsec_another-secret",
+        ))
+        .await;
+
+        let logged = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(logged, "");
+    }
+
     #[tokio::test]
     async fn missing_signature_headers_are_refused() {
         let request = Request::builder()
@@ -245,17 +309,17 @@ mod tests {
 
     #[tokio::test]
     async fn another_event_type_is_ignored() {
-        ignored(SUBSCRIPTION_UPDATED, vec![], "event_type").await;
+        ignored(SUBSCRIPTION_UPDATED, products(), "event_type").await;
     }
 
     #[tokio::test]
     async fn a_one_off_purchase_is_ignored() {
-        ignored(PURCHASE, vec![], "billing_reason").await;
+        ignored(PURCHASE, products(), "billing_reason").await;
     }
 
     #[tokio::test]
     async fn an_unpaid_order_is_ignored() {
-        ignored(UNPAID, vec![], "unpaid").await;
+        ignored(UNPAID, products(), "unpaid").await;
     }
 
     #[tokio::test]
@@ -266,6 +330,11 @@ mod tests {
     #[tokio::test]
     async fn an_order_without_an_email_is_unprocessable() {
         unprocessable(NO_EMAIL).await;
+    }
+
+    #[tokio::test]
+    async fn a_listed_product_without_seats_is_unprocessable() {
+        unprocessable(NO_SEATS).await;
     }
 
     #[tokio::test]
@@ -285,8 +354,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_send_is_unavailable_so_polar_retries() {
-        let (status, body) = answer(app(Arc::new(Failing), vec![]), signed(CREATE)).await;
+        let (status, body) = answer(app(Arc::new(Failing), products()), signed(CREATE)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, None);
+    }
+
+    #[tokio::test]
+    async fn a_send_that_can_never_succeed_is_unprocessable() {
+        let (status, body) = answer(app(Arc::new(Unsendable), products()), signed(CREATE)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body, None);
     }
 
@@ -296,7 +372,7 @@ mod tests {
             .uri(HEALTH_PATH)
             .body(Body::empty())
             .unwrap();
-        let (status, body) = answer(app(Arc::new(Failing), vec![]), request).await;
+        let (status, body) = answer(app(Arc::new(Failing), products()), request).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, Some(json!({ "status": "ok" })));
     }
@@ -307,7 +383,7 @@ mod tests {
             .uri(WEBHOOK_PATH)
             .body(Body::empty())
             .unwrap();
-        let (status, _) = answer(app(Arc::new(Failing), vec![]), request).await;
+        let (status, _) = answer(app(Arc::new(Failing), products()), request).await;
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     }
 }

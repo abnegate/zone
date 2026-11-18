@@ -5,6 +5,7 @@ use abnegate_notify::{Sender, SmtpConfig, SmtpSecurity};
 use async_trait::async_trait;
 use lettre::message::header::{ContentTransferEncoding, ContentType};
 use lettre::message::{Mailbox, MultiPart, SinglePart};
+use lettre::transport::smtp::AsyncSmtpTransportBuilder;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Address, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
@@ -24,44 +25,11 @@ pub struct Relay {
 
 impl Relay {
     pub fn new(config: &SmtpConfig) -> Result<Self, MailError> {
-        let from = mailbox(&config.sender)?;
-        let builder = match config.effective_security() {
-            SmtpSecurity::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host),
-            SmtpSecurity::StartTls => {
-                AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.host)
-            }
-            SmtpSecurity::Plaintext => Ok(AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(
-                &config.host,
-            )),
-            _ => {
-                return Err(MailError::Configuration {
-                    host: config.host.clone(),
-                    message: UNSUPPORTED_SECURITY.to_string(),
-                });
-            }
-        }
-        .map_err(|error| MailError::configuration(&config.host, &error))?
-        .port(config.port)
-        .timeout(Some(SEND_TIMEOUT));
-
-        let builder = if config.authenticate {
-            builder.credentials(Credentials::new(
-                config.user.clone(),
-                config.password.expose().to_string(),
-            ))
-        } else {
-            builder
-        };
-
         Ok(Self {
-            transport: builder.build(),
-            from,
+            transport: transport(config)?.timeout(Some(SEND_TIMEOUT)).build(),
+            from: mailbox(&config.sender)?,
             host: config.host.clone(),
         })
-    }
-
-    pub fn host(&self) -> &str {
-        &self.host
     }
 
     fn compose(&self, recipient: &str, letter: &Letter) -> Result<Message, MailError> {
@@ -101,6 +69,31 @@ impl fmt::Debug for Relay {
             .field("from", &self.from)
             .finish_non_exhaustive()
     }
+}
+
+fn transport(config: &SmtpConfig) -> Result<AsyncSmtpTransportBuilder, MailError> {
+    let builder = match config.effective_security() {
+        SmtpSecurity::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host),
+        SmtpSecurity::StartTls => {
+            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.host)
+        }
+        SmtpSecurity::Plaintext => Ok(AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(
+            &config.host,
+        )),
+        _ => {
+            return Err(MailError::Configuration {
+                host: config.host.clone(),
+                message: UNSUPPORTED_SECURITY.to_string(),
+            });
+        }
+    }
+    .map_err(|error| MailError::configuration(&config.host, &error))?
+    .port(config.port);
+    if !config.authenticate {
+        return Ok(builder);
+    }
+    let credentials = Credentials::new(config.user.clone(), config.password.expose().to_string());
+    Ok(builder.credentials(credentials))
 }
 
 fn part(content_type: ContentType, body: &str) -> SinglePart {

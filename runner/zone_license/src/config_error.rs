@@ -12,10 +12,12 @@ impl ConfigError {
         Self { problems }
     }
 
+    #[cfg(test)]
     pub fn problems(&self) -> &[Problem] {
         &self.problems
     }
 
+    #[cfg(test)]
     pub fn into_problems(self) -> Vec<Problem> {
         self.problems
     }

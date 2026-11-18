@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use abnegate_secret::sanitize;
 use serde::Deserialize;
 
 use super::billing_reason::BillingReason;
@@ -8,29 +8,24 @@ use super::order_subscription::OrderSubscription;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Order {
     pub id: String,
-    pub status: String,
     pub paid: bool,
     pub billing_reason: BillingReason,
     #[serde(default)]
     pub billing_name: Option<String>,
     #[serde(default)]
     pub product_id: Option<String>,
-    #[serde(default)]
-    pub subscription_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-    #[serde(default)]
-    pub seats: Option<i64>,
     pub customer: Customer,
     #[serde(default)]
     pub subscription: Option<OrderSubscription>,
 }
 
 impl Order {
+    /// Only the subscription's seats count: the order's own `seats` is for
+    /// one-time orders and may be a proration delta.
     pub fn seats(&self) -> Option<u32> {
         self.subscription
             .as_ref()
             .and_then(|subscription| subscription.seats)
-            .or(self.seats)
             .and_then(|seats| u32::try_from(seats).ok())
             .filter(|seats| *seats >= 1)
     }
@@ -39,7 +34,10 @@ impl Order {
         filled(self.customer.email.as_deref())
     }
 
-    pub fn customer_name(&self) -> Option<&str> {
+    /// The first name in the fallback chain that is still readable once
+    /// control and invisible characters are stripped and its whitespace is
+    /// collapsed, so the signed license and the email show the same name.
+    pub fn customer_name(&self) -> Option<String> {
         [
             self.billing_name.as_deref(),
             self.customer.billing_name.as_deref(),
@@ -47,12 +45,21 @@ impl Order {
             self.customer.email.as_deref(),
         ]
         .into_iter()
-        .find_map(filled)
+        .flatten()
+        .find_map(normalized)
     }
 }
 
 fn filled(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn normalized(name: &str) -> Option<String> {
+    let name = sanitize(name)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!name.is_empty()).then_some(name)
 }
 
 #[cfg(test)]
@@ -98,23 +105,22 @@ mod tests {
     }
 
     #[test]
-    fn subscription_seats_win_over_order_seats() {
+    fn seats_come_from_the_subscription() {
         let order = order(json!({"seats": 3, "subscription": {"seats": 7}}));
         assert_eq!(order.seats(), Some(7));
     }
 
     #[test]
-    fn falls_back_to_order_seats() {
-        let order = order(json!({"seats": 3}));
-        assert_eq!(order.seats(), Some(3));
+    fn order_seats_alone_are_none() {
+        assert_eq!(order(json!({"seats": 3})).seats(), None);
     }
 
     #[test]
     fn zero_negative_or_missing_seats_are_none() {
-        assert_eq!(order(json!({"subscription": {"seats": 0}})).seats(), None);
-        assert_eq!(order(json!({"seats": -2})).seats(), None);
-        assert_eq!(order(json!({})).seats(), None);
-        assert_eq!(order(json!({"seats": 5_000_000_000_i64})).seats(), None);
+        for seats in [json!(0), json!(-2), json!(null), json!(5_000_000_000_i64)] {
+            let order = order(json!({"subscription": {"seats": seats}}));
+            assert_eq!(order.seats(), None, "{seats}");
+        }
     }
 
     #[test]
@@ -132,19 +138,34 @@ mod tests {
             "billing_name": "Order Ltd",
             "customer": {"billing_name": "Customer Ltd", "name": "Jane", "email": "j@x.test"}
         });
-        assert_eq!(order(full).customer_name(), Some("Order Ltd"));
+        assert_eq!(order(full).customer_name().as_deref(), Some("Order Ltd"));
         let customer_billing = json!({
             "billing_name": " ",
             "customer": {"billing_name": "Customer Ltd", "name": "Jane", "email": "j@x.test"}
         });
         assert_eq!(
-            order(customer_billing).customer_name(),
+            order(customer_billing).customer_name().as_deref(),
             Some("Customer Ltd")
         );
         let name = json!({"customer": {"billing_name": "", "name": "Jane", "email": "j@x.test"}});
-        assert_eq!(order(name).customer_name(), Some("Jane"));
+        assert_eq!(order(name).customer_name().as_deref(), Some("Jane"));
         let email = json!({"customer": {"email": "j@x.test"}});
-        assert_eq!(order(email).customer_name(), Some("j@x.test"));
+        assert_eq!(order(email).customer_name().as_deref(), Some("j@x.test"));
         assert_eq!(order(json!({})).customer_name(), None);
+    }
+
+    #[test]
+    fn customer_name_strips_control_and_invisible_characters_and_collapses_whitespace() {
+        let order = order(json!({"billing_name": " Acme\u{1b}[31m\u{200b} \r\n Ltd\t"}));
+        assert_eq!(order.customer_name().as_deref(), Some("Acme Ltd"));
+    }
+
+    #[test]
+    fn a_name_with_nothing_readable_falls_through_the_chain() {
+        let order = order(json!({
+            "billing_name": "\u{1b}[31m\u{200b}",
+            "customer": {"name": "Jane"}
+        }));
+        assert_eq!(order.customer_name().as_deref(), Some("Jane"));
     }
 }
