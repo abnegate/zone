@@ -48,13 +48,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_feature_is_refused_as_forbidden_with_the_license_code() {
-        for feature in [
-            Feature::Sso,
-            Feature::Policy,
-            Feature::AuditExport,
-            Feature::AuditStreaming,
-            Feature::AuditRetention,
-        ] {
+        for feature in Feature::ALL {
             let response = Unentitled(feature).into_response();
             assert_eq!(response.status(), StatusCode::FORBIDDEN, "{feature:?}");
             let bytes = response.into_body().collect().await.unwrap().to_bytes();

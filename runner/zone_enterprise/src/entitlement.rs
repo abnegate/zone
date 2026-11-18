@@ -15,6 +15,14 @@ pub enum Feature {
 }
 
 impl Feature {
+    pub const ALL: [Self; 5] = [
+        Self::Sso,
+        Self::Policy,
+        Self::AuditExport,
+        Self::AuditStreaming,
+        Self::AuditRetention,
+    ];
+
     pub fn enforced(self, license: Option<&License>) -> bool {
         license.is_some()
     }
@@ -31,14 +39,6 @@ mod tests {
     use super::*;
     use crate::fixtures;
 
-    const FEATURES: [Feature; 5] = [
-        Feature::Sso,
-        Feature::Policy,
-        Feature::AuditExport,
-        Feature::AuditStreaming,
-        Feature::AuditRetention,
-    ];
-
     fn license() -> License {
         fixtures::license(&fixtures::payload())
     }
@@ -53,7 +53,7 @@ mod tests {
 
     #[test]
     fn community_is_never_entitled() {
-        for feature in FEATURES {
+        for feature in Feature::ALL {
             for (now, _) in moments(&license()) {
                 assert!(!feature.entitled(None, now), "{feature:?} at {now}");
             }
@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn community_enforces_nothing() {
-        for feature in FEATURES {
+        for feature in Feature::ALL {
             assert!(!feature.enforced(None), "{feature:?}");
         }
     }
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn a_license_is_entitled_to_every_feature_while_active_or_in_grace() {
         let license = license();
-        for feature in FEATURES {
+        for feature in Feature::ALL {
             for (now, status) in moments(&license) {
                 assert_eq!(license.status(now), status);
                 assert_eq!(
@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn a_license_enforces_every_feature_whatever_the_status() {
         let license = license();
-        for feature in FEATURES {
+        for feature in Feature::ALL {
             for (now, status) in moments(&license) {
                 assert_eq!(license.status(now), status);
                 assert!(
