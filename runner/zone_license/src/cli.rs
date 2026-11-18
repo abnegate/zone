@@ -108,18 +108,28 @@ mod tests {
         assert!(refused.is_err());
     }
 
+    fn collapsed(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
     #[test]
-    fn keygen_help_shows_the_suggested_key_id_on_one_line() {
+    fn every_argument_help_renders_whole() {
         let mut cli = Cli::command();
-        let help = cli
-            .find_subcommand_mut("keygen")
-            .expect("keygen is a subcommand")
-            .render_help()
-            .to_string();
-        assert!(
-            help.contains("the next free one for this year, such as 2026-2"),
-            "{help}"
-        );
+        for subcommand in cli.get_subcommands_mut() {
+            let help = collapsed(&subcommand.render_help().to_string());
+            for argument in subcommand.get_arguments() {
+                let Some(declared) = argument.get_help() else {
+                    continue;
+                };
+                let declared = collapsed(&declared.to_string());
+                assert!(
+                    help.contains(&declared),
+                    "{} --{} renders as:\n{help}",
+                    subcommand.get_name(),
+                    argument.get_id()
+                );
+            }
+        }
     }
 
     #[test]

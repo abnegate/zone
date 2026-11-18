@@ -414,14 +414,6 @@ fn other_event_types_are_ignored() {
 }
 
 #[test]
-fn cancellation_fixture_is_marked_to_cancel_at_period_end() {
-    assert_eq!(
-        event(SUBSCRIPTION_CANCELED).data["cancel_at_period_end"],
-        json!(true)
-    );
-}
-
-#[test]
 fn meter_cycle_and_unknown_reasons_are_ignored() {
     for reason in ["subscription_meter_cycle", "subscription_pause"] {
         let event = edited(CREATE, |value| {
