@@ -357,11 +357,26 @@ fn unpaid_order_is_ignored() {
     );
 }
 
+fn misconfigured(order: &str) -> Result<Decision, OrderError> {
+    Err(OrderError::Misconfigured {
+        order: order.to_owned(),
+        product: PRODUCT.to_owned(),
+    })
+}
+
 #[test]
-fn order_without_seats_is_ignored() {
+fn a_listed_product_without_seats_is_misconfigured() {
     assert_eq!(
         decide(&event(NO_SEATS), &products()),
-        Ok(Decision::Ignore(Ignored::NotSeatBased))
+        misconfigured("3d6e9f21-8a4b-4c1d-9e2f-0a1b2c3d4e06")
+    );
+}
+
+#[test]
+fn an_unlisted_product_without_seats_is_ignored() {
+    assert_eq!(
+        decide(&event(NO_SEATS), &["another-product".to_owned()]),
+        Ok(Decision::Ignore(Ignored::Product))
     );
 }
 
@@ -478,25 +493,19 @@ fn seats_fall_back_to_the_order() {
 }
 
 #[test]
-fn zero_seats_are_ignored() {
+fn zero_seats_are_misconfigured() {
     let event = edited(CREATE, |value| {
         value["data"]["subscription"]["seats"] = json!(0);
     });
-    assert_eq!(
-        decide(&event, &products()),
-        Ok(Decision::Ignore(Ignored::NotSeatBased))
-    );
+    assert_eq!(decide(&event, &products()), misconfigured(ORDER));
 }
 
 #[test]
-fn null_subscription_is_not_seat_based() {
+fn a_listed_product_without_a_subscription_is_misconfigured() {
     let event = edited(CREATE, |value| {
         value["data"]["subscription"] = Value::Null;
     });
-    assert_eq!(
-        decide(&event, &products()),
-        Ok(Decision::Ignore(Ignored::NotSeatBased))
-    );
+    assert_eq!(decide(&event, &products()), misconfigured(ORDER));
 }
 
 #[test]

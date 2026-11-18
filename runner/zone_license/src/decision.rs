@@ -22,11 +22,14 @@ pub fn decide(event: &Event, products: &[String]) -> Result<Decision, OrderError
     if !order.billing_reason.issues() {
         return Ok(Decision::Ignore(Ignored::BillingReason));
     }
-    if !sold(&order, products) {
+    let Some(product) = sold(&order, products) else {
         return Ok(Decision::Ignore(Ignored::Product));
-    }
+    };
     let (Some(subscription), Some(seats)) = (&order.subscription, order.seats()) else {
-        return Ok(Decision::Ignore(Ignored::NotSeatBased));
+        return Err(OrderError::Misconfigured {
+            order: order.id.clone(),
+            product: product.to_owned(),
+        });
     };
     let email = order.email().ok_or(OrderError::Email)?;
     let customer = order.customer_name().unwrap_or(email);
@@ -41,11 +44,11 @@ pub fn decide(event: &Event, products: &[String]) -> Result<Decision, OrderError
     }))
 }
 
-fn sold(order: &Order, products: &[String]) -> bool {
+fn sold<'a>(order: &'a Order, products: &[String]) -> Option<&'a str> {
     order
         .product_id
-        .as_ref()
-        .is_some_and(|product| products.contains(product))
+        .as_deref()
+        .filter(|product| products.iter().any(|listed| listed == product))
 }
 
 #[cfg(test)]

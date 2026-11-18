@@ -54,6 +54,7 @@ mod tests {
     const PURCHASE: &[u8] = include_bytes!("../../tests/fixtures/polar/order_paid_purchase.json");
     const UNPAID: &[u8] = include_bytes!("../../tests/fixtures/polar/order_paid_unpaid.json");
     const NO_EMAIL: &[u8] = include_bytes!("../../tests/fixtures/polar/order_paid_no_email.json");
+    const NO_SEATS: &[u8] = include_bytes!("../../tests/fixtures/polar/order_paid_no_seats.json");
     const SUBSCRIPTION_UPDATED: &[u8] =
         include_bytes!("../../tests/fixtures/polar/subscription_updated.json");
 
@@ -262,6 +263,11 @@ mod tests {
     #[tokio::test]
     async fn an_order_without_an_email_is_unprocessable() {
         unprocessable(NO_EMAIL).await;
+    }
+
+    #[tokio::test]
+    async fn a_listed_product_without_seats_is_unprocessable() {
+        unprocessable(NO_SEATS).await;
     }
 
     #[tokio::test]

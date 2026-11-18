@@ -13,6 +13,7 @@ use crate::http::issued::Issued;
 use crate::http::outcome::Outcome;
 use crate::http::skipped::Skipped;
 use crate::mail::Letter;
+use crate::order_error::OrderError;
 use crate::polar::{self, Event, Headers};
 
 /// Answers `2xx` for an issuing order only once the relay has taken the
@@ -52,8 +53,20 @@ pub async fn receive(
             return (outcome.status(), Json(Skipped::from(reason))).into_response();
         }
         Err(error) => {
-            let outcome = Outcome::Malformed;
-            tracing::warn!(webhook, %outcome, %error, "Could not issue for a paid order");
+            let outcome = Outcome::from(&error);
+            match &error {
+                OrderError::Misconfigured { order, product } => tracing::error!(
+                    webhook,
+                    order,
+                    product,
+                    %outcome,
+                    %error,
+                    "A paid order for a listed product issued nothing; hand-sign it"
+                ),
+                OrderError::Malformed | OrderError::Email => {
+                    tracing::warn!(webhook, %outcome, %error, "Could not issue for a paid order");
+                }
+            }
             return outcome.status().into_response();
         }
     };

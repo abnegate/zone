@@ -2,10 +2,13 @@ use std::fmt;
 
 use axum::http::StatusCode;
 
+use crate::order_error::OrderError;
+
 pub const SENT: &str = "sent";
 pub const IGNORED: &str = "ignored";
 pub const UNSIGNED: &str = "unsigned";
 pub const MALFORMED: &str = "malformed";
+pub const MISCONFIGURED: &str = "misconfigured";
 pub const UNSIGNABLE: &str = "unsignable";
 pub const UNDELIVERED: &str = "undelivered";
 
@@ -15,6 +18,7 @@ pub enum Outcome {
     Ignored,
     Unsigned,
     Malformed,
+    Misconfigured,
     Unsignable,
     Undelivered,
 }
@@ -24,7 +28,9 @@ impl Outcome {
         match self {
             Self::Sent | Self::Ignored => StatusCode::ACCEPTED,
             Self::Unsigned => StatusCode::UNAUTHORIZED,
-            Self::Malformed | Self::Unsignable => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Malformed | Self::Misconfigured | Self::Unsignable => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             Self::Undelivered => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
@@ -35,8 +41,18 @@ impl Outcome {
             Self::Ignored => IGNORED,
             Self::Unsigned => UNSIGNED,
             Self::Malformed => MALFORMED,
+            Self::Misconfigured => MISCONFIGURED,
             Self::Unsignable => UNSIGNABLE,
             Self::Undelivered => UNDELIVERED,
+        }
+    }
+}
+
+impl From<&OrderError> for Outcome {
+    fn from(error: &OrderError) -> Self {
+        match error {
+            OrderError::Malformed | OrderError::Email => Self::Malformed,
+            OrderError::Misconfigured { .. } => Self::Misconfigured,
         }
     }
 }
@@ -56,17 +72,30 @@ mod tests {
         assert_eq!(Outcome::Sent.status(), StatusCode::ACCEPTED);
         assert_eq!(Outcome::Ignored.status(), StatusCode::ACCEPTED);
         assert_eq!(Outcome::Unsigned.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            Outcome::Malformed.status(),
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
-        assert_eq!(
-            Outcome::Unsignable.status(),
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
+        for unprocessable in [
+            Outcome::Malformed,
+            Outcome::Misconfigured,
+            Outcome::Unsignable,
+        ] {
+            assert_eq!(
+                unprocessable.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{unprocessable}"
+            );
+        }
         assert_eq!(
             Outcome::Undelivered.status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[test]
+    fn a_listed_product_without_seats_is_a_misconfiguration() {
+        let error = OrderError::Misconfigured {
+            order: "order".into(),
+            product: "product".into(),
+        };
+        assert_eq!(Outcome::from(&error), Outcome::Misconfigured);
+        assert_eq!(Outcome::from(&OrderError::Malformed), Outcome::Malformed);
     }
 }

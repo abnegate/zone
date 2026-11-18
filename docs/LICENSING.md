@@ -358,7 +358,8 @@ at 2 MB, far above any Polar event.
 
 `serve` writes one JSON object per line to standard error. Each delivery logs
 one line with an `outcome` of `sent`, `ignored`, `unsigned`, `malformed`,
-`unsignable` or `undelivered`, matching the [responses](#responses). Once the
+`misconfigured`, `unsignable` or `undelivered`, matching the
+[responses](#responses). Once the
 signature checks out, the line carries the Polar `webhook` id and, once the
 order is read, its `order`, `subscription` and `license` ids. An ignored
 delivery also logs the event type and the `reason`. A failed send logs what
@@ -559,8 +560,15 @@ It issues a key when all of these hold:
 - it's for a seat-based subscription with at least one seat.
 
 It ignores, with `202` and `{"ignored":"<reason>"}`, a one-off `purchase`, a
-`subscription_meter_cycle`, an unpaid order, another product, an order that
-isn't seat-based, and every other event type.
+`subscription_meter_cycle`, an unpaid order, another product, and every other
+event type.
+
+An order for a product in `POLAR_PRODUCT_IDS` that has no subscription, or a
+subscription without seats, isn't ignored: the customer has paid for a product
+you said is Zone Enterprise and would otherwise get nothing. The signer
+answers `422` and logs an error with the outcome `misconfigured`, naming the
+order and the product. Fix the product's pricing so it's seat-based, then
+[hand-sign](#hand-signing-a-stuck-order) the order's key.
 
 Other events look tempting but can't be trusted alone:
 
@@ -609,6 +617,7 @@ the customer receives the same email twice. Both carry the identical key.
 | Event or order deliberately ignored | `202` | `{"ignored":"<reason>"}` | Records a success |
 | Signature missing, wrong, or outside the five-minute window | `401` | | Retries; counts as a failure |
 | A body that isn't a Polar event, or an order the signer can't issue for, such as one without a customer email or with a subscription period that ends before it starts | `422` | | Retries; counts as a failure |
+| An order for a listed product without a seat-based subscription | `422` | | Retries; counts as a failure |
 | The email couldn't be sent: the relay refused it or timed out, or the order's address can't be parsed | `503` | | Retries |
 
 The signer answers `2xx` for an issuing order only after the relay has
@@ -638,6 +647,7 @@ quickly.
 | Every delivery gets `401` | Wrong `POLAR_WEBHOOK_SECRET`, a proxy changing the body, or the host clock more than five minutes off | Copy the secret from the endpoint again, pass the body through unchanged, run NTP. |
 | Deliveries get `503` | The relay is down, slow, or refusing the sender or the recipient | Fix the relay; the `undelivered` log line says whether its error was `retryable`. Polar retries, and you can redeliver anything that ran out of attempts. A recipient that's refused for good needs a [hand-signed](#hand-signing-a-stuck-order) key sent to a corrected address. |
 | Deliveries get `422` | The order can't be issued, usually because it has no customer email | [Hand-sign](#hand-signing-a-stuck-order) it and send the key yourself. |
+| A `misconfigured` error in the log | An order for a product in `POLAR_PRODUCT_IDS` had no seat-based subscription | Make the product seat-based, then [hand-sign](#hand-signing-a-stuck-order) the order the log names. |
 | Deliveries get `403` | Cloudflare Bot Fight Mode or another bot filter | Turn it off for the signer's name. |
 | The endpoint is disabled | 10 consecutive events failed | Fix the cause, [re-enable it](#re-enabling-the-endpoint), then redeliver. |
 | A customer says no email arrived | Spam filtering, or a mistyped address | Check SPF and DKIM, redeliver the order, or hand-sign it to a corrected address. |
