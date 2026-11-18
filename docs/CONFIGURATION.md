@@ -2365,10 +2365,6 @@ The console's **Pull Requests** and **Releases** pages read every active GitHub 
 - **Default**: `7` (1–90)
 - **Description**: How many days of published releases the Releases page lists when it does not ask for another window. A window it asks for is held to 1–90 days. It also bounds release pipeline lookups: only releases published inside this many days, and never less than one, are checked against GitHub Actions; an older release shown in a wider window keeps the pipeline already known for it.
 
-### `ZONE_GITHUB_OPEN_PULL_REQUEST_LIMIT`
-- **Default**: `50` (1–200)
-- **Description**: The most open pull requests read from one source. A source with more is listed in part and says so.
-
 ### `ZONE_GITHUB_ADMIN_MERGE`
 - **Default**: `false`
 - **Description**: When branch protection refuses a merge from the Pull Requests page at the moment of merging, try again through the merge mutation an administrator merges with. Only a workspace admin or owner's merge is retried; a member's merge stops at the protection. Works when the source's credential belongs to a repository administrator the protection does not include, or a ruleset bypass actor. It does not bypass a merge GitHub already reports as blocked, behind, conflicted or not yet worked out: that pull request is not ready, and the page refuses it before asking GitHub to merge.
@@ -2736,7 +2732,7 @@ Need to find a specific config? Quick lookup:
 - **Search**: SEARCH_ENABLE_WEB_SEARCH, SEARCH_*, SEARXNG_*
 - **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_CONNECT, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS, ZONE_MCP_COMMANDS
 - **Auto projects**: ZONE_AUTO_ENABLED, ZONE_AUTO_PARALLEL_TASKS, ZONE_AUTO_REVIEW_MODELS, ZONE_AUTO_REVIEW_BOTS, ZONE_AUTO_ADMIN_MERGE, ZONE_AUTO_*
-- **GitHub pages**: ZONE_GITHUB_PULL_REQUEST_TTL_SECONDS, ZONE_GITHUB_RELEASE_TTL_SECONDS, ZONE_GITHUB_RELEASE_WINDOW_DAYS, ZONE_GITHUB_OPEN_PULL_REQUEST_LIMIT, ZONE_GITHUB_ADMIN_MERGE
+- **GitHub pages**: ZONE_GITHUB_PULL_REQUEST_TTL_SECONDS, ZONE_GITHUB_RELEASE_TTL_SECONDS, ZONE_GITHUB_RELEASE_WINDOW_DAYS, ZONE_GITHUB_ADMIN_MERGE
 - **Notifications**: ZONE_NOTIFY_SLACK_WEBHOOK, ZONE_NOTIFY_DISCORD_WEBHOOK, ZONE_NOTIFY_EMAIL_TO, SMTP_*
 - **Task evaluation**: ZONE_TASK_EVALUATION, ZONE_TASK_EVALUATION_CATEGORIES, ZONE_TASK_EVALUATION_TOOL_TIMEOUT_SECONDS, ZONE_TASK_EVALUATION_BUDGET_SECONDS
 - **Workspace digests**: ZONE_REPORT_ENABLED, ZONE_REPORT_CADENCE, ZONE_REPORT_HOUR, ZONE_REPORT_WEEKDAY, ZONE_REPORT_DAY_OF_MONTH
