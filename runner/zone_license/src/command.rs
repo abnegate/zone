@@ -9,4 +9,8 @@ pub enum Command {
     Keygen(KeygenArguments),
     /// Sign a license with a key the production keyring trusts.
     Sign(SignArguments),
+    /// Serve the Polar webhook, emailing a signed license for each paid order.
+    ///
+    /// Every setting comes from the environment; see docs/LICENSING.md.
+    Serve,
 }

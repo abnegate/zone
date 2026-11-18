@@ -1,24 +1,61 @@
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Variable {
     PrivateKeyFile,
     PrivateKey,
     KeyId,
+    WebhookSecret,
+    Products,
+    Listen,
+    SmtpHost,
+    SmtpPort,
+    SmtpUser,
+    SmtpPassword,
+    SmtpFrom,
+    SmtpFromName,
 }
 
 impl Variable {
+    pub const ALL: [Self; 12] = [
+        Self::PrivateKeyFile,
+        Self::PrivateKey,
+        Self::KeyId,
+        Self::WebhookSecret,
+        Self::Products,
+        Self::Listen,
+        Self::SmtpHost,
+        Self::SmtpPort,
+        Self::SmtpUser,
+        Self::SmtpPassword,
+        Self::SmtpFrom,
+        Self::SmtpFromName,
+    ];
+
     pub const fn name(self) -> &'static str {
         match self {
             Self::PrivateKeyFile => "ZONE_LICENSE_PRIVATE_KEY_FILE",
             Self::PrivateKey => "ZONE_LICENSE_PRIVATE_KEY",
             Self::KeyId => "ZONE_LICENSE_KEY_ID",
+            Self::WebhookSecret => "POLAR_WEBHOOK_SECRET",
+            Self::Products => "POLAR_PRODUCT_IDS",
+            Self::Listen => "ZONE_LICENSE_LISTEN",
+            Self::SmtpHost => "SMTP_HOST",
+            Self::SmtpPort => "SMTP_PORT",
+            Self::SmtpUser => "SMTP_USER",
+            Self::SmtpPassword => "SMTP_PASSWORD",
+            Self::SmtpFrom => "SMTP_FROM",
+            Self::SmtpFromName => "SMTP_FROM_NAME",
         }
     }
 
     /// Blank values count as unset, so an empty export cannot shadow the other key source.
     pub fn read(self) -> Option<String> {
-        std::env::var(self.name())
-            .ok()
-            .filter(|value| !value.trim().is_empty())
+        self.exact().filter(|value| !value.trim().is_empty())
+    }
+
+    /// The value exactly as set, blank included, for `SMTP_PASSWORD`, which a
+    /// relay may accept empty.
+    pub fn exact(self) -> Option<String> {
+        std::env::var(self.name()).ok()
     }
 }
 
@@ -28,19 +65,21 @@ mod tests {
 
     #[test]
     fn every_variable_keeps_its_documented_name() {
-        let names = [
-            Variable::PrivateKeyFile,
-            Variable::PrivateKey,
-            Variable::KeyId,
-        ]
-        .map(Variable::name);
-
         assert_eq!(
-            names,
+            Variable::ALL.map(Variable::name),
             [
                 "ZONE_LICENSE_PRIVATE_KEY_FILE",
                 "ZONE_LICENSE_PRIVATE_KEY",
                 "ZONE_LICENSE_KEY_ID",
+                "POLAR_WEBHOOK_SECRET",
+                "POLAR_PRODUCT_IDS",
+                "ZONE_LICENSE_LISTEN",
+                "SMTP_HOST",
+                "SMTP_PORT",
+                "SMTP_USER",
+                "SMTP_PASSWORD",
+                "SMTP_FROM",
+                "SMTP_FROM_NAME",
             ]
         );
     }
