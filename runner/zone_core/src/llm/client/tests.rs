@@ -1562,48 +1562,6 @@ async fn the_context_an_agent_reports_is_kept_on_the_client_not_chunked() {
 }
 
 #[tokio::test]
-async fn the_model_an_agent_reports_is_kept_on_the_client_not_chunked() {
-    let events = agent_events(vec![
-        Ok(AgentEvent::Model("claude-opus-4-5".to_string())),
-        Ok(AgentEvent::Text("Done.".to_string())),
-        Ok(AgentEvent::finished(Some("success".to_string()))),
-    ]);
-    let reported = Reported::default();
-
-    let (delivered, failure) = collected(turn(reported.clone()).chunks(events)).await;
-
-    assert!(failure.is_none(), "a report failed the turn: {failure:?}");
-    assert_eq!(delivered.len(), 2, "no chunk carries the report");
-    assert_eq!(
-        reported.latest_model(),
-        Some((
-            Reporter::Agent(AgentKind::Claude),
-            "claude-opus-4-5".to_string()
-        ))
-    );
-}
-
-/// A turn that moves between models reports each, and the last one is what
-/// it ran on.
-#[tokio::test]
-async fn the_last_model_an_agent_reports_is_the_one_kept() {
-    let events = agent_events(vec![
-        Ok(AgentEvent::Model("claude-opus-4-5".to_string())),
-        Ok(AgentEvent::Model("claude-sonnet-4-6".to_string())),
-        Ok(AgentEvent::finished(Some("success".to_string()))),
-    ]);
-    let reported = Reported::default();
-
-    let (_, failure) = collected(turn(reported.clone()).chunks(events)).await;
-
-    assert!(failure.is_none(), "a report failed the turn: {failure:?}");
-    assert_eq!(
-        reported.latest_model().map(|(_, model)| model).as_deref(),
-        Some("claude-sonnet-4-6")
-    );
-}
-
-#[tokio::test]
 async fn news_of_a_subagent_never_reaches_the_reader_as_a_chunk() {
     let events = agent_events(vec![
         Ok(AgentEvent::Subagent(

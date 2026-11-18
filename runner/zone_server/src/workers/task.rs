@@ -8090,11 +8090,8 @@ mod cli_tests {
     use zone_core::llm::Toolset;
 
     const ANSWER: &str = "Wrote it.";
-    /// The model a stand-in under [`Agent::wrote_on`] says it answered on,
-    /// which is not the [`REFUSED_MODEL`] the run asks it for.
-    const WROTE_ON: &str = "claude-opus-4-5-20261101";
-    /// The model a self-hosted endpoint answers under, which is likewise not
-    /// the name the run asked it for.
+    /// The model a self-hosted endpoint answers under, which is not the name
+    /// the run asked it for.
     const ANSWERED_ON: &str = "qwen3.8-27b-uncensored";
     const EXECUTABLE: &str = "claude";
     const ARGUMENTS: &str = "arguments";
@@ -8150,17 +8147,6 @@ mod cli_tests {
             )
             .expect("the stand-in agent to be executable");
             agent
-        }
-
-        /// It answers at once, naming `model` on the message it writes as
-        /// claude names the model of every message of its own.
-        fn wrote_on(model: &str) -> Self {
-            let assistant = json!({
-                "type": "assistant",
-                "message": {"model": model, "content": [{"type": "text", "text": ANSWER}]},
-            });
-            let result = json!({"type": "result", "subtype": "success", "is_error": false});
-            Self::with(move |_| format!("echo '{assistant}'\necho '{result}'\n"))
         }
 
         /// It records how the run invoked it, one argument per line, and the
@@ -9610,41 +9596,9 @@ mod cli_tests {
         assert_eq!(window.used_percent, Some(50.0));
     }
 
-    /// A coding agent is asked for a model by a name of zone's, or for none
-    /// at all, and answers on whichever model it chose. What it says it wrote
-    /// on is the only account of that, so the run records it over the name it
-    /// resolved to before it started.
-    #[tokio::test]
-    async fn a_run_records_the_model_its_agent_says_it_wrote_on() {
-        let _execution = EXECUTION.lock().await;
-        let fixture = Fixture::new(false).await;
-        let agent = Agent::wrote_on(WROTE_ON);
-        let provider = MockServer::start().await;
-        let state = fixture.state(config(&agent, &provider));
-
-        execute(&state, &fixture).await;
-
-        let finished = fixture.finished().await;
-        let model = tasks::run_mode(&fixture.pool, fixture.run)
-            .await
-            .unwrap()
-            .and_then(|mode| mode.model);
-        fixture.remove().await;
-        assert_eq!(
-            finished.status, RUN_COMPLETED,
-            "{:?}",
-            finished.error_message
-        );
-        assert_eq!(
-            model.as_deref(),
-            Some(WROTE_ON),
-            "the run kept {REFUSED_MODEL}, the name it asked the agent for"
-        );
-    }
-
-    /// The same on a self-hosted instance: the endpoint answers under the
-    /// model it routed the request to, which a proxy resolves from the name
-    /// the run asked for, and the run records what answered.
+    /// A self-hosted instance: the endpoint answers under the model it
+    /// routed the request to, which a proxy resolves from the name the run
+    /// asked for, and the run records what answered.
     #[tokio::test]
     async fn a_run_records_the_model_its_endpoint_answered_under() {
         let _execution = EXECUTION.lock().await;

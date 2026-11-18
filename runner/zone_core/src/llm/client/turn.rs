@@ -10,7 +10,7 @@ use abnegate_llm::{
 };
 use futures::{Stream, StreamExt};
 
-use super::reported::{Reported, Reporter};
+use super::reported::Reported;
 use crate::llm::cli::{Observer, SignIn, Toolset};
 use crate::llm::window;
 
@@ -50,8 +50,8 @@ impl Turn {
 
     /// Hand `event` to whoever it is for besides the reader: a tool's output
     /// and a subagent to the observer, a turn on usage credits to the log,
-    /// and the context the agent reports, with the model it reports running
-    /// on, to the client. Returns whether that is all the event was for.
+    /// and the context the agent reports to the client. Returns whether that
+    /// is all the event was for.
     fn notice(&self, event: &AgentEvent) -> bool {
         match event {
             AgentEvent::Output(output) => {
@@ -79,11 +79,6 @@ impl Turn {
             }
             AgentEvent::Occupancy(occupancy) => {
                 self.reported.record(self.agent, *occupancy);
-                true
-            }
-            AgentEvent::Model(model) => {
-                self.reported
-                    .record_model(Reporter::Agent(self.agent), model);
                 true
             }
             _ => false,
