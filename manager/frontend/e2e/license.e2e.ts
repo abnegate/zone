@@ -1,9 +1,9 @@
-import path from 'node:path';
 import type { Page } from '@playwright/test';
 import { ACTIVE, COMMUNITY, LAPSED, UNVERIFIED } from '../src/features/enterprise/fixtures';
 import { PRICING_URL } from '../src/features/enterprise/pricing';
 import type { LicenseResponse } from '../src/features/enterprise/types';
 import { expect, test } from './fixtures';
+import { expectNoSidewaysScroll, shoot } from './helpers/screenshots';
 import { setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
 
@@ -23,6 +23,8 @@ const WIDTHS = [DESKTOP, PHONE];
 const SCHEMES = ['light', 'dark'] as const;
 
 const SCREENSHOTS = process.env.LICENSE_SCREENSHOTS;
+
+const SCROLLERS = '.license-section';
 
 interface LicenseServer {
   reads: number;
@@ -49,49 +51,6 @@ async function openLicense(page: Page): Promise<void> {
   await setupCommonRoutes(page, false);
   await page.goto('/login', { waitUntil: 'domcontentloaded' });
   await setupAdminAuth(page);
-}
-
-async function expectNoSidewaysScroll(page: Page): Promise<void> {
-  const overflow = await page.evaluate(() =>
-    Math.max(
-      document.documentElement.scrollWidth - document.documentElement.clientWidth,
-      ...Array.from(
-        document.querySelectorAll('.license-section'),
-        (element) => element.scrollWidth - element.clientWidth
-      )
-    )
-  );
-  expect(overflow, 'the page never scrolls sideways').toBeLessThanOrEqual(0);
-}
-
-function contentHeight(page: Page): Promise<number> {
-  return page.evaluate(() =>
-    Math.ceil(
-      Math.max(
-        ...Array.from(
-          document.querySelectorAll('*'),
-          (element) => element.getBoundingClientRect().top + element.scrollHeight
-        )
-      )
-    )
-  );
-}
-
-async function shoot(page: Page, name: string): Promise<void> {
-  await expectNoSidewaysScroll(page);
-  const viewport = page.viewportSize() ?? DESKTOP;
-  let height = viewport.height;
-  for (let measured = await contentHeight(page); measured > height; ) {
-    height = measured;
-    await page.setViewportSize({ width: viewport.width, height });
-    measured = await contentHeight(page);
-  }
-  await expectNoSidewaysScroll(page);
-  await page.screenshot({
-    path: path.join(SCREENSHOTS ?? '', `${name}.png`),
-    animations: 'disabled',
-  });
-  await page.setViewportSize(viewport);
 }
 
 test.describe('License settings', () => {
@@ -164,10 +123,7 @@ test.describe('License settings', () => {
       await expect(page.getByRole('status').filter({ hasText: UNVERIFIED_WARNING })).toBeVisible();
       await expect(page.getByRole('button', { name: 'Remove license' })).toBeInViewport();
       await expect(page.getByRole('link', { name: BUY })).toBeInViewport();
-      const overflow = await page.evaluate(
-        () => document.documentElement.scrollWidth - document.documentElement.clientWidth
-      );
-      expect(overflow).toBeLessThanOrEqual(0);
+      await expectNoSidewaysScroll(page, SCROLLERS);
     });
   });
 });
@@ -193,7 +149,7 @@ test.describe('License layout', () => {
           await page.goto(LICENSE_PATH, { waitUntil: 'domcontentloaded' });
           await expect(page.getByRole('heading', { name: 'License', level: 2 })).toBeVisible();
           await expect(page.locator('.license-summary')).toBeVisible();
-          await shoot(page, `license-${name}-${scheme}-${viewport.width}`);
+          await shoot(page, SCREENSHOTS, `license-${name}-${scheme}-${viewport.width}`, SCROLLERS);
         }
       });
     }
