@@ -93,7 +93,7 @@ pub async fn receive(
 
     let letter = Letter::license(&terms.customer, terms.seats, terms.expires_at, &key);
     if let Err(error) = context.outbox.send(&grant.email, &letter).await {
-        let outcome = Outcome::Undelivered;
+        let outcome = Outcome::from(&error);
         tracing::error!(
             webhook,
             order,
@@ -102,7 +102,7 @@ pub async fn receive(
             %outcome,
             retryable = error.is_retryable(),
             %error,
-            "Could not email a license; Polar will retry"
+            "Could not email a license"
         );
         return outcome.status().into_response();
     }

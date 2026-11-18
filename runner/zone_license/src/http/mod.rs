@@ -99,6 +99,15 @@ mod tests {
         }
     }
 
+    struct Unsendable;
+
+    #[async_trait]
+    impl Outbox for Unsendable {
+        async fn send(&self, _: &str, _: &Letter) -> Result<(), MailError> {
+            Err(MailError::Recipient)
+        }
+    }
+
     fn products() -> Vec<String> {
         vec![PRODUCT.to_owned()]
     }
@@ -289,6 +298,13 @@ mod tests {
     async fn a_failed_send_is_unavailable_so_polar_retries() {
         let (status, body) = answer(app(Arc::new(Failing), products()), signed(CREATE)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, None);
+    }
+
+    #[tokio::test]
+    async fn a_send_that_can_never_succeed_is_unprocessable() {
+        let (status, body) = answer(app(Arc::new(Unsendable), products()), signed(CREATE)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body, None);
     }
 

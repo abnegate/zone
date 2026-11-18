@@ -200,14 +200,17 @@ async fn a_seat_change_in_the_same_period_gets_a_new_license() {
 }
 
 #[tokio::test]
-async fn a_relay_that_refuses_the_message_gets_polar_to_retry() {
-    for reply in ["451 4.3.0 try again later", "550 5.1.1 no such user"] {
+async fn a_relay_refusal_is_unavailable_only_while_it_may_pass() {
+    for (reply, expected) in [
+        ("451 4.3.0 try again later", StatusCode::SERVICE_UNAVAILABLE),
+        ("550 5.1.1 no such user", StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
         let sink = SmtpSink::rejecting(reply).await;
         let service = Service::start(&sink).await;
 
         let (status, answer) = service.deliver(CREATE, now()).await;
 
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{reply}");
+        assert_eq!(status, expected, "{reply}");
         assert_eq!(answer, Value::Null);
         assert!(sink.messages().is_empty());
         service.stop().await;
