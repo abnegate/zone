@@ -15,8 +15,8 @@ The public site: home, pricing, licensing, the post-checkout thank-you page and 
 ```bash
 bun website/generator/serve.ts        # build, then preview at http://127.0.0.1:4321
 bun website/generator/build.ts        # build into website/dist
-cd website && bun test generator      # tests
-cd website && biome check . && bunx tsc -p tsconfig.json
+(cd website && bun test generator)    # tests
+(cd website && biome check . && bunx tsc -p tsconfig.json)
 ```
 
 A template that uses a value `config.ts` does not have fails the build.

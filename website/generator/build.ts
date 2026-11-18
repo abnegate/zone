@@ -10,19 +10,28 @@ export const outputDirectory = join(websiteDirectory, 'dist');
 const templateDirectory = join(websiteDirectory, 'templates');
 const staticDirectory = join(websiteDirectory, 'static');
 
-export function renderSite(basePath: string): ReadonlyMap<string, string> {
+/// The address the site is served from, ending in a slash so pages resolve beneath it.
+export function baseURLFrom(address: string): URL {
+  return new URL(address.endsWith('/') ? address : `${address}/`);
+}
+
+export function defaultBaseURL(): URL {
+  return baseURLFrom(`https://${site.domain}/`);
+}
+
+export function renderSite(baseURL: URL): ReadonlyMap<string, string> {
   const layout = readFileSync(join(templateDirectory, 'layout.html'), 'utf8');
   return new Map(
     pages.map((page) => {
       const template = readFileSync(join(templateDirectory, page.template), 'utf8');
-      return [page.output, renderPage(page, pages, layout, template, site, basePath)];
+      return [page.output, renderPage(page, pages, layout, template, site, baseURL)];
     })
   );
 }
 
-export function build(basePath: string): void {
+export function build(baseURL: URL): void {
   rmSync(outputDirectory, { recursive: true, force: true });
-  for (const [output, html] of renderSite(basePath)) {
+  for (const [output, html] of renderSite(baseURL)) {
     const destination = join(outputDirectory, output);
     mkdirSync(dirname(destination), { recursive: true });
     writeFileSync(destination, html);
@@ -38,7 +47,8 @@ function warnUnconfirmed(): void {
 }
 
 if (import.meta.main) {
-  build(process.env.SITE_BASE_PATH || '/');
+  const address = process.env.SITE_BASE_URL;
+  build(address ? baseURLFrom(address) : defaultBaseURL());
   warnUnconfirmed();
   console.log(`Built ${pages.length} pages into ${outputDirectory}`);
 }

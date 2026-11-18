@@ -195,7 +195,7 @@
       </p>
       <ul class="list">
         <li>Docker 20.10+ and Docker Compose v2</li>
-        <li>Ollama listening on port 11434</li>
+        <li>Ollama listening on port 11434: run <code>ollama serve</code> in its own terminal unless it already runs as a service</li>
         <li>8&nbsp;GB of RAM for chat only; more for vision, image and video models</li>
       </ul>
       <p class="docs-links">
@@ -208,7 +208,6 @@
       <p class="terminal-title">Terminal</p>
       <pre><code><span class="prompt" aria-hidden="true">$ </span>git clone {{ repository }}.git
 <span class="prompt" aria-hidden="true">$ </span>cd zone
-<span class="prompt" aria-hidden="true">$ </span>ollama serve
 <span class="prompt" aria-hidden="true">$ </span>./scripts/setup.sh
 <span class="prompt" aria-hidden="true">$ </span>make up</code></pre>
       <p class="terminal-note">Then open <code>https://manager.localhost</code>.</p>

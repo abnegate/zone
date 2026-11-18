@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { site } from '../config.ts';
-import { renderSite } from './build.ts';
+import { baseURLFrom, renderSite } from './build.ts';
 import type { Page } from './Page.ts';
 import { pages } from './pages.ts';
 import { directoryOf, escapeHTML, fill, formatMoney, rootFor, siteValues } from './render.ts';
@@ -75,7 +75,8 @@ describe('price', () => {
 });
 
 describe('site', () => {
-  const rendered = renderSite('/zone/');
+  const baseURL = baseURLFrom('https://abnegate.github.io/zone');
+  const rendered = renderSite(baseURL);
 
   test('renders every page', () => {
     expect([...rendered.keys()].sort()).toEqual(pages.map((page) => page.output).sort());
@@ -98,6 +99,14 @@ describe('site', () => {
       test('loads no third-party scripts', () => {
         expect(html).not.toMatch(/<script/i);
       });
+
+      if (page.indexed) {
+        test('names its canonical address under the deployment base URL', () => {
+          const canonical = new URL(directoryOf(page.output), baseURL).href;
+          expect(html).toContain(`<link rel="canonical" href="${canonical}">`);
+          expect(canonical.startsWith('https://abnegate.github.io/zone/')).toBe(true);
+        });
+      }
 
       test('is only indexed when public', () => {
         expect(html).toContain(page.indexed ? 'index, follow' : 'noindex');

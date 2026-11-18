@@ -97,9 +97,9 @@ export function renderPage(
   layout: string,
   template: string,
   site: Site,
-  basePath: string
+  baseURL: URL
 ): string {
-  const root = rootFor(page, basePath);
+  const root = rootFor(page, baseURL.pathname);
   const values = {
     ...siteValues(site),
     root,
@@ -108,7 +108,7 @@ export function renderPage(
     robots: page.indexed ? 'index, follow' : 'noindex',
   };
   const canonicalLink = page.indexed
-    ? `<link rel="canonical" href="${escapeHTML(`https://${site.domain}/${directoryOf(page.output)}`)}">`
+    ? `<link rel="canonical" href="${escapeHTML(new URL(directoryOf(page.output), baseURL).href)}">`
     : '';
   const content = fill(template, values);
   return fill(layout, values, {

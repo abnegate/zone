@@ -1,6 +1,6 @@
 import { existsSync, statSync } from 'node:fs';
 import { join, normalize, sep } from 'node:path';
-import { build, outputDirectory } from './build.ts';
+import { build, defaultBaseURL, outputDirectory } from './build.ts';
 
 const notFoundPage = join(outputDirectory, '404.html');
 
@@ -12,10 +12,11 @@ function isFile(path: string): boolean {
   return existsSync(path) && statSync(path).isFile();
 }
 
-function respond(request: Request): Response {
+export function respond(request: Request): Response {
+  const url = new URL(request.url);
   let pathname: string;
   try {
-    pathname = decodeURIComponent(new URL(request.url).pathname);
+    pathname = decodeURIComponent(url.pathname);
   } catch {
     return new Response('Bad request', { status: 400 });
   }
@@ -25,7 +26,8 @@ function respond(request: Request): Response {
   }
   if (isDirectory(candidate)) {
     if (!pathname.endsWith('/')) {
-      return Response.redirect(`${pathname}/`, 301);
+      url.pathname = `${url.pathname}/`;
+      return Response.redirect(url.href, 301);
     }
     return respondWithFile(join(candidate, 'index.html'));
   }
@@ -42,10 +44,12 @@ function respondWithFile(path: string): Response {
   });
 }
 
-build('/');
-const server = Bun.serve({
-  hostname: '127.0.0.1',
-  port: Number(process.env.PORT || 4321),
-  fetch: respond,
-});
-console.log(`Serving website/dist at ${server.url}`);
+if (import.meta.main) {
+  build(defaultBaseURL());
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: Number(process.env.PORT || 4321),
+    fetch: respond,
+  });
+  console.log(`Serving website/dist at ${server.url}`);
+}
