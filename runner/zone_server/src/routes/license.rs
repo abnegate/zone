@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
-use zone_enterprise::{Edition, License, Seats, Status, Tier, status};
+use zone_enterprise::{Edition, License, Seats, Status, status};
 
 use super::common::{AuditEvent, ErrorResponse, audit};
 use crate::auth::ServerAdmin;
@@ -47,7 +47,6 @@ impl LicenseResponse {
 pub struct LicenseDetails {
     pub id: Uuid,
     pub customer: String,
-    pub tier: Tier,
     pub seats: u32,
     pub issued_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
@@ -60,7 +59,6 @@ impl From<&License> for LicenseDetails {
         Self {
             id: license.id(),
             customer: license.customer().to_owned(),
-            tier: license.tier(),
             seats: license.seats(),
             issued_at: license.issued_at(),
             expires_at: license.expires_at(),
@@ -119,7 +117,6 @@ fn recorded(license: &License) -> Value {
     json!({
         "id": license.id(),
         "customer": license.customer(),
-        "tier": license.tier(),
         "seats": license.seats(),
         "expires_at": license.expires_at(),
         "key_id": license.key_id(),
@@ -263,7 +260,7 @@ mod tests {
     const SEED: [u8; 32] = [0x11; 32];
     const SEATS: u32 = 3;
 
-    fn license(tier: Tier) -> License {
+    fn license() -> License {
         let signing = SigningKey::from_bytes(&SEED);
         let keyring =
             Keyring::new([TrustedKey::new(KEY_ID, signing.verifying_key().to_bytes()).unwrap()])
@@ -273,7 +270,6 @@ mod tests {
             &Payload {
                 id: Uuid::new_v4(),
                 customer: "Acme Ltd".into(),
-                tier,
                 seats: SEATS,
                 issued_at: "2026-11-01T00:00:00Z".parse().unwrap(),
                 expires_at,
@@ -314,7 +310,7 @@ mod tests {
 
     #[test]
     fn a_license_is_sent_with_every_detail_and_its_grace_end() {
-        let license = license(Tier::Team);
+        let license = license();
         let response = LicenseResponse::new(
             &Stored::Verified(license.clone()),
             seats(2, Some(SEATS)).into(),
@@ -324,12 +320,11 @@ mod tests {
         assert_eq!(
             serialized(&response),
             json!({
-                "edition": "team",
+                "edition": "enterprise",
                 "status": "active",
                 "license": {
                     "id": license.id(),
                     "customer": "Acme Ltd",
-                    "tier": "team",
                     "seats": SEATS,
                     "issued_at": "2026-11-01T00:00:00Z",
                     "expires_at": "2027-11-01T00:00:00Z",
@@ -343,8 +338,8 @@ mod tests {
     }
 
     #[test]
-    fn the_edition_stays_the_tier_through_grace_and_lapse() {
-        let license = license(Tier::Enterprise);
+    fn the_edition_stays_enterprise_through_grace_and_lapse() {
+        let license = license();
         let moments = [
             (license.expires_at(), Status::Grace),
             (
@@ -394,7 +389,7 @@ mod tests {
 
     #[test]
     fn the_audit_record_keeps_the_license_but_never_its_key() {
-        let license = license(Tier::Team);
+        let license = license();
 
         let record = recorded(&license);
 
@@ -403,7 +398,6 @@ mod tests {
             json!({
                 "id": license.id(),
                 "customer": "Acme Ltd",
-                "tier": "team",
                 "seats": SEATS,
                 "expires_at": "2027-11-01T00:00:00Z",
                 "key_id": KEY_ID,
@@ -414,7 +408,7 @@ mod tests {
 
     #[test]
     fn the_audit_keeps_what_a_change_replaced() {
-        let license = license(Tier::Team);
+        let license = license();
 
         assert_eq!(former(&Stored::Empty), None);
         assert_eq!(
@@ -429,7 +423,7 @@ mod tests {
 
     #[test]
     fn seats_that_could_not_be_counted_are_reported_as_unknown_and_never_over() {
-        let license = license(Tier::Team);
+        let license = license();
         let cases = [
             (
                 counted(Err(sqlx::Error::PoolClosed), Some(&license)),
@@ -455,7 +449,7 @@ mod tests {
 
     #[test]
     fn a_loaded_license_is_answered_in_full_when_its_seats_cannot_be_counted() {
-        let license = license(Tier::Enterprise);
+        let license = license();
         let stored = Stored::Verified(license.clone());
 
         let response = answer(&stored, Err(sqlx::Error::PoolClosed), license.issued_at());
@@ -488,7 +482,7 @@ mod tests {
 
     #[test]
     fn counted_seats_are_answered_as_counted() {
-        let license = license(Tier::Team);
+        let license = license();
         let stored = Stored::Verified(license.clone());
 
         let body = serialized(&answer(

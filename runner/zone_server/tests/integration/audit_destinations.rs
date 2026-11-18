@@ -7,7 +7,6 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 use zone_enterprise::LICENSE_REQUIRED;
-use zone_enterprise::Tier;
 use zone_enterprise::audit::signature::SIGNATURE_HEADER;
 use zone_enterprise::audit::{
     BUCKET_INVALID, CERTIFICATE_INVALID, DESTINATION_DUPLICATE, DESTINATION_NOT_FOUND,
@@ -188,7 +187,7 @@ async fn community_and_lapsed_licenses_cannot_configure_but_can_always_disable_a
     assert_eq!(listed["standing"]["streaming"], false);
     assert_eq!(listed["destinations"], json!([]));
 
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let created = post(
         client,
         &path,
@@ -200,7 +199,7 @@ async fn community_and_lapsed_licenses_cannot_configure_but_can_always_disable_a
     let siem = id(&created);
     let archive = id(&post(client, &path, owner, &s3("Archive")).await);
 
-    fixture.store_license(&sso::lapsed(Tier::Enterprise)).await;
+    fixture.store_license(&sso::lapsed()).await;
     let listed = client.get_auth(&path, &owner.token).await.json_value();
     assert_eq!(listed["standing"]["pause"], "lapsed");
     assert_eq!(listed["destinations"][0]["delivery"]["health"], "paused");
@@ -284,39 +283,9 @@ async fn community_and_lapsed_licenses_cannot_configure_but_can_always_disable_a
 }
 
 #[tokio::test]
-async fn team_licenses_export_but_do_not_stream() {
-    let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Team).await;
-    let client = &fixture.sso.client;
-    let path = destinations(fixture.organization);
-
-    refused(
-        &post(
-            client,
-            &path,
-            &fixture.owner,
-            &webhook("SIEM", "https://siem.example.com/hook"),
-        )
-        .await,
-        StatusCode::FORBIDDEN,
-        LICENSE_REQUIRED,
-    );
-    let standing = client
-        .get_auth(&path, &fixture.owner.token)
-        .await
-        .json_value()["standing"]
-        .clone();
-    assert_eq!(standing["edition"], "team");
-    assert_eq!(standing["export"], true);
-    assert_eq!(standing["streaming"], false);
-    assert_eq!(standing["pause"], "edition");
-    fixture.cleanup().await;
-}
-
-#[tokio::test]
 async fn only_admins_manage_destinations_and_scopes_never_mix() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let client = &fixture.sso.client;
     let path = destinations(fixture.organization);
     let owner = &fixture.owner;
@@ -493,7 +462,7 @@ async fn only_admins_manage_destinations_and_scopes_never_mix() {
 #[tokio::test]
 async fn secrets_are_sealed_and_only_their_names_are_ever_shown() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let client = &fixture.sso.client;
     let path = destinations(fixture.organization);
     let owner = &fixture.owner;
@@ -627,7 +596,7 @@ async fn secrets_are_sealed_and_only_their_names_are_ever_shown() {
 #[tokio::test]
 async fn every_invalid_field_is_refused_with_its_own_code() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let client = &fixture.sso.client;
     let path = destinations(fixture.organization);
     let owner = &fixture.owner;
@@ -836,7 +805,7 @@ async fn every_invalid_field_is_refused_with_its_own_code() {
 #[tokio::test]
 async fn zone_endpoint_hosts_restricts_where_destinations_send() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let restricted = AppState::new_with_mail(
         Config {
             endpoint_hosts: Hosts::parse("allowed.example"),
@@ -922,7 +891,7 @@ fn bucket(name: &str, endpoint: &str, addressing: &str) -> Value {
 #[tokio::test]
 async fn virtual_host_s3_is_allowed_by_its_bucket_host_and_never_on_an_ip_endpoint() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let path = destinations(fixture.organization);
     let owner = &fixture.owner;
 
@@ -983,7 +952,7 @@ async fn virtual_host_s3_is_allowed_by_its_bucket_host_and_never_on_an_ip_endpoi
 #[tokio::test]
 async fn health_reports_failures_resets_on_change_and_reports_a_stall() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let client = &fixture.sso.client;
     let path = destinations(fixture.organization);
     let owner = &fixture.owner;
@@ -1114,7 +1083,7 @@ async fn health_reports_failures_resets_on_change_and_reports_a_stall() {
 #[tokio::test]
 async fn a_test_sends_one_unaudited_event_and_reports_how_the_send_went() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let client = &fixture.sso.client;
     let path = destinations(fixture.organization);
     let owner = &fixture.owner;
@@ -1244,7 +1213,7 @@ async fn a_test_sends_one_unaudited_event_and_reports_how_the_send_went() {
 #[tokio::test]
 async fn only_admins_with_streaming_can_test_a_destination() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let client = &fixture.sso.client;
     let path = destinations(fixture.organization);
     let owner = &fixture.owner;
@@ -1277,7 +1246,7 @@ async fn only_admins_with_streaming_can_test_a_destination() {
         .await
         .assert_status(StatusCode::FORBIDDEN);
 
-    fixture.store_license(&sso::lapsed(Tier::Enterprise)).await;
+    fixture.store_license(&sso::lapsed()).await;
     for uri in [&organization_test, &server_test] {
         refused(
             &post(client, uri, owner, &json!({})).await,
@@ -1304,7 +1273,7 @@ async fn only_admins_with_streaming_can_test_a_destination() {
 #[tokio::test]
 async fn certificates_that_do_not_parse_are_refused_at_create_and_update() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let client = &fixture.sso.client;
     let path = destinations(fixture.organization);
     let owner = &fixture.owner;
@@ -1375,7 +1344,7 @@ async fn certificates_that_do_not_parse_are_refused_at_create_and_update() {
 #[tokio::test]
 async fn a_host_the_operator_no_longer_allows_is_refused_when_sending() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let pool = fixture.pool();
     let server = receiver().await;
     let siem = id(&post(
@@ -1439,7 +1408,7 @@ async fn adding_a_destination_never_waits_for_a_rebase_in_flight() {
     let pool = fixture.pool();
     let path = destinations(fixture.organization);
     let owner = &fixture.owner;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let restored = Destination::new(Some(fixture.organization))
         .create(
             pool,
@@ -1494,7 +1463,7 @@ async fn a_destination_is_refused_until_positions_left_by_a_restore_are_rebased(
     let pool = fixture.pool();
     let path = destinations(fixture.organization);
     let owner = &fixture.owner;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     let restored = Destination::new(Some(fixture.organization))
         .create(
             pool,

@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
-use zone_enterprise::Tier;
 use zone_enterprise::policy::{
     BODY_INVALID, CEILING_INVALID, DOMAIN_INVALID, MODEL_INVALID, Rules, SERVER_INVALID, WIDER,
 };
@@ -107,7 +106,7 @@ fn uncoded(response: &TestResponse, status: StatusCode) {
 
 async fn licensed() -> Fixture {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     fixture
 }
 
@@ -402,7 +401,7 @@ async fn the_license_is_checked_before_the_body_is_read() {
 #[tokio::test]
 async fn a_license_in_its_grace_period_can_change_the_policy() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.install(&grace(Tier::Enterprise)).await;
+    fixture.install(&grace()).await;
 
     let response = fixture
         .update_organization(&fixture.owner.token, &json!({ "agents": ["codex"] }))
@@ -425,7 +424,7 @@ async fn a_license_in_its_grace_period_can_change_the_policy() {
 #[tokio::test]
 async fn a_lapsed_license_keeps_enforcing_and_refuses_changes() {
     let fixture = Fixture::new(PREFIX).await;
-    fixture.store_license(&lapsed(Tier::Team)).await;
+    fixture.store_license(&lapsed()).await;
 
     for response in [
         fixture.organization_policy(&fixture.owner.token).await,
@@ -492,7 +491,7 @@ async fn an_unset_policy_restricts_nothing() {
     assert_eq!(body["updated_at"], Value::Null);
     assert_eq!(body["entitled"], true);
     assert_eq!(body["enforced"], true);
-    assert_eq!(body["edition"], "team");
+    assert_eq!(body["edition"], "enterprise");
     assert_eq!(body["status"], "active");
 
     let workspace = fixture.workspace_policy(&fixture.owner.token).await;

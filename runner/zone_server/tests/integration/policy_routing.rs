@@ -1,6 +1,6 @@
-//! A workspace's route under its organization's agent policy: enforced while a Team or
-//! Enterprise license is installed, lapsed or not, never on Community, and failing closed when
-//! the stored rules can't be read. No agent the policy denies is ever picked, by routing, by the
+//! A workspace's route under its organization's agent policy: enforced while an Enterprise
+//! license is installed, lapsed or not, never on Community, and failing closed when the stored
+//! rules can't be read. No agent the policy denies is ever picked, by routing, by the
 //! host's sign-in or by a handover.
 
 use abnegate_agent_cli::login::claude::Tokens;
@@ -15,7 +15,6 @@ use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_core::llm::{LlmBackend, SignIn};
-use zone_enterprise::Tier;
 use zone_enterprise::policy::{self, Denial, Effective};
 use zone_server::config::{AgentConfig, Config};
 use zone_server::db::agent_logins::{self, Insert};
@@ -234,9 +233,9 @@ async fn community_stores_rules_and_enforces_none_of_them() {
 }
 
 #[tokio::test]
-async fn an_active_team_license_makes_a_denied_agents_route_unusable() {
+async fn an_active_license_makes_a_denied_agents_route_unusable() {
     let fixture = Fixture::new(CLAUDE).await;
-    fixture.license(&active(Tier::Team)).await;
+    fixture.license(&active()).await;
     fixture.restrict(json!({"agents": []})).await;
 
     let route = fixture.route().await;
@@ -262,7 +261,7 @@ async fn an_active_team_license_makes_a_denied_agents_route_unusable() {
 #[tokio::test]
 async fn a_lapsed_license_still_denies() {
     let fixture = Fixture::new(CLAUDE).await;
-    fixture.license(&lapsed(Tier::Team)).await;
+    fixture.license(&lapsed()).await;
     fixture.restrict(json!({"agents": []})).await;
 
     let route = fixture.route().await;
@@ -275,7 +274,7 @@ async fn a_lapsed_license_still_denies() {
 #[tokio::test]
 async fn non_strict_routing_never_picks_a_denied_agents_login() {
     let fixture = Fixture::new(CLAUDE).await;
-    fixture.license(&active(Tier::Enterprise)).await;
+    fixture.license(&active()).await;
     fixture.restrict(json!({"agents": ["claude"]})).await;
     fixture.codex("codex@example.com").await;
 
@@ -306,7 +305,7 @@ async fn non_strict_routing_never_picks_a_denied_agents_login() {
 #[tokio::test]
 async fn the_host_sign_in_never_runs_a_denied_agent() {
     let fixture = Fixture::with_host_login(CODEX, true).await;
-    fixture.license(&active(Tier::Team)).await;
+    fixture.license(&active()).await;
     fixture.restrict(json!({"agents": ["claude"]})).await;
 
     let route = fixture.route().await;
@@ -365,7 +364,7 @@ async fn the_host_sign_in_never_runs_a_denied_agent() {
 #[tokio::test]
 async fn stored_rules_that_cannot_be_read_deny_everything() {
     let fixture = Fixture::new(CLAUDE).await;
-    fixture.license(&active(Tier::Team)).await;
+    fixture.license(&active()).await;
     fixture.restrict(json!({"agents": "claude"})).await;
 
     let route = fixture.route().await;
@@ -388,7 +387,7 @@ async fn stored_rules_that_cannot_be_read_deny_everything() {
 #[tokio::test]
 async fn a_model_the_policy_does_not_list_is_not_admitted() {
     let fixture = Fixture::new(CLAUDE).await;
-    fixture.license(&active(Tier::Team)).await;
+    fixture.license(&active()).await;
     fixture
         .restrict(json!({"agents": ["claude"], "models": ["claude-opus-*"]}))
         .await;
@@ -416,7 +415,7 @@ async fn a_model_the_policy_does_not_list_is_not_admitted() {
 #[tokio::test]
 async fn a_handover_never_moves_onto_a_denied_agent() {
     let fixture = Fixture::new(CLAUDE).await;
-    fixture.license(&active(Tier::Team)).await;
+    fixture.license(&active()).await;
     fixture.restrict(json!({"agents": ["claude"]})).await;
     let alice = fixture.claude("alice@example.com").await;
     let codex = fixture.codex("codex@example.com").await;
@@ -446,7 +445,7 @@ async fn a_handover_never_moves_onto_a_denied_agent() {
 #[tokio::test]
 async fn a_handover_never_moves_onto_a_model_the_policy_denies() {
     let fixture = Fixture::new(CLAUDE).await;
-    fixture.license(&active(Tier::Team)).await;
+    fixture.license(&active()).await;
     fixture.restrict(json!({"models": ["sonnet"]})).await;
     let alice = fixture.claude("alice@example.com").await;
     fixture.codex("codex@example.com").await;
@@ -486,7 +485,7 @@ async fn litellm_claiming_local_routes() -> MockServer {
 #[tokio::test]
 async fn only_an_organizations_litellm_endpoint_is_believed_about_where_it_runs() {
     let fixture = Fixture::new(SELF_HOSTED).await;
-    fixture.license(&active(Tier::Team)).await;
+    fixture.license(&active()).await;
     fixture.restrict(json!({"providers": ["local"]})).await;
     let organization = litellm_claiming_local_routes().await;
     let workspace = litellm_claiming_local_routes().await;

@@ -10,7 +10,6 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_enterprise::Tier;
 use zone_server::db::audit::actions::AGENT_POLICY_TURN_DENIED;
 use zone_server::db::organization_members::{self, OrgRole};
 use zone_server::db::workspace_members::{self, WorkspaceRole};
@@ -115,20 +114,16 @@ impl Fixture {
         &self.owner.token
     }
 
-    async fn license(&self, tier: Tier) {
+    async fn license(&self) {
         self.client
-            .put_json_auth(
-                "/api/license",
-                &json!({ "key": active(tier) }),
-                self.token(),
-            )
+            .put_json_auth("/api/license", &json!({ "key": active() }), self.token())
             .await
             .assert_status(StatusCode::OK);
     }
 
     /// Stores a lapsed key, which the license route would refuse, and reloads it.
-    async fn lapse(&self, tier: Tier) {
-        licenses::replace(self.pool(), &lapsed(tier)).await.unwrap();
+    async fn lapse(&self) {
+        licenses::replace(self.pool(), &lapsed()).await.unwrap();
         self.client
             .state()
             .licenses()
@@ -510,7 +505,7 @@ fn denial(audit: &Audit) -> (&str, Value) {
 #[tokio::test]
 async fn chat_providers_mark_a_denied_offer_and_offer_only_the_models_the_policy_admits() {
     let fixture = Fixture::new().await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     fixture.save_openai().await;
     fixture
         .restrict(json!({ "models": [FAST, "sonnet"] }))
@@ -561,7 +556,7 @@ async fn chat_providers_mark_a_denied_offer_and_offer_only_the_models_the_policy
 #[tokio::test]
 async fn a_chat_choosing_a_denied_provider_or_model_is_refused_and_audited() {
     let fixture = Fixture::new().await;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     fixture.save_openai().await;
     let chat = fixture.chat(FAST).await;
     let before = fixture.chats().await;
@@ -666,7 +661,7 @@ async fn a_chat_choosing_a_denied_provider_or_model_is_refused_and_audited() {
 #[tokio::test]
 async fn a_task_on_a_denied_model_keeps_its_model_and_starts_no_run() {
     let fixture = Fixture::new().await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     fixture.save_openai().await;
     fixture.restrict(json!({ "models": [FAST] })).await;
     let task = fixture.task().await;
@@ -714,7 +709,7 @@ async fn a_task_on_a_denied_model_keeps_its_model_and_starts_no_run() {
 #[tokio::test]
 async fn a_viewer_is_refused_a_task_change_or_run_before_the_policy_is_asked() {
     let fixture = Fixture::new().await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     fixture.save_openai().await;
     fixture.restrict(json!({ "models": [FAST] })).await;
     let task = fixture.task().await;
@@ -755,7 +750,7 @@ async fn a_viewer_is_refused_a_task_change_or_run_before_the_policy_is_asked() {
 #[tokio::test]
 async fn the_workspace_models_mark_what_the_policy_denies_on_either_endpoint() {
     let fixture = Fixture::new().await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     fixture
         .restrict(json!({ "models": ["qwen3*", FAST] }))
         .await;
@@ -799,7 +794,7 @@ async fn the_workspace_models_mark_what_the_policy_denies_on_either_endpoint() {
 #[tokio::test]
 async fn a_sign_in_to_an_agent_the_organization_denies_is_refused_and_audited() {
     let fixture = Fixture::new().await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     fixture.restrict(json!({ "agents": ["codex"] })).await;
     fixture.restrict_workspace(json!({ "agents": [] })).await;
     let member = fixture.member(OrgRole::Member).await;
@@ -885,7 +880,7 @@ async fn a_sign_in_to_an_agent_the_organization_denies_is_refused_and_audited() 
 #[tokio::test]
 async fn ai_settings_naming_a_denied_provider_agent_or_model_are_not_saved() {
     let fixture = Fixture::new().await;
-    fixture.license(Tier::Enterprise).await;
+    fixture.license().await;
     fixture
         .restrict(json!({
             "providers": ["anthropic"],
@@ -1022,7 +1017,7 @@ async fn community_enforces_nothing_and_a_lapsed_license_still_refuses() {
     );
     assert!(fixture.audits().await.is_empty());
 
-    fixture.lapse(Tier::Team).await;
+    fixture.lapse().await;
     refused(
         &fixture.sign_in("claude", fixture.token()).await,
         AGENT_DENIED,
@@ -1050,7 +1045,7 @@ async fn community_enforces_nothing_and_a_lapsed_license_still_refuses() {
 #[tokio::test]
 async fn a_policy_that_cannot_be_read_refuses_everything_it_governs() {
     let fixture = Fixture::new().await;
-    fixture.license(Tier::Team).await;
+    fixture.license().await;
     fixture.save_openai().await;
     let chat = fixture.chat(FAST).await;
     fixture.restrict(json!({ "agents": "claude" })).await;

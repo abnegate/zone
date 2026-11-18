@@ -5,7 +5,6 @@
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
-use zone_enterprise::Tier;
 use zone_server::db::organization_members::{self, OrgRole};
 use zone_server::db::workspace_members::{self, WorkspaceRole};
 use zone_server::db::{organizations, policies, workspaces};
@@ -54,8 +53,8 @@ impl Fixture {
         self.sso.state()
     }
 
-    pub async fn license(&self, tier: Tier) {
-        self.sso.license(&self.owner, tier).await;
+    pub async fn license(&self) {
+        self.sso.license(&self.owner).await;
     }
 
     /// Installs a key through the license route, such as one in its grace period.

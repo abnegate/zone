@@ -5,11 +5,11 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use serde_json::{Value, json};
 use uuid::Uuid;
+use zone_enterprise::LICENSE_REQUIRED;
 use zone_enterprise::sso::{
     CLIENT_ID_INVALID, CLIENT_SECRET_INVALID, DISCOVERY_FAILED, DISPLAY_NAME_INVALID,
     DOMAIN_INVALID, ISSUER_INVALID, PROVIDER_DUPLICATE, PROVIDER_NOT_FOUND,
 };
-use zone_enterprise::{LICENSE_REQUIRED, Tier};
 use zone_server::auth::admin_guard::REQUIRED;
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::sso::providers;
@@ -37,16 +37,15 @@ fn assert_code(response: &TestResponse, status: StatusCode, code: &str) {
 
 fn assert_license_required(response: &TestResponse) {
     assert_code(response, StatusCode::FORBIDDEN, LICENSE_REQUIRED);
-    let message = response.json_value()["error"].as_str().unwrap().to_owned();
-    assert!(
-        message.contains("Team") && message.contains("Enterprise"),
-        "{message}"
+    assert_eq!(
+        response.json_value()["error"],
+        "This needs a Zone Enterprise license that is active or in its grace period."
     );
 }
 
-async fn licensed(fixture: &Fixture, tier: Tier) -> Account {
+async fn licensed(fixture: &Fixture) -> Account {
     let admin = fixture.register().await;
-    fixture.license(&admin, tier).await;
+    fixture.license(&admin).await;
     admin
 }
 
@@ -83,7 +82,7 @@ async fn narrowing_writes(fixture: &Fixture, token: &str, id: Uuid) -> [TestResp
 #[tokio::test]
 async fn every_route_needs_a_signed_in_server_admin() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
     let member = fixture.register().await;
     let id = Uuid::new_v4();
 
@@ -174,17 +173,17 @@ async fn the_license_is_checked_before_the_request_is_read() {
 #[tokio::test]
 async fn a_lapsed_license_shows_existing_providers_read_only() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
     let identity_provider = IdentityProvider::start().await;
     let id = fixture
         .created(&admin.token, &identity_provider.provider())
         .await;
 
-    fixture.store_license(&lapsed(Tier::Team)).await;
+    fixture.store_license(&lapsed()).await;
 
     let body = fixture.settings(&admin.token).await.json_value();
     assert_eq!(body["entitled"], false, "{body}");
-    assert_eq!(body["edition"], "team", "{body}");
+    assert_eq!(body["edition"], "enterprise", "{body}");
     assert_eq!(body["status"], "lapsed", "{body}");
     assert_eq!(body["providers"][0]["id"], id.to_string(), "{body}");
     for response in licensed_writes(&fixture, &admin.token, id).await {
@@ -197,12 +196,12 @@ async fn a_lapsed_license_shows_existing_providers_read_only() {
 #[tokio::test]
 async fn a_lapsed_license_still_takes_a_provider_out_of_service() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
     let identity_provider = IdentityProvider::start().await;
     let id = fixture
         .created(&admin.token, &identity_provider.provider())
         .await;
-    fixture.store_license(&lapsed(Tier::Team)).await;
+    fixture.store_license(&lapsed()).await;
 
     let [disabled, deleted, relaxed] = narrowing_writes(&fixture, &admin.token, id).await;
 
@@ -222,7 +221,7 @@ async fn a_lapsed_license_still_takes_a_provider_out_of_service() {
 async fn a_license_in_grace_is_entitled() {
     let fixture = Fixture::new(PREFIX).await;
     let admin = fixture.register().await;
-    fixture.install(&admin, &grace(Tier::Enterprise)).await;
+    fixture.install(&admin, &grace()).await;
     let identity_provider = IdentityProvider::start().await;
 
     fixture
@@ -238,65 +237,63 @@ async fn a_license_in_grace_is_entitled() {
 }
 
 #[tokio::test]
-async fn team_and_enterprise_admins_add_a_provider_through_a_loopback_identity_provider() {
-    for tier in [Tier::Team, Tier::Enterprise] {
-        let fixture = Fixture::new(PREFIX).await;
-        let admin = licensed(&fixture, tier).await;
-        let identity_provider = IdentityProvider::start().await;
-        assert!(identity_provider.issuer().starts_with("http://127.0.0.1:"));
+async fn an_admin_adds_a_provider_through_a_loopback_identity_provider() {
+    let fixture = Fixture::new(PREFIX).await;
+    let admin = licensed(&fixture).await;
+    let identity_provider = IdentityProvider::start().await;
+    assert!(identity_provider.issuer().starts_with("http://127.0.0.1:"));
 
-        let response = fixture
-            .create(
-                &admin.token,
-                &json!({
-                    "display_name": " Okta ",
-                    "issuer": identity_provider.issuer(),
-                    "client_id": CLIENT_ID,
-                    "client_secret": CLIENT_SECRET,
-                    "allowed_domains": [" ACME.com", "acme.com", "acme.io"],
-                    "require_verified_email": false,
-                    "enabled": false,
-                }),
-            )
-            .await;
+    let response = fixture
+        .create(
+            &admin.token,
+            &json!({
+                "display_name": " Okta ",
+                "issuer": identity_provider.issuer(),
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+                "allowed_domains": [" ACME.com", "acme.com", "acme.io"],
+                "require_verified_email": false,
+                "enabled": false,
+            }),
+        )
+        .await;
 
-        response.assert_status(StatusCode::CREATED);
-        let created = response.json_value();
-        let id: Uuid = created["id"].as_str().unwrap().parse().unwrap();
-        let mut expected = json!({
-            "id": id,
-            "protocol": "oidc",
-            "display_name": "Okta",
-            "issuer": identity_provider.issuer(),
-            "client_id": CLIENT_ID,
-            "allowed_domains": ["acme.com", "acme.io"],
-            "require_verified_email": false,
-            "enabled": false,
-        });
-        for timestamp in ["created_at", "updated_at"] {
-            assert!(created[timestamp].is_string(), "{created}");
-            expected[timestamp] = created[timestamp].clone();
-        }
-        assert_eq!(created, expected);
-        assert_eq!(identity_provider.requests(DISCOVERY_PATH), 1);
-
-        let settings = fixture.settings(&admin.token).await.json_value();
-        assert_eq!(settings["entitled"], true, "{settings}");
-        assert_eq!(settings["edition"], json!(tier), "{settings}");
-        assert_eq!(settings["status"], "active", "{settings}");
-        assert_eq!(
-            settings["redirect_uri"],
-            "http://localhost:3000/sso/callback"
-        );
-        assert_eq!(settings["providers"], json!([expected]));
-        fixture.cleanup().await;
+    response.assert_status(StatusCode::CREATED);
+    let created = response.json_value();
+    let id: Uuid = created["id"].as_str().unwrap().parse().unwrap();
+    let mut expected = json!({
+        "id": id,
+        "protocol": "oidc",
+        "display_name": "Okta",
+        "issuer": identity_provider.issuer(),
+        "client_id": CLIENT_ID,
+        "allowed_domains": ["acme.com", "acme.io"],
+        "require_verified_email": false,
+        "enabled": false,
+    });
+    for timestamp in ["created_at", "updated_at"] {
+        assert!(created[timestamp].is_string(), "{created}");
+        expected[timestamp] = created[timestamp].clone();
     }
+    assert_eq!(created, expected);
+    assert_eq!(identity_provider.requests(DISCOVERY_PATH), 1);
+
+    let settings = fixture.settings(&admin.token).await.json_value();
+    assert_eq!(settings["entitled"], true, "{settings}");
+    assert_eq!(settings["edition"], "enterprise", "{settings}");
+    assert_eq!(settings["status"], "active", "{settings}");
+    assert_eq!(
+        settings["redirect_uri"],
+        "http://localhost:3000/sso/callback"
+    );
+    assert_eq!(settings["providers"], json!([expected]));
+    fixture.cleanup().await;
 }
 
 #[tokio::test]
 async fn a_new_provider_is_enabled_and_requires_verified_email_by_default() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
     let identity_provider = IdentityProvider::start().await;
 
     let response = fixture
@@ -315,7 +312,7 @@ async fn a_new_provider_is_enabled_and_requires_verified_email_by_default() {
 #[tokio::test]
 async fn each_invalid_field_is_refused_with_its_own_code_and_nothing_is_stored() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
     let identity_provider = IdentityProvider::start().await;
     let valid = identity_provider.provider();
     let with = |field: &str, value: Value| {
@@ -370,7 +367,7 @@ async fn each_invalid_field_is_refused_with_its_own_code_and_nothing_is_stored()
 #[tokio::test]
 async fn a_discovery_document_naming_another_issuer_is_refused() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
     let identity_provider = IdentityProvider::start().await;
     identity_provider.mismatch_issuer(true);
 
@@ -388,7 +385,7 @@ async fn a_discovery_document_naming_another_issuer_is_refused() {
 #[tokio::test]
 async fn an_unreachable_issuer_is_a_discovery_failure() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
 
     let response = fixture
         .create(
@@ -408,7 +405,7 @@ async fn an_unreachable_issuer_is_a_discovery_failure() {
 #[tokio::test]
 async fn the_same_issuer_and_client_id_cannot_be_added_twice() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
     let identity_provider = IdentityProvider::start().await;
     fixture
         .created(&admin.token, &identity_provider.provider())
@@ -433,7 +430,7 @@ async fn the_same_issuer_and_client_id_cannot_be_added_twice() {
 #[tokio::test]
 async fn a_sparse_update_keeps_every_field_it_leaves_out_and_the_secret() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
     let identity_provider = IdentityProvider::start().await;
     let id = fixture
         .created(&admin.token, &identity_provider.provider())
@@ -466,7 +463,7 @@ async fn a_sparse_update_keeps_every_field_it_leaves_out_and_the_secret() {
 #[tokio::test]
 async fn an_update_validates_the_fields_it_carries() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
     let identity_provider = IdentityProvider::start().await;
     let id = fixture
         .created(&admin.token, &identity_provider.provider())
@@ -493,7 +490,7 @@ async fn an_update_validates_the_fields_it_carries() {
 #[tokio::test]
 async fn changing_the_issuer_rediscovers_it() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
     let first = IdentityProvider::start().await;
     let second = IdentityProvider::start().await;
     let id = fixture.created(&admin.token, &first.provider()).await;
@@ -517,7 +514,7 @@ async fn changing_the_issuer_rediscovers_it() {
 #[tokio::test]
 async fn an_unknown_provider_is_not_found() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
     let unknown = Uuid::new_v4();
 
     for response in [
@@ -542,7 +539,7 @@ async fn an_unknown_provider_is_not_found() {
 #[tokio::test]
 async fn a_deleted_provider_is_gone() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
     let identity_provider = IdentityProvider::start().await;
     let id = fixture
         .created(&admin.token, &identity_provider.provider())
@@ -560,7 +557,7 @@ async fn a_deleted_provider_is_gone() {
 #[tokio::test]
 async fn every_change_is_audited_without_the_secret() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
     let identity_provider = IdentityProvider::start().await;
     let id = fixture
         .created(&admin.token, &identity_provider.provider())
@@ -662,7 +659,7 @@ async fn every_change_is_audited_without_the_secret() {
 #[tokio::test]
 async fn no_response_ever_carries_the_secret() {
     let fixture = Fixture::new(PREFIX).await;
-    let admin = licensed(&fixture, Tier::Team).await;
+    let admin = licensed(&fixture).await;
     let identity_provider = IdentityProvider::start().await;
 
     let created = fixture
