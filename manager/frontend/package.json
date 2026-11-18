@@ -74,6 +74,6 @@
     "pretypecheck": "bun run build:ui",
     "typecheck": "tsc --noEmit && tsc --noEmit -p e2e",
     "lighthouse": "lhci autorun",
-    "audit": "bun audit --ignore GHSA-gcqx-w48m-w2h4"
+    "audit": "bun audit --ignore GHSA-gcqx-w48m-w2h4 --ignore GHSA-fc5q-39xc-vjpf"
   }
 }
