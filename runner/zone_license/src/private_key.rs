@@ -1,5 +1,6 @@
 use std::fmt;
-use std::fs;
+use std::fs::{self, File, Metadata};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -47,11 +48,26 @@ impl PrivateKey {
             (None, Some(value)) => Self::parse(value),
             (Some(path), None) => {
                 let path = secured(path)?;
-                let text = fs::read_to_string(&path)
-                    .map_err(|source| PrivateKeyError::Read { path, source })?;
-                Self::parse(&text)
+                let file = File::open(&path).map_err(|source| PrivateKeyError::Read {
+                    path: path.clone(),
+                    source,
+                })?;
+                Self::read(&path, file)
             }
         }
+    }
+
+    /// Checks the permissions of the handle it then reads, so the file
+    /// checked is the file read even if the path is swapped in between.
+    fn read(path: &Path, mut file: File) -> Result<Self, PrivateKeyError> {
+        let unreadable = |source| PrivateKeyError::Read {
+            path: path.to_path_buf(),
+            source,
+        };
+        guard(path, &file.metadata().map_err(unreadable)?)?;
+        let mut text = String::new();
+        file.read_to_string(&mut text).map_err(unreadable)?;
+        Self::parse(&text)
     }
 
     pub fn encode(&self) -> String {
@@ -76,12 +92,19 @@ impl fmt::Debug for PrivateKey {
     }
 }
 
-/// Returns the path it checked so CodeQL's barrier model can bind the guard.
+/// Refuses anything but a private regular file before it is opened, so a
+/// FIFO can't block startup, and returns the path it checked so CodeQL's
+/// barrier model can bind the guard. The handle is checked again once open.
 pub fn secured(path: &Path) -> Result<PathBuf, PrivateKeyError> {
     let metadata = fs::metadata(path).map_err(|source| PrivateKeyError::Read {
         path: path.to_path_buf(),
         source,
     })?;
+    guard(path, &metadata)?;
+    Ok(path.to_path_buf())
+}
+
+fn guard(path: &Path, metadata: &Metadata) -> Result<(), PrivateKeyError> {
     if !metadata.is_file() {
         return Err(PrivateKeyError::NotAFile {
             path: path.to_path_buf(),
@@ -98,7 +121,7 @@ pub fn secured(path: &Path) -> Result<PathBuf, PrivateKeyError> {
             });
         }
     }
-    Ok(path.to_path_buf())
+    Ok(())
 }
 
 #[cfg(test)]
@@ -250,6 +273,42 @@ mod tests {
     fn accepts_an_owner_read_only_file() {
         let file = key_file(&encoded(), 0o400);
         assert!(PrivateKey::resolve(Some(file.path()), None).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checks_and_reads_the_same_handle_when_the_path_is_swapped() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("signing.key");
+        fs::write(&path, encoded()).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let checked = secured(&path).unwrap();
+        let handle = File::open(&checked).unwrap();
+
+        let swapped = directory.path().join("swapped.key");
+        fs::write(&swapped, STANDARD.encode([8; SEED_LENGTH])).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&swapped, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        fs::rename(&swapped, &path).unwrap();
+
+        let key = PrivateKey::read(&checked, handle).unwrap();
+        assert_eq!(key.encode(), encoded());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_handle_others_can_access() {
+        let file = key_file(&encoded(), 0o644);
+        let handle = File::open(file.path()).unwrap();
+        assert!(matches!(
+            PrivateKey::read(file.path(), handle),
+            Err(PrivateKeyError::Permissions { mode: 0o644, .. })
+        ));
     }
 
     #[test]
