@@ -70,7 +70,7 @@ export const LAPSED_STANDING: Standing = {
 };
 
 export const TEAM_STANDING: Standing = {
-  edition: Edition.Team,
+  edition: Edition.Enterprise,
   status: LicenseStatus.Active,
   export: true,
   streaming: false,

@@ -29,7 +29,6 @@ import {
 describe('editionLabel', () => {
   it('names each edition', () => {
     expect(editionLabel('community')).toBe('Community');
-    expect(editionLabel('team')).toBe('Team');
     expect(editionLabel('enterprise')).toBe('Enterprise');
   });
 });

@@ -38,8 +38,6 @@ export {
   LicenseStatusSchema,
   SeatsSchema,
   SetLicenseRequestSchema,
-  TIERS,
-  TierSchema,
   UNVERIFIED_CODES,
   UnverifiedSchema,
 } from './schemas';
@@ -50,7 +48,6 @@ export type {
   LicenseResponse,
   Seats,
   SetLicenseRequest,
-  Tier,
   Unverified,
   UnverifiedCode,
 } from './types';

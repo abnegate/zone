@@ -2,7 +2,6 @@ import { z } from 'zod';
 
 export const Edition = {
   Community: 'community',
-  Team: 'team',
   Enterprise: 'enterprise',
 } as const;
 
@@ -21,9 +20,7 @@ export const LicenseRefusalCode = {
   Lapsed: 'license_lapsed',
 } as const;
 
-export const EDITIONS = [Edition.Community, Edition.Team, Edition.Enterprise] as const;
-
-export const TIERS = [Edition.Team, Edition.Enterprise] as const;
+export const EDITIONS = [Edition.Community, Edition.Enterprise] as const;
 
 export const LICENSE_STATUSES = [
   LicenseStatus.Community,
@@ -51,12 +48,9 @@ export const EditionSchema = z.enum(EDITIONS);
 
 export const LicenseStatusSchema = z.enum(LICENSE_STATUSES);
 
-export const TierSchema = z.enum(TIERS);
-
 export const LicenseDetailsSchema = z.object({
   id: z.string(),
   customer: z.string(),
-  tier: TierSchema,
   seats: z.number().int().positive(),
   issued_at: z.string(),
   expires_at: z.string(),

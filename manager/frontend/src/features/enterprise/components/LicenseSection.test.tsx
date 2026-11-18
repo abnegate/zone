@@ -143,14 +143,13 @@ describe('LicenseSection', () => {
       });
     }
 
-    it('shows an active license with its customer, tier, seats and expiry', async () => {
+    it('shows an active license with its customer, seats and expiry', async () => {
       await loaded(ACTIVE);
 
       expect(screen.getByText('Enterprise', { selector: '.license-edition-name' })).toBeTruthy();
       expect(screen.getByText('Active')).toBeInTheDocument();
       expect(details()).toEqual({
         Customer: 'Acme Ltd',
-        Tier: 'Enterprise',
         Seats: '12 of 25 seats used this month',
         Expires: 'Nov 1, 2027',
         'Grace ends': 'Dec 1, 2027',
@@ -180,9 +179,8 @@ describe('LicenseSection', () => {
       expect(warning).toHaveTextContent('lapsed on Dec 1, 2027');
       expect(warning).toHaveTextContent('Paste a renewed license key');
       expect(warning).not.toHaveTextContent(ENFORCEMENT_CLAIM);
-      expect(screen.getByText('Team', { selector: '.license-edition-name' })).toBeTruthy();
+      expect(screen.getByText('Enterprise', { selector: '.license-edition-name' })).toBeTruthy();
       expect(details().Customer).toBe('Acme Ltd');
-      expect(details().Tier).toBe('Team');
     });
 
     it('notes extra seats softly without blocking anyone', async () => {

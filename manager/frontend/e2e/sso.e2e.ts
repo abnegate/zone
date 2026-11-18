@@ -50,7 +50,7 @@ const STATE = 'zone-state-7d1f';
 const CODE = 'c';
 const INVITATION_PATH = '/invitations?token=sso-invitation-token';
 
-const UPGRADE_NOTICE = 'Single sign-on is part of Zone Team and Enterprise.';
+const UPGRADE_NOTICE = 'Single sign-on is part of Zone Enterprise.';
 const LAPSED_NOTICE = 'Your Zone license has lapsed.';
 const ENFORCED_READ_ONLY =
   'Single sign-on is required. Only server admins can sign in with a password.';

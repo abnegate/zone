@@ -19,7 +19,6 @@ export type Tone = (typeof Tone)[keyof typeof Tone];
 
 const EDITION_LABELS: Readonly<Record<EditionValue, string>> = {
   [Edition.Community]: 'Community',
-  [Edition.Team]: 'Team',
   [Edition.Enterprise]: 'Enterprise',
 };
 
