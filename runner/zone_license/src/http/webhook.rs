@@ -26,7 +26,7 @@ pub async fn receive(
     let signed = Headers::read(|name| headers.get(name).and_then(|value| value.to_str().ok()));
     if let Err(error) = polar::verify(&context.secret, &signed, &body, Utc::now()) {
         let outcome = Outcome::Unsigned;
-        tracing::warn!(%outcome, %error, "Refused a webhook delivery");
+        tracing::info!(%outcome, %error, "Refused a webhook delivery");
         return outcome.status().into_response();
     }
     let webhook = signed.id.as_deref().unwrap_or_default();
