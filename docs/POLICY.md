@@ -15,14 +15,14 @@ Workspace → Agent policy**, but never widen it.
 
 ## Licensing
 
-Agent policy is part of Zone Team and Zone Enterprise. Editing a policy needs
-a Team or Enterprise license that's either active or in its 30-day grace
+Agent policy is part of Zone Enterprise. Editing a policy needs a Zone
+Enterprise license that verifies and is either active or in its 30-day grace
 period after expiry. You install the license under **Settings → This server →
 License**.
 
 | License state | Enforcement | Settings |
 |---|---|---|
-| Team or Enterprise, active or in grace | Enforced | Editable by the people listed [below](#who-can-see-and-change-a-policy) |
+| Enterprise, active or in grace | Enforced | Editable by the people listed [below](#who-can-see-and-change-a-policy) |
 | Lapsed (past grace) | Still enforced | Read-only, with a renewal notice |
 | Removed, or never installed (Community) | Not enforced | Read-only, with an upgrade notice |
 
@@ -33,7 +33,7 @@ would only loosen the policy.
 
 Removing the license is different: the server runs as Community, and
 Community enforces no policy. Zone keeps the saved policies, and enforces them
-again as soon as a Team or Enterprise license is installed.
+again as soon as a Zone Enterprise license is installed.
 
 A stored license key that no longer verifies, for example after an upgrade
 changes the keys Zone trusts, isn't treated as removed. The saved policies stay
@@ -489,7 +489,7 @@ Refusals of a policy change:
 
 | Code | Status | Meaning |
 |---|---|---|
-| `license_required` | 403 | There's no active or grace Team or Enterprise license. See [Licensing](#licensing). |
+| `license_required` | 403 | This needs a Zone Enterprise license that is active or in its grace period. See [Licensing](#licensing). |
 | `policy_body_invalid` | 400 | The request body can't be read: it isn't valid JSON, has a key that isn't a policy field, or has a value of the wrong type. |
 | `policy_wider_than_organization` | 400 | A workspace field would allow more than the organization's. |
 | `policy_model_invalid` | 400 | A model pattern is empty, longer than 128 characters, has whitespace, or has a `*` that isn't last. |
@@ -546,9 +546,9 @@ Content-Type: application/json
 
 | Field | Meaning |
 |---|---|
-| `entitled` | The license allows editing: Team or Enterprise, active or in grace. |
-| `enforced` | The license enforces policies: Team or Enterprise, in any state. |
-| `edition` | `community`, `team` or `enterprise`. |
+| `entitled` | The license allows editing: Enterprise, active or in grace. |
+| `enforced` | The license enforces policies: Enterprise, in any state. |
+| `edition` | `community` or `enterprise`. |
 | `status` | `community`, `active`, `grace` or `lapsed`. |
 | `editable` | The license allows editing and you may change this policy. |
 | `policy` | The organization's rules. All six fields are always present; `null` means unset. |

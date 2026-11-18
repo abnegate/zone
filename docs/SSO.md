@@ -11,15 +11,14 @@ see that section.
 
 ## Licensing
 
-Single sign-on is part of Zone Team and Zone Enterprise. To add or change a
-provider, or to turn enforcement on, the server needs a Team or Enterprise
-license that's either active or in its 30-day grace period
-after expiry. You install the license under **Settings → This server →
-License**.
+Single sign-on is part of Zone Enterprise. To add or change a provider, or
+to turn enforcement on, the server needs a Zone Enterprise license that
+verifies and is either active or in its 30-day grace period after expiry. You
+install the license under **Settings → This server → License**.
 
 | License state | Sign-in with SSO | Enforcement | Settings |
 |---|---|---|---|
-| Team or Enterprise, active or in grace | Works | Works | Editable |
+| Enterprise, active or in grace | Works | Works | Editable |
 | Lapsed (past grace) | Keeps working | Keeps working | Read-only, with a renewal warning |
 | Removed, or never installed (Community) | Keeps working for providers already set up | Keeps working if it was on | Read-only, with an upgrade notice |
 
@@ -579,7 +578,7 @@ each one.
 | `sso_email_conflict` | The account can't be matched safely. | See [Accounts](#accounts-matching-linking-and-jit-provisioning). |
 | `sso_required` | Password sign-in, registration or reset was refused because SSO is required. | Sign in with SSO, or as a server admin. |
 | `account_disabled` | The Zone account is disabled. | Disabled accounts can't sign in by any method. |
-| `license_required` | A change was refused because there's no active or grace Team or Enterprise license. | **Settings → This server → License**. |
+| `license_required` | A change was refused because there's no Zone Enterprise license that is active or in its grace period. | **Settings → This server → License**. |
 
 Zone accepts ID tokens signed with RS256, RS384, RS512, PS256, PS384,
 PS512, ES256, ES384 or EdDSA. When the discovery document lists
