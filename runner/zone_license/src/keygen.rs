@@ -14,6 +14,7 @@ use crate::variable::Variable;
 
 const BYTES_PER_LINE: usize = 15;
 const KEY_ID_SEPARATOR: char = '-';
+const KEY_ID_PUNCTUATION: [char; 3] = ['-', '_', '.'];
 const PRODUCTION_SOURCE: &str = "runner/zone_enterprise/src/production.rs";
 
 pub fn run(
@@ -21,11 +22,14 @@ pub fn run(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<(), KeygenError> {
-    let key = generate()?;
     let key_id = arguments
         .key_id
         .clone()
         .unwrap_or_else(|| suggest(&Keyring::production(), Utc::now().year()));
+    if !valid(&key_id) {
+        return Err(KeygenError::KeyId { id: key_id });
+    }
+    let key = generate()?;
     let report: &mut dyn Write = match &arguments.output {
         Some(path) => {
             write_new(path, &key)?;
@@ -67,6 +71,15 @@ pub fn suggest(keyring: &Keyring, year: i32) -> String {
         .max()
         .unwrap_or(0);
     format!("{prefix}{}", highest + 1)
+}
+
+/// The id is pasted into Rust source as a string literal, so only characters
+/// that need no escaping there are allowed.
+pub fn valid(key_id: &str) -> bool {
+    !key_id.is_empty()
+        && key_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || KEY_ID_PUNCTUATION.contains(&character)
+        })
 }
 
 pub fn entry(key_id: &str, public: &[u8; 32]) -> String {
@@ -260,6 +273,37 @@ mod tests {
             );
         }
         assert!(PrivateKey::resolve(Some(&path), None).is_ok());
+    }
+
+    #[test]
+    fn refuses_a_key_id_that_would_break_the_rust_entry_before_printing() {
+        for id in ["", "2026-2\"", "2026\n2", "2026 2", "2026-2\\", "€"] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let error = run(
+                &KeygenArguments {
+                    output: None,
+                    key_id: Some(id.into()),
+                },
+                &mut stdout,
+                &mut stderr,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, KeygenError::KeyId { .. }),
+                "{id:?}: {error}"
+            );
+            assert!(stdout.is_empty() && stderr.is_empty(), "{id:?} printed");
+        }
+    }
+
+    #[test]
+    fn accepts_every_production_key_id() {
+        for id in Keyring::production().ids() {
+            assert!(valid(id), "{id}");
+        }
+        assert!(valid("2026-2"));
+        assert!(valid("test_1.2"));
     }
 
     #[test]

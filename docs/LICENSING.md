@@ -106,7 +106,9 @@ the key:
   `runner/zone_enterprise/src/production.rs`;
 - the public key in base64, to record beside the key id;
 - the key id: the one you passed with `--key-id`, or else the next free one
-  for the current year, such as `2026-2`.
+  for the current year, such as `2026-2`. An id may use only letters, digits,
+  `-`, `_` and `.`, because it's pasted into Rust source; `keygen` refuses any
+  other before it generates or prints anything.
 
 Without `--output`, the private key goes to standard output instead. Prefer
 `--output`: it keeps the key out of terminal scrollback and out of a shell
