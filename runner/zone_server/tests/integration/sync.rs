@@ -82,6 +82,7 @@ async fn setup_test_state() -> AppState {
         comfyui: Default::default(),
         source_index: Default::default(),
         evaluation: Default::default(),
+        license_renewal: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
         train_upload_limit_mb: 512,

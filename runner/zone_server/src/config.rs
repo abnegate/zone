@@ -19,6 +19,7 @@ use uuid::Uuid;
 use zone_core::flag::Flag;
 
 use crate::services::hosts::Hosts;
+use crate::services::license::renewal;
 use crate::services::login::claude::ROOT_PATH;
 use crate::workers::evaluation::EvaluationSettings;
 
@@ -150,6 +151,8 @@ pub struct Config {
     pub mcp_commands: bool,
     /// Code quality evaluation around each task run (`ZONE_TASK_EVALUATION*`).
     pub evaluation: EvaluationSettings,
+    /// Automatic renewal of an Enterprise license (`ZONE_LICENSE_RENEWAL*`).
+    pub license_renewal: renewal::Settings,
 }
 
 /// The instance-wide default backend.
@@ -1468,6 +1471,8 @@ impl Config {
             mcp_enabled: Flag::environment(MCP_ENABLED, true),
             mcp_commands: Flag::environment(MCP_COMMANDS, false),
             evaluation: EvaluationSettings::from_process_environment(),
+            license_renewal: renewal::Settings::from_process_environment()
+                .map_err(|error| ConfigError::Invalid(error.message()))?,
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
@@ -1522,6 +1527,7 @@ impl std::fmt::Debug for Config {
             .field("mcp_enabled", &self.mcp_enabled)
             .field("mcp_commands", &self.mcp_commands)
             .field("evaluation", &self.evaluation)
+            .field("license_renewal", &self.license_renewal)
             .finish()
     }
 }
@@ -1605,6 +1611,8 @@ mod tests {
         evaluation::CATEGORIES_VARIABLE,
         evaluation::TOOL_TIMEOUT_VARIABLE,
         evaluation::BUDGET_VARIABLE,
+        renewal::ENABLED_VARIABLE,
+        renewal::URL_VARIABLE,
     ];
     const GITHUB_SETTINGS: [&str; 4] = [
         GITHUB_PULL_REQUEST_TTL,
@@ -1687,6 +1695,7 @@ mod tests {
             mcp_enabled: true,
             mcp_commands: false,
             evaluation: EvaluationSettings::default(),
+            license_renewal: renewal::Settings::default(),
         }
     }
 
@@ -2463,6 +2472,48 @@ mod tests {
                 (enabled, enabled),
                 "ZONE_MCP_ENABLED={value:?}"
             );
+        }
+    }
+
+    #[test]
+    fn license_renewal_is_read_and_a_bad_url_stops_startup() {
+        let mut environment = Variables::isolated(ENVIRONMENT);
+        environment.set("JWT_SECRET", "12345678901234567890123456789012");
+        environment.set("ENCRYPTION_KEY", "abcdefghijklmnopqrstuvwxyz123456");
+        environment.set("DATABASE_URL", "postgres://database/zone");
+        environment.set("REDIS_URL", "redis://cache:6379");
+        environment.set("LITELLM_HOST", "http://models:4000");
+        environment.set("LITELLM_KEY", "models-key");
+
+        assert_eq!(
+            Config::from_env()
+                .expect("required values are present")
+                .license_renewal,
+            renewal::Settings::default()
+        );
+
+        environment.set(renewal::ENABLED_VARIABLE, "false");
+        environment.set(renewal::URL_VARIABLE, "http://signer:8080/licenses/renew");
+        let configured = Config::from_env()
+            .expect("required values are present")
+            .license_renewal;
+        assert!(!configured.enabled);
+        assert_eq!(configured.url.as_str(), "http://signer:8080/licenses/renew");
+
+        for (url, error) in [
+            ("not a url", renewal::SettingsError::Url),
+            (
+                "http://169.254.169.254/latest",
+                renewal::SettingsError::Metadata,
+            ),
+        ] {
+            environment.set(renewal::URL_VARIABLE, url);
+            let refused = Config::from_env().map(|_| ()).unwrap_err();
+            assert!(
+                matches!(refused, ConfigError::Invalid(message) if message == error.message()),
+                "{url}: {refused}"
+            );
+            assert!(!refused.to_string().contains(url), "{refused}");
         }
     }
 
