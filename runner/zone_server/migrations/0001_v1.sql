@@ -294,7 +294,10 @@ CREATE TABLE licenses (
     id smallint DEFAULT 1 NOT NULL PRIMARY KEY,
     key text NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT licenses_singleton_check CHECK (id = 1)
+    renewal_attempted_at timestamp with time zone,
+    renewal_outcome text,
+    CONSTRAINT licenses_singleton_check CHECK (id = 1),
+    CONSTRAINT licenses_renewal_outcome_check CHECK ((renewal_outcome = ANY (ARRAY['renewed'::text, 'current'::text, 'ended'::text, 'refused'::text, 'rejected'::text, 'unreachable'::text])))
 );
 
 CREATE TABLE organizations (

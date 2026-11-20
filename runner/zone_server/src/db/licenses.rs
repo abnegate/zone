@@ -2,7 +2,7 @@ use sqlx::{Executor, PgPool, Postgres};
 
 use super::DbResult;
 
-const SINGLETON: i16 = 1;
+pub const SINGLETON: i16 = 1;
 
 pub async fn get<'e, E>(executor: E) -> DbResult<Option<String>>
 where
@@ -25,7 +25,8 @@ pub async fn replace(pool: &PgPool, key: &str) -> DbResult<Option<String>> {
     let previous = get(&mut *transaction).await?;
     sqlx::query(
         "INSERT INTO licenses (id, key) VALUES ($1, $2)
-         ON CONFLICT (id) DO UPDATE SET key = EXCLUDED.key, updated_at = now()",
+         ON CONFLICT (id) DO UPDATE SET key = EXCLUDED.key, updated_at = now(),
+             renewal_attempted_at = NULL, renewal_outcome = NULL",
     )
     .bind(SINGLETON)
     .bind(key)
@@ -33,6 +34,22 @@ pub async fn replace(pool: &PgPool, key: &str) -> DbResult<Option<String>> {
     .await?;
     transaction.commit().await?;
     Ok(previous)
+}
+
+/// Stores `key` only while `expected` is still the stored key, so a key an
+/// admin installs meanwhile is never overwritten.
+pub async fn replace_if(pool: &PgPool, expected: &str, key: &str) -> DbResult<bool> {
+    let result = sqlx::query(
+        "UPDATE licenses SET key = $3, updated_at = now(),
+             renewal_attempted_at = NULL, renewal_outcome = NULL
+         WHERE id = $1 AND key = $2",
+    )
+    .bind(SINGLETON)
+    .bind(expected)
+    .bind(key)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub async fn remove<'e, E>(executor: E) -> DbResult<Option<String>>

@@ -3,6 +3,7 @@ mod change;
 mod error;
 mod licenses;
 mod loaded;
+pub mod renewal;
 mod stored;
 
 pub use change::Change;

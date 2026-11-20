@@ -26,6 +26,7 @@ pub mod github_connection_states;
 pub mod github_installations;
 pub mod invitations;
 pub mod knowledge;
+pub mod license_renewal;
 pub mod licenses;
 pub mod mcp_servers;
 pub mod memory;
