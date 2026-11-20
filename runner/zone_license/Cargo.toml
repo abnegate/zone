@@ -25,7 +25,7 @@ chrono = { workspace = true }
 clap = { workspace = true }
 getrandom = { workspace = true, features = ["std"] }
 hmac = "=0.13.0"
-lettre = { version = "=0.11.23", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1-native-tls"] }
+lettre = { version = "=0.11.24", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1-native-tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "=0.11.0"
