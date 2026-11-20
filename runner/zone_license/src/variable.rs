@@ -5,6 +5,7 @@ pub enum Variable {
     KeyId,
     WebhookSecret,
     Products,
+    AccessToken,
     Listen,
     SmtpHost,
     SmtpPort,
@@ -16,12 +17,13 @@ pub enum Variable {
 
 impl Variable {
     #[cfg(test)]
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::PrivateKeyFile,
         Self::PrivateKey,
         Self::KeyId,
         Self::WebhookSecret,
         Self::Products,
+        Self::AccessToken,
         Self::Listen,
         Self::SmtpHost,
         Self::SmtpPort,
@@ -38,6 +40,7 @@ impl Variable {
             Self::KeyId => "ZONE_LICENSE_KEY_ID",
             Self::WebhookSecret => "POLAR_WEBHOOK_SECRET",
             Self::Products => "POLAR_PRODUCT_IDS",
+            Self::AccessToken => "POLAR_ACCESS_TOKEN",
             Self::Listen => "ZONE_LICENSE_LISTEN",
             Self::SmtpHost => "SMTP_HOST",
             Self::SmtpPort => "SMTP_PORT",
@@ -74,6 +77,7 @@ mod tests {
                 "ZONE_LICENSE_KEY_ID",
                 "POLAR_WEBHOOK_SECRET",
                 "POLAR_PRODUCT_IDS",
+                "POLAR_ACCESS_TOKEN",
                 "ZONE_LICENSE_LISTEN",
                 "SMTP_HOST",
                 "SMTP_PORT",

@@ -9812,6 +9812,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
  "zone_enterprise",
 ]
 
