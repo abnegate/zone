@@ -13,10 +13,11 @@ The public site: home, pricing, licensing, the post-checkout thank-you page and 
 ## Working on it
 
 ```bash
+bun install --frozen-lockfile         # once, from the repository root
 bun website/generator/serve.ts        # build, then preview at http://127.0.0.1:4321
 bun website/generator/build.ts        # build into website/dist
 (cd website && bun test generator)    # tests
-(cd website && biome check . && bunx tsc -p tsconfig.json)
+(cd website && bunx @biomejs/biome@2.5.12 check . && bunx tsc -p tsconfig.json)
 ```
 
 A template that uses a value `config.ts` does not have fails the build.
@@ -25,10 +26,9 @@ A template that uses a value `config.ts` does not have fails the build.
 
 `unconfirmed` in `config.ts` lists the values that are still placeholders or proposals. The build prints a warning for each one, and in GitHub Actions the warnings show on the run. Remove a key from the list once it is final.
 
-- **`checkoutURL`**: create the Zone Enterprise product in Polar, create a checkout link for it, and paste the link here. Set the checkout link's success URL to `https://<domain>/thanks/`.
-- **`price`**: the price on the site must match the Polar product.
+- **`price`**: if it changes, change the Polar product's price too. The two must match.
 - **`contactEmail`**: a mailbox that someone reads.
-- **`domain`**: the custom domain configured for GitHub Pages. Deployed builds take canonical links from the base URL Pages reports (`SITE_BASE_URL`), so until the custom domain is live they point at `https://abnegate.github.io/zone/`. Local builds and the preview server fall back to `https://<domain>/`.
+- **`domain`**: the custom domain configured for GitHub Pages. Deployed builds take canonical links from the base URL Pages reports (`SITE_BASE_URL`), so until the custom domain is live they point at `https://abnegate.github.io/zone/`. Local builds and the preview server fall back to `https://<domain>/`. Once it is final, set the Polar checkout link's success URL to `https://<domain>/thanks/`.
 
 ## Deploying
 
