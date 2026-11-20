@@ -41,6 +41,7 @@ const communityLicense: LicenseResponse = {
   license: null,
   seats: { used: 1, licensed: null, over: false },
   unverified: null,
+  renewal: null,
 };
 
 const mockWorkspace = {

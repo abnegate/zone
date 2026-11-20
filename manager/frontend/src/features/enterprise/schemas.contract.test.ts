@@ -11,6 +11,9 @@ import {
   LicenseDetailsSchema,
   LicenseRefusalSchema,
   LicenseResponseSchema,
+  RENEWAL_MODES,
+  RENEWAL_OUTCOMES,
+  RenewalSchema,
   SeatsSchema,
   SetLicenseRequestSchema,
   UNVERIFIED_CODES,
@@ -23,6 +26,7 @@ const ENTERPRISE = join(RUNNER, 'zone_enterprise/src');
 const ROUTE = join(SERVER, 'routes/license.rs');
 const COMMON = join(SERVER, 'routes/common.rs');
 const SERVICE = join(SERVER, 'services/license/error.rs');
+const RENEWAL = join(SERVER, 'services/license/renewal');
 const ERRORS = join(ENTERPRISE, 'error.rs');
 
 const CODE = /pub const [A-Z_]+: &str = "([^"]+)";/g;
@@ -75,6 +79,7 @@ describe('the license reads as the server serialises it', () => {
     ['LicenseDetails', LicenseDetailsSchema],
     ['SeatsResponse', SeatsSchema],
     ['UnverifiedResponse', UnverifiedSchema],
+    ['RenewalResponse', RenewalSchema],
   ])('%s carries the same fields on both sides, none of them omitted', (structName, schema) => {
     expect(zodShape(schema)).toEqual(rustShape(ROUTE, structName));
   });
@@ -84,6 +89,7 @@ describe('the license reads as the server serialises it', () => {
     ['LicenseDetails', LicenseDetailsSchema],
     ['SeatsResponse', SeatsSchema],
     ['UnverifiedResponse', UnverifiedSchema],
+    ['RenewalResponse', RenewalSchema],
   ])('%s is null in exactly the fields the server may send as null', (structName, schema) => {
     expect(zodNullable(schema)).toEqual(rustNullable(ROUTE, structName));
   });
@@ -114,6 +120,18 @@ describe('the license vocabularies match the server', () => {
   test('statuses', () => {
     expect(sorted(LICENSE_STATUSES)).toEqual(
       sorted(rustVariants(read(join(ENTERPRISE, 'status.rs')), 'Status'))
+    );
+  });
+
+  test('renewal modes', () => {
+    expect(sorted(RENEWAL_MODES)).toEqual(
+      sorted(rustVariants(read(join(RENEWAL, 'mode.rs')), 'Mode'))
+    );
+  });
+
+  test('renewal outcomes', () => {
+    expect(sorted(RENEWAL_OUTCOMES)).toEqual(
+      sorted(rustVariants(read(join(RENEWAL, 'outcome.rs')), 'Outcome'))
     );
   });
 

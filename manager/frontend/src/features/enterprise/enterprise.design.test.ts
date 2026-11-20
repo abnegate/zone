@@ -38,6 +38,14 @@ describe('license section surfaces', () => {
     expect(rule(css, '.license-unverified p')).toContain('margin: 0');
   });
 
+  it('sets the renewal outcome beside its date and wraps it under on a narrow column', () => {
+    const attempt = rule(css, '.license-renewal-attempt');
+    expect(attempt).toContain('display: flex');
+    expect(attempt).toContain('flex-wrap: wrap');
+    expect(attempt).toContain('align-items: center');
+    expect(attempt).toContain('gap: var(--ui-space-2)');
+  });
+
   it('lets every column shrink below its content', () => {
     for (const selector of [
       '.license-section',
