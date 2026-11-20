@@ -800,8 +800,9 @@ their absolute paths as before.
 
 ### Agent worktrees
 
-A chat agent starts work with `git fetch --prune origin && git worktree add
-.worktrees/<branch> -b <branch> origin/main`, in whichever of the workspace's
+A chat agent starts work with `git fetch --prune origin; git worktree add
+.worktrees/<branch> -b <branch> origin/main`, so a fetch its shell has no
+credential for still leaves it a worktree, in whichever of the workspace's
 **Folders** it is working in. The `worktree-cleanup` housekeeping sweep removes
 them again. Once an hour, for every folder any workspace mounted that is in a git
 repository and has a `.worktrees/` directory, it runs `git worktree remove`,
