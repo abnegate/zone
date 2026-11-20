@@ -74,6 +74,23 @@ cargo tree --workspace --all-features --target all -e all -i libsqlite3-sys
 It reports nothing to print. Remove the ignore once a sqlx release accepts libsqlite3-sys
 0.39.0 or later.
 
+## Patched without a policy exception
+
+Two advisories were fixed directly rather than ignored, since both had a
+same-series patch already permitted by every dependent's version requirement:
+`cargo update -p rustix` moved the lockfile from 1.1.4 to 1.1.6 (RUSTSEC-2026-0486,
+an xattr function marking unwritten bytes as initialized), and
+`cargo update -p lettre` moved it from 0.11.23 to 0.11.24 (RUSTSEC-2026-0560
+through -0565, real vulnerabilities, not just informational advisories).
+
+Separately, `zvariant_derive` (RUSTSEC-2026-0372, unmaintained, no patched
+version) and `glib` (RUSTSEC-2024-0429, unsound, fixed only in >=0.20.0 which no
+dependent in the graph permits yet) also appear in `cargo audit`/`cargo deny`
+output. Neither needs a policy exception: both are informational-severity
+advisories that neither tool fails the build on by default, confirmed by
+running `cargo audit` and `cargo deny check` locally with no ignore entry for
+either ID.
+
 ## jsonwebtoken crypto backend
 
 `jsonwebtoken` 11.0.0 is built with `aws_lc_rs` only, the same aws-lc-rs that
