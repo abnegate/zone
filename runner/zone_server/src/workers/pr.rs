@@ -3192,7 +3192,7 @@ mod publication_tests {
             task.project_ids.clear();
             // Reuse the same live execution after dropping its original fixture checkout.
             std::fs::remove_dir_all(&fixture.path).unwrap();
-            std::fs::remove_dir_all(fixture.checkout.scratch().path()).unwrap();
+            fixture.checkout.scratch().remove().unwrap();
             let checkout = crate::services::checkout::Checkout::prepare(
                 fixture.state.db(),
                 fixture.state.github(),

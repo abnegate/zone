@@ -720,6 +720,7 @@ mod tests {
             in_scratch(LlmBackend::Http, &scratch),
             LlmBackend::Http
         ));
+        scratch.remove().unwrap();
     }
 
     /// An endpoint runs no git, so there is no identity to hand it.

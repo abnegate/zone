@@ -160,21 +160,15 @@ mod tests {
         assert!(!build.exists(), "an idle cache was left to fill the disk");
     }
 
+    /// A build writes its artifacts into the profile's `deps/`, which is
+    /// what keeps a cache whose own directory a build never touches.
     #[test]
-    fn a_write_deep_in_the_profile_keeps_the_cache() {
+    fn a_build_writing_into_the_profile_keeps_the_cache() {
         let temporary = tempfile::tempdir().unwrap();
         let build = target(&temporary.path().join("zone-target2"));
-        let deps = build.join("debug").join("deps");
-        let fresh = SystemTime::now() + IDLE;
-        std::fs::File::options()
-            .write(true)
-            .open(deps.join("libzone.rlib"))
+        std::fs::File::open(build.join("debug").join("deps"))
             .unwrap()
-            .set_modified(fresh)
-            .unwrap();
-        std::fs::File::open(&deps)
-            .unwrap()
-            .set_modified(fresh)
+            .set_modified(SystemTime::now() + IDLE)
             .unwrap();
 
         assert_eq!(Cache::sweep(temporary.path(), later()).unwrap(), 0);

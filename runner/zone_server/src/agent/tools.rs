@@ -3328,14 +3328,6 @@ mod tests {
         assert_eq!(leased.session(), Session::Task(run));
     }
 
-    /// The other half of that threading, and the half neither the park nor the
-    /// registration could prove on its own: the wait a leased tool set opens is
-    /// charged to the run. While the context still assembled with a
-    /// placeholder, every task-run wait counted against `Detached`, which is
-    /// one counter shared by every run at once -- so the per-attempt limit was
-    /// both unreachable on the task surface and exhaustible by a stranger.
-    /// Dispatched through the registry the profile really assembles, with the
-    /// context it really threads, because that pairing is the thing at issue.
     /// Agents named `/tmp/zone-build` and the like themselves and never
     /// removed them, filling the disk. A run's commands find their temporary
     /// directory and cargo's target directory in the run's scratch instead,
@@ -3387,8 +3379,17 @@ mod tests {
             metadata.contains(&format!("\"target_directory\":\"{}\"", target.display())),
             "cargo builds outside the run's scratch: {metadata}"
         );
+        scratch.remove().unwrap();
     }
 
+    /// The other half of that threading, and the half neither the park nor the
+    /// registration could prove on its own: the wait a leased tool set opens is
+    /// charged to the run. While the context still assembled with a
+    /// placeholder, every task-run wait counted against `Detached`, which is
+    /// one counter shared by every run at once -- so the per-attempt limit was
+    /// both unreachable on the task surface and exhaustible by a stranger.
+    /// Dispatched through the registry the profile really assembles, with the
+    /// context it really threads, because that pairing is the thing at issue.
     #[tokio::test]
     async fn a_wait_a_leased_tool_set_opens_is_charged_to_its_run() {
         let directory = tempfile::TempDir::new().expect("a temporary working directory");

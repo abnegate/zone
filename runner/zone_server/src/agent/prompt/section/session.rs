@@ -154,6 +154,7 @@ mod tests {
         );
         assert!(rendered.contains("rather than in /tmp"), "{rendered}");
         assert!(!chat(&environment()).contains("Scratch directory"));
+        scratch.remove().unwrap();
     }
 
     #[test]

@@ -848,21 +848,26 @@ impl Checkout {
     /// Remove the scratch of every run that has ended, which only a run that
     /// crashed or was cut off leaves behind.
     async fn recover_scratch(pool: &PgPool, root: &Path) -> Result<u64, String> {
-        let directory = Scratch::root(root);
-        let entries = {
-            let directory = directory.clone();
-            Self::filesystem(move || Self::entries(&directory)).await?
-        };
+        let registry = Scratch::registry(root);
+        let entries = Self::filesystem(move || Self::entries(&registry)).await?;
         let mut removed = 0;
-        for (run, path) in entries {
+        for (run, marker) in entries {
             if !Self::ended(pool, run)
                 .await
                 .map_err(|_| "Cannot inspect task scratch ownership".to_string())?
             {
                 continue;
             }
-            let directory = directory.clone();
-            match Self::detailed(move || Self::remove_entry(&directory, &path)).await {
+            let Some(owner) = marker
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .and_then(|name| name.split_once('.'))
+                .and_then(|(_, owner)| Uuid::parse_str(owner).ok())
+            else {
+                continue;
+            };
+            let scratch = Scratch::of(root, run, owner);
+            match Self::detailed(move || scratch.remove()).await {
                 Ok(true) => removed += 1,
                 Ok(false) => {}
                 Err(error) => {
@@ -1076,7 +1081,7 @@ impl Checkout {
             self.worktree.is_none(),
         );
         if Self::filesystem(move || {
-            scratch.remove();
+            scratch.release();
             if plain {
                 Self::release(&path);
             }
@@ -1128,13 +1133,20 @@ impl Checkout {
 impl Drop for Checkout {
     /// The fallback for a run that never reached [`Checkout::finish`]: it
     /// panicked or was cancelled. It does what `finish` does without waiting
-    /// on anything: its scratch and a plain directory are removed, and a
+    /// on anything: a plain directory is removed, its scratch is removed on
+    /// a thread of its own, since a build can leave gigabytes there, and a
     /// worktree is left to recovery.
     fn drop(&mut self) {
         if self.finished || !self.root_is_safe() {
             return;
         }
-        self.scratch.remove();
+        let scratch = self.scratch.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("zone-scratch-removal".into())
+            .spawn(move || scratch.release())
+        {
+            tracing::error!(%error, "Cannot start removing a run's scratch; recovery will");
+        }
         if self.worktree.is_none() {
             Self::release(&self.path);
         }
@@ -1286,11 +1298,32 @@ mod tests {
 
     /// A private root of the shape production makes: a temporary directory
     /// is made with the process umask, which is not the 0700 the root demands.
-    fn private_root() -> (tempfile::TempDir, PathBuf) {
+    fn private_root() -> (PrivateRoot, PathBuf) {
         let holder = tempfile::tempdir().unwrap();
         let root = holder.path().join("root");
         Checkout::directory(&root).unwrap();
-        (holder, root)
+        (
+            PrivateRoot {
+                root: root.clone(),
+                _holder: holder,
+            },
+            root,
+        )
+    }
+
+    /// A test's checkout root, which takes the scratch of every run it
+    /// staged with it: a scratch lives in the host's temporary directory,
+    /// outside the root, and a run whose crash a test stages never removes
+    /// its own.
+    struct PrivateRoot {
+        root: PathBuf,
+        _holder: tempfile::TempDir,
+    }
+
+    impl Drop for PrivateRoot {
+        fn drop(&mut self) {
+            Scratch::remove_all(&self.root);
+        }
     }
 
     /// Readying a base is exclusive: a second locker is refused while the
@@ -1845,6 +1878,12 @@ mod tests {
         finished.finish().await;
         drop(cancelled);
 
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ended.iter().any(|(_, scratch)| scratch.exists())
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         for (worktree, scratch) in ended {
             assert!(!scratch.exists(), "{} outlived its run", scratch.display());
             assert!(worktree.exists(), "the worktree waits for recovery");
@@ -1895,7 +1934,7 @@ mod tests {
                     .unwrap()
             );
             let checkout = Checkout::create(&root, run.id, owner).unwrap();
-            std::fs::write(checkout.scratch().path().join("tmp").join("left"), "x").unwrap();
+            std::fs::write(checkout.scratch().path().join("left"), "x").unwrap();
             scratch.push((run.id, owner, checkout.scratch().path().to_path_buf()));
             std::mem::forget(checkout);
         }
@@ -1991,6 +2030,7 @@ mod tests {
         );
         let checkout = Checkout::create(&Checkout::root(&pool), run.id, owner).unwrap();
         let path = checkout.path().to_path_buf();
+        let scratch = checkout.scratch().clone();
         std::fs::write(path.join("private.txt"), "Private repository content").unwrap();
         std::mem::forget(checkout);
         crate::db::tasks::complete_owned_task_run(
@@ -2010,7 +2050,7 @@ mod tests {
         );
         let recovery = crate::workers::task::spawn_recovery(state);
         let recovered = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while path.exists() {
+            while path.exists() || scratch.path().exists() {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
@@ -2021,6 +2061,7 @@ mod tests {
         if path.exists() {
             std::fs::remove_dir_all(&path).unwrap();
         }
+        let _ = scratch.remove();
         sqlx::query("DELETE FROM organizations WHERE id=$1")
             .bind(organization)
             .execute(&pool)
@@ -2028,7 +2069,7 @@ mod tests {
             .unwrap();
         assert!(
             recovered,
-            "production recovery must remove a checkout when Drop never ran"
+            "production recovery must remove a checkout and its scratch when Drop never ran"
         );
     }
 
@@ -2400,7 +2441,16 @@ mod tests {
         assert!(!path.exists());
         assert!(second.path().exists());
         drop(second);
-        std::fs::remove_dir(Scratch::root(&root)).expect("every run's scratch went with it");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::fs::remove_dir(Scratch::registry(&root)).is_err()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            !Scratch::registry(&root).exists(),
+            "a run's scratch outlived it"
+        );
         std::fs::remove_dir(root).unwrap();
     }
 
