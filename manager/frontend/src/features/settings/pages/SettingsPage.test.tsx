@@ -218,7 +218,7 @@ describe('SettingsPage', () => {
       expect(linkLabels('You')).toEqual(['Sessions']);
     });
 
-    it('adds License and Single sign-on under This server for a server admin', () => {
+    it('adds License, Single sign-on and Audit export under This server for a server admin', () => {
       user = { is_admin: true };
 
       renderAt('/settings/workspace/general');
@@ -228,6 +228,7 @@ describe('SettingsPage', () => {
         'Connect a device',
         'License',
         'Single sign-on',
+        'Audit export',
       ]);
     });
 
@@ -243,6 +244,7 @@ describe('SettingsPage', () => {
         'Members',
         'Devices',
         'Audit log',
+        'Audit export',
         'GitHub',
         'MCP servers',
       ]);
@@ -269,7 +271,7 @@ describe('SettingsPage', () => {
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
     });
 
-    it('shows an organization owner and workspace admin all sixteen sections', () => {
+    it('shows an organization owner and workspace admin all seventeen sections', () => {
       signInAs('owner', 'admin');
 
       renderAt('/settings/workspace/general');
@@ -288,6 +290,7 @@ describe('SettingsPage', () => {
         'Members',
         'Devices',
         'Audit log',
+        'Audit export',
         'GitHub',
         'MCP servers',
       ]);

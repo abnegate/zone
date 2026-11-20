@@ -235,6 +235,13 @@
 }
 
 @media (max-width: 768px) {
+  .audit-logs-section .section-row-actions {
+    flex-wrap: wrap;
+    flex-shrink: 1;
+    max-width: 100%;
+    min-width: 0;
+  }
+
   .filter-grid {
     grid-template-columns: minmax(0, 1fr);
   }

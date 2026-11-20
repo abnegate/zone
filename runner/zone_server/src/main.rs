@@ -9,7 +9,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::Utc;
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -18,13 +17,13 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use zone_context::context::ContextService;
-use zone_enterprise::{Edition, status};
 use zone_server::cache::Cache;
 use zone_server::config::Config;
 use zone_server::db::reminders::Sweep;
 use zone_server::db::sealing::Options;
 use zone_server::db::sealing::Sealer;
 use zone_server::routes;
+use zone_server::services::audit::transport::open::Transports;
 use zone_server::services::embedding::create_embedding_service;
 use zone_server::services::embedding::default_embedding_model;
 use zone_server::services::embedding::embedding_engine_from_env;
@@ -206,22 +205,17 @@ async fn main() {
     } else {
         AppState::new_with_mail(config.clone(), db, Some(cache), mail)
     };
-    match state.licenses().load(state.db()).await {
-        Ok(stored) => tracing::info!(
-            edition = %Edition::from(stored.license()),
-            status = %status(stored.license(), Utc::now()),
-            "License loaded"
-        ),
-        Err(error) => {
-            tracing::warn!(%error, "Could not load the license; running as Community until it loads")
-        }
-    }
-    state.mcp().configured().await;
-    state.network_denial().await.announce();
+    state.prepare().await;
 
-    // Start background workers
     zone_server::workers::housekeeping::spawn(state.clone());
     zone_server::workers::reminders::spawn(state.clone(), Sweep::All);
+    zone_server::workers::audit::spawn(
+        state.clone(),
+        Arc::new(Transports::new(
+            Arc::clone(state.master_key()),
+            state.config().endpoint_hosts.clone(),
+        )),
+    );
     if state.config().auto.enabled {
         zone_server::workers::auto_project::spawn(state.clone());
     }

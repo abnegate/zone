@@ -183,6 +183,12 @@ export const AUDIT_ACTIONS = [
   'device.blocked',
   'device.renamed',
   'device_policy.updated',
+  'audit_destination.created',
+  'audit_destination.updated',
+  'audit_destination.deleted',
+  'audit_retention.updated',
+  'audit_retention.applied',
+  'audit_export.downloaded',
 ] as const;
 export const AUDIT_RESOURCE_TYPES = [
   'organization',
@@ -192,6 +198,9 @@ export const AUDIT_RESOURCE_TYPES = [
   'ai_settings',
   'device',
   'device_policy',
+  'audit_destination',
+  'audit_retention',
+  'audit_export',
 ] as const;
 
 export const AuditActionSchema = z.string().min(1);

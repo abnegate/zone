@@ -12,6 +12,7 @@ use super::error::SealingError;
 use super::policy::Policy;
 
 const AGENT_LOGINS: &str = "agent_logins";
+const AUDIT_DESTINATIONS: &str = "audit_destinations";
 const GITHUB_APPS: &str = "github_apps";
 const MCP_SERVERS: &str = "mcp_servers";
 const PROJECTS: &str = "projects";
@@ -55,6 +56,8 @@ pub enum Column {
     LinearApiKey,
     /// `sso_providers.client_secret`, the client secret of a single sign-on provider.
     SsoClientSecret,
+    /// `audit_destinations.secrets`, the sealed credentials of an audit log destination.
+    AuditDestinationSecrets,
     /// A provider key in an AI settings table.
     AiSetting { scope: AiScope, key: AiKey },
 }
@@ -74,6 +77,7 @@ impl Column {
         Self::McpServerSecrets,
         Self::LinearApiKey,
         Self::SsoClientSecret,
+        Self::AuditDestinationSecrets,
         Self::ai(AiScope::Organization, AiKey::LitellmKey),
         Self::ai(AiScope::Organization, AiKey::OpenaiApiKey),
         Self::ai(AiScope::Organization, AiKey::AnthropicApiKey),
@@ -101,6 +105,7 @@ impl Column {
             Self::AgentLoginCredential => AGENT_LOGINS,
             Self::McpServerSecrets => MCP_SERVERS,
             Self::SsoClientSecret => SSO_PROVIDERS,
+            Self::AuditDestinationSecrets => AUDIT_DESTINATIONS,
             Self::AppClientSecret | Self::AppPrivateKey | Self::AppWebhookSecret => GITHUB_APPS,
             Self::AiSetting { scope, .. } => scope.table(),
         }
@@ -119,7 +124,7 @@ impl Column {
             Self::AppClientSecret | Self::SsoClientSecret => "client_secret",
             Self::AppPrivateKey => "private_key",
             Self::AppWebhookSecret => "webhook_secret",
-            Self::McpServerSecrets => "secrets",
+            Self::McpServerSecrets | Self::AuditDestinationSecrets => "secrets",
             Self::AiSetting { key, .. } => key.column(),
         }
     }
@@ -130,7 +135,8 @@ impl Column {
             Self::SourceCredentials
             | Self::AgentLoginCredential
             | Self::McpServerSecrets
-            | Self::SsoClientSecret => Policy::Strict,
+            | Self::SsoClientSecret
+            | Self::AuditDestinationSecrets => Policy::Strict,
             Self::WebhookSecret => Policy::Mixed,
             Self::ProjectToken | Self::GithubSyncToken => Policy::Lenient,
             Self::GithubAppPrivateKey
@@ -193,7 +199,8 @@ impl Column {
             | Self::ProjectToken
             | Self::AgentLoginCredential
             | Self::McpServerSecrets
-            | Self::SsoClientSecret => {
+            | Self::SsoClientSecret
+            | Self::AuditDestinationSecrets => {
                 let table = self.table();
                 let name = self.name();
                 sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -242,6 +249,12 @@ mod tests {
     fn every_column_is_listed_once() {
         let distinct: BTreeSet<Column> = Column::ALL.iter().copied().collect();
         assert_eq!(distinct.len(), Column::ALL.len());
+        let places: BTreeSet<String> = Column::ALL.iter().map(Column::to_string).collect();
+        assert_eq!(
+            places.len(),
+            Column::ALL.len(),
+            "two columns read the same stored value"
+        );
         assert_eq!(
             Column::ALL
                 .iter()
@@ -259,5 +272,33 @@ mod tests {
             .filter(|column| column.policy() == Policy::Lenient)
             .collect();
         assert_eq!(lenient, [Column::ProjectToken, Column::GithubSyncToken]);
+    }
+
+    #[test]
+    fn plaintext_is_refused_by_the_strict_columns() {
+        let strict: Vec<Column> = Column::ALL
+            .iter()
+            .copied()
+            .filter(|column| column.policy() == Policy::Strict)
+            .collect();
+        assert_eq!(
+            strict,
+            [
+                Column::SourceCredentials,
+                Column::AgentLoginCredential,
+                Column::McpServerSecrets,
+                Column::SsoClientSecret,
+                Column::AuditDestinationSecrets,
+            ]
+        );
+    }
+
+    #[test]
+    fn audit_destination_secrets_are_the_secrets_column_of_audit_destinations() {
+        let column = Column::AuditDestinationSecrets;
+        assert_eq!(column.table(), "audit_destinations");
+        assert_eq!(column.name(), "secrets");
+        assert!(column.provider().is_none());
+        assert_eq!(column.to_string(), "audit_destinations.secrets");
     }
 }

@@ -33,6 +33,8 @@ use zone_server::db::sealing::Sealer;
 use zone_server::db::sealing::SealingError;
 use zone_server::db::sealing::Table;
 
+use crate::common::database::dropping;
+
 /// Every test replays the whole migration chain into an empty database and dumps it.
 static DATABASES: Semaphore = Semaphore::const_new(4);
 
@@ -45,6 +47,7 @@ const ENVELOPE_OPENING: &str = "ENC[v1:";
 const ENVELOPE_CLOSING: char = ']';
 const SNAPSHOT_TABLES: &[&str] = &[
     "agent_logins",
+    "audit_destinations",
     "github_apps",
     "mcp_servers",
     "organization_ai_settings",
@@ -57,6 +60,7 @@ const SNAPSHOT_TABLES: &[&str] = &[
 const GITHUB: &str = "github";
 const MCP_SECRETS: &str = "{\"environment\":{\"GITHUB_TOKEN\":\"ghp_mcp\"},\"headers\":{}}";
 const SSO_CLIENT_SECRET: &str = "sso-client-secret";
+const AUDIT_SECRETS: &str = "{\"signing_secret\":\"whsec-audit\"}";
 const LINEAR: &str = "linear";
 const PASSPHRASE: &str = "a-sealing-test-passphrase-of-at-least-32-bytes";
 const MISTAKEN_PASSPHRASE: &str = "a-mistaken-sealing-passphrase-of-at-least-32-bytes";
@@ -306,6 +310,21 @@ impl Scratch {
         id
     }
 
+    /// An audit log destination of `tenant`'s organization holding `secrets` in its secrets column.
+    async fn audit_destination(&self, tenant: &Tenant, secrets: &str) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO audit_destinations(id,organization_id,kind,name,settings,secrets) VALUES($1,$2,'webhook',$1::text,'{\"url\":\"https://siem.example.com/hook\"}'::jsonb,$3)",
+        )
+        .bind(id)
+        .bind(tenant.organization)
+        .bind(secrets)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        id
+    }
+
     async fn ai_settings(&self, tenant: &Tenant, scope: AiScope, value: &str) {
         let table = scope.table();
         let (owner, id) = match scope {
@@ -367,11 +386,13 @@ impl Scratch {
 
     async fn cleanup(self) {
         self.pool.close().await;
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE {} WITH (FORCE)",
-            self.name
-        )))
-        .execute(&self.admin)
+        dropping(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE {} WITH (FORCE)",
+                self.name
+            )))
+            .execute(&self.admin),
+        )
         .await
         .unwrap();
         self.admin.close().await;
@@ -487,6 +508,9 @@ async fn a_dry_run_counts_every_column_and_class_and_writes_nothing() {
         .await;
     scratch.sso_provider(&legacy(SSO_CLIENT_SECRET, &key)).await;
     scratch
+        .audit_destination(&tenant, &legacy(AUDIT_SECRETS, &key))
+        .await;
+    scratch
         .ai_settings(&tenant, AiScope::Organization, "sk-organization")
         .await;
     scratch
@@ -550,6 +574,12 @@ async fn a_dry_run_counts_every_column_and_class_and_writes_nothing() {
             Outcome::Resealed,
         ),
         (Column::SsoClientSecret, Class::Legacy, 1, Outcome::Resealed),
+        (
+            Column::AuditDestinationSecrets,
+            Class::Legacy,
+            1,
+            Outcome::Resealed,
+        ),
         (Column::LinearApiKey, Class::Plaintext, 1, Outcome::Reported),
     ];
     for (column, class, count, outcome) in expected {
@@ -579,6 +609,7 @@ async fn a_dry_run_counts_every_column_and_class_and_writes_nothing() {
     assert!(!printed.contains("ghp_plaintext_project"), "{printed}");
     assert!(!printed.contains("sk-organization"), "{printed}");
     assert!(!printed.contains(SSO_CLIENT_SECRET), "{printed}");
+    assert!(!printed.contains("whsec-audit"), "{printed}");
     scratch.cleanup().await;
 }
 
@@ -608,6 +639,9 @@ async fn legacy_values_are_resealed_in_every_sealed_column() {
         .mcp_server(&tenant, &legacy(MCP_SECRETS, &key))
         .await;
     let provider = scratch.sso_provider(&legacy(SSO_CLIENT_SECRET, &key)).await;
+    let destination = scratch
+        .audit_destination(&tenant, &legacy(AUDIT_SECRETS, &key))
+        .await;
     let backup = scratch.backup(&[]).await;
 
     let report = scratch.run(&key, false, backup.path()).await;
@@ -624,13 +658,14 @@ async fn legacy_values_are_resealed_in_every_sealed_column() {
         ),
         (Column::McpServerSecrets, server, MCP_SECRETS),
         (Column::SsoClientSecret, provider, SSO_CLIENT_SECRET),
+        (Column::AuditDestinationSecrets, destination, AUDIT_SECRETS),
     ];
     for (column, id, credential) in expected {
         let stored = scratch.text(column, id).await.expect("a value");
         assert_eq!(opened(&stored, &key), credential, "{column}");
         assert_eq!(report.outcome(column, Outcome::Resealed), 1, "{column}");
     }
-    assert_eq!(report.written(), 7);
+    assert_eq!(report.written(), 8);
     assert!(report.is_clean());
     scratch.cleanup().await;
 }
@@ -685,6 +720,7 @@ async fn plaintext_in_strict_and_mixed_columns_is_reported_and_unchanged() {
         .await;
     let server = scratch.mcp_server(&tenant, MCP_SECRETS).await;
     let provider = scratch.sso_provider(SSO_CLIENT_SECRET).await;
+    let destination = scratch.audit_destination(&tenant, AUDIT_SECRETS).await;
     let sync = scratch
         .sync_config(
             &tenant,
@@ -731,12 +767,20 @@ async fn plaintext_in_strict_and_mixed_columns_is_reported_and_unchanged() {
             .as_deref(),
         Some(SSO_CLIENT_SECRET)
     );
+    assert_eq!(
+        scratch
+            .text(Column::AuditDestinationSecrets, destination)
+            .await
+            .as_deref(),
+        Some(AUDIT_SECRETS)
+    );
     for column in [
         Column::SourceCredentials,
         Column::AgentLoginCredential,
         Column::WebhookSecret,
         Column::McpServerSecrets,
         Column::SsoClientSecret,
+        Column::AuditDestinationSecrets,
     ] {
         assert_eq!(report.count(column, Class::Plaintext), 1, "{column}");
         assert_eq!(report.outcome(column, Outcome::Reported), 1, "{column}");
@@ -812,6 +856,9 @@ async fn envelopes_are_skipped_byte_for_byte() {
     scratch
         .sso_provider(&envelope(SSO_CLIENT_SECRET, &key))
         .await;
+    scratch
+        .audit_destination(&tenant, &envelope(AUDIT_SECRETS, &key))
+        .await;
     let backup = scratch.backup(&[]).await;
     let before = scratch.snapshot().await;
 
@@ -826,6 +873,7 @@ async fn envelopes_are_skipped_byte_for_byte() {
         Column::AgentLoginCredential,
         Column::McpServerSecrets,
         Column::SsoClientSecret,
+        Column::AuditDestinationSecrets,
     ] {
         assert_eq!(report.count(column, Class::Envelope), 1, "{column}");
         assert_eq!(report.outcome(column, Outcome::Skipped), 1, "{column}");

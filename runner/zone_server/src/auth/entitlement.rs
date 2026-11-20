@@ -61,6 +61,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn audit_streaming_and_retention_name_only_enterprise() {
+        for feature in [Feature::AuditStreaming, Feature::AuditRetention] {
+            assert_eq!(
+                message(feature),
+                "This needs a Zone Enterprise license that is active or in its grace period.",
+                "{feature:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_export_names_team_or_enterprise() {
+        assert_eq!(
+            message(Feature::AuditExport),
+            "This needs a Zone Team or Enterprise license that is active or in its grace period."
+        );
+    }
+
     #[tokio::test]
     async fn a_refusal_is_forbidden_with_the_license_code() {
         let response = Unentitled(Feature::Sso).into_response();

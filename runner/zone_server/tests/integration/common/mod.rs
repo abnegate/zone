@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+pub mod audit;
 pub mod comfy;
 pub mod context;
 pub mod database;

@@ -1172,7 +1172,11 @@ export async function routeWorkspaceRole(page: Page, role: string): Promise<void
   );
 }
 
-export async function setupAdminAuth(page: Page, withheld: readonly string[] = []) {
+export async function setupAdminAuth(
+  page: Page,
+  withheld: readonly string[] = [],
+  now: Date = new Date()
+) {
   const fullAdminPermissions = [
     ...adminPermissions,
     'organizations:read',
@@ -1188,7 +1192,7 @@ export async function setupAdminAuth(page: Page, withheld: readonly string[] = [
     email: mockAdminUser.email,
     roles: ['admin', 'user'],
     permissions: fullAdminPermissions,
-    exp: Math.floor(Date.now() / 1000) + 3600,
+    exp: Math.floor(now.getTime() / 1000) + 3600,
   });
 
   await page.evaluate(

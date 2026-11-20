@@ -9,6 +9,8 @@
 use sqlx::{AssertSqlSafe, Connection, PgConnection};
 use std::path::{Path, PathBuf};
 
+use crate::common::database::dropping;
+
 const SCRATCH_DATABASE: &str = "zone_migration_atomicity";
 
 fn migrations_directory() -> PathBuf {
@@ -84,8 +86,7 @@ async fn the_initial_schema_applies_to_an_empty_database() {
     let create_scratch = format!("CREATE DATABASE {SCRATCH_DATABASE}");
 
     let mut maintenance = connect_to_maintenance_database().await;
-    sqlx::raw_sql(AssertSqlSafe(drop_scratch.clone()))
-        .execute(&mut maintenance)
+    dropping(sqlx::raw_sql(AssertSqlSafe(drop_scratch.clone())).execute(&mut maintenance))
         .await
         .expect("scratch database can be dropped");
     sqlx::raw_sql(AssertSqlSafe(create_scratch))
@@ -107,9 +108,7 @@ async fn the_initial_schema_applies_to_an_empty_database() {
     drop(scratch);
 
     let mut maintenance = connect_to_maintenance_database().await;
-    let _ = sqlx::raw_sql(AssertSqlSafe(drop_scratch))
-        .execute(&mut maintenance)
-        .await;
+    let _ = dropping(sqlx::raw_sql(AssertSqlSafe(drop_scratch)).execute(&mut maintenance)).await;
 }
 
 #[test]

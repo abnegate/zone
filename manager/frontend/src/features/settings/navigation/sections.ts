@@ -25,6 +25,7 @@ export const SettingsSection = {
   Members: 'members',
   Devices: 'devices',
   Audit: 'audit',
+  AuditExport: 'audit-export',
   GitHub: 'github',
   Mcp: 'mcp',
   Features: 'features',
@@ -63,6 +64,8 @@ export const GROUP_LABELS: Record<SettingsGroup, string> = {
 const SOURCES_LABEL = 'Sources';
 
 const AGENT_POLICY_LABEL = 'Agent policy';
+
+const AUDIT_EXPORT_LABEL = 'Audit export';
 
 const LOCATION_SEPARATOR = ' → ';
 
@@ -167,6 +170,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
   },
   {
     group: SettingsGroup.Organization,
+    section: SettingsSection.AuditExport,
+    label: AUDIT_EXPORT_LABEL,
+    visible: administersOrganization,
+  },
+  {
+    group: SettingsGroup.Organization,
     section: SettingsSection.GitHub,
     label: 'GitHub',
     visible: inOrganization,
@@ -199,6 +208,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     group: SettingsGroup.Server,
     section: SettingsSection.Sso,
     label: 'Single sign-on',
+    visible: administersServer,
+  },
+  {
+    group: SettingsGroup.Server,
+    section: SettingsSection.AuditExport,
+    label: AUDIT_EXPORT_LABEL,
     visible: administersServer,
   },
   {

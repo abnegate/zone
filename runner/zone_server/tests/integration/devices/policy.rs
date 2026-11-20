@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use super::{Phone, device_named, listed_devices, login, register};
 use crate::common::TestClient;
+use crate::common::database::dropping;
 use zone_server::db::devices::{self, Mode};
 use zone_server::db::migrations;
 
@@ -47,10 +48,11 @@ impl Database {
 
     async fn close(self) {
         self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!("DROP DATABASE {}", self.name)))
-            .execute(&self.admin)
-            .await
-            .expect("the policy test database drops");
+        dropping(
+            sqlx::query(AssertSqlSafe(format!("DROP DATABASE {}", self.name))).execute(&self.admin),
+        )
+        .await
+        .expect("the policy test database drops");
         self.admin.close().await;
     }
 }
