@@ -175,17 +175,16 @@ The tool path in `agent/integrations.rs` calls `assess` with `Depth::Full`, whic
 ### State, config, permissions, audit
 
 - **State:** `AppState.github_snapshots: Snapshots`, built from `config.github` in every constructor. The accessor is `github_snapshots()`. `AppState::github()` is still the GitHub App provider.
-- **Config:** `GithubConfig { pull_request_ttl: Duration, release_ttl: Duration, release_window_days: u32, open_pull_request_limit: u32, admin_merge: bool }`, read from these variables:
+- **Config:** `GithubConfig { pull_request_ttl: Duration, release_ttl: Duration, release_window_days: u32, admin_merge: bool }`, read from these variables:
 
   | Variable | Default | Range |
   |---|---|---|
   | `ZONE_GITHUB_PULL_REQUEST_TTL_SECONDS` | 45 | 10..3600 |
   | `ZONE_GITHUB_RELEASE_TTL_SECONDS` | 120 | 10..3600 |
   | `ZONE_GITHUB_RELEASE_WINDOW_DAYS` | 7 | 1..90 |
-  | `ZONE_GITHUB_OPEN_PULL_REQUEST_LIMIT` | 50 | 1..200 |
   | `ZONE_GITHUB_ADMIN_MERGE` | false | |
 
-  They are documented in `docs/CONFIGURATION.md`. The service constants are pipeline TTL 15 s, options TTL 300 s, refresh floor 10 s, diff budget 4 MiB (also the per-file fallback's patch budget), diff permits 4, credential permits 8 (a pull request listing runs its assessments up to the credential's permits, 8, at a time), log tail 1 MiB, failed-check re-assessment after 120 s, any kept assessment re-assessed after 5 min, idle cache keys swept after 1 h, a release with no run settled 1 h after publishing (`RUN_GRACE`), and release pipelines looked up only inside the default window, at least 24 h (`GithubConfig::pipeline_horizon`).
+  They are documented in `docs/CONFIGURATION.md`. A listing pages until GitHub has no more open pull requests to give, bounded only by the refresh deadline. The service constants are pipeline TTL 15 s, options TTL 300 s, refresh floor 10 s, diff budget 4 MiB (also the per-file fallback's patch budget), diff permits 4, credential permits 8 (a pull request listing runs its assessments up to the credential's permits, 8, at a time), log tail 1 MiB, failed-check re-assessment after 120 s, any kept assessment re-assessed after 5 min, idle cache keys swept after 1 h, a release with no run settled 1 h after publishing (`RUN_GRACE`), and release pipelines looked up only inside the default window, at least 24 h (`GithubConfig::pipeline_horizon`).
 - **Origin:** `GITHUB_API_URL` was already validated in `config.rs`. The crate handles GitHub Enterprise `/api/v3` and `/api/graphql`. The web origin, `GITHUB_WEB_URL`, is held by each `Github` client: an Actions job link and a release-triggered run link are accepted only at that origin, so GitHub Enterprise job logs and release pipelines are read.
 - **Permissions:** `0010_pull_request_and_release_permissions.sql` seeds the four permissions and the role grants. Both use `ON CONFLICT DO NOTHING`, with no `BEGIN;`/`COMMIT;`. The four names are also in the hard-coded admin list in `db/users.rs::get_user_with_permissions`. `auth::Permission` gains `PullRequestsUpdate` and `ReleasesCreate`, which `auth/github_guard.rs` requires from the caller's claims.
 - **Audit:** `actions::PULL_REQUEST_MERGED` and `actions::RELEASE_CREATED` on `resources::PULL_REQUEST` and `resources::RELEASE`, with the source id as `resource_id`, written through `routes::common::audit` after success inside the spawned task. The merge records `source_id, number, head, method, sha, admin, url`; the release records `source_id, release_id, tag, url, prerelease`.
