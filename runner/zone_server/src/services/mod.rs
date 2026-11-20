@@ -28,6 +28,7 @@ pub mod mcp_servers;
 pub mod media_source;
 pub mod model;
 pub mod network_denial;
+pub mod policy;
 pub mod prioritisation;
 pub mod project_directory;
 pub mod provider;

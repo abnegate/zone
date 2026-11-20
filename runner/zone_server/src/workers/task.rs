@@ -36,6 +36,8 @@ use uuid::Uuid;
 use zone_core::llm::BuiltinTools;
 use zone_core::llm::LlmBackend;
 use zone_core::llm::LlmClient;
+use zone_enterprise::policy::Denial;
+use zone_enterprise::policy::Effective;
 
 use crate::agent;
 use crate::agent::AgentEvent;
@@ -54,6 +56,7 @@ use crate::agent::wait;
 use crate::agent::wait::Waited;
 use crate::agent::wait::Waiting;
 use crate::config::ModelBackend;
+use crate::db::audit::actions;
 use crate::db::task_tool_calls;
 use crate::db::tasks;
 use crate::services::backend;
@@ -64,10 +67,15 @@ use crate::services::endpoint::Endpoint;
 use crate::services::failure::unreachable;
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router;
+use crate::services::policy;
+use crate::services::policy::Auditor;
+use crate::services::policy::Denied;
+use crate::services::policy::Subject;
 use crate::services::route::Reason;
 use crate::services::route::Route;
 use crate::services::route::Unusable;
 use crate::services::stages;
+use crate::services::task_progress::{self, ProgressMessage};
 use crate::state::AppState;
 use crate::workers::evaluation;
 use crate::workers::evaluation::Evaluator;
@@ -248,6 +256,8 @@ struct Fault {
     login: Option<Box<LoginIdentity>>,
     /// The login the run was handed over to, when it was.
     rerouted: Option<Box<LoginIdentity>>,
+    /// The agent policy's denial the attempt failed on, when it did.
+    denial: Option<Denial>,
 }
 
 impl Fault {
@@ -259,6 +269,7 @@ impl Fault {
             limit: None,
             login: None,
             rerouted: None,
+            denial: None,
         }
     }
 
@@ -309,14 +320,17 @@ impl Fault {
     }
 
     /// The backend an attempt was to run on could not be resolved. Only a
-    /// database read can succeed on a later attempt, and every login being
-    /// exhausted, once the earliest resets: a sign-in that failed needs an
-    /// admin, and a state directory that cannot be made, an operator.
+    /// database read can succeed on a later attempt, an agent policy that
+    /// could not be read among them, and every login being exhausted, once
+    /// the earliest resets: a sign-in that failed needs an admin, a state
+    /// directory that cannot be made, an operator, and a policy denial, a
+    /// policy change.
     fn backend(error: backend::Error) -> Self {
         let failure = match error {
             backend::Error::Database { .. }
+            | backend::Error::Denied(Denial::Unreadable)
             | backend::Error::Unusable(Unusable {
-                reason: Reason::Unreadable,
+                reason: Reason::Unreadable | Reason::Denied(Denial::Unreadable),
             }) => Failure::Transient,
             backend::Error::Limited { resets_at, .. } => Failure::RateLimited {
                 retry_after: resets_at.and_then(remaining),
@@ -324,9 +338,13 @@ impl Fault {
             backend::Error::SignedOut { .. }
             | backend::Error::Renewal { .. }
             | backend::Error::Home { .. }
+            | backend::Error::Denied(_)
             | backend::Error::Unusable(_) => Failure::Terminal,
         };
-        Self::new(failure, RUN_FAILED, error.to_string())
+        Self {
+            denial: error.denial(),
+            ..Self::new(failure, RUN_FAILED, error.to_string())
+        }
     }
 
     /// This fault, of an attempt that ran under `login`.
@@ -412,6 +430,7 @@ impl From<Unprepared> for Fault {
     fn from(unprepared: Unprepared) -> Self {
         match unprepared {
             Unprepared::Backend(error) => Self::backend(error),
+            Unprepared::Denied { denial, .. } => Self::backend(backend::Error::Denied(denial)),
             unprepared => Self::new(Failure::Terminal, RUN_FAILED, unprepared.to_string()),
         }
     }
@@ -1079,8 +1098,26 @@ async fn lose_lease(state: &AppState, run_id: Uuid, owner: Uuid) -> Lapse {
         return Lapse::Lost;
     }
     match tokio::time::timeout(HEARTBEAT_TIMEOUT, tasks::get_task_run(state.db(), run_id)).await {
-        Ok(Ok(Some(run))) if run.status == tasks::CANCELLED => Lapse::Stopped,
+        Ok(Ok(Some(run))) => {
+            announce_ending(&run);
+            match run.status == tasks::CANCELLED {
+                true => Lapse::Stopped,
+                false => Lapse::Lost,
+            }
+        }
         _ => Lapse::Lost,
+    }
+}
+
+/// Tells whoever still watches `run` how it ended when the writer that ended it never did: the
+/// heartbeat can see a run's own ending land and win the race against the pipeline that wrote
+/// it, which is then dropped before it announces the ending.
+fn announce_ending(run: &tasks::TaskRunRow) {
+    let error = run.error_message.as_deref();
+    if task_progress::progress().tracks(run.id)
+        && ProgressMessage::terminal(&run.status, error).is_some()
+    {
+        task_progress::publish_terminal(run.id, &run.status, error);
     }
 }
 
@@ -1291,6 +1328,10 @@ async fn execute_in_checkout<'a>(
         Err(unprepared) => {
             obs.set_status(RUN_FAILED);
             tracing::error!("Task {} cannot start: {}", task_id, unprepared);
+            if let Some((denial, model)) = unprepared.denial() {
+                let model = model.or(task.model_name.as_deref());
+                refused(state, &task, execution.actor, denial, model).await;
+            }
             if let Err(error) = tasks::complete_owned_task_run(
                 state.db(),
                 run_id,
@@ -1349,6 +1390,7 @@ async fn execute_in_checkout<'a>(
     // validates `triggered_by` against active membership, and a task whose
     // author has since been cleared must not cost its initiator their memory.
     let actor = run.triggered_by;
+    let enforcement = Enforcement::of(state, &route, workspace_id, actor, task_id);
 
     // The model the run runs on is written down so the reviewer can be chosen
     // against it.
@@ -1405,6 +1447,7 @@ async fn execute_in_checkout<'a>(
     // starts from it rather than asking the person again.
     let approval = plan::Approval::default();
     let approval = &approval;
+    let enforcement = enforcement.as_ref();
 
     let result = run_with_policy(
         policy,
@@ -1438,6 +1481,7 @@ async fn execute_in_checkout<'a>(
                 unattended,
                 approval,
                 LoopBudget::task(),
+                enforcement,
             )
             .await;
             let outcome = match outcome {
@@ -1515,6 +1559,10 @@ async fn execute_in_checkout<'a>(
             );
         }
         Err(stopped) => {
+            if let Some(denial) = stopped.fault.denial {
+                let model = seat.lock().await.current().to_string();
+                refused(state, task, actor, denial, Some(&model)).await;
+            }
             obs.set_status(if stopped.exhausted {
                 "exhausted"
             } else {
@@ -1565,7 +1613,8 @@ struct Prepared {
 /// run at that endpoint.
 ///
 /// A plan waits for approval on a card only zone's own loop raises, so a run
-/// that needs one cannot start on a coding agent at all.
+/// that needs one cannot start on a coding agent at all, and a run on a model
+/// the route's agent policy refuses does not start.
 async fn prepare(
     state: &AppState,
     task: &tasks::TaskRow,
@@ -1574,7 +1623,7 @@ async fn prepare(
     plan_approval: bool,
 ) -> Result<Prepared, Unprepared> {
     let preferences = route.preferences(&state.config().comfyui.classifier_model);
-    let endpoint = route.into_endpoint().map_err(backend::Error::from)?;
+    let endpoint = route.endpoint().map_err(backend::Error::from)?.clone();
     let Resolved { backend, login } = resolved?;
     if plan_approval && matches!(backend, LlmBackend::Cli { .. }) {
         return Err(Unprepared::Refused(match state.config().model_backend() {
@@ -1585,6 +1634,7 @@ async fn prepare(
     let model = resolve_model(state, task, &backend, &endpoint, &preferences)
         .await
         .map_err(Unprepared::Model)?;
+    let model = admitted(&route, &backend, model).await?;
     Ok(Prepared {
         backend,
         endpoint,
@@ -1623,6 +1673,40 @@ async fn routed(
         .resolve(state, tried, Some(login.id), running)
         .await
         .map_err(Fault::backend)
+}
+
+async fn admitted(
+    route: &Route,
+    backend: &LlmBackend,
+    model: String,
+) -> Result<String, Unprepared> {
+    match route.admit(backend, &model).await {
+        Ok(()) => Ok(model),
+        Err(denial) => Err(Unprepared::Denied { denial, model }),
+    }
+}
+
+async fn refused(
+    state: &AppState,
+    task: &tasks::TaskRow,
+    actor: Option<Uuid>,
+    denial: Denial,
+    model: Option<&str>,
+) {
+    tracing::warn!(task_id = %task.id, code = denial.code(), model, "The agent policy refused the run");
+    policy::record(
+        state,
+        actions::AGENT_POLICY_TURN_DENIED,
+        &Denied {
+            workspace: task.workspace_id,
+            organization: None,
+            actor,
+            subject: Subject::Task(task.id),
+            denial,
+            detail: model,
+        },
+    )
+    .await;
 }
 
 /// Brings what the organization knows of `login`'s usage up to date once an
@@ -2381,6 +2465,7 @@ async fn attempt_run<'a>(
     unattended: bool,
     approval: &plan::Approval,
     budget: LoopBudget,
+    enforcement: Option<&Enforcement>,
 ) -> Result<TaskOutcome, Fault> {
     // A task that requires its plan approved changes nothing until it is:
     // every tool that would is refused, turn after turn, until the answer
@@ -2400,6 +2485,7 @@ async fn attempt_run<'a>(
             workspace,
             plan_held,
             unattended,
+            enforcement,
         )
         .await,
     );
@@ -2421,6 +2507,7 @@ async fn attempt_run<'a>(
     }
     let mut system_prompt = prompt::task(&tools, &environment);
     system_prompt.push_str(guidance);
+    let approvals = enforcement.map_or_else(ApprovalPolicy::unattended, Enforcement::approvals);
     let mut agent_tools = crate::mcp::AgentTools::serve(
         backend,
         &mut tools,
@@ -2428,7 +2515,7 @@ async fn attempt_run<'a>(
             workspace: workspace_id,
             chat: run_id,
             user: actor,
-            approval: ApprovalPolicy::auto(),
+            approval: approvals.clone(),
             calls: budget.max_tool_calls,
             builtin: BuiltinTools::Withheld,
         },
@@ -2483,6 +2570,7 @@ async fn attempt_run<'a>(
                 &callback,
                 agent_tools.as_mut().map(|served| &mut served.calls),
                 metered.as_mut().map(|metered| &mut metered.meter),
+                approvals.clone(),
             )
             .await
             {
@@ -2526,6 +2614,7 @@ async fn attempt_run<'a>(
                         workspace,
                         plan_held,
                         unattended,
+                        enforcement,
                     )
                     .await;
                 }
@@ -2554,6 +2643,7 @@ async fn attempt_run<'a>(
                         workspace,
                         plan_held,
                         unattended,
+                        enforcement,
                     )
                     .await;
                 }
@@ -2735,10 +2825,16 @@ async fn task_tools(
     workspace: &Path,
     plan_held: bool,
     unattended: bool,
+    enforcement: Option<&Enforcement>,
 ) -> ChatTools {
-    let tools = ChatTools::for_task(state, workspace.to_path_buf(), workspace_id, actor)
-        .await
-        .with_task_lease(state.db().clone(), run_id, owner);
+    let policy = enforcement.map(|enforcement| enforcement.policy.clone());
+    let tools =
+        ChatTools::for_task_with(state, workspace.to_path_buf(), workspace_id, actor, policy)
+            .await
+            .with_task_lease(state.db().clone(), run_id, owner);
+    if let Some(enforcement) = enforcement {
+        tools.set_recorder(enforcement.auditor.egress());
+    }
     let tools = if unattended {
         tools.unattended()
     } else {
@@ -2748,6 +2844,42 @@ async fn task_tools(
         tools.with_plan_approval().holding_for_plan()
     } else {
         tools
+    }
+}
+
+struct Enforcement {
+    policy: Arc<Effective>,
+    auditor: Auditor,
+}
+
+impl Enforcement {
+    fn of(
+        state: &AppState,
+        route: &Route,
+        workspace: Uuid,
+        actor: Option<Uuid>,
+        task: Uuid,
+    ) -> Option<Self> {
+        let policy = route.policy()?;
+        Some(Self {
+            policy: Arc::new(policy.clone()),
+            auditor: Auditor::new(
+                state.clone(),
+                workspace,
+                route.organization(),
+                actor,
+                Subject::Task(task),
+            ),
+        })
+    }
+
+    /// Nobody attends a run, so a call above the ceiling is withheld rather
+    /// than asked about, and audited.
+    fn approvals(&self) -> ApprovalPolicy {
+        let approvals = ApprovalPolicy::unattended()
+            .with_ceiling(crate::services::policy::ceiling(&self.policy));
+        approvals.set_recorder(self.auditor.approvals());
+        approvals
     }
 }
 
@@ -3279,6 +3411,7 @@ async fn run_task_loop(
     callback: &DatabaseTaskCallback,
     calls: Option<&mut mpsc::UnboundedReceiver<AgentEvent>>,
     mut meter: Option<&mut Meter<'_>>,
+    approval: ApprovalPolicy,
 ) -> Result<TurnOutcome, Halt> {
     callback.on_phase_change(AgentPhase::Thinking, None);
     let mut summary = String::new();
@@ -3292,7 +3425,7 @@ async fn run_task_loop(
             tools,
             messages: Vec::new(),
             budget,
-            approval: ApprovalPolicy::auto(),
+            approval,
         },
         &mut context,
         true,
@@ -4309,6 +4442,7 @@ mod tests {
                 &callback,
                 None,
                 None,
+                ApprovalPolicy::unattended(),
             ),
         )
         .await
@@ -4468,6 +4602,7 @@ mod tests {
                 &callback,
                 None,
                 None,
+                ApprovalPolicy::unattended(),
             ),
         )
         .await
@@ -5237,6 +5372,7 @@ mod retry_tests {
                 &callback,
                 None,
                 None,
+                ApprovalPolicy::unattended(),
             ),
         )
         .await
@@ -5586,6 +5722,40 @@ mod retry_tests {
             let message = error.to_string();
             let fault = Fault::backend(error);
             assert_eq!(fault.failure, Failure::Terminal, "{message}");
+            assert_eq!(fault.message, message);
+        }
+    }
+
+    /// A policy that could not be read may be read on the next attempt; a
+    /// policy that denies the run denies every attempt alike.
+    #[test]
+    fn a_backend_a_policy_denies_is_retried_only_when_the_policy_could_not_be_read() {
+        use zone_enterprise::policy;
+
+        for (error, failure) in [
+            (
+                backend::Error::Denied(Denial::Unreadable),
+                Failure::Transient,
+            ),
+            (
+                backend::Error::Unusable(Unusable::from(Reason::Denied(Denial::Unreadable))),
+                Failure::Transient,
+            ),
+            (
+                backend::Error::Denied(Denial::Agent(policy::Agent::Codex)),
+                Failure::Terminal,
+            ),
+            (
+                backend::Error::Unusable(Unusable::from(Reason::Denied(Denial::Provider(
+                    policy::Provider::OpenAI,
+                )))),
+                Failure::Terminal,
+            ),
+            (backend::Error::Denied(Denial::Model), Failure::Terminal),
+        ] {
+            let message = error.to_string();
+            let fault = Fault::backend(error);
+            assert_eq!(fault.failure, failure, "{message}");
             assert_eq!(fault.message, message);
         }
     }
@@ -6656,6 +6826,29 @@ mod watchdog_tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_lapsed_lease_announces_an_ending_its_pipeline_wrote_but_never_announced() {
+        let _execution = EXECUTION.lock().await;
+        let (pool, _observed, state, run, owner) = parked_fixture().await;
+        let mut progress = task_progress::progress().subscribe(run);
+        sqlx::query("UPDATE task_runs SET status = $2, error_message = $3 WHERE id = $1")
+            .bind(run)
+            .bind(RUN_FAILED)
+            .bind(LOST_LEASE)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let lapse = lose_lease(&state, run, owner).await;
+
+        assert_eq!(lapse, Lapse::Lost);
+        match progress.try_recv() {
+            Ok(ProgressMessage::Failed { error }) => assert_eq!(error, LOST_LEASE),
+            other => panic!("the run's watchers were never told it failed: {other:?}"),
+        }
+        assert!(!task_progress::progress().tracks(run));
+    }
+
     /// Waiting for a run to park has to end when the run does. A run that
     /// never parks never writes 'waiting', and a wait that only watched the
     /// row for it would hang the test instead of failing it.
@@ -7010,6 +7203,7 @@ mod watchdog_tests {
                 false,
                 &plan::Approval::default(),
                 PARKING_CEILING,
+                None,
             ),
         )
         .await
@@ -7871,6 +8065,7 @@ mod watchdog_tests {
             false,
             &approval,
             LoopBudget::task(),
+            None,
         );
         // The row is watched on the real clock: a paused one jumps to the next
         // timer while a query is in flight. Only once the run is parked, with
@@ -8015,6 +8210,7 @@ mod watchdog_tests {
             false,
             &plan::Approval::default(),
             LoopBudget::task(),
+            None,
         )
         .await
         .expect("an attempt that waits on nothing finishes");
@@ -8066,6 +8262,7 @@ mod cli_tests {
     use wiremock::MockServer;
     use zone_core::llm::SignIn;
     use zone_core::llm::Toolset;
+    use zone_enterprise::policy::{Effective, Rules};
 
     const ANSWER: &str = "Wrote it.";
     const EXECUTABLE: &str = "claude";
@@ -8975,6 +9172,94 @@ mod cli_tests {
         .with_sign_in(SignIn::Organization)
     }
 
+    fn governed(state: &AppState, provider: &str, rules: Rules) -> Route {
+        Route::new(
+            state.config(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            crate::services::endpoint::testing::settings(provider),
+        )
+        .with_policy(Some(Effective::new(rules, Rules::default())))
+    }
+
+    /// A run re-routed onto an agent its policy denies never runs an attempt
+    /// on it, and only a policy change could let it, so it is not retried.
+    #[tokio::test]
+    async fn an_attempt_routed_onto_an_agent_the_policy_denies_fails_for_good() {
+        let state = AppState::new(
+            crate::state::test_config(),
+            crate::state::unreachable_pool(),
+            None,
+        );
+        let route = governed(
+            &state,
+            PROVIDER_CLAUDE_CODE,
+            Rules {
+                agents: Some(Vec::new()),
+                ..Rules::default()
+            },
+        );
+        let login = LoginIdentity {
+            id: Uuid::new_v4(),
+            agent: AgentKind::Claude,
+            label: "jake@example.com".to_string(),
+        };
+
+        let fault = routed(
+            &state,
+            &route,
+            &signed_in("first-access"),
+            Some(&login),
+            &[],
+            None,
+        )
+        .await
+        .expect_err("a denied agent runs no attempt");
+
+        let denial = Denial::Agent(zone_enterprise::policy::Agent::Claude);
+        assert_eq!(fault.failure, Failure::Terminal);
+        assert_eq!(fault.message, denial.to_string());
+        assert_eq!(fault.denial, Some(denial));
+    }
+
+    /// A model the policy does not list never runs, and fails the run with the
+    /// denial; a policy that could not be read fails only this attempt.
+    #[tokio::test]
+    async fn a_run_on_a_model_the_policy_denies_is_not_prepared() {
+        let state = AppState::new(
+            crate::state::test_config(),
+            crate::state::unreachable_pool(),
+            None,
+        );
+        let route = governed(
+            &state,
+            PROVIDER_CLAUDE_CODE,
+            Rules {
+                models: Some(vec!["claude-opus-*".to_string()]),
+                ..Rules::default()
+            },
+        );
+        let backend = signed_in("first-access");
+
+        let allowed = admitted(&route, &backend, "claude-opus-4-1".to_string()).await;
+        let refused = admitted(&route, &backend, "sonnet".to_string())
+            .await
+            .expect_err("a model the policy does not list");
+
+        assert_eq!(allowed.ok().as_deref(), Some("claude-opus-4-1"));
+        assert_eq!(refused.denial(), Some((Denial::Model, Some("sonnet"))));
+        assert_eq!(refused.to_string(), Denial::Model.to_string());
+        let fault = Fault::from(refused);
+        assert_eq!(fault.failure, Failure::Terminal);
+        assert_eq!(fault.denial, Some(Denial::Model));
+        let unreadable = Fault::from(Unprepared::Denied {
+            denial: Denial::Unreadable,
+            model: "sonnet".to_string(),
+        });
+        assert_eq!(unreadable.failure, Failure::Transient);
+        assert_eq!(unreadable.denial, Some(Denial::Unreadable));
+    }
+
     /// A login that cannot be read may since have been renewed or signed out,
     /// so the attempt is retried rather than run on the sign-in it had.
     #[tokio::test]
@@ -9212,6 +9497,7 @@ mod cli_tests {
             false,
             &plan::Approval::default(),
             LoopBudget::task(),
+            None,
         )
         .await
     }
@@ -9405,6 +9691,7 @@ mod cli_tests {
             &callback,
             Some(&mut calls),
             None,
+            ApprovalPolicy::unattended(),
         )
         .await
         .expect("the turn finishes");

@@ -6,6 +6,7 @@ import { type SettingsAccess, SettingsGroup, SettingsSection } from '../navigati
 const organizationId = 'org-1';
 const workspaceId = 'ws-1';
 const organizationDefaultsPath = '/settings/organization/ai';
+const organizationPolicyPath = '/settings/organization/agent-policy';
 
 const workspaceContext: {
   currentOrganization: { id: string } | null;
@@ -50,7 +51,9 @@ mock.module('../server/components', () => ({
 
 mock.module('../../enterprise', () => ({
   LicenseSection: marker('license-section'),
+  OrganizationPolicySection: marker('organization-policy-section'),
   SsoSection: marker('sso-section'),
+  WorkspacePolicySection: marker('workspace-policy-section'),
 }));
 
 mock.module('../../auth/components', () => ({
@@ -212,6 +215,60 @@ describe('SettingsContent', () => {
         );
       });
     }
+  });
+
+  describe('agent policy', () => {
+    const cases: { role: OrgRole; path: string | undefined }[] = [
+      { role: 'member', path: undefined },
+      { role: 'admin', path: organizationPolicyPath },
+      { role: 'owner', path: organizationPolicyPath },
+    ];
+
+    for (const { role, path } of cases) {
+      it(`${path ? 'links' : 'does not link'} an organization ${role} from the workspace policy to the organization policy`, () => {
+        renderSection(SettingsGroup.Workspace, SettingsSection.AgentPolicy, access('viewer', role));
+        expect(propsOf('workspace-policy-section')).toEqual(
+          path === undefined
+            ? { organizationId, workspaceId }
+            : { organizationId, workspaceId, organizationPolicyPath: path }
+        );
+      });
+    }
+
+    for (const role of ['member', 'admin', 'owner'] as const) {
+      it(`shows the organization policy to an organization ${role} and leaves editing to the server`, () => {
+        renderSection(
+          SettingsGroup.Organization,
+          SettingsSection.AgentPolicy,
+          access('viewer', role)
+        );
+        expect(propsOf('organization-policy-section')).toEqual({ organizationId });
+      });
+    }
+
+    it('renders no workspace policy without a current workspace', () => {
+      workspaceContext.currentWorkspace = null;
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Workspace}
+          section={SettingsSection.AgentPolicy}
+          access={access('admin', 'admin')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('renders no organization policy without a current organization', () => {
+      workspaceContext.currentOrganization = null;
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.AgentPolicy}
+          access={access('admin', 'admin')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
   });
 
   describe('organization invitations', () => {

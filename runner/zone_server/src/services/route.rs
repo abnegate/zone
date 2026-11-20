@@ -5,6 +5,7 @@ use std::fmt;
 use abnegate_agent_cli::AgentKind;
 use uuid::Uuid;
 use zone_core::llm::LlmBackend;
+use zone_enterprise::policy::{Denial, Effective};
 
 use crate::config::Config;
 use crate::db::ai_settings::{self, EffectiveAiSettings};
@@ -12,9 +13,10 @@ use crate::db::chats::provider::{self, Choice};
 use crate::db::chats::{ChatRow, ChatSession};
 use crate::db::workspaces;
 use crate::services::backend::{self, Continuation, Resolved, Routing};
-use crate::services::endpoint::{Endpoint, UrlError};
+use crate::services::endpoint::{Endpoint, Origin, UrlError};
+use crate::services::policy;
 use crate::services::provider::Provider;
-use crate::services::stages::Preferences;
+use crate::services::stages::{self, Preferences};
 use crate::state::AppState;
 
 /// Why a workspace's saved endpoint, or a chat's chosen provider, cannot take its completions.
@@ -38,6 +40,9 @@ pub enum Reason {
     Refused(Provider, UrlError),
     /// The model the chat chose is not one its provider's settings save.
     Unsaved(Provider),
+    /// The organization's or workspace's agent policy refuses the agent or direct provider
+    /// completions would run on, or could not be read.
+    Denied(Denial),
 }
 
 impl From<UrlError> for Reason {
@@ -75,12 +80,13 @@ impl fmt::Display for Reason {
             Self::Unsaved(_) => {
                 formatter.write_str("the model this chat chose isn't saved for it in AI Settings")
             }
+            Self::Denied(denial) => clause(formatter, *denial),
         }
     }
 }
 
 /// `error` as a clause: without its closing period, its first letter lowercased.
-fn clause(formatter: &mut fmt::Formatter<'_>, error: UrlError) -> fmt::Result {
+fn clause(formatter: &mut fmt::Formatter<'_>, error: impl fmt::Display) -> fmt::Result {
     let sentence = error.to_string();
     let mut characters = sentence.trim_end_matches('.').chars();
     match characters.next() {
@@ -133,7 +139,21 @@ impl fmt::Display for Unusable {
                 formatter,
                 "This workspace's AI endpoint can't be used: {reason}. Check AI Settings."
             ),
+            Reason::Denied(denial) => write!(formatter, "{denial}"),
         }
+    }
+}
+
+impl Unusable {
+    pub fn denial(&self) -> Option<Denial> {
+        match self.reason {
+            Reason::Denied(denial) => Some(denial),
+            _ => None,
+        }
+    }
+
+    pub fn code(&self) -> Option<&'static str> {
+        self.denial().map(|denial| denial.code())
     }
 }
 
@@ -153,6 +173,9 @@ impl From<Reason> for Unusable {
 ///
 /// A chat that chose its provider runs on that provider alone, a coding agent
 /// on that agent's logins alone, or fails: never on its workspace's provider.
+///
+/// A route read for a workspace or a chat carries the agent policy it runs under, read once,
+/// and is unusable while that policy refuses its agent or direct provider, or cannot be read.
 #[derive(Clone)]
 pub struct Route {
     endpoint: Result<Endpoint, Unusable>,
@@ -162,6 +185,9 @@ pub struct Route {
     /// bounds its completions: on that provider, or on the same self-hosted
     /// endpoint chosen by name.
     windowed: bool,
+    /// The agent the instance runs completions on, when it runs them on one.
+    configured: Option<AgentKind>,
+    policy: Result<Option<Effective>, Denial>,
 }
 
 #[derive(Clone)]
@@ -175,6 +201,7 @@ impl Route {
         match saved(state, workspace).await {
             Ok(Some((organization, settings))) => {
                 Self::new(state.config(), workspace, organization, settings)
+                    .governed(policy::load(state, organization, Some(workspace)).await)
             }
             Ok(None) => Self::instance(state.config()),
             Err(reason) => Self::unusable(reason),
@@ -202,6 +229,7 @@ impl Route {
         match saved(state, workspace).await {
             Ok(Some((organization, settings))) => {
                 Self::choosing(state.config(), workspace, organization, &settings, choice)
+                    .governed(policy::load(state, organization, Some(workspace)).await)
             }
             Ok(None) | Err(_) => {
                 let reason = Reason::SettingsUnreadable(choice.provider);
@@ -265,6 +293,8 @@ impl Route {
             }),
             chosen: Some(choice),
             windowed,
+            configured: config.model_backend().agent(),
+            policy: Ok(None),
         }
     }
 
@@ -306,6 +336,8 @@ impl Route {
             }),
             chosen: None,
             windowed: true,
+            configured: config.model_backend().agent(),
+            policy: Ok(None),
         }
     }
 
@@ -315,6 +347,8 @@ impl Route {
             saved: None,
             chosen: None,
             windowed: true,
+            configured: config.model_backend().agent(),
+            policy: Ok(None),
         }
     }
 
@@ -324,7 +358,117 @@ impl Route {
             saved: None,
             chosen: None,
             windowed: true,
+            configured: None,
+            policy: Ok(None),
         }
+    }
+
+    /// This route under `policy`, in place of any it ran under: unusable while `policy` refuses
+    /// its agent or direct provider.
+    pub fn with_policy(self, policy: Option<Effective>) -> Self {
+        Self {
+            policy: Ok(policy),
+            ..self
+        }
+    }
+
+    fn governed(self, policy: Result<Option<Effective>, Denial>) -> Self {
+        Self { policy, ..self }
+    }
+
+    /// The policy this route runs under, none when no policy is enforced or it could not be
+    /// read.
+    pub fn policy(&self) -> Option<&Effective> {
+        self.policy.as_ref().ok().and_then(Option::as_ref)
+    }
+
+    /// The organization whose settings this route runs on, none on the instance's.
+    pub fn organization(&self) -> Option<Uuid> {
+        self.saved.as_ref().map(|saved| saved.organization)
+    }
+
+    /// Whether the policy lets `model` run on `backend`, one this route resolved: see
+    /// [`policy::admit`]. A route its policy leaves unusable admits nothing.
+    pub async fn admit(&self, backend: &LlmBackend, model: &str) -> Result<(), Denial> {
+        if let Some(denial) = self.denial() {
+            return Err(denial);
+        }
+        let Some(effective) = self.policy() else {
+            return Ok(());
+        };
+        match &self.endpoint {
+            Ok(endpoint) => {
+                policy::admit(effective, endpoint, backend, self.provider(), model).await
+            }
+            Err(_) => effective.model(model),
+        }
+    }
+
+    /// Whether the policy lets a request start on this route with `model`, before a backend
+    /// is resolved: why the route is unusable under it, else whether it admits `model` on the
+    /// agent the route prefers, or over HTTP. No model, or [`stages::AUTO`], leaves the choice
+    /// to the turn.
+    pub async fn precheck(&self, model: Option<&str>) -> Result<(), Denial> {
+        if let Some(denial) = self.denial() {
+            return Err(denial);
+        }
+        let (Some(effective), Some(model)) =
+            (self.policy(), model.filter(|model| !stages::is_auto(model)))
+        else {
+            return Ok(());
+        };
+        effective.model(model)?;
+        match (self.preferred(), &self.endpoint) {
+            (Some(agent), _) => policy::admits(effective, agent),
+            (None, Ok(endpoint)) => {
+                policy::over_http(effective, endpoint, self.provider(), model).await
+            }
+            (None, Err(_)) => Ok(()),
+        }
+    }
+
+    fn denial(&self) -> Option<Denial> {
+        match &self.policy {
+            Err(denial) => Some(*denial),
+            Ok(None) => None,
+            Ok(Some(effective)) => self.refusal(effective),
+        }
+    }
+
+    fn refusal(&self, effective: &Effective) -> Option<Denial> {
+        self.endpoint.as_ref().ok()?;
+        match self.preferred() {
+            Some(agent) => policy::admits(effective, agent).err(),
+            None => self
+                .provider()
+                .and_then(|provider| policy::provider(effective, provider).err()),
+        }
+    }
+
+    /// The provider the route's settings name, none on the instance's.
+    fn provider(&self) -> Option<Provider> {
+        self.settings()
+            .and_then(|settings| Provider::named(&settings.provider))
+    }
+
+    /// [`Self::agent`], whatever the policy says of it.
+    fn preferred(&self) -> Option<AgentKind> {
+        let origin = self.endpoint.as_ref().ok()?.origin();
+        match self.settings() {
+            Some(settings) => settings.agent().or(match origin {
+                Origin::Settings => None,
+                Origin::Instance => self.configured,
+            }),
+            None => self.configured,
+        }
+    }
+
+    fn denied(&self) -> Option<Unusable> {
+        self.endpoint
+            .is_ok()
+            .then(|| self.denial())
+            .flatten()
+            .map(|denial| Unusable::from(Reason::Denied(denial)))
     }
 
     /// The provider the chat chose, when it chose one rather than follow its
@@ -363,13 +507,28 @@ impl Route {
         chat
     }
 
+    /// Who chose the endpoint completions go to, whatever the policy says of them, or why there
+    /// is none.
+    pub fn origin(&self) -> Result<Origin, Unusable> {
+        self.endpoint
+            .as_ref()
+            .map(Endpoint::origin)
+            .map_err(|unusable| *unusable)
+    }
+
     /// The endpoint completions go to, or why there is none.
     pub fn endpoint(&self) -> Result<&Endpoint, Unusable> {
-        self.endpoint.as_ref().map_err(|unusable| *unusable)
+        match self.denied() {
+            Some(unusable) => Err(unusable),
+            None => self.endpoint.as_ref().map_err(|unusable| *unusable),
+        }
     }
 
     pub fn into_endpoint(self) -> Result<Endpoint, Unusable> {
-        self.endpoint
+        match self.denied() {
+            Some(unusable) => Err(unusable),
+            None => self.endpoint,
+        }
     }
 
     /// These settings with their completions sent to the instance's own
@@ -377,6 +536,7 @@ impl Route {
     pub fn on_instance(self, config: &Config) -> Self {
         Self {
             endpoint: self.endpoint.map(|_| Endpoint::instance(config)),
+            configured: config.model_backend().agent(),
             ..self
         }
     }
@@ -485,6 +645,7 @@ impl Route {
         let endpoint = self.endpoint()?;
         let routing = Routing {
             strict: self.chosen().is_some(),
+            policy: self.policy(),
             ..routing
         };
         match &self.saved {
@@ -503,14 +664,15 @@ impl Route {
     }
 
     /// The models these settings prefer for completions sent to this route's
-    /// endpoint.
+    /// endpoint, choosing only models its policy lets run.
     pub fn preferences(&self, classifier: &str) -> Preferences {
-        match (self.settings(), self.endpoint()) {
+        match (self.settings(), &self.endpoint) {
             (Some(settings), Ok(endpoint)) => {
                 Preferences::for_endpoint(settings, classifier, endpoint)
             }
             _ => Preferences::from_optional_settings(None, classifier),
         }
+        .under(self.policy())
     }
 }
 
@@ -588,6 +750,7 @@ mod tests {
     use tempfile::TempDir;
     use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
     use zone_core::llm::SignIn;
+    use zone_enterprise::policy::{self, Rules};
 
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
@@ -1510,6 +1673,203 @@ mod tests {
         assert_eq!(
             agent(&instance_on(Some(AgentKind::Claude)), &settings, None),
             None
+        );
+    }
+
+    fn governed(rules: Rules) -> Option<Effective> {
+        Some(Effective::new(rules, Rules::default()))
+    }
+
+    fn routed(config: &Config, settings: EffectiveAiSettings, rules: Rules) -> Route {
+        Route::of(config, Uuid::nil(), Uuid::nil(), settings, None).with_policy(governed(rules))
+    }
+
+    fn denial(route: &Route) -> Option<Denial> {
+        route
+            .endpoint()
+            .err()
+            .and_then(|unusable| unusable.denial())
+    }
+
+    #[test]
+    fn a_route_the_policy_denies_says_so_in_the_policys_words() {
+        let denial = Denial::Agent(policy::Agent::Codex);
+        let unusable = Unusable::from(Reason::Denied(denial));
+
+        assert_eq!(unusable.to_string(), denial.to_string());
+        assert_eq!(
+            Reason::Denied(denial).to_string(),
+            "your organization's policy doesn't allow Codex in this workspace"
+        );
+        assert_eq!(unusable.denial(), Some(denial));
+        assert_eq!(unusable.code(), Some("policy_agent_denied"));
+        assert_eq!(
+            Unusable::from(Reason::Denied(Denial::Unreadable)).code(),
+            Some("policy_unreadable")
+        );
+        for reason in [Reason::Unreadable, Reason::Host, Reason::ChoiceUnreadable] {
+            assert_eq!(Unusable::from(reason).denial(), None);
+            assert_eq!(Unusable::from(reason).code(), None);
+        }
+    }
+
+    #[test]
+    fn a_route_is_unusable_while_the_policy_denies_its_agent() {
+        let config = instance_on(None);
+        let route = routed(
+            &config,
+            settings(PROVIDER_CLAUDE_CODE),
+            Rules {
+                agents: Some(vec![policy::Agent::Codex]),
+                ..Rules::default()
+            },
+        );
+
+        assert_eq!(denial(&route), Some(Denial::Agent(policy::Agent::Claude)));
+        assert!(route.clone().into_endpoint().is_err());
+        assert_eq!(route.agent(&config), None);
+        assert_eq!(route.organization(), Some(Uuid::nil()));
+        assert!(route.policy().is_some());
+
+        let lifted = route.with_policy(None);
+        assert!(lifted.endpoint().is_ok(), "the policy was not re-applied");
+        assert_eq!(lifted.agent(&config), Some(AgentKind::Claude));
+        assert!(lifted.policy().is_none());
+    }
+
+    #[test]
+    fn a_route_on_the_instances_agent_is_judged_by_that_agent() {
+        let config = instance_on(Some(AgentKind::Codex));
+        let route = routed(
+            &config,
+            settings(PROVIDER_SELF_HOSTED),
+            Rules {
+                agents: Some(vec![]),
+                ..Rules::default()
+            },
+        );
+
+        assert_eq!(denial(&route), Some(Denial::Agent(policy::Agent::Codex)));
+    }
+
+    #[test]
+    fn a_route_is_unusable_while_the_policy_denies_its_direct_provider() {
+        let config = instance_on(None);
+        let anthropic_only = Rules {
+            providers: Some(vec![policy::Provider::Anthropic]),
+            ..Rules::default()
+        };
+
+        assert_eq!(
+            denial(&routed(
+                &config,
+                openai_at("https://api.openai.com/v1"),
+                anthropic_only.clone()
+            )),
+            Some(Denial::Provider(policy::Provider::OpenAI))
+        );
+        assert_eq!(
+            denial(&routed(
+                &config,
+                settings(PROVIDER_SELF_HOSTED),
+                anthropic_only
+            )),
+            None,
+            "a LiteLLM's upstream is judged per model"
+        );
+    }
+
+    #[test]
+    fn a_route_already_unusable_keeps_its_own_reason() {
+        let config = instance_on(None);
+        let route = routed(
+            &config,
+            openai_at("https://proxy.example/v1?key=leak"),
+            Rules {
+                providers: Some(vec![]),
+                ..Rules::default()
+            },
+        );
+
+        assert_eq!(
+            route.endpoint().err().map(|unusable| unusable.reason),
+            Some(Reason::Url(UrlError::Query))
+        );
+    }
+
+    #[test]
+    fn a_policy_that_cannot_be_read_leaves_the_route_unusable() {
+        let route = Route::instance(&instance_on(None)).governed(Err(Denial::Unreadable));
+
+        assert_eq!(denial(&route), Some(Denial::Unreadable));
+        assert!(route.policy().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_precheck_judges_the_model_on_the_routes_own_agent() {
+        let config = instance_on(None);
+        let route = routed(
+            &config,
+            settings(PROVIDER_CLAUDE_CODE),
+            Rules {
+                models: Some(vec!["claude-*".into()]),
+                ..Rules::default()
+            },
+        );
+
+        assert_eq!(route.precheck(Some("gpt-5")).await, Err(Denial::Model));
+        assert_eq!(route.precheck(Some("claude-opus-4-1")).await, Ok(()));
+        assert_eq!(route.precheck(Some(AUTO)).await, Ok(()));
+        assert_eq!(route.precheck(None).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_precheck_names_why_the_route_is_denied_before_the_model() {
+        let route = routed(
+            &instance_on(None),
+            settings(PROVIDER_CLAUDE_CODE),
+            Rules {
+                agents: Some(vec![]),
+                models: Some(vec![]),
+                ..Rules::default()
+            },
+        );
+
+        assert_eq!(
+            route.precheck(Some("sonnet")).await,
+            Err(Denial::Agent(policy::Agent::Claude))
+        );
+        assert_eq!(
+            route
+                .admit(
+                    &LlmBackend::cli(AgentKind::Claude, Default::default()),
+                    "sonnet"
+                )
+                .await,
+            Err(Denial::Agent(policy::Agent::Claude))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_route_without_a_policy_admits_anything() {
+        let route = Route::of(
+            &instance_on(None),
+            Uuid::nil(),
+            Uuid::nil(),
+            settings(PROVIDER_CLAUDE_CODE),
+            None,
+        );
+
+        assert!(route.policy().is_none());
+        assert_eq!(route.precheck(Some("anything")).await, Ok(()));
+        assert_eq!(
+            route
+                .admit(
+                    &LlmBackend::cli(AgentKind::Codex, Default::default()),
+                    "anything"
+                )
+                .await,
+            Ok(())
         );
     }
 }

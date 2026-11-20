@@ -384,6 +384,7 @@ export const ChatProviderOfferSchema = z.object({
   label: z.string(),
   usable: z.boolean(),
   reason: z.string().nullish(),
+  denial: z.string().nullish(),
   models: tolerantArray(ChatProviderModelSchema),
   efforts: ProviderEffortsSchema,
   requires_model: z.boolean(),

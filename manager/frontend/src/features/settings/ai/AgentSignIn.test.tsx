@@ -1678,6 +1678,44 @@ describe('AgentSignIn', () => {
     });
   });
 
+  describe('under an agent policy that denies the agent', () => {
+    const CODEX_DENIED = "Your organization's policy doesn't allow Codex in this workspace.";
+
+    it('disables signing in and says why', () => {
+      renderPanel('codex', { ...codexSignedOut, denial: 'policy_agent_denied' });
+
+      const button = screen.getByRole('button', { name: 'Sign in with ChatGPT' });
+      expect(button).toBeDisabled();
+      const denial = screen.getByTestId('agent-sign-in-denial');
+      expect(denial).toHaveTextContent(CODEX_DENIED);
+      expect(button).not.toHaveAttribute('aria-describedby');
+      expect(denial.closest('[role="status"]')).not.toBeNull();
+      fireEvent.click(button);
+      expect(agentsApi.start).not.toHaveBeenCalled();
+    });
+
+    it('shows a reason the server worded as it is', () => {
+      const worded = "Your organization's policy doesn't allow Claude Code in this workspace.";
+      renderPanel('claude', { ...claudeSignedOut, denial: worded });
+
+      expect(screen.getByRole('button', { name: 'Sign in with Claude' })).toBeDisabled();
+      expect(screen.getByTestId('agent-sign-in-denial')).toHaveTextContent(worded);
+    });
+
+    it('tells a member why too', () => {
+      renderPanel('codex', { ...codexSignedOut, denial: 'policy_agent_denied' }, 'view');
+
+      expect(screen.getByTestId('agent-sign-in-denial')).toHaveTextContent(CODEX_DENIED);
+    });
+
+    it('leaves signing in alone when nothing is denied', () => {
+      renderPanel('codex', codexSignedOut);
+
+      expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeEnabled();
+      expect(screen.queryByTestId('agent-sign-in-denial')).toBeNull();
+    });
+  });
+
   describe('members', () => {
     it('see a neutral status and whom to ask, with no buttons and no code', () => {
       renderPanel('codex', codexPending, 'view');

@@ -753,6 +753,28 @@
     opacity: 0.5;
   }
 
+  .ui-select-item-described {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: var(--ui-space-0-5);
+    padding-top: var(--ui-space-1-5);
+    padding-bottom: var(--ui-space-1-5);
+  }
+
+  .ui-select-item-described[data-disabled] {
+    opacity: 1;
+    color: var(--ui-text-disabled);
+  }
+
+  .ui-select-item-description {
+    max-width: 36ch;
+    font-size: var(--ui-text-xs);
+    line-height: var(--ui-leading-snug);
+    color: var(--ui-text-secondary);
+    white-space: normal;
+  }
+
   .ui-select-item-indicator {
     position: absolute;
     right: var(--ui-space-2);

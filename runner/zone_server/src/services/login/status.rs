@@ -67,6 +67,10 @@ pub struct AgentStatus {
     pub error: Option<String>,
     /// Every login the organization holds of the agent, oldest first.
     pub logins: Vec<LoginStatus>,
+    /// The code of the organization's agent policy denial when it refuses the agent, which no
+    /// sign-in can start or finish while it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denial: Option<String>,
 }
 
 impl AgentStatus {
@@ -175,6 +179,7 @@ impl AgentStatus {
             pending: None,
             error: None,
             logins: vec![],
+            denial: None,
         }
     }
 }
@@ -1065,6 +1070,7 @@ mod tests {
                     }),
                     last_used_at: Some(at(1_790_135_400)),
                 }],
+                denial: None,
             },
             AgentStatus {
                 agent: AgentKind::Codex,
@@ -1085,6 +1091,7 @@ mod tests {
                 }),
                 error: None,
                 logins: vec![],
+                denial: None,
             },
         ];
 

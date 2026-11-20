@@ -8,6 +8,8 @@
 //! `tools/call` before the registry runs it.
 
 use abnegate_agent::ToolResult;
+use abnegate_agent::tool::Tier;
+use abnegate_agent_cli::WEB_TOOLS;
 use dashmap::DashMap;
 use futures::{Stream, StreamExt};
 use once_cell::sync::Lazy;
@@ -158,9 +160,10 @@ impl Turn {
     ///
     /// Claude asks here before running a tool its own permission rules would
     /// stop. Zone answers under the chat's approval policy: at once when the
-    /// chat auto-approves, otherwise as the same card zone's own confirmed
-    /// tools raise. Nothing is bypassed; the decision moves to the one place
-    /// the reader can see and answer it.
+    /// chat auto-approves the tool's tier, otherwise as the same card zone's
+    /// own confirmed tools raise, and with a refusal when the policy needs an
+    /// approval nobody attending the run can give. Nothing is bypassed; the
+    /// decision moves to the one place the reader can see and answer it.
     ///
     /// Spends no budget. The agent asking whether a call may run is not the
     /// call, and charging for the question would halve what a turn can do.
@@ -169,9 +172,11 @@ impl Turn {
             return verdict(None, UNREADABLE);
         };
         let approval = &self.scope.approval;
+        let tier = builtin_tier(&asked.tool_name);
         let id = format!("{CALL_PREFIX}{}", Uuid::new_v4().simple());
-        let pending = approval.expect_decision(&id);
-        if pending.is_none() {
+        let withheld = approval.withheld(&asked.tool_name, tier);
+        let pending = approval.expect_decision(&id, tier);
+        if pending.is_none() && !withheld {
             return verdict(Some(&asked.input), "");
         }
         let stated = asked.input.to_string();
@@ -181,20 +186,29 @@ impl Turn {
             arguments: stated.clone(),
         });
         let started = Instant::now();
-        let raised = self.publish(AgentEvent::ToolApprovalRequired {
-            id: id.clone(),
-            name: asked.tool_name.clone(),
-            arguments: stated.clone(),
-            reason: crate::agent::reason(&stated),
-            // Zone renders an effect for its own tools; it knows nothing about
-            // what the agent's own tool would do beyond what the agent said.
-            preview: None,
-        });
-        if !raised {
-            approval.withdraw(&id);
-            return verdict(None, UNATTENDED);
-        }
-        let refusal = approval.awaited_decision(&id, pending).await.refusal();
+        let refusal = match withheld {
+            true => Some(Refusal::Policy),
+            false => {
+                let raised = self.publish(AgentEvent::ToolApprovalRequired {
+                    id: id.clone(),
+                    name: asked.tool_name.clone(),
+                    arguments: stated.clone(),
+                    reason: crate::agent::reason(&stated),
+                    // Zone renders an effect for its own tools; it knows nothing
+                    // about what the agent's own tool would do beyond what the
+                    // agent said.
+                    preview: None,
+                });
+                if !raised {
+                    approval.withdraw(&id);
+                    return verdict(None, UNATTENDED);
+                }
+                approval
+                    .awaited_decision(&id, tier, pending)
+                    .await
+                    .refusal()
+            }
+        };
         self.publish(AgentEvent::ToolCallCompleted {
             id,
             name: asked.tool_name,
@@ -323,10 +337,13 @@ impl Turn {
     async fn allowed(&self, id: &str, name: &str, arguments: &str) -> Decision {
         let tier = self.tools.tier(name);
         let approval = &self.scope.approval;
+        if approval.withheld(name, tier) {
+            return Decision::Withheld;
+        }
         if !approval.confirms(tier) {
             return Decision::Approved;
         }
-        let pending = approval.expect_decision(id);
+        let pending = approval.expect_decision(id, tier);
         let raised = self.publish(AgentEvent::ToolApprovalRequired {
             id: id.to_string(),
             name: name.to_string(),
@@ -338,7 +355,7 @@ impl Turn {
             approval.withdraw(id);
             return Decision::Cancelled;
         }
-        approval.awaited_decision(id, pending).await
+        approval.awaited_decision(id, tier, pending).await
     }
 
     /// Refuse a call past the budget, the `made`th this turn. The console is
@@ -380,6 +397,15 @@ impl Turn {
 struct Question {
     tool_name: String,
     input: serde_json::Value,
+}
+
+/// The tier one of the agent's own tools is asked at: a web fetch or search
+/// reaches outside the workspace, and everything else acts on the host.
+fn builtin_tier(name: &str) -> Tier {
+    match WEB_TOOLS.contains(&name) {
+        true => Tier::Outward,
+        false => Tier::Host,
+    }
 }
 
 /// The answer, in the shape the agent reads it in.
@@ -631,6 +657,78 @@ mod permission_tests {
             0,
             "asking whether a call may run is not the call"
         );
+    }
+
+    fn asked_for(tool: &str) -> String {
+        json!({"tool_name": tool, "input": {"url": "https://example.com"}}).to_string()
+    }
+
+    #[test]
+    fn the_agents_web_tools_reach_outward_and_the_rest_act_on_the_host() {
+        assert_eq!(builtin_tier("WebFetch"), Tier::Outward);
+        assert_eq!(builtin_tier("WebSearch"), Tier::Outward);
+        assert_eq!(builtin_tier("Bash"), Tier::Host);
+        assert_eq!(builtin_tier("Write"), Tier::Host);
+    }
+
+    #[tokio::test]
+    async fn a_ceiling_asks_the_reader_about_the_agents_tools_above_it() {
+        let mut opened = open(ApprovalPolicy::auto().with_ceiling(Some(Tier::Host))).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+
+        let answer = turn.run(Toolset::PERMISSION, &asked()).await;
+        assert_eq!(body(&answer)["behavior"], "allow", "{:?}", answer.content);
+
+        for tool in ["WebFetch", "WebSearch"] {
+            let asking = turn.clone();
+            let question = asked_for(tool);
+            let answering =
+                tokio::spawn(async move { asking.run(Toolset::PERMISSION, &question).await });
+            let card = next_card(&mut opened.events).await;
+            assert_eq!(card.name, tool);
+            assert!(opened.approval.decide(&card.id, true));
+            let answer = answering.await.expect("the question is answered");
+            assert_eq!(body(&answer)["behavior"], "allow", "{:?}", answer.content);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unattended_run_refuses_the_agents_tool_above_the_ceiling_at_once() {
+        let mut opened = open(ApprovalPolicy::unattended().with_ceiling(Some(Tier::Write))).await;
+        let names = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&names);
+        opened.approval.set_recorder(Arc::new(move |name: &str| {
+            recorder.lock().expect("the record").push(name.to_string());
+        }));
+        let turn = Turn::find(&opened.token).expect("the turn");
+
+        let answer = turn.run(Toolset::PERMISSION, &asked()).await;
+
+        assert_eq!(body(&answer)["behavior"], "deny", "{:?}", answer.content);
+        assert_eq!(body(&answer)["message"], Refusal::Policy.message());
+        assert_eq!(*names.lock().expect("the record"), ["Bash"]);
+        let mut completed = Vec::new();
+        while let Ok(event) = opened.events.try_recv() {
+            assert!(
+                !matches!(event, AgentEvent::ToolApprovalRequired { .. }),
+                "nobody is there to answer a card"
+            );
+            if let AgentEvent::ToolCallCompleted { name, refusal, .. } = event {
+                completed.push((name, refusal));
+            }
+        }
+        assert_eq!(completed, [("Bash".to_string(), Some(Refusal::Policy))]);
+    }
+
+    #[tokio::test]
+    async fn an_unattended_run_without_a_ceiling_lets_the_agents_tools_through() {
+        let opened = open(ApprovalPolicy::unattended()).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+
+        for question in [asked(), asked_for("WebFetch")] {
+            let answer = turn.run(Toolset::PERMISSION, &question).await;
+            assert_eq!(body(&answer)["behavior"], "allow", "{:?}", answer.content);
+        }
     }
 }
 
@@ -1178,6 +1276,45 @@ mod tests {
         assert!(told.contains(APPROVAL_CANCELLED), "{told}");
         assert!(!told.contains(DENIED), "nobody denied it: {told}");
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn an_unattended_call_above_the_ceiling_is_refused_by_the_policy_without_a_card() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("withheld.txt");
+        let mut opened = open(ApprovalPolicy::unattended().with_ceiling(Some(Tier::Write))).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            turn.run("write_file", &write(&path).to_string()),
+        )
+        .await
+        .expect("a withheld call returns at once");
+
+        let told = format!("{:?}", result.content);
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        assert!(told.contains(Refusal::Policy.message()), "{told}");
+        assert!(!path.exists());
+        assert_eq!(drain(&mut opened.events), ["started", "completed"]);
+    }
+
+    #[tokio::test]
+    async fn an_auto_approving_chat_asks_about_a_call_above_the_ceiling() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("asked.txt");
+        let mut opened = open(ApprovalPolicy::auto().with_ceiling(Some(Tier::Write))).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+        let arguments = write(&path).to_string();
+
+        let call = tokio::spawn(async move { turn.run("write_file", &arguments).await });
+        let card = next_card(&mut opened.events).await;
+        assert_eq!(card.name, "write_file");
+        assert!(opened.approval.decide(&card.id, true));
+
+        let result = call.await.expect("the call task");
+        assert_eq!(result.is_error, Some(false), "{result:?}");
+        assert!(path.exists());
     }
 
     /// The chat's live auto-approve flag reaches a call already waiting here,

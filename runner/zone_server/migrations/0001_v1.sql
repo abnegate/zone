@@ -505,6 +505,15 @@ CREATE INDEX idx_org_members_active ON organization_members (organization_id, is
 CREATE INDEX idx_org_members_org ON organization_members (organization_id);
 CREATE INDEX idx_org_members_user_active ON organization_members (user_id) WHERE (is_active = true);
 
+CREATE TABLE organization_policies (
+    organization_id uuid NOT NULL PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+    rules jsonb DEFAULT '{}'::jsonb NOT NULL,
+    updated_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT organization_policies_rules_check CHECK ((jsonb_typeof(rules) = 'object'::text))
+);
+
 CREATE TABLE password_reset_tokens (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -829,6 +838,15 @@ CREATE TABLE workspace_members (
 CREATE INDEX idx_workspace_members_active ON workspace_members (workspace_id, is_active) WHERE (is_active = true);
 CREATE INDEX idx_workspace_members_user_active ON workspace_members (user_id) WHERE (is_active = true);
 CREATE INDEX idx_workspace_members_workspace ON workspace_members (workspace_id);
+
+CREATE TABLE workspace_policies (
+    workspace_id uuid NOT NULL PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+    rules jsonb DEFAULT '{}'::jsonb NOT NULL,
+    updated_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT workspace_policies_rules_check CHECK ((jsonb_typeof(rules) = 'object'::text))
+);
 
 CREATE TABLE workspace_themes (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,

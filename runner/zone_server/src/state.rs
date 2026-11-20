@@ -28,11 +28,12 @@ use crate::cache::Cache;
 #[cfg(test)]
 use crate::config::AgentConfig;
 use crate::config::{Config, ModelBackend};
+use crate::db::DbResult;
 use crate::pull::PullRegistry;
 use crate::services::chat::pull_request::StatusCache;
 use crate::services::github::snapshots::Snapshots;
 use crate::services::github_app::Provider;
-use crate::services::license::Licenses;
+use crate::services::license::{Licenses, Stored};
 use crate::services::mail::AccountMail;
 use crate::services::mcp_servers::hubs::Hubs;
 use crate::services::mcp_servers::status::Policy;
@@ -476,6 +477,17 @@ impl AppState {
         self.inner.licenses.current(&self.inner.db).await
     }
 
+    /// The license as last read from the database, for enforcement that must fail closed: see
+    /// [`Licenses::settled`].
+    pub async fn settled_license(&self) -> DbResult<Option<License>> {
+        self.inner.licenses.settled(&self.inner.db).await
+    }
+
+    /// [`Self::settled_license`] as the key stored, verified or not.
+    pub async fn stored_license(&self) -> DbResult<Stored> {
+        self.inner.licenses.stored(&self.inner.db).await
+    }
+
     pub async fn edition(&self) -> Edition {
         Edition::from(self.license().await.as_ref())
     }
@@ -693,6 +705,15 @@ mod tests {
 
         assert_eq!(state.license().await, None);
         assert_eq!(state.edition().await, Edition::Community);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_database_with_no_license_loaded_is_unsettled() {
+        let state = AppState::new(test_config(), unreachable_pool(), None);
+        state.disable_mcp();
+
+        assert_eq!(state.license().await, None);
+        assert!(state.settled_license().await.is_err());
     }
 
     #[tokio::test]

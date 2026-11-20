@@ -7,5 +7,7 @@ export {
   SelectRoot,
   SelectSeparator,
   SelectTrigger,
+  SelectUnavailable,
   SelectValue,
+  unavailableId,
 } from './Select';

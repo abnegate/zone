@@ -10,6 +10,7 @@ mod key_error;
 mod keyring;
 mod license;
 mod payload;
+pub mod policy;
 mod production;
 mod seats;
 #[cfg(any(test, feature = "signing"))]

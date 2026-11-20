@@ -1,5 +1,9 @@
 import type { Page } from '@playwright/test';
 import type { Overview } from '../src/features/analytics/types';
+import {
+  COMMUNITY_ORGANIZATION,
+  COMMUNITY_WORKSPACE,
+} from '../src/features/enterprise/policy/fixtures';
 import { Edition, LicenseStatus } from '../src/features/enterprise/schemas';
 import type { LicenseResponse } from '../src/features/enterprise/types';
 import type { SourceStatus } from '../src/features/github/sourceStatus';
@@ -72,6 +76,10 @@ const mockAiSettings: AiSettings = {
 };
 
 const workspaceAiSettingsPath = /\/workspaces\/[^/]+\/settings\/ai$/;
+
+const ORGANIZATION_AGENT_POLICY = /^\/api\/organizations\/[^/]+\/agent-policy$/;
+
+const WORKSPACE_AGENT_POLICY = /^\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/agent-policy$/;
 
 export function workspaceAiSettingsResponse(
   settings: AiSettings = mockAiSettings
@@ -1235,6 +1243,8 @@ export async function setupCommonRoutes(page: Page, populated = false): Promise<
     } else if (path.endsWith('/members')) body = { members: populated ? mockMembers : [] };
     else if (path.endsWith('/devices')) body = { devices: [] };
     else if (path.endsWith('/device-policy')) body = { mode: 'open' };
+    else if (ORGANIZATION_AGENT_POLICY.test(path)) body = COMMUNITY_ORGANIZATION;
+    else if (WORKSPACE_AGENT_POLICY.test(path)) body = COMMUNITY_WORKSPACE;
     else if (/\/settings\/ai(?:\/effective)?$/.test(path)) body = aiSettingsResponse(path);
     else if (path === '/api/organizations') body = { organizations: [mockOrganization] };
     else if (/\/organizations\/[^/]+\/workspaces$/.test(path))

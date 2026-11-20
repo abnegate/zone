@@ -124,6 +124,7 @@ async fn main() {
         let default_settings = EffectiveAiSettings {
             provider: PROVIDER_SELF_HOSTED.to_string(),
             litellm_host: Some(host.to_string()),
+            litellm_layer: None,
             litellm_key: Some(abnegate_secret::SecretValue::new(
                 config.litellm_key.clone(),
             )),

@@ -88,6 +88,21 @@ describe('newChatSettings', () => {
     expect(settings.offline).toBe(true);
   });
 
+  it('falls back to Default when the agent policy denies the recent provider', () => {
+    const denied = { ...codex, usable: false, denial: 'policy_agent_denied' };
+    const latest = recent({ provider: 'codex', provider_model: 'gpt-6-sol' });
+    const settings = newChatSettings(providers(latest, selfHosted, [selfHosted, denied]), []);
+
+    expect([settings.provider, settings.model]).toEqual(['default', 'auto']);
+  });
+
+  it('falls back to Automatic when the agent policy denies the recent model', () => {
+    const latest = recent({ model_name: 'llama3.2' });
+    const denied = { ...llama, denial: 'policy_model_denied' };
+
+    expect(newChatSettings(providers(latest), [denied]).model).toBe('auto');
+  });
+
   it('falls back to Default when the recent provider no longer offers its model', () => {
     const latest = recent({ provider: 'codex', provider_model: 'gpt-5-retired' });
     const settings = newChatSettings(providers(latest), []);

@@ -577,11 +577,13 @@ pub fn run_with_context(
                     };
                 }
                 let call = &batch[0];
-                let refusal = if approval.confirms(tier) {
+                let refusal = if approval.withheld(&call.function.name, tier) {
+                    Some(Refusal::Policy)
+                } else if approval.confirms(tier) {
                     // Register before the request goes out: a client that
                     // answers immediately would otherwise be told the call
                     // is not waiting for approval.
-                    let pending = approval.expect_decision(&call.id);
+                    let pending = approval.expect_decision(&call.id, tier);
                     yield AgentEvent::ToolApprovalRequired {
                         id: call.id.clone(),
                         name: call.function.name.clone(),
@@ -589,7 +591,7 @@ pub fn run_with_context(
                         reason: super::reason(&call.function.arguments),
                         preview: tools.effect(&call.function.name, &call.function.arguments),
                     };
-                    approval.awaited_decision(&call.id, pending).await.refusal()
+                    approval.awaited_decision(&call.id, tier, pending).await.refusal()
                 } else {
                     None
                 };

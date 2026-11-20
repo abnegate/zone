@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::auth::AuthUser;
 use crate::db::{chat_attached_sources, chats, message_embeddings, projects};
 use crate::error::ServerError;
+use crate::routes::policy::asked::Asked;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::character::ChatCharacter;
 use crate::services::chat::authorship;
@@ -26,6 +27,7 @@ use crate::services::chat::driver::Driver;
 use crate::services::chat::indicator::{self, ChatActivity, Indicator};
 use crate::services::chat::session;
 use crate::services::model::Model;
+use crate::services::policy::Subject;
 use crate::services::provider::Provider;
 use crate::services::route::Route;
 use crate::state::AppState;
@@ -599,14 +601,18 @@ pub async fn create(
     auth: AuthUser,
     Json(req): Json<CreateChatRequest>,
 ) -> impl IntoResponse {
-    // Check workspace write access
     if let Err(e) = check_workspace_write_access(&state, &auth, req.workspace_id).await {
         return e.into_response();
     }
 
+    let asked = Asked {
+        workspace: req.workspace_id,
+        actor: auth.0.user_id().ok(),
+        subject: Subject::Workspace(req.workspace_id),
+    };
     let choice = match provider::chosen(
         &state,
-        req.workspace_id,
+        asked,
         req.provider.as_deref(),
         req.provider_model.as_deref(),
     )
@@ -617,7 +623,7 @@ pub async fn create(
     };
     let route = Route::for_workspace(&state, req.workspace_id).await;
     if let Some(refusal) =
-        workspace_refusal(&state, &route, &req.model_name, choice.is_some()).await
+        workspace_refusal(&state, &route, &req.model_name, choice.is_some(), asked).await
     {
         return refusal;
     }
@@ -713,13 +719,11 @@ pub async fn update(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateChatRequest>,
 ) -> impl IntoResponse {
-    // Get chat and verify access (write access required)
     let chat = match get_chat_with_access(&state, &auth, id).await {
         Ok(chat) => chat,
         Err(e) => return e.into_response(),
     };
 
-    // Verify write access to workspace
     if let Some(workspace_id) = chat.workspace_id
         && let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await
     {
@@ -749,7 +753,7 @@ pub async fn update(
         }
     };
     if let Some(model) = model
-        && let Some(refusal) = model_refusal(&state, &chat, model).await
+        && let Some(refusal) = model_refusal(&state, &chat, model, auth.0.user_id().ok()).await
     {
         return refusal;
     }
@@ -805,11 +809,13 @@ pub async fn update(
 }
 
 /// Why `chat` can't keep `model` as the model it asks its workspace's
-/// provider for, as [`create`] refuses it.
+/// provider for, as [`create`] refuses it, with `actor` audited as asking for
+/// it when the agent policy refuses it.
 async fn model_refusal(
     state: &AppState,
     chat: &chats::ChatRow,
     model: &str,
+    actor: Option<Uuid>,
 ) -> Option<axum::response::Response> {
     let Some(workspace) = chat.workspace_id else {
         let profile = Model::profile(&state.config().ollama_host, model).await;
@@ -829,19 +835,29 @@ async fn model_refusal(
         }
     };
     let route = Route::for_workspace(state, workspace).await;
-    workspace_refusal(state, &route, model, chosen).await
+    let asked = Asked {
+        workspace,
+        actor,
+        subject: Subject::Chat(chat.id),
+    };
+    workspace_refusal(state, &route, model, chosen, asked).await
 }
 
 /// Why `model` is refused as the model a chat keeps for its workspace's
-/// `route`: the route knows it can't chat, or can't be used at all. A name the
-/// route doesn't know is allowed. A `chosen` chat runs on its own provider
-/// until it returns to the workspace's, so an unusable route refuses it nothing.
+/// `route`: the agent policy denies it, with the denial audited as `asked`, or
+/// the route knows it can't chat, or can't be used at all. A name the route
+/// doesn't know is allowed. A `chosen` chat runs on its own provider until it
+/// returns to the workspace's, so the route refuses it nothing.
 async fn workspace_refusal(
     state: &AppState,
     route: &Route,
     model: &str,
     chosen: bool,
+    asked: Asked,
 ) -> Option<axum::response::Response> {
+    if !chosen && let Err(denial) = route.precheck(Some(model)).await {
+        return Some(asked.refuse(state, denial, Some(model)).await);
+    }
     let endpoint = match route.endpoint() {
         Ok(endpoint) => endpoint,
         Err(_) if chosen => return None,

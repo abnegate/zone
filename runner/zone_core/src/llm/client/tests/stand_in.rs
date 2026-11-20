@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
+use std::process::Stdio;
+use std::time::Duration;
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -21,6 +25,7 @@ impl StandIn {
     const STDIN: &'static str = "stdin";
     const MCP_CONFIG: &'static str = "mcp-config";
     const REPLAY: &'static str = "replay.jsonl";
+    const WARMING_UP: &'static str = "STAND_IN_WARMING_UP";
 
     /// A stand-in that records, then runs `reply` as a shell script.
     pub(super) fn new(reply: &str) -> Self {
@@ -28,6 +33,7 @@ impl StandIn {
         let record = directory.path().display();
         let script = format!(
             r#"#!/bin/sh
+if [ -n "${warming_up}" ]; then exit 0; fi
 printf '%s\0' "$@" > '{record}/{arguments}'
 /usr/bin/env -0 > '{record}/{environment}'
 cat > '{record}/{stdin}'
@@ -42,11 +48,13 @@ done
             environment = Self::ENVIRONMENT,
             stdin = Self::STDIN,
             mcp_config = Self::MCP_CONFIG,
+            warming_up = Self::WARMING_UP,
         );
         let executable = directory.path().join(Self::EXECUTABLE);
         std::fs::write(&executable, script).expect("the stand-in's script");
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
             .expect("an executable stand-in");
+        wait_until_executable(&executable, &[(Self::WARMING_UP, "1")]);
         Self { directory }
     }
 
@@ -108,4 +116,49 @@ done
         std::fs::read_to_string(self.directory.path().join(record))
             .unwrap_or_else(|_| panic!("the stand-in never recorded its {record}"))
     }
+}
+
+/// Runs `path` until Linux lets it exec. Linux refuses to exec a file any
+/// process holds open for writing, and a sibling test that forks between its
+/// own open and exec inherits this script's descriptor for that window.
+fn wait_until_executable(path: &Path, environment: &[(&str, &str)]) {
+    const ATTEMPTS: u32 = 100;
+    const PAUSE: Duration = Duration::from_millis(20);
+    for _ in 0..ATTEMPTS {
+        match Command::new(path)
+            .envs(environment.iter().copied())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(PAUSE);
+            }
+            _ => return,
+        }
+    }
+}
+
+#[test]
+fn a_script_held_open_for_writing_runs_once_released() {
+    let directory = TempDir::new().expect("a directory for the script");
+    let path = directory.path().join("script");
+    std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("the script");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("an executable script");
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("the script held open for writing");
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        drop(writer);
+    });
+
+    wait_until_executable(&path, &[]);
+    let status = Command::new(&path).status().expect("the script to start");
+    release.join().expect("the writer to be released");
+
+    assert!(status.success(), "the script exited with {status}");
 }

@@ -1,7 +1,7 @@
 //! Workspace database queries
 
 use chrono::NaiveDateTime;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::DbResult;
@@ -278,4 +278,19 @@ pub async fn delete_workspace_theme(pool: &PgPool, workspace_id: Uuid) -> DbResu
     .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+pub async fn lock_owned(
+    connection: &mut PgConnection,
+    organization_id: Uuid,
+    workspace_id: Uuid,
+) -> DbResult<bool> {
+    let owned: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workspaces WHERE id = $1 AND organization_id = $2 FOR SHARE",
+    )
+    .bind(workspace_id)
+    .bind(organization_id)
+    .fetch_optional(connection)
+    .await?;
+    Ok(owned.is_some())
 }

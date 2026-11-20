@@ -19,14 +19,17 @@ use chrono::{DateTime, Utc};
 use futures::future::try_join_all;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use zone_enterprise::policy::{Denial, Effective};
 
 use crate::auth::jwt::Claims;
 use crate::auth::{AuthSession, AuthUser};
 use crate::db::ai_settings::{self, AccessError};
 use crate::db::organization_members::OrgRole;
+use crate::routes::policy::asked;
 use crate::services::login::caller::Caller;
 use crate::services::login::status::{AgentStatus, Viewer};
 use crate::services::login::{devices, oauth};
+use crate::services::policy;
 use crate::state::AppState;
 use failure::Failure;
 use receipt_request::ReceiptRequest;
@@ -86,13 +89,17 @@ pub async fn list(
     Path(organization): Path<Uuid>,
 ) -> Result<Json<Statuses>, Failure> {
     let viewer = viewer(&state, &auth.0, organization).await?;
+    let loaded = policy::load(&state, organization, None).await;
     let agents = try_join_all(
         AgentKind::ALL
             .iter()
             .map(|&agent| AgentStatus::read(&state, organization, agent, viewer, None)),
     )
     .await
-    .map_err(Failure::database)?;
+    .map_err(Failure::database)?
+    .into_iter()
+    .map(|status| governed(status, &loaded))
+    .collect();
     Ok(Json(Statuses { agents }))
 }
 
@@ -108,7 +115,8 @@ pub async fn get(
     let status = AgentStatus::read(&state, organization, agent, viewer, query.attempt)
         .await
         .map_err(Failure::database)?;
-    Ok(Json(status))
+    let loaded = policy::load(&state, organization, None).await;
+    Ok(Json(governed(status, &loaded)))
 }
 
 /// POST /api/organizations/{org_id}/agents/{agent}/login
@@ -121,6 +129,7 @@ pub async fn start(
 ) -> Result<Json<Login>, Failure> {
     let agent = named(&agent)?;
     let user = admin(&state, &session.claims, organization).await?;
+    admit(&state, organization, agent, user).await?;
     let request = request
         .map_err(Failure::unreadable)?
         .map(|Json(request)| request)
@@ -175,6 +184,7 @@ pub async fn finish(
     if agent != AgentKind::Claude {
         return Err(Failure::new(StatusCode::BAD_REQUEST, NO_CODE));
     }
+    admit(&state, organization, agent, user).await?;
     let Json(request) = request.map_err(Failure::unreadable)?;
     oauth::finish(&state, organization, user, request.code.expose())
         .await
@@ -202,6 +212,10 @@ pub async fn redeem(
         email: session.claims.email.clone(),
         session: session.session_id,
     };
+    if let Some(denial) = refusal(&policy::load(&state, organization, None).await, agent) {
+        viewer(&state, &session.claims, organization).await?;
+        return Err(refused(&state, organization, agent, caller.user, denial).await);
+    }
     oauth::redeem(&state, organization, &caller, &request.receipt)
         .await
         .map_err(Failure::exchange)?;
@@ -261,6 +275,43 @@ pub async fn sign_out(
     let user = admin(&state, &auth.0, organization).await?;
     devices::sign_out(&state, organization, agent, user, &auth.0.email).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A sign-in belongs to the organization, so only the organization's own policy applies.
+async fn admit(
+    state: &AppState,
+    organization: Uuid,
+    agent: AgentKind,
+    user: Uuid,
+) -> Result<(), Failure> {
+    match refusal(&policy::load(state, organization, None).await, agent) {
+        Some(denial) => Err(refused(state, organization, agent, user, denial).await),
+        None => Ok(()),
+    }
+}
+
+async fn refused(
+    state: &AppState,
+    organization: Uuid,
+    agent: AgentKind,
+    user: Uuid,
+    denial: Denial,
+) -> Failure {
+    asked::record_organization(state, organization, user, denial, Some(agent.as_str())).await;
+    Failure::denied(denial)
+}
+
+fn refusal(loaded: &Result<Option<Effective>, Denial>, agent: AgentKind) -> Option<Denial> {
+    match loaded {
+        Ok(None) => None,
+        Ok(Some(effective)) => policy::admits(effective, agent).err(),
+        Err(denial) => Some(*denial),
+    }
+}
+
+fn governed(mut status: AgentStatus, loaded: &Result<Option<Effective>, Denial>) -> AgentStatus {
+    status.denial = refusal(loaded, status.agent).map(|denial| denial.code().to_owned());
+    status
 }
 
 fn named(agent: &str) -> Result<AgentKind, Failure> {

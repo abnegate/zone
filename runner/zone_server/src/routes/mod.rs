@@ -22,6 +22,7 @@ pub mod license;
 pub mod mcp_servers;
 pub mod models;
 pub mod organizations;
+pub mod policy;
 pub mod projects;
 pub mod pull_requests;
 pub mod refresh_query;
@@ -552,6 +553,14 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai/effective",
             get(ai_settings::get_effective),
+        )
+        .route(
+            "/api/organizations/{org_id}/agent-policy",
+            get(policy::organization::get).patch(policy::organization::update),
+        )
+        .route(
+            "/api/organizations/{org_id}/workspaces/{ws_id}/agent-policy",
+            get(policy::workspace::get).patch(policy::workspace::update),
         )
         .route(
             "/api/organizations/{org_id}/mcp-servers",

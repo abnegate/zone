@@ -5,6 +5,7 @@ export { AuthenticatedAudio } from './AuthenticatedAudio';
 export { AuthenticatedImage } from './AuthenticatedImage';
 export { AuthenticatedVideo } from './AuthenticatedVideo';
 export { AutomationBadge } from './AutomationBadge';
+export { ChatError } from './ChatError';
 export { ChatMenu } from './ChatMenu';
 export { ChatPanel } from './ChatPanel';
 export { ChatSources } from './ChatSources';
