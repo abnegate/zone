@@ -7,6 +7,7 @@ use std::path::Path;
 use std::process::{Output, Stdio};
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 /// Longest one git command may run. Nothing here reaches the network, so this only bounds a
@@ -20,6 +21,8 @@ const REPOSITORY_ENVIRONMENT: [&str; 4] = [
     "GIT_INDEX_FILE",
     "GIT_COMMON_DIR",
 ];
+
+const PATCH_ID: [&str; 2] = ["patch-id", "--verbatim"];
 
 fn command(directory: &Path) -> Command {
     let mut command = Command::new("git");
@@ -69,39 +72,50 @@ pub async fn answers(directory: &Path, arguments: &[&str]) -> io::Result<bool> {
     }
 }
 
-/// The stable patch id of every patch `arguments` prints, in order, streamed through
-/// `git patch-id` so a long history is never held in memory.
+/// The verbatim patch id of every patch `arguments` prints, in order, streamed through
+/// `git patch-id` so a long history is never held in memory. Verbatim, because a change that
+/// differs only in whitespace is still a different change.
 pub async fn patch_ids(directory: &Path, arguments: &[&str]) -> io::Result<Vec<String>> {
     let mut producer = command(directory)
         .args(arguments)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()?;
+    let mut complaint = producer
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("git kept no standard error to read"))?;
     let patches: Stdio = producer
         .stdout
         .take()
         .ok_or_else(|| io::Error::other("git kept no standard output to read"))?
         .try_into()?;
     let consumer = command(directory)
-        .args(["patch-id", "--stable"])
+        .args(PATCH_ID)
         .stdin(patches)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let (produced, consumed) = tokio::time::timeout(TIMEOUT, async {
-        tokio::join!(producer.wait(), consumer.wait_with_output())
+    let mut diagnostic = Vec::new();
+    let (produced, consumed, _) = tokio::time::timeout(TIMEOUT, async {
+        tokio::join!(
+            producer.wait(),
+            consumer.wait_with_output(),
+            complaint.read_to_end(&mut diagnostic)
+        )
     })
     .await
     .map_err(|_| timed_out(arguments))?;
     if !produced?.success() {
         return Err(io::Error::other(format!(
-            "git {} failed",
-            arguments.join(" ")
+            "git {} failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&diagnostic).trim()
         )));
     }
     let consumed = consumed?;
     if !consumed.status.success() {
-        return Err(failed(&["patch-id", "--stable"], &consumed));
+        return Err(failed(&PATCH_ID, &consumed));
     }
     Ok(String::from_utf8_lossy(&consumed.stdout)
         .lines()

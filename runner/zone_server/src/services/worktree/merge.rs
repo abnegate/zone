@@ -6,8 +6,10 @@ use std::path::Path;
 use super::git;
 
 /// The same diff whatever the repository configures, so two patches of the same change get the
-/// same patch id: no rename detection, no external diff or text conversion, fixed prefixes.
-const PATCH: [&str; 6] = [
+/// same patch id: the whole repository even under `diff.relative`, no rename detection, no
+/// external diff or text conversion, fixed prefixes.
+const PATCH: [&str; 7] = [
+    "--no-relative",
     "--no-renames",
     "--no-ext-diff",
     "--no-textconv",

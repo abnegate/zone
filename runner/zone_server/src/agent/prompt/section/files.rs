@@ -42,8 +42,9 @@ const READING: &str = "Read only the part of a file you need when you already kn
              Prefer plain-text formats over ones that inflate the context.";
 
 const GIT: &str = "Git: interactive flags such as rebase -i are not supported here. Start work in a fresh \
-             worktree on a new branch off the latest main: git fetch --prune origin && git worktree \
-             add .worktrees/<branch> -b <branch> origin/main. Zone removes a worktree once its \
+             worktree on a new branch off the latest main: git fetch --prune origin, then git worktree \
+             add .worktrees/<branch> -b <branch> origin/main. If the fetch fails, say so and start \
+             from the origin/main you have. Zone removes a worktree once its \
              work is merged and it has been left clean. Commit work you were asked \
              to do once it is done, and push only when the user asks. Do not \
              force-push, hard reset, or rewrite history unless the user asked for it. When gh opens a \
@@ -133,10 +134,15 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "git fetch --prune origin && git worktree add .worktrees/<branch> -b <branch> \
+                "git fetch --prune origin, then git worktree add .worktrees/<branch> -b <branch> \
                  origin/main"
             ),
             "main is fetched before the worktree starts from it: {rendered}"
+        );
+        assert!(
+            rendered
+                .contains("If the fetch fails, say so and start from the origin/main you have."),
+            "a repository the shell cannot fetch still gets a worktree: {rendered}"
         );
         assert!(
             rendered.contains(

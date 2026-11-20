@@ -48,11 +48,21 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::services::worktree::verdict::Verdict;
 
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
     fn run(directory: &Path, arguments: &[&str]) -> String {
-        let output = Command::new("git")
+        let mut command = Command::new("git");
+        for variable in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+        ] {
+            command.env_remove(variable);
+        }
+        let output = command
             .args(arguments)
             .current_dir(directory)
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -375,6 +385,25 @@ mod tests {
             run(&fixture.checkout, &["status", "--porcelain"]).is_empty(),
             "the host's status lists no agent worktree"
         );
+    }
+
+    #[tokio::test]
+    async fn keeps_a_worktree_whose_head_moved_after_it_was_judged_merged() {
+        let fixture = Fixture::new();
+        let worktree = fixture.merged("feat/moved");
+        let repository = Repository::open(&fixture.checkout).await.unwrap();
+        let entry = repository.worktrees().await.unwrap().remove(0);
+        let target = repository.default_branch().await.unwrap();
+        let verdict = repository
+            .judge(&entry, target.as_deref(), DAY, SystemTime::now() + 2 * DAY)
+            .await
+            .unwrap();
+        assert_eq!(verdict, Verdict::Removable);
+
+        commit(&worktree, "later.txt", "after the verdict\n");
+
+        assert!(repository.remove(&entry).await.is_err());
+        assert!(fixture.listed("feat/moved"));
     }
 
     #[tokio::test]

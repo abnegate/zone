@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use abnegate_vcs::worktree::is_worktree;
+use tokio::io::AsyncWriteExt;
 
 use super::entry::Entry;
 use super::git;
@@ -152,7 +153,13 @@ impl Repository {
             "\n"
         };
         tokio::fs::create_dir_all(&information).await?;
-        tokio::fs::write(&path, format!("{existing}{separator}{pattern}\n")).await?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await?;
+        file.write_all(format!("{separator}{pattern}\n").as_bytes())
+            .await?;
         Ok(true)
     }
 
@@ -244,8 +251,16 @@ impl Repository {
 
     /// `git worktree remove` without `--force`, so git refuses a worktree that changed since it
     /// was judged, then every directory a branch name's prefix made that is now empty. The branch
-    /// it was on is left where it is.
+    /// it was on is left where it is. A worktree whose HEAD moved since it was judged is left
+    /// too: its new commit was never checked against the default branch.
     pub async fn remove(&self, entry: &Entry) -> io::Result<()> {
+        let head = git::read(&entry.path, &["rev-parse", "HEAD"]).await?;
+        if head != entry.head {
+            return Err(io::Error::other(format!(
+                "HEAD moved from {} to {head} since the worktree was judged",
+                entry.head
+            )));
+        }
         let path = entry.path.to_string_lossy();
         git::read(&self.folder, &["worktree", "remove", "--", &path]).await?;
         let mut parent = entry.path.parent();
