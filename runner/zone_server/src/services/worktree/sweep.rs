@@ -440,6 +440,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_writer_that_never_releases_the_exclude_lock_fails_rather_than_stalls_the_sweep() {
+        use nix::fcntl::{Flock, FlockArg};
+
+        let fixture = Fixture::new();
+        fixture.worktree("feat/stuck");
+        let repository = Repository::open(&fixture.checkout).await.unwrap();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(fixture.checkout.join(".git/info/exclude"))
+            .unwrap();
+        let _held = Flock::lock(file, FlockArg::LockExclusive).unwrap();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(30), repository.exclude())
+            .await
+            .expect("the sweep gave up on the lock in bounded time");
+
+        assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        assert!(!fixture.exclude().contains("/.worktrees/"));
+    }
+
+    #[tokio::test]
     async fn leaves_a_folder_without_agent_worktrees_untouched() {
         let fixture = Fixture::new();
 

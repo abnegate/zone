@@ -270,8 +270,14 @@ async fn last_active(worktree: &Path) -> io::Result<SystemTime> {
     Ok(logged.map_or(head, |logged| logged.max(head)))
 }
 
+/// How often the exclude file's lock is tried, [`LOCK_RETRY`] apart, before the sweep moves on.
+const LOCK_ATTEMPTS: u32 = 50;
+
+const LOCK_RETRY: Duration = Duration::from_millis(100);
+
 /// Append `pattern` to `information/exclude` unless a line already holds it, under an exclusive
-/// lock on the file so two sweeps never both decide it is missing.
+/// lock on the file so two sweeps never both decide it is missing. A writer that keeps the lock
+/// past [`LOCK_ATTEMPTS`] tries is an error, so one held file never stalls the whole sweep.
 fn append_once(information: &Path, pattern: &str) -> io::Result<bool> {
     std::fs::create_dir_all(information)?;
     let file = std::fs::OpenOptions::new()
@@ -279,7 +285,7 @@ fn append_once(information: &Path, pattern: &str) -> io::Result<bool> {
         .read(true)
         .append(true)
         .open(information.join("exclude"))?;
-    let mut file = Flock::lock(file, FlockArg::LockExclusive).map_err(|(_, error)| error)?;
+    let mut file = lock(file)?;
     let mut existing = String::new();
     file.read_to_string(&mut existing)?;
     if existing.lines().any(|line| line.trim() == pattern) {
@@ -292,4 +298,21 @@ fn append_once(information: &Path, pattern: &str) -> io::Result<bool> {
     };
     file.write_all(format!("{separator}{pattern}\n").as_bytes())?;
     Ok(true)
+}
+
+fn lock(mut file: std::fs::File) -> io::Result<Flock<std::fs::File>> {
+    for _ in 0..LOCK_ATTEMPTS {
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(locked) => return Ok(locked),
+            Err((unlocked, nix::errno::Errno::EWOULDBLOCK)) => {
+                file = unlocked;
+                std::thread::sleep(LOCK_RETRY);
+            }
+            Err((_, error)) => return Err(error.into()),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "another writer held info/exclude's lock throughout",
+    ))
 }

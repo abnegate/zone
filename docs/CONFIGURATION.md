@@ -800,7 +800,7 @@ their absolute paths as before.
 
 ### Agent worktrees
 
-A chat agent starts work with `git fetch --prune origin; git worktree add
+A chat agent starts work with `git fetch origin; git worktree add
 .worktrees/<branch> -b <branch> origin/main`, so a fetch its shell has no
 credential for still leaves it a worktree, in whichever of the workspace's
 **Folders** it is working in. The `worktree-cleanup` housekeeping sweep removes
@@ -821,8 +821,10 @@ without `--force`, on each worktree under `.worktrees/` that is:
   ancestor of that branch, or when its whole change since the two diverged
   landed there as one commit, matched by `git patch-id --verbatim`, which is
   what a squash merge leaves. That match needs Git 2.39 or later; with an
-  older git the check fails and the worktree is kept. Zone doesn't fetch: the prompt's `git fetch` keeps
-  `origin/main` current.
+  older git the check fails and the worktree is kept. Zone doesn't fetch: the
+  prompt's `git fetch` updates `origin/main` only when it succeeds, so where it
+  fails the worktree starts from the `origin/main` already there, and a worktree
+  merged since is removed only once a later fetch brings the merge in.
 
 The branch is kept, any directory a branch name's prefix made under
 `.worktrees/` goes once it is empty, and a worktree anywhere else, such as
