@@ -84,6 +84,8 @@ The following table lists the configurable parameters and their default values.
 | `server.env.ZONE_REPORT_HOUR` | Hour of the day, `0` to `23` UTC, a digest is owed | unset (`8`) |
 | `server.env.ZONE_REPORT_WEEKDAY` | Day of the week a weekly digest is owed | unset (`monday`) |
 | `server.env.ZONE_REPORT_DAY_OF_MONTH` | Day of the month, `1` to `31`, a monthly digest is owed; moved to the last day in shorter months | unset (`1`) |
+| `server.env.ZONE_LICENSE_RENEWAL` | Renew a Zone Enterprise license that carries a Polar subscription by posting only its key to the license server once a day from 14 days before expiry, and install the key it returns: `true`, `1`, `yes` or `on` turns it on, `false`, `0`, `no` or `off` off, in any case, and any other value logs a warning and keeps it on. Turn it off for an air-gapped install; see [docs/LICENSING.md](../../docs/LICENSING.md#automatic-renewal) | unset (`true`) |
+| `server.env.ZONE_LICENSE_RENEWAL_URL` | Where the license key is posted for renewal: an `http` or `https` URL that doesn't name a cloud metadata address, or zone-server refuses to start | unset (`https://licenses.bitecode.ltd/licenses/renew`) |
 
 ### Manager Configuration
 
