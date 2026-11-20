@@ -57,12 +57,14 @@ describe('price', () => {
     expect(formatMoney(24.5, 'USD')).toBe('$24.50');
   });
 
-  test('derives the yearly figures from the monthly seat price', () => {
+  test('shows the yearly price and what it saves over twelve months', () => {
     const values = siteValues({
       ...site,
-      price: { currency: 'USD', seatMonthly: 25 },
+      price: { currency: 'USD', seatMonthly: 20, seatYearly: 200 },
     });
-    expect(values.seatAnnual).toBe('$300');
+    expect(values.seatMonthly).toBe('$20');
+    expect(values.seatYearly).toBe('$200');
+    expect(values.yearlySaving).toBe('$40');
     expect(values.contactHref).toBe(`mailto:${site.contactEmail}`);
   });
 
