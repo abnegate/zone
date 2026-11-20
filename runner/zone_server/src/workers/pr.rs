@@ -1394,7 +1394,7 @@ mod tests {
         pub(super) workspace: Uuid,
         pub(super) path: PathBuf,
         pub(super) baseline: Baseline,
-        _checkout: crate::services::checkout::Checkout,
+        pub(super) checkout: crate::services::checkout::Checkout,
     }
 
     impl Fixture {
@@ -1532,7 +1532,7 @@ mod tests {
                 workspace: workspace.id,
                 path,
                 baseline,
-                _checkout: checkout,
+                checkout,
             }
         }
 
@@ -3192,6 +3192,7 @@ mod publication_tests {
             task.project_ids.clear();
             // Reuse the same live execution after dropping its original fixture checkout.
             std::fs::remove_dir_all(&fixture.path).unwrap();
+            fixture.checkout.scratch().remove().unwrap();
             let checkout = crate::services::checkout::Checkout::prepare(
                 fixture.state.db(),
                 fixture.state.github(),

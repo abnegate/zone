@@ -36,6 +36,7 @@ pub mod provider;
 pub mod route;
 pub mod runner;
 pub mod schedule;
+pub mod scratch;
 pub mod search;
 pub mod sso;
 pub mod stages;

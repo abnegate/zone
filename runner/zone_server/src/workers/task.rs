@@ -74,6 +74,8 @@ use crate::services::policy::Subject;
 use crate::services::route::Reason;
 use crate::services::route::Route;
 use crate::services::route::Unusable;
+use crate::services::scratch::Scratch;
+use crate::services::scratch::cache::Cache;
 use crate::services::stages;
 use crate::services::task_progress::{self, ProgressMessage};
 use crate::state::AppState;
@@ -916,6 +918,17 @@ pub fn spawn_recovery(state: AppState) -> tokio::task::JoinHandle<()> {
             if let Err(error) = crate::services::checkout::Checkout::recover(state.db()).await {
                 tracing::error!(%error, "Could not recover abandoned task checkouts");
             }
+            match tokio::task::spawn_blocking(|| {
+                Cache::sweep(&std::env::temp_dir(), std::time::SystemTime::now())
+            })
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::error!(%error, "Could not sweep idle build caches from the temporary directory")
+                }
+                Err(error) => tracing::error!(%error, "The build cache sweep stopped"),
+            }
         }
     })
 }
@@ -1424,7 +1437,8 @@ async fn execute_in_checkout<'a>(
     let environment = Environment {
         directory: workspace_path.clone(),
         ..Environment::here()
-    };
+    }
+    .with_scratch(checkout.scratch().clone());
     let environment = match checkout.baseline() {
         Some(baseline) => environment.with_vcs(Vcs {
             branch: baseline.branch.to_string(),
@@ -2474,6 +2488,10 @@ async fn attempt_run<'a>(
     // with the approved plan in hand and no plan phase to go through again.
     let approved = approval.approved();
     let mut plan_held = plan_approval && approved.is_none();
+    let backend = &match &environment.scratch {
+        Some(scratch) => backend::in_scratch(backend.clone(), scratch),
+        None => backend.clone(),
+    };
     let mut tools = crate::mcp::offered(
         backend,
         task_tools(
@@ -2483,6 +2501,7 @@ async fn attempt_run<'a>(
             workspace_id,
             actor,
             workspace,
+            environment.scratch.as_ref(),
             plan_held,
             unattended,
             enforcement,
@@ -2612,6 +2631,7 @@ async fn attempt_run<'a>(
                         workspace_id,
                         actor,
                         workspace,
+                        environment.scratch.as_ref(),
                         plan_held,
                         unattended,
                         enforcement,
@@ -2641,6 +2661,7 @@ async fn attempt_run<'a>(
                         workspace_id,
                         actor,
                         workspace,
+                        environment.scratch.as_ref(),
                         plan_held,
                         unattended,
                         enforcement,
@@ -2823,6 +2844,7 @@ async fn task_tools(
     workspace_id: Uuid,
     actor: Option<Uuid>,
     workspace: &Path,
+    scratch: Option<&Scratch>,
     plan_held: bool,
     unattended: bool,
     enforcement: Option<&Enforcement>,
@@ -2832,6 +2854,10 @@ async fn task_tools(
         ChatTools::for_task_with(state, workspace.to_path_buf(), workspace_id, actor, policy)
             .await
             .with_task_lease(state.db().clone(), run_id, owner);
+    let tools = match scratch {
+        Some(scratch) => tools.with_scratch(scratch),
+        None => tools,
+    };
     if let Some(enforcement) = enforcement {
         tools.set_recorder(enforcement.auditor.egress());
     }
