@@ -2,9 +2,11 @@
 
 This page is for whoever sells Zone Enterprise: how a license works, how to
 keep the signing key, how to set up Polar, and how to run `zone-license`, the
-signer that turns a Polar payment into a license key in the customer's inbox.
-If you run Zone and want to install a license you bought, you only need
-[What the customer receives](#what-the-customer-receives).
+signer that turns a Polar payment into a license key in the customer's inbox
+and hands online Zone servers their renewed key. If you run Zone and want to
+install a license you bought, you only need
+[What the customer receives](#what-the-customer-receives) and
+[Automatic renewal](#automatic-renewal).
 
 - [Overview](#overview)
 - [The signing key](#the-signing-key)
@@ -13,6 +15,7 @@ If you run Zone and want to install a license you bought, you only need
 - [Deploying the signer](#deploying-the-signer)
 - [SMTP](#smtp)
 - [What the customer receives](#what-the-customer-receives)
+- [Automatic renewal](#automatic-renewal)
 - [Hand-signing a license](#hand-signing-a-license)
 - [Rotating the signing key](#rotating-the-signing-key)
 - [Why the signer listens only to `order.paid`](#why-the-signer-listens-only-to-orderpaid)
@@ -42,11 +45,15 @@ The payload holds:
 | `issued_at` | When the license period starts. |
 | `expires_at` | When it ends. |
 | `key_id` | Which signing key signed it, such as `2026-1`. |
+| `subscription` | Optional. The Polar subscription it was issued for, which lets a server [renew it automatically](#automatic-renewal). Keys without it are laid out exactly as before, and every Zone release reads both. |
 
 Every Zone release compiles in a keyring of trusted public keys, in
 `runner/zone_enterprise/src/production.rs`. Zone verifies a license against
 that keyring when an admin pastes it and whenever the server loads it. It never
-contacts anyone to do so, so air-gapped servers work the same way.
+contacts anyone to do so, so air-gapped servers work the same way. The one
+request Zone makes about its license is the
+[renewal check](#automatic-renewal) in a license's last 14 days, which sends
+only the key and can be turned off.
 
 - **Seats are soft.** A seat is a person who is an active member of an active
   organization and signed in during the current calendar month (UTC). Going
@@ -72,7 +79,7 @@ live; the pricing page links to the Polar checkout.
 |---|---|---|
 | `runner/zone_enterprise` | Enterprise features, the license payload, the verifier and signing | Zone Enterprise License |
 | `manager/frontend/src/features/enterprise` | Enterprise console pages, including the License section | Zone Enterprise License |
-| `runner/zone_license` | The `zone-license` signer: key generation, signing, the Polar webhook and email | MIT |
+| `runner/zone_license` | The `zone-license` signer: key generation, signing, the Polar webhook, renewal and email | MIT |
 | Everything else | Community | MIT |
 
 The root [LICENSE](../LICENSE) sets this out: everything outside the two Zone
@@ -147,7 +154,9 @@ first trusts its key, or a later one.
 Customers' servers trust only the keys their own release shipped with. A
 license signed with a key added in a new release doesn't verify on a server
 still running an older one, so leave time between shipping a key and signing
-with it.
+with it. Renewal follows the same rule: the signer renews with the key it's
+configured with, and a server whose release doesn't trust that key records
+`rejected` and keeps the key it has.
 
 ## Setting up Polar
 
@@ -245,6 +254,19 @@ Create a checkout link for the Zone Enterprise product. Leave the seat count
 open on the self-serve link, so buyers choose it in checkout within the
 price's tiers, and point the pricing page's buy button at it. Every buyer must
 give an email address; the key is sent there.
+
+### 7. The access token
+
+[Automatic renewal](#automatic-renewal) reads each subscription from Polar's
+API, which needs an organization access token. Create one in the
+organization's settings with the `subscriptions:read` scope and nothing else,
+and put it in the signer's `POLAR_ACCESS_TOKEN`. Without it the signer still
+issues keys from the webhook; only `/licenses/renew` is off. When the token
+expires or is revoked, renewals answer `502` and log an error until you
+replace it.
+
+The signer always reads subscriptions from Polar's production API, so
+renewal can't be tried against the sandbox.
 
 ## The webhook endpoint
 
@@ -359,6 +381,7 @@ Values are trimmed, and a blank value counts as unset, except
 | `SMTP_PASSWORD` | Required | The relay password. It may be blank, but must be set. |
 | `SMTP_FROM` | Required | The address keys are sent from: a bare address, such as `licenses@example.com`, without a name. |
 | `SMTP_FROM_NAME` | `Zone` | The sender name, on one line. |
+| `POLAR_ACCESS_TOKEN` | None | An organization access token with `subscriptions:read`. See [The access token](#7-the-access-token). When it's unset, `POST /licenses/renew` answers `404` and Zone servers keep their key until one is pasted. |
 | `RUST_LOG` | `info` | The log filter. See [Logs](#logs). |
 
 ### Routes
@@ -366,11 +389,13 @@ Values are trimmed, and a blank value counts as unset, except
 | Route | Answers |
 |---|---|
 | `POST /webhooks/polar` | Polar's deliveries. See [Responses](#responses). |
-| `GET /health` | `200` with `{"status":"ok"}` while the process is serving. It doesn't check the mail relay. |
+| `POST /licenses/renew` | Zone servers asking for their renewed key. See [The renewal route](#the-renewal-route). Bodies are capped at 16 KiB, far above any license key; a larger one gets `413`. |
+| `GET /health` | `200` with `{"status":"ok"}` while the process is serving. It doesn't check the mail relay or Polar. |
 
-Point your platform's health check or uptime monitor at `/health`. Only
-`/webhooks/polar` needs to be reachable from Polar. Request bodies are capped
-at 2 MB, far above any Polar event.
+Point your platform's health check or uptime monitor at `/health`. Polar must
+reach `/webhooks/polar`, and customers' Zone servers must reach
+`/licenses/renew`, both from the internet. Webhook bodies are capped at 2 MB,
+far above any Polar event.
 
 The image has no Docker `HEALTHCHECK`: the slim runtime image carries no HTTP
 client to run one with. Have your orchestrator or load balancer probe
@@ -393,9 +418,21 @@ went wrong (`rejected`, `response`, `client`, `tls`, `timeout` or
 error was `retryable`. It never logs the text of the relay's reply, because
 relays often quote the recipient's address in it.
 
-The logs never contain the license key, the webhook secret, the private key,
-the SMTP password, or the customer's name or email address. Set `RUST_LOG`,
-such as `RUST_LOG=debug`, to change what's logged.
+At startup, `serve` logs `renewal = true` when `POLAR_ACCESS_TOKEN` is set and
+`renewal = false` when it isn't. Each renewal request logs one line with an
+`outcome` matching the [renewal responses](#renewal-responses). Once the key
+verifies, the line carries its `subscription` id and its `license` id; once
+Polar answers, the subscription's Polar `status`; and once a new key is
+signed, its id as `renewed`. A subscription that won't renew also logs the
+`reason`: `missing` (Polar has no such subscription), `status` (it isn't
+`active` or `trialing`), `ended` (it has ended) or `product` (its product
+isn't in `POLAR_PRODUCT_IDS`). Polar refusing the access token (`401` or
+`403`) and a subscription without seats (`misconfigured`) are logged as
+errors, since every renewal fails until you fix them.
+
+The logs never contain the license key, the webhook secret, the access token,
+the private key, the SMTP password, or the customer's name or email address.
+Set `RUST_LOG`, such as `RUST_LOG=debug`, to change what's logged.
 
 ### Stopping
 
@@ -423,6 +460,21 @@ allow-listing Polar's addresses doesn't help.
 The proxy must pass the request body through unchanged. The signature covers
 the exact bytes Polar sent, so anything that re-encodes the body makes every
 delivery fail with `401`.
+
+Customers' Zone servers call `/licenses/renew` from their own networks, so a
+bot filter that challenges Polar challenges them too: a challenge page
+reaches Zone as a `4xx`, which it records as `refused`. If the proxy only
+lets through the paths it knows, allow these three and nothing else:
+
+| Path | Called by |
+|---|---|
+| `/webhooks/polar` | Polar |
+| `/licenses/renew` | Customers' Zone servers |
+| `/health` | Your health check or uptime monitor |
+
+`/licenses/renew` has no rate limit of its own. Anyone holding a valid key can
+make the signer read its subscription from Polar on every request, so add a
+rate limit in the proxy if that matters to you.
 
 ## SMTP
 
@@ -483,7 +535,7 @@ space, and the email shows exactly the name the license carries.
 | What happens in Polar | What the customer gets |
 |---|---|
 | A new subscription is paid | A key for the seats bought, expiring at the end of the first year. |
-| A renewal is paid | A new key for the next year. The old key keeps working until it lapses, so the new one has to be pasted before the old one's grace period ends. |
+| A renewal is paid | A new key for the next year, by email. A server that [renews automatically](#automatic-renewal) installs the same license itself; any other server needs the new key pasted before the old one's grace period ends. |
 | The seat count changes, with `invoice` proration | A new key with the new seat count and the same expiry, as soon as the change is billed. |
 | A renewal payment fails | Nothing until Polar collects it. If it does, the key arrives then. |
 | The subscription is cancelled | Nothing. The current key runs to its expiry and then its 30-day grace period. |
@@ -492,6 +544,126 @@ space, and the email shows exactly the name the license carries.
 A customer who loses the email can have it sent again: redeliver the order's
 `order.paid` event from Polar (see [Redelivering an
 event](#redelivering-an-event)), which sends the identical key.
+
+## Automatic renewal
+
+A Zone server that can reach the signer installs its renewed key itself, so
+nobody has to paste a key every year. It applies to keys that carry a
+`subscription`: every key the webhook issues, and hand-signed keys given
+[`--subscription`](#hand-signing-a-license). A key without one is never sent
+anywhere and is renewed by pasting, as before.
+
+### How it works
+
+1. Once a day, zone-server looks at the installed license. It's due when it
+   carries a subscription and expires within 14 days, or has already expired,
+   grace period included. A license that isn't due is left alone and nothing
+   is sent or recorded.
+2. A due license is posted to `ZONE_LICENSE_RENEWAL_URL`, by default
+   `https://licenses.bitecode.ltd/licenses/renew`.
+3. The signer verifies the key and reads its subscription from Polar. When
+   the subscription is `active` and its current period ends later than the
+   key, or ends at the same time with a different seat count, it signs a key
+   for that period and returns it. Otherwise it answers that there's nothing
+   newer, or that the subscription won't renew.
+4. zone-server checks the new key and installs it in place of the old one,
+   just as a pasted key is installed: no restart, and the Enterprise features
+   carry on. It writes a `license.renewed` entry to the audit log with no
+   actor. If an admin pasted or removed a key while the request was in flight,
+   the admin's change stands and the answer is dropped.
+5. It records when it last asked and what came of it, shown under
+   **Settings → This server → License**. Pasting or removing a key clears
+   that record.
+
+A due license is asked about every day, whatever the last answer was, until
+it's renewed or replaced. Polar starts the next period only at the end of the
+current one, so for most of the 14 days the answer is `current`; the renewed
+key arrives within a day of Polar starting the new period. A seat change
+mid-year still arrives only by email, because the key isn't due then. Paste
+that key, or let the next renewal carry the new seat count.
+
+The first check runs about a minute after the server starts, and then every
+24 hours.
+
+### What Zone sends
+
+Only the license key, and only to `ZONE_LICENSE_RENEWAL_URL`:
+
+```http
+POST /licenses/renew HTTP/1.1
+Content-Type: application/json
+User-Agent: Zone
+
+{"license":"<the installed key>"}
+```
+
+The key holds nothing the signer didn't put there itself: the customer name,
+seats, dates and subscription id. Zone sends no version, host name, seat
+usage, user, or anything else about the server. The request uses the
+system's proxy settings (`HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`), follows
+no redirects, and gives up after 30 seconds, or 10 seconds without a
+connection.
+
+### The renewal route
+
+`POST /licenses/renew` takes `{"license":"<key>"}` with
+`Content-Type: application/json`, in a body of at most 16 KiB. It never sends
+email: the renewal order's `order.paid` email still goes out from the webhook
+as before, and the route only answers the server that asked.
+
+A renewed key's terms come from the subscription's current period:
+
+| License field | Taken from |
+|---|---|
+| `seats` | The subscription's seat count |
+| `expires_at` | The subscription's `current_period_end` in whole seconds, with no grace added |
+| `issued_at` | The subscription's `current_period_start` in whole seconds |
+| `customer` | The old key's, unchanged |
+| `subscription` | The old key's, unchanged |
+| `id` | A UUIDv5 over the subscription, the period end and the seat count, as for the webhook |
+| `key_id` | `ZONE_LICENSE_KEY_ID` |
+
+The id is derived as the webhook derives it, so the key a server fetches for
+a period and the key the customer is emailed for it carry the same license
+id. The signer signs with the key it's configured with, whichever key signed
+the old one.
+
+#### Renewal responses
+
+| Status | Body | Meaning | Zone records |
+|---|---|---|---|
+| `200` | `{"license":"<new key>"}` | A new key was signed. | `renewed`, or `rejected` if the key fails Zone's check |
+| `204` | | Nothing newer to issue: the subscription is `active` but the key already covers its current period and seats, or it's `trialing`. | `current` |
+| `400` | | The body can't be read: invalid JSON, no `license` field, or a missing or non-JSON `Content-Type`. | `refused` |
+| `404` | | Renewal is off on this signer: `POLAR_ACCESS_TOKEN` is unset. | `unreachable` |
+| `410` | | The subscription won't renew: Polar has no such subscription, it has ended, its product isn't in `POLAR_PRODUCT_IDS`, or its status is anything but `active` or `trialing`. | `ended` |
+| `413` | | The body is over 16 KiB. | `refused` |
+| `422` | | The key doesn't verify, has no `subscription`, or its subscription id isn't a UUID. | `refused` |
+| `500` | | Signing failed. | `unreachable` |
+| `502` | | Polar refused the access token (`401` or `403`), answered something unexpected, or the subscription has no seats (`misconfigured`). | `unreachable` |
+| `503` | | Polar timed out, couldn't be reached, or answered `408`, `429` or `5xx`. | `unreachable` |
+
+### What Zone records
+
+| Outcome | Meaning | What to do |
+|---|---|---|
+| `renewed` | A new key was installed. | Nothing. |
+| `current` | The signer had nothing newer yet. | Nothing; Zone asks again the next day. |
+| `ended` | The subscription won't renew: it was cancelled, isn't paid, or has ended. | The key runs to its expiry and its grace period. Paste a new key if you buy again. |
+| `refused` | The signer, or something in front of it, refused the request with a `4xx` other than `404`, `408`, `410` or `429`. | Usually a proxy or bot filter between the server and the signer. Otherwise ask whoever sold you the license. |
+| `rejected` | The signer answered `200` with a body Zone can't read, or with a key Zone won't install: it doesn't verify with this release's keyring, names another customer or subscription, expires earlier than the installed key, has the same id, or has already lapsed. Zone keeps the installed key. | If the seller has moved to a new signing key, upgrade Zone to a release that trusts it. Otherwise ask the seller. |
+| `unreachable` | No usable answer: the signer couldn't be reached, timed out, answered `404`, `408`, `429` or `5xx`, or sent more than 64 KiB. | Check that the server can reach `ZONE_LICENSE_RENEWAL_URL`, through the proxy if it has one. Zone asks again the next day. |
+
+zone-server logs each attempt with its outcome and the license ids involved,
+never the key itself.
+
+### Air-gapped servers
+
+A server that can't reach the signer keeps working exactly as before: paste
+each new key from the email before the old one's grace period ends. Set
+`ZONE_LICENSE_RENEWAL=false` on it, so it doesn't try every day from 14 days
+before expiry and record `unreachable`. See
+[CONFIGURATION.md](CONFIGURATION.md#-license-renewal) for both settings.
 
 ## Hand-signing a license
 
@@ -514,6 +686,7 @@ zone-license sign --customer "Acme Ltd" --seats 10 --expires-at 2027-06-30
 | `--private-key-file <path>` | The private key file. Without it, the key comes from `ZONE_LICENSE_PRIVATE_KEY_FILE` or `ZONE_LICENSE_PRIVATE_KEY`. |
 | `--issued-at <time>` | When the license period starts, in either form `--expires-at` takes. Defaults to now; leave it out for a new license. |
 | `--id <uuid>` | The license id. Defaults to a random UUID; leave it out for a new license. |
+| `--subscription <id>` | The Polar subscription id the key belongs to, so servers can [renew it automatically](#automatic-renewal). Leave it out for a key that's only ever renewed by hand, such as an evaluation or a deal invoiced outside Polar. |
 
 It prints the license string and nothing else, so it can be piped or copied as
 it is. The private key never goes on the command line, and `sign` refuses a
@@ -524,6 +697,10 @@ Send the key to the customer yourself, with the installation steps from
 
 For an evaluation, sign a short license, such as 30 days. It can't be
 withdrawn early: it runs to its expiry, plus the grace period.
+
+A key given `--subscription` renews only while that subscription is `active`
+and its product is in `POLAR_PRODUCT_IDS`, and each renewed key keeps the
+customer name you signed it with.
 
 ## Rotating the signing key
 
@@ -620,6 +797,12 @@ Other events look tempting but can't be trusted alone:
 Cancellation, revocation and refunds issue nothing. The current key runs to its
 expiry and Zone's grace period follows.
 
+[Automatic renewal](#automatic-renewal) decides differently, because a Zone
+server asks rather than Polar telling. It reads the subscription's current
+state from Polar's API at the moment of the request, and signs only for an
+`active` subscription to a listed product whose current period runs past the
+key.
+
 ### The key's terms
 
 | License field | Taken from |
@@ -630,6 +813,7 @@ expiry and Zone's grace period follows.
 | `customer` | The order's billing name, else the customer's billing name, else the customer's name, else their email |
 | `id` | A UUIDv5 over the subscription, the period end and the seat count |
 | `key_id` | `ZONE_LICENSE_KEY_ID` |
+| `subscription` | The order's subscription id |
 
 The key goes to the customer's email address on the order.
 
@@ -696,6 +880,11 @@ redeliver the order once it's fixed.
 | Symptom | Cause | Fix |
 |---|---|---|
 | The signer exits at startup | A required variable is missing or invalid, both or neither private key variables are set, the key file is too readable, or the key isn't in this release's keyring | Read the message, which names the variable. For an untrusted key, run a signer built from a release that trusts it. |
+| Renewals get `404` and servers record `unreachable` | `POLAR_ACCESS_TOKEN` is unset, so renewal is off; the startup line logs `renewal = false` | Set the [access token](#7-the-access-token) and restart the signer. |
+| Renewals get `502` with an error in the log | Polar refused the access token, which has expired, been revoked or lacks `subscriptions:read`; or a subscription has no seats (`misconfigured`) | Create a new token with `subscriptions:read`. For `misconfigured`, make the product seat-based. |
+| Renewals get `503` | Polar is down, slow or rate-limiting the signer | Nothing; servers ask again the next day. |
+| Renewals get `422` | The key doesn't verify with the signer's release, or carries a subscription id that isn't a UUID | Run a signer built from a release that trusts every key you've signed with. Re-sign a hand-signed key with the right `--subscription`. |
+| Renewals get `410` for a paying customer | Its product isn't in `POLAR_PRODUCT_IDS`, or the subscription isn't `active` in Polar; the log's `reason` and `status` say which | Add the product, or settle the subscription in Polar. Until then, the customer pastes the key they're emailed. |
 | Every delivery gets `401` | Wrong `POLAR_WEBHOOK_SECRET`, a proxy changing the body, or the host clock more than five minutes off | Copy the secret from the endpoint again, pass the body through unchanged, run NTP. |
 | Deliveries get `503` | The relay is down, slow, or refusing mail for now | Fix the relay; the `undelivered` log line gives the failure and the SMTP status. Polar retries, and you can redeliver anything that ran out of attempts. |
 | Deliveries get `422` with an `unsendable` log line | The relay refused the message for good, such as an unknown recipient or a refused sender, or the order's address can't be parsed | If the sender or the relay account is at fault, fix it and redeliver. If the recipient is, [hand-sign](#hand-signing-a-stuck-order) the key and send it to a corrected address. |
@@ -735,15 +924,18 @@ zone-license sign \
   --customer "Acme Ltd" \
   --seats 5 \
   --issued-at 2026-11-18T11:59:58Z \
-  --expires-at 2027-11-18T11:59:58Z
+  --expires-at 2027-11-18T11:59:58Z \
+  --subscription 0b6d3c9e-2f41-4c55-9a7e-6d1f8e2a4b70
 ```
 
 Use the period start and end exactly as Polar shows them, so the key covers
-the same period the webhook's would have. Its license id differs from the one
-the webhook would have derived, which does no harm: if the webhook later
-succeeds for the same order, the customer gets a second key with the same
-terms, and either works. Get the customer's address from Polar or the buyer,
-and send the key with the installation steps.
+the same period the webhook's would have, and pass the order's subscription
+id so the key [renews automatically](#automatic-renewal) like a
+webhook-issued one. Its license id differs from the one the webhook would
+have derived, which does no harm: if the webhook later succeeds for the same
+order, the customer gets a second key with the same terms, and either works.
+Get the customer's address from Polar or the buyer, and send the key with the
+installation steps.
 
 ## CI and publishing the image
 
@@ -755,5 +947,6 @@ that the binary starts in it.
 Pushing a tag such as `license-signer-v1.0.0` also runs its `publish` job,
 once the others pass, which pushes the image to
 `ghcr.io/abnegate/zone-license` as `1.0.0` and `latest`. Only that job can
-write packages. The image holds no secrets: the signing key, the webhook secret
-and the SMTP password all reach the container at runtime.
+write packages. The image holds no secrets: the signing key, the webhook
+secret, the Polar access token and the SMTP password all reach the container
+at runtime.

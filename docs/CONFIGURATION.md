@@ -2556,6 +2556,20 @@ Digests are sent through the [notification](#-notifications) channels — Slack,
 
 ---
 
+## 🔑 License renewal
+
+On by default. Once a day, the server looks at its Zone Enterprise license, and when the license carries a Polar subscription and expires within 14 days, or has already expired, it posts the license key to the license server and installs the renewed key it gets back. Nothing is sent for a license without a subscription, a license that isn't due yet, or a server with no license. The request carries only the key, as `{"license":"<key>"}` with `User-Agent: Zone`; it goes through the system proxy (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`), follows no redirects, and gives up after 30 seconds. The last attempt and its outcome — `renewed`, `current`, `ended`, `refused`, `rejected` or `unreachable` — show under **Settings → This server → License**. Both settings are read at startup, and a blank value counts as unset. See [LICENSING.md](LICENSING.md#automatic-renewal) for the whole flow.
+
+### `ZONE_LICENSE_RENEWAL`
+- **Default**: `true`
+- **Description**: `true`, `1`, `yes` or `on`, in any case, renews the license automatically; `false`, `0`, `no` or `off` does not, and the license is renewed by pasting a new key. A blank value counts as unset, and any other value logs a warning and keeps the default, on. Turn it off on an air-gapped server, which would otherwise try every day from 14 days before expiry and record `unreachable`.
+
+### `ZONE_LICENSE_RENEWAL_URL`
+- **Default**: `https://licenses.bitecode.ltd/licenses/renew`
+- **Description**: Where the license key is posted for renewal. It must be an `http` or `https` URL with no user name or password in it; a private or loopback address is accepted, a link-local or cloud metadata address is not. A URL that breaks either rule stops the server at startup with a message naming the variable, and the URL itself is written only to the warning log. Point it elsewhere only for a license server you were told to use.
+
+---
+
 ## 🔒 VPN Configuration - Optional
 
 **VPN is completely optional!** Enable it to send all stack internet traffic through Gluetun, including private web search.
@@ -2709,6 +2723,7 @@ Regenerate secrets for production:
 | MCP / magents | No | ✅ Yes (auto if `magents` is on PATH) |
 | Task evaluation | No | ✅ Yes (off) |
 | Workspace digests | No | ✅ Yes (off) |
+| License renewal | No | ✅ Yes (on) |
 
 *Security variables have insecure defaults. Change for production.
 
@@ -2773,6 +2788,7 @@ Need to find a specific config? Quick lookup:
 - **Notifications**: ZONE_NOTIFY_SLACK_WEBHOOK, ZONE_NOTIFY_DISCORD_WEBHOOK, ZONE_NOTIFY_EMAIL_TO, SMTP_*
 - **Task evaluation**: ZONE_TASK_EVALUATION, ZONE_TASK_EVALUATION_CATEGORIES, ZONE_TASK_EVALUATION_TOOL_TIMEOUT_SECONDS, ZONE_TASK_EVALUATION_BUDGET_SECONDS
 - **Workspace digests**: ZONE_REPORT_ENABLED, ZONE_REPORT_CADENCE, ZONE_REPORT_HOUR, ZONE_REPORT_WEEKDAY, ZONE_REPORT_DAY_OF_MONTH
+- **License renewal**: ZONE_LICENSE_RENEWAL, ZONE_LICENSE_RENEWAL_URL
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
 - **Timezone**: TZ
 - **VPN**: VPN_*, OPENVPN_*
