@@ -39,7 +39,7 @@ A template that uses a value `config.ts` does not have fails the build.
 
 ### Adding a custom domain
 
-1. At the DNS provider, add a `CNAME` record pointing the domain (for example `zone.abnegate.dev`) at `abnegate.github.io`.
+1. At the DNS provider, add a `CNAME` record pointing the domain (for example `zone.bitecode.ltd`) at `abnegate.github.io`.
 2. In **Settings → Pages**, enter the domain under **Custom domain**, wait for the DNS check, then tick **Enforce HTTPS**.
 3. Set `domain` in `config.ts` to the same value.
 
