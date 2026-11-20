@@ -57,8 +57,10 @@ the shell running the backup: `zone_postgres_data` (the cluster, under
 the clones that project chats work in, along with whatever they left there
 ([`ZONE_PROJECT_CLONE_DIR`](CONFIGURATION.md#zone_project_clone_dir)). It leaves out
 `zone_comfyui_models` (downloaded weights, and the LoRAs Zone trains),
-`zone_comfyui_output`, `zone_manager_embed_cache`, and every volume of the
-`dev` profile, `zone_dev_agent_state` included. It checks that
+`zone_comfyui_output`, `zone_manager_embed_cache`, the manager's scratch
+volumes (`zone_manager_tmp`, `zone_manager_home` and `zone_manager_workspace`,
+see [Manager scratch](#manager-scratch)), and every volume of the `dev`
+profile, `zone_dev_agent_state` included. It checks that
 `zone_postgres_data` holds a `PG_VERSION` first and stops with the migration
 steps above when it does not; `ALLOW_EMPTY_POSTGRES=1` archives the other
 volumes regardless.
@@ -277,6 +279,26 @@ so the host trainer must run as the uid of the container's `zone` user, 999,
 which `docker compose exec manager id -u zone` prints. Run as anyone else, the
 trainer cannot read a queued job and the manager cannot read its progress or
 publish its weight. See the host worker in [COMFYUI.md](COMFYUI.md).
+
+## Manager scratch
+
+Nothing the manager writes stays in its container: what the server, its
+agents and their tools write outside the data volumes above goes to three
+volumes, as the Helm chart's emptyDirs take it there.
+
+| Volume | Mounted at | What it holds |
+| --- | --- | --- |
+| `zone_manager_tmp` | `/tmp` | Task checkouts (`zone-checkouts-v1-*`), which keep a run's unpublished work, and whatever agents put in `/tmp`, such as build directories |
+| `zone_manager_home` | `/home/zone` | The `HOME` agents run with: package and toolchain caches, Playwright's browsers |
+| `zone_manager_workspace` | `/app/workspace` | The working directory of chat agents with no folder of their own |
+
+Agents' builds and caches only grow, so `docker system df -v` shows where the
+disk went. To reclaim it, stop the manager and empty what you no longer need:
+`docker run --rm -v zone_manager_tmp:/scratch alpine:3 sh -c 'du -sh
+/scratch/*'` lists it, and an `rm -rf` in the same `sh -c` removes it. Leave
+`zone-checkouts-v1-*` alone unless no task is running and its unpublished work
+can go. `docker volume rm zone_manager_home` while the manager is stopped
+drops every cache; the next start seeds the volume from the image again.
 
 ## Volume ownership
 

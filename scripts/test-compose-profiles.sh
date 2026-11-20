@@ -288,6 +288,32 @@ for name, config in (("core", direct), ("dev", dev), ("dev+vpn+monitoring", comb
     if "/var/lib/postgresql" in targets:
         raise SystemExit(f"{name} postgres must not also mount /var/lib/postgresql")
 
+# Helm runs the server on a read-only root filesystem, so every path it writes
+# is mounted there. Compose has no read-only root to catch a missing mount:
+# task checkouts, agent builds and tool caches written to an unmounted path
+# grow the container's writable layer until Docker's disk is full.
+chart = (root / "helm" / "zone-apps" / "templates" / "server" / "deployment.yaml").read_text(
+    encoding="utf-8"
+).split("      containers:", 1)[1]
+chart_paths = set(re.findall(r"^\s+mountPath: (/\S+)$", chart, re.MULTILINE))
+chart_environment = dict(
+    re.findall(r"^\s+- name: (\w+)\n\s+value: (/\S+)$", chart, re.MULTILINE)
+)
+if "/tmp" not in chart_paths:
+    raise SystemExit(f"no server mounts found in the Helm chart; the scan is broken: {chart_paths!r}")
+for name, config in (("core", direct), ("dev", dev), ("dev+vpn+monitoring", combo)):
+    manager = config["services"]["manager"]
+    environment = manager.get("environment") or {}
+    targets = volume_targets(manager)
+    for path in sorted(chart_paths):
+        setting = next((key for key, value in chart_environment.items() if value == path), None)
+        expected = environment.get(setting, path) if setting else path
+        if expected not in targets:
+            raise SystemExit(
+                f"{name} manager writes {expected} (Helm mounts {path}) but compose mounts "
+                f"nothing there, so it grows the container's writable layer; got {sorted(targets)!r}"
+            )
+
 # host.docker.internal is unroutable from the internal-only network, so an
 # ollama-init pointed at a host Ollama needs the edge network too.
 init_networks = set(bundled["services"]["ollama-init"].get("networks") or {})

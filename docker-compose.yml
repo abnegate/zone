@@ -470,6 +470,9 @@ services:
       - MONITORING_GRAFANA_ADMIN_USER=${MONITORING_GRAFANA_ADMIN_USER:-admin}
       - MONITORING_GRAFANA_ADMIN_PASSWORD=${MONITORING_GRAFANA_ADMIN_PASSWORD:-}
     volumes:
+      - manager_tmp:/tmp
+      - manager_home:/home/zone
+      - manager_workspace:/app/workspace
       - manager_repos:/tmp/repos
       - manager_artifacts:/app/artifacts
       - manager_embed_cache:/app/embed-cache
@@ -846,6 +849,12 @@ volumes:
     name: zone_comfyui_models
   comfyui_output:
     name: zone_comfyui_output
+  manager_tmp:
+    name: zone_manager_tmp
+  manager_home:
+    name: zone_manager_home
+  manager_workspace:
+    name: zone_manager_workspace
   manager_repos:
     name: zone_manager_repos
   manager_artifacts:
