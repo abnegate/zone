@@ -2,13 +2,13 @@
 
 Zone records security-relevant actions in an audit log: sign-ins, membership
 and role changes, settings, licenses, SSO, agent policy and more. With a Zone
-Team or Enterprise license you can also:
+Enterprise license you can also:
 
 - download the audit log for a date range as NDJSON or CSV;
 - stream every event, at least once, to an HMAC-signed webhook, an
-  S3-compatible bucket or a syslog server (Enterprise);
+  S3-compatible bucket or a syslog server;
 - delete events older than a retention period, once every enabled destination
-  has delivered them (Enterprise).
+  has delivered them.
 
 Each organization has its own destinations, retention period and downloads,
 managed by its owners and admins under **Settings → Organization → Audit
@@ -26,13 +26,15 @@ rows), unchanged and with no license.
 | License | Download | Streaming | Retention period | Changing destinations or retention |
 |---|---|---|---|---|
 | None (Community) | Refused | Nothing is sent | Not applied: events are kept forever | Refused, except [disabling and deleting](#what-needs-a-license) |
-| Team, active or in grace | Allowed | Paused (`edition`) | Applied, if one was set | Refused, except disabling and deleting |
 | Enterprise, active or in grace | Allowed | Running | Applied | Allowed |
-| Team or Enterprise, lapsed (past grace) | Refused | Paused (`lapsed`; Team reports `edition`), backlog kept | Still applied | Refused, except disabling and deleting |
+| Enterprise, lapsed (past grace) | Refused | Paused (`lapsed`), backlog kept | Still applied | Refused, except disabling and deleting |
 | Stored key that no longer verifies | Refused | Paused (`unverified`), backlog kept | Still applied | Refused, except disabling and deleting |
 
 Install the license under **Settings → This server → License**. Grace is the
-30 days after the license expires.
+30 days after the license expires. Downloading, streaming and changing the
+retention period each need a Zone Enterprise license that verifies and is
+active or in its grace period. A lapse never loosens anything: downloads and
+streaming pause, and a period already set keeps applying.
 
 **A lapse pauses, it doesn't lose.** While streaming is paused, every enabled
 destination keeps its place in the log. Events written meanwhile wait, and
@@ -40,17 +42,17 @@ delivery resumes from where it stopped once the license is renewed. Waiting
 events also hold retention back, so nothing is deleted before it's delivered.
 
 **Retention keeps applying until the license is removed.** A period you set
-keeps deleting expired events under a lapsed license, after a downgrade to
-Team and under a stored key that no longer verifies, because a lapse or a
-downgrade must not silently stop deleting data you committed to delete.
-Removing the license returns the server to Community, which keeps every event
-forever; the saved period applies again as soon as a license is installed.
+keeps deleting expired events under a lapsed license and under a stored key
+that no longer verifies, because neither must silently stop deleting data you
+committed to delete. Removing the license returns the server to Community,
+which keeps every event forever; the saved period applies again as soon as a
+license is installed.
 
 ### What needs a license
 
 | Change | Needs |
 |---|---|
-| Download | Team or Enterprise, active or in grace, with a key that verifies |
+| Download | Enterprise, active or in grace, with a key that verifies |
 | Add, edit or test a destination, or enable a disabled one | Enterprise, active or in grace, with a key that verifies |
 | Disable a destination with a `PATCH` whose only field is `"enabled": false` | Nothing |
 | Delete a destination | Nothing |
@@ -68,13 +70,13 @@ Every response carries the license as `standing`:
 
 | Field | Meaning |
 |---|---|
-| `edition` | `community`, `team` or `enterprise`. |
+| `edition` | `community` or `enterprise`. |
 | `status` | `community`, `active`, `grace` or `lapsed`. |
 | `export` | Downloads are allowed. |
 | `streaming` | Destinations can be added, changed and tested, and they deliver. |
 | `retention` | The retention period can be changed. |
 | `applies` | A retention period that's set is applied: a license is installed, or the stored key doesn't verify. |
-| `pause` | Why delivery is paused: `unlicensed`, `edition`, `lapsed` or `unverified`; `null` while it runs. |
+| `pause` | Why delivery is paused: `unlicensed`, `lapsed` or `unverified`; `null` while it runs. |
 
 ## Destinations
 

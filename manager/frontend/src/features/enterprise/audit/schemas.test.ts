@@ -10,7 +10,6 @@ import {
   PAUSED_SYSLOG,
   SERVER_DESTINATIONS,
   STALLED_DESTINATIONS,
-  TEAM_DESTINATIONS,
   WAITING_RETENTION,
 } from './fixtures';
 import {
@@ -47,7 +46,7 @@ describe('audit vocabulary', () => {
     expect(SYSLOG_PROTOCOLS).toEqual(['tls', 'udp']);
     expect(S3_ADDRESSINGS).toEqual(['path', 'virtual_host']);
     expect(DELIVERY_HEALTHS).toEqual(['healthy', 'failing', 'paused', 'disabled']);
-    expect(STREAMING_PAUSES).toEqual(['unlicensed', 'edition', 'lapsed', 'unverified']);
+    expect(STREAMING_PAUSES).toEqual(['unlicensed', 'lapsed', 'unverified']);
     expect(RETENTION_WAITS).toEqual(['backlog', 'failing', 'paused']);
     expect(DELIVERY_FAILURES).toEqual([
       'connect',
@@ -96,6 +95,11 @@ describe('StandingSchema', () => {
     expect(StandingSchema.safeParse(missing).success).toBe(false);
     expect(StandingSchema.safeParse({ ...missing, pause: 'expired' }).success).toBe(false);
   });
+
+  it('refuses the retired edition pause', () => {
+    const standing = { ...ENTERPRISE_DESTINATIONS.standing, pause: 'edition' };
+    expect(StandingSchema.safeParse(standing).success).toBe(false);
+  });
 });
 
 describe('destination responses', () => {
@@ -103,7 +107,6 @@ describe('destination responses', () => {
     for (const response of [
       ENTERPRISE_DESTINATIONS,
       LAPSED_DESTINATIONS,
-      TEAM_DESTINATIONS,
       STALLED_DESTINATIONS,
       SERVER_DESTINATIONS,
     ]) {

@@ -1,7 +1,9 @@
 import type { Page } from '@playwright/test';
-import { COMMUNITY, UNVERIFIED } from '../src/features/enterprise/fixtures';
+import { ACTIVE, COMMUNITY, LAPSED, UNVERIFIED } from '../src/features/enterprise/fixtures';
+import { PRICING_URL } from '../src/features/enterprise/pricing';
 import type { LicenseResponse } from '../src/features/enterprise/types';
 import { expect, test } from './fixtures';
+import { expectNoSidewaysScroll, shoot } from './helpers/screenshots';
 import { setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
 
@@ -12,6 +14,19 @@ const LICENSE_API = /\/api\/license$/;
 const UNVERIFIED_WARNING = "A license key is stored, but this version of Zone can't verify it";
 
 const FORBIDDEN = 'This needs a server admin.';
+
+const BUY = /Buy a license/;
+
+const BUY_NAME = 'Buy a license (opens in a new tab)';
+
+const DESKTOP = { width: 1440, height: 900 };
+const PHONE = { width: 375, height: 812 };
+const WIDTHS = [DESKTOP, PHONE];
+const SCHEMES = ['light', 'dark'] as const;
+
+const SCREENSHOTS = process.env.LICENSE_SCREENSHOTS;
+
+const SCROLLERS = '.license-section';
 
 interface LicenseServer {
   reads: number;
@@ -41,6 +56,31 @@ async function openLicense(page: Page): Promise<void> {
 }
 
 test.describe('License settings', () => {
+  test('links a Community install to pricing in a new tab', async ({ page }) => {
+    await openLicense(page);
+    await serveLicense(page, COMMUNITY);
+    await page.goto(LICENSE_PATH, { waitUntil: 'domcontentloaded' });
+
+    const link = page.getByRole('link', { name: BUY });
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAccessibleName(BUY_NAME);
+    await expect(link).toHaveAttribute('href', PRICING_URL);
+    await expect(link).toHaveAttribute('target', '_blank');
+    await expect(link).toHaveAttribute('rel', /\bnoopener\b/);
+
+    await link.hover();
+    await expect(link).toHaveCSS('text-decoration-line', 'none');
+  });
+
+  test('does not offer a purchase to an active install', async ({ page }) => {
+    await openLicense(page);
+    await serveLicense(page, ACTIVE);
+    await page.goto(LICENSE_PATH, { waitUntil: 'domcontentloaded' });
+
+    await expect(page.getByRole('button', { name: 'Remove license' })).toBeVisible();
+    await expect(page.getByRole('link', { name: BUY })).toHaveCount(0);
+  });
+
   test('warns about a stored key that no longer verifies and removes it', async ({ page }) => {
     await openLicense(page);
     const server = await serveLicense(page, UNVERIFIED);
@@ -88,10 +128,36 @@ test.describe('License settings', () => {
 
       await expect(page.getByRole('status').filter({ hasText: UNVERIFIED_WARNING })).toBeVisible();
       await expect(page.getByRole('button', { name: 'Remove license' })).toBeInViewport();
-      const overflow = await page.evaluate(
-        () => document.documentElement.scrollWidth - document.documentElement.clientWidth
-      );
-      expect(overflow).toBeLessThanOrEqual(0);
+      await expect(page.getByRole('link', { name: BUY })).toBeInViewport();
+      await expectNoSidewaysScroll(page, SCROLLERS);
     });
   });
+});
+
+test.describe('License layout', () => {
+  test.skip(!SCREENSHOTS, 'set LICENSE_SCREENSHOTS to an output directory');
+
+  const states: readonly (readonly [string, LicenseResponse])[] = [
+    ['community', COMMUNITY],
+    ['active', ACTIVE],
+    ['lapsed', LAPSED],
+  ];
+
+  for (const viewport of WIDTHS) {
+    for (const scheme of SCHEMES) {
+      test(`lays the license states out at ${viewport.width}px in ${scheme}`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        await page.emulateMedia({ colorScheme: scheme });
+        await openLicense(page);
+        for (const [name, response] of states) {
+          await page.unroute(LICENSE_API);
+          await serveLicense(page, response);
+          await page.goto(LICENSE_PATH, { waitUntil: 'domcontentloaded' });
+          await expect(page.getByRole('heading', { name: 'License', level: 2 })).toBeVisible();
+          await expect(page.locator('.license-summary')).toBeVisible();
+          await shoot(page, SCREENSHOTS, `license-${name}-${scheme}-${viewport.width}`, SCROLLERS);
+        }
+      });
+    }
+  }
 });

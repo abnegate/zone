@@ -7,7 +7,7 @@ import {
 } from '../../../settings/navigation/sections';
 
 export const UPGRADE_NOTICE =
-  'Single sign-on is part of Zone Team and Enterprise. Add a license to let people sign in with Okta, Microsoft Entra ID or Google Workspace.';
+  'Single sign-on is part of Zone Enterprise. Add a license to let people sign in with Okta, Microsoft Entra ID or Google Workspace.';
 
 export const LICENSE_PATH = settingsPath(SettingsGroup.Server, SettingsSection.License);
 

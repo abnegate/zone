@@ -14,6 +14,7 @@ import {
   UNVERIFIED,
 } from '../fixtures';
 import { LicenseRefusal } from '../LicenseRefusal';
+import { PRICING_URL } from '../pricing';
 import { LICENSE_REFUSAL_CODES, UNVERIFIED_CODES } from '../schemas';
 import { refusalMessage, unverifiedReason } from '../status';
 import type { LicenseResponse } from '../types';
@@ -143,14 +144,13 @@ describe('LicenseSection', () => {
       });
     }
 
-    it('shows an active license with its customer, tier, seats and expiry', async () => {
+    it('shows an active license with its customer, seats and expiry', async () => {
       await loaded(ACTIVE);
 
       expect(screen.getByText('Enterprise', { selector: '.license-edition-name' })).toBeTruthy();
       expect(screen.getByText('Active')).toBeInTheDocument();
       expect(details()).toEqual({
         Customer: 'Acme Ltd',
-        Tier: 'Enterprise',
         Seats: '12 of 25 seats used this month',
         Expires: 'Nov 1, 2027',
         'Grace ends': 'Dec 1, 2027',
@@ -180,9 +180,8 @@ describe('LicenseSection', () => {
       expect(warning).toHaveTextContent('lapsed on Dec 1, 2027');
       expect(warning).toHaveTextContent('Paste a renewed license key');
       expect(warning).not.toHaveTextContent(ENFORCEMENT_CLAIM);
-      expect(screen.getByText('Team', { selector: '.license-edition-name' })).toBeTruthy();
+      expect(screen.getByText('Enterprise', { selector: '.license-edition-name' })).toBeTruthy();
       expect(details().Customer).toBe('Acme Ltd');
-      expect(details().Tier).toBe('Team');
     });
 
     it('notes extra seats softly without blocking anyone', async () => {
@@ -498,5 +497,60 @@ describe('LicenseSection', () => {
       );
       expect(details().Customer).toBe('Acme Ltd');
     });
+  });
+});
+
+describe('LicenseSection buy link', () => {
+  const BUY = /Buy a license/;
+  const BUY_NAME = 'Buy a license (opens in a new tab)';
+
+  beforeEach(() => {
+    get.mockReset();
+  });
+
+  const unlicensed: readonly (readonly [string, LicenseResponse])[] = [
+    ['a Community install', COMMUNITY],
+    ['a stored key that does not verify', UNVERIFIED],
+    ['a lapsed license', LAPSED],
+  ];
+
+  for (const [name, response] of unlicensed) {
+    it(`links ${name} to pricing in a new tab`, async () => {
+      await loaded(response);
+
+      const link = screen.getByRole('link', { name: BUY });
+      expect(screen.getByRole('link', { name: BUY_NAME })).toBe(link);
+      expect(link).toHaveAttribute('href', PRICING_URL);
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link.getAttribute('rel')?.split(' ')).toContain('noopener');
+    });
+  }
+
+  const licensed: readonly (readonly [string, LicenseResponse])[] = [
+    ['an active license', ACTIVE],
+    ['a license in its grace period', GRACE],
+  ];
+
+  for (const [name, response] of licensed) {
+    it(`does not offer a purchase for ${name}`, async () => {
+      await loaded(response);
+
+      expect(screen.queryByRole('link', { name: BUY })).not.toBeInTheDocument();
+    });
+  }
+
+  it('does not offer a purchase while the license fails to load', async () => {
+    get.mockRejectedValue(
+      new ApiError('Failed to load the license: This needs a server admin.', 403)
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LicenseSection />
+      </QueryClientProvider>
+    );
+
+    await screen.findByRole('alert');
+    expect(screen.queryByRole('link', { name: BUY })).not.toBeInTheDocument();
   });
 });

@@ -12,7 +12,6 @@ use tokio_tungstenite::{
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-use zone_enterprise::Tier;
 use zone_server::config::{AgentConfig, Config};
 use zone_server::db::audit::actions::AGENT_POLICY_TURN_DENIED;
 use zone_server::db::reminders::{self, Reminder, Sweep};
@@ -352,7 +351,7 @@ async fn a_denied_agent_is_refused_with_its_code_and_audited_before_anything_is_
     let fixture = Fixture::new(ALLOWED, Upstream::Vertex).await;
     fixture.provide("claude_code").await;
     fixture.restrict(json!({"agents": ["codex"]})).await;
-    fixture.license(&active(Tier::Enterprise)).await;
+    fixture.license(&active()).await;
 
     let frames = fixture.turn("Hello").await;
 
@@ -384,7 +383,7 @@ async fn a_denied_agent_is_refused_with_its_code_and_audited_before_anything_is_
 async fn a_model_the_policy_denies_is_refused_and_never_sent() {
     let fixture = Fixture::new(DENIED, Upstream::Vertex).await;
     fixture.restrict(json!({"models": ["allowed-*"]})).await;
-    fixture.license(&active(Tier::Team)).await;
+    fixture.license(&active()).await;
 
     let frames = fixture.turn("Hello").await;
 
@@ -407,7 +406,7 @@ async fn a_model_the_policy_denies_is_refused_and_never_sent() {
 async fn a_model_litellm_routes_to_a_provider_the_policy_denies_is_refused() {
     let fixture = Fixture::new(ALLOWED, Upstream::Azure).await;
     fixture.restrict(json!({"providers": ["vertex"]})).await;
-    fixture.license(&active(Tier::Enterprise)).await;
+    fixture.license(&active()).await;
 
     let frames = fixture.turn("Hello").await;
 
@@ -430,7 +429,7 @@ async fn a_turn_the_policy_allows_completes() {
     fixture
         .restrict(json!({"providers": ["vertex"], "models": ["allowed-*"]}))
         .await;
-    fixture.license(&active(Tier::Enterprise)).await;
+    fixture.license(&active()).await;
 
     let frames = fixture.turn("Hello").await;
 
@@ -456,7 +455,7 @@ async fn auto_runs_on_a_model_the_policy_admits() {
         .mount(&fixture.litellm)
         .await;
     fixture.restrict(json!({"models": ["qwen*"]})).await;
-    fixture.license(&active(Tier::Enterprise)).await;
+    fixture.license(&active()).await;
 
     let frames = fixture.turn("Hello").await;
 
@@ -478,7 +477,7 @@ async fn the_classifier_never_runs_on_a_route_the_policy_denies() {
     })
     .await;
     fixture.restrict(json!({"providers": ["vertex"]})).await;
-    fixture.license(&active(Tier::Enterprise)).await;
+    fixture.license(&active()).await;
 
     let frames = fixture.turn(AMBIGUOUS).await;
 
@@ -516,7 +515,7 @@ async fn the_classifier_runs_on_a_model_the_policy_admits_in_place_of_a_denied_o
     })
     .await;
     fixture.restrict(json!({"models": ["allowed-*"]})).await;
-    fixture.license(&active(Tier::Enterprise)).await;
+    fixture.license(&active()).await;
 
     let frames = fixture.turn(AMBIGUOUS).await;
 
@@ -540,7 +539,7 @@ async fn the_classifier_runs_on_a_model_the_policy_admits_in_place_of_a_denied_o
 async fn a_lapsed_license_still_enforces() {
     let fixture = Fixture::new(ALLOWED, Upstream::Azure).await;
     fixture.restrict(json!({"providers": ["vertex"]})).await;
-    fixture.license(&lapsed(Tier::Team)).await;
+    fixture.license(&lapsed()).await;
 
     let frames = fixture.turn("Hello").await;
 
@@ -573,7 +572,7 @@ async fn community_enforces_nothing() {
 async fn a_policy_that_cannot_be_read_refuses_the_turn() {
     let fixture = Fixture::new(ALLOWED, Upstream::Vertex).await;
     fixture.restrict(json!({"providers": "everything"})).await;
-    fixture.license(&active(Tier::Enterprise)).await;
+    fixture.license(&active()).await;
 
     let frames = fixture.turn("Hello").await;
 
@@ -594,7 +593,7 @@ async fn a_policy_that_cannot_be_read_refuses_the_turn() {
 async fn a_reminder_on_a_denied_route_sends_no_completion() {
     let fixture = Fixture::new(ALLOWED, Upstream::Azure).await;
     fixture.restrict(json!({"providers": ["vertex"]})).await;
-    fixture.license(&active(Tier::Enterprise)).await;
+    fixture.license(&active()).await;
     let created = reminders::create(
         &fixture.database.pool,
         fixture.workspace,

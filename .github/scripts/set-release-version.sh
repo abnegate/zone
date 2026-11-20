@@ -68,4 +68,5 @@ cargo update \
   -p zone_installer \
   -p zone_desktop \
   -p zone_context \
-  -p zone_enterprise
+  -p zone_enterprise \
+  -p zone_license

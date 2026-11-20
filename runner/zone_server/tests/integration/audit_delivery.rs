@@ -10,7 +10,6 @@ use futures::future::join_all;
 use sqlx::{Executor, PgPool};
 use tokio::sync::Notify;
 use uuid::Uuid;
-use zone_enterprise::Tier;
 use zone_enterprise::audit::delivery::{RETRY_BASE, S3_BATCH, S3_FLUSH_AGE};
 use zone_enterprise::audit::{FailureCode, Kind, Pause};
 use zone_server::db::audit::deliveries::{self, Delivery};
@@ -148,9 +147,9 @@ impl Engine {
         }
     }
 
-    async fn licensed(tier: Tier) -> Self {
+    async fn licensed() -> Self {
         let engine = Self::new().await;
-        engine.license(&active(tier)).await;
+        engine.license(&active()).await;
         engine
     }
 
@@ -335,7 +334,7 @@ fn backoff(attempt: u32) -> Duration {
 
 #[tokio::test]
 async fn a_failing_destination_is_retried_with_backoff_until_every_event_is_delivered() {
-    let engine = Engine::licensed(Tier::Enterprise).await;
+    let engine = Engine::licensed().await;
     let scope = engine.organization().await;
     let destination = engine.destination(scope, Kind::Webhook).await;
     let ids = engine.written(scope, 3).await;
@@ -392,7 +391,7 @@ async fn a_failing_destination_is_retried_with_backoff_until_every_event_is_deli
 
 #[tokio::test]
 async fn a_new_owner_resends_the_identical_pinned_batch_after_the_lease_expires() {
-    let engine = Engine::licensed(Tier::Enterprise).await;
+    let engine = Engine::licensed().await;
     let scope = engine.organization().await;
     let destination = engine.destination(scope, Kind::Webhook).await;
     let first = engine.written(scope, 3).await;
@@ -444,8 +443,7 @@ async fn streaming_pauses_without_claiming_until_an_enterprise_license_is_renewe
     let untouched = engine.delivery(destination).await;
     let standings = [
         (None, Pause::Unlicensed),
-        (Some(active(Tier::Team)), Pause::Edition),
-        (Some(lapsed(Tier::Enterprise)), Pause::Lapsed),
+        (Some(lapsed()), Pause::Lapsed),
         (Some(UNVERIFIABLE.to_owned()), Pause::Unverified),
     ];
 
@@ -470,7 +468,7 @@ async fn streaming_pauses_without_claiming_until_an_enterprise_license_is_renewe
     }
     assert!(engine.receiver.received(destination).is_empty());
 
-    engine.license(&active(Tier::Enterprise)).await;
+    engine.license(&active()).await;
     assert_eq!(engine.drain().await, 2, "renewal resumes from the cursor");
     assert_eq!(engine.receiver.received(destination), ids);
     engine.cleanup().await;
@@ -478,7 +476,7 @@ async fn streaming_pauses_without_claiming_until_an_enterprise_license_is_renewe
 
 #[tokio::test]
 async fn an_open_transaction_delays_its_row_but_never_lets_the_cursor_skip_it() {
-    let engine = Engine::licensed(Tier::Enterprise).await;
+    let engine = Engine::licensed().await;
     let scope = engine.organization().await;
     let destination = engine.destination(scope, Kind::Webhook).await;
     let first = engine.write(scope).await;
@@ -508,7 +506,7 @@ async fn an_open_transaction_delays_its_row_but_never_lets_the_cursor_skip_it() 
 
 #[tokio::test]
 async fn s3_waits_for_a_full_batch_or_its_oldest_event_to_age() {
-    let engine = Engine::licensed(Tier::Enterprise).await;
+    let engine = Engine::licensed().await;
     let scope = engine.organization().await;
     let destination = engine.destination(scope, Kind::S3).await;
     let single = engine.write(scope).await;
@@ -560,7 +558,7 @@ async fn concurrent_drains_never_send_one_destination_two_batches_at_once() {
     const DESTINATIONS: usize = 4;
     const EVENTS: usize = 250;
     const DRAINS: usize = 4;
-    let engine = Engine::licensed(Tier::Enterprise).await;
+    let engine = Engine::licensed().await;
     let scope = engine.organization().await;
     let mut destinations = Vec::with_capacity(DESTINATIONS);
     for _ in 0..DESTINATIONS {
@@ -593,7 +591,7 @@ async fn concurrent_drains_never_send_one_destination_two_batches_at_once() {
 
 #[tokio::test]
 async fn a_tick_rebases_a_restore_before_delivering() {
-    let engine = Engine::licensed(Tier::Enterprise).await;
+    let engine = Engine::licensed().await;
     let scope = engine.organization().await;
     let destination = engine.destination(scope, Kind::Webhook).await;
     let delivered = engine.written(scope, 3).await;
@@ -631,7 +629,7 @@ async fn a_tick_rebases_a_restore_before_delivering() {
 
 #[tokio::test]
 async fn a_failed_rebase_aborts_the_tick() {
-    let engine = Engine::licensed(Tier::Enterprise).await;
+    let engine = Engine::licensed().await;
     let scope = engine.organization().await;
     let destination = engine.destination(scope, Kind::Webhook).await;
     let ids = engine.written(scope, 1).await;
@@ -679,7 +677,7 @@ async fn a_failed_rebase_aborts_the_tick() {
 
 #[tokio::test]
 async fn the_server_takes_requests_while_a_restore_waits_for_its_rebase() {
-    let engine = Engine::licensed(Tier::Enterprise).await;
+    let engine = Engine::licensed().await;
     let scope = engine.organization().await;
     engine.destination(scope, Kind::Webhook).await;
     engine.written(scope, 3).await;
@@ -727,7 +725,7 @@ async fn the_server_takes_requests_while_a_restore_waits_for_its_rebase() {
 
 #[tokio::test]
 async fn a_send_that_outlived_its_lease_cannot_record_over_the_same_process_reclaiming_it() {
-    let engine = Engine::licensed(Tier::Enterprise).await;
+    let engine = Engine::licensed().await;
     let scope = engine.organization().await;
     let destination = engine.destination(scope, Kind::Webhook).await;
     let first = engine.written(scope, 3).await;
@@ -769,7 +767,7 @@ async fn a_send_that_outlived_its_lease_cannot_record_over_the_same_process_recl
 
 #[tokio::test]
 async fn a_send_in_flight_across_a_rebase_cannot_move_the_cursor() {
-    let engine = Engine::licensed(Tier::Enterprise).await;
+    let engine = Engine::licensed().await;
     let scope = engine.organization().await;
     let destination = engine.destination(scope, Kind::Webhook).await;
     let ids = engine.written(scope, 3).await;
@@ -804,7 +802,7 @@ async fn a_send_in_flight_across_a_rebase_cannot_move_the_cursor() {
 
 #[tokio::test]
 async fn a_tick_ends_even_when_an_idle_destination_is_released_already_due() {
-    let engine = Engine::licensed(Tier::Enterprise).await;
+    let engine = Engine::licensed().await;
     let scope = engine.organization().await;
     let s3 = engine.destination(scope, Kind::S3).await;
     let busy = engine.destination(scope, Kind::Webhook).await;
@@ -828,7 +826,7 @@ async fn a_tick_ends_even_when_an_idle_destination_is_released_already_due() {
 
 #[tokio::test]
 async fn idle_and_failed_deliveries_are_due_again_on_the_database_clock() {
-    let engine = Engine::licensed(Tier::Enterprise).await;
+    let engine = Engine::licensed().await;
     let scope = engine.organization().await;
     let idle = engine.destination(scope, Kind::Webhook).await;
     settle(engine.pool()).await;
@@ -852,7 +850,7 @@ async fn idle_and_failed_deliveries_are_due_again_on_the_database_clock() {
 #[tokio::test]
 async fn a_deep_backlog_takes_turns_with_other_destinations() {
     const EVENTS: usize = 250;
-    let engine = Engine::licensed(Tier::Enterprise).await;
+    let engine = Engine::licensed().await;
     let scope = engine.organization().await;
     let mut destinations = Vec::new();
     for _ in 0..3 {

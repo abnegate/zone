@@ -181,8 +181,10 @@ describe('refusalMessage', () => {
     expect(new Set(POLICY_ADMIN_CODES.map(refusalMessage)).size).toBe(POLICY_ADMIN_CODES.length);
   });
 
-  it('names Team and Enterprise when a license is required', () => {
-    expect(refusalMessage(PolicyCode.LicenseRequired)).toContain('Team or Enterprise');
+  it('names Zone Enterprise when a license is required', () => {
+    expect(refusalMessage(PolicyCode.LicenseRequired)).toBe(
+      'Changing the agent policy needs a Zone Enterprise license that is active or in its grace period.'
+    );
   });
 });
 

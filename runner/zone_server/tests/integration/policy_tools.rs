@@ -19,7 +19,6 @@ use tokio_tungstenite::connect_async;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-use zone_enterprise::Tier;
 use zone_enterprise::policy::Denial;
 use zone_server::agent::approval::refusal::POLICY;
 use zone_server::agent::wait::{KIND_TASK_RUN, WAIT_FOR};
@@ -571,7 +570,7 @@ async fn auto_approve_asks_for_a_call_above_the_ceiling() {
         "Community holds auto-approve to no ceiling: {frames:?}"
     );
 
-    server.license(&active(Tier::Team)).await;
+    server.license(&active()).await;
     let enforced = server.chat(MODEL, json!({})).await;
     server.script.push(calls("", vec![command("enforced")]));
     server.script.push(answer(ANSWER));
@@ -589,7 +588,7 @@ async fn auto_approve_asks_for_a_call_above_the_ceiling() {
 async fn a_lapsed_license_still_holds_the_ceiling() {
     let server = Server::start(Backend::Http).await;
     server.restrict(json!({"ceiling": "write"})).await;
-    server.license(&lapsed(Tier::Enterprise)).await;
+    server.license(&lapsed()).await;
 
     let chat = server.chat(MODEL, json!({})).await;
     server.script.push(calls("", vec![command("lapsed")]));
@@ -604,7 +603,7 @@ async fn a_lapsed_license_still_holds_the_ceiling() {
 async fn a_host_ceiling_releases_a_write_and_asks_for_an_outward_call() {
     let server = Server::start(Backend::Http).await;
     server.restrict(json!({"ceiling": "host"})).await;
-    server.license(&active(Tier::Team)).await;
+    server.license(&active()).await;
     let note = server.directory.path().join("note.txt");
 
     let chat = server.chat(MODEL, json!({})).await;
@@ -644,7 +643,7 @@ async fn a_host_ceiling_releases_a_write_and_asks_for_an_outward_call() {
 async fn a_writerless_task_run_refuses_a_call_above_the_ceiling_and_audits_it() {
     let server = Server::start(Backend::Http).await;
     server.restrict(json!({"ceiling": "write"})).await;
-    server.license(&active(Tier::Team)).await;
+    server.license(&active()).await;
 
     let task = tasks::create_task_as(
         server.pool(),
@@ -713,7 +712,7 @@ async fn a_codex_chat_under_any_ceiling_runs_without_its_own_tools() {
         "an unsandboxed Codex keeps its own tools with no policy: {arguments}"
     );
 
-    server.license(&active(Tier::Team)).await;
+    server.license(&active()).await;
     let enforced = server.chat(AGENT_MODEL, unsandboxed).await;
     server.turn(enforced, "Write it.", None).await;
     let arguments = server.arguments().await;
@@ -736,7 +735,7 @@ async fn a_cli_agent_under_domains_runs_without_its_own_tools() {
     let arguments = server.arguments().await;
     assert!(!arguments.contains(CLAUDE_WITHHELD), "{arguments}");
 
-    server.license(&active(Tier::Team)).await;
+    server.license(&active()).await;
     let enforced = server.chat(AGENT_MODEL, unsandboxed).await;
     server.turn(enforced, "Write it.", None).await;
     let arguments = server.arguments().await;
@@ -769,7 +768,7 @@ async fn a_chat_under_domains_loses_web_search_github_and_the_search_prefetch() 
         assert!(names(&open, name), "{name} is offered with no policy");
     }
 
-    server.license(&active(Tier::Team)).await;
+    server.license(&active()).await;
     let enforced = server.chat(MODEL, json!({})).await;
     server.script.push(answer(ANSWER));
     let frames = server.turn(enforced, NEWS, requested).await;
@@ -791,7 +790,7 @@ async fn a_chat_under_domains_loses_web_search_github_and_the_search_prefetch() 
 async fn fetch_url_to_a_host_the_policy_does_not_admit_is_refused_and_audited() {
     let server = Server::start(Backend::Http).await;
     server.restrict(json!({"domains": [ADMITTED]})).await;
-    server.license(&active(Tier::Team)).await;
+    server.license(&active()).await;
 
     let chat = server.chat(MODEL, json!({})).await;
     server.script.push(calls(
@@ -830,7 +829,7 @@ async fn fetch_url_to_a_host_the_policy_does_not_admit_is_refused_and_audited() 
 async fn a_chat_offline_on_its_own_is_never_readmitted() {
     let server = Server::start(Backend::Http).await;
     server.restrict(json!({"domains": [ADMITTED]})).await;
-    server.license(&active(Tier::Team)).await;
+    server.license(&active()).await;
 
     let chat = server.chat(MODEL, json!({"offline": true})).await;
     server.script.push(answer(ANSWER));
@@ -853,7 +852,7 @@ async fn a_turn_resumed_after_a_wait_still_reaches_only_the_listed_mcp_servers()
     server
         .restrict(json!({"mcp_servers": [LISTED_SERVER]}))
         .await;
-    server.license(&active(Tier::Team)).await;
+    server.license(&active()).await;
     server.serve(LISTED_SERVER, &stub).await;
     server.serve(UNLISTED_SERVER, &stub).await;
     let run = server.finished_run().await;
@@ -902,7 +901,7 @@ async fn a_turn_resumed_after_a_wait_keeps_what_a_domain_list_readmits_and_audit
     server
         .restrict(json!({"mcp_servers": [LISTED_SERVER], "domains": [ADMITTED]}))
         .await;
-    server.license(&active(Tier::Team)).await;
+    server.license(&active()).await;
     server.serve(LISTED_SERVER, &stub).await;
     server.serve(UNLISTED_SERVER, &stub).await;
     let run = server.finished_run().await;

@@ -5,7 +5,6 @@ use uuid::Uuid;
 
 use crate::payload::Payload;
 use crate::status::{self, Status};
-use crate::tier::Tier;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct License {
@@ -41,10 +40,6 @@ impl License {
 
     pub fn customer(&self) -> &str {
         &self.payload.customer
-    }
-
-    pub fn tier(&self) -> Tier {
-        self.payload.tier
     }
 
     pub fn seats(&self) -> u32 {
@@ -94,7 +89,6 @@ mod tests {
         let license = fixtures::license(&payload);
         assert_eq!(license.id(), payload.id);
         assert_eq!(license.customer(), payload.customer);
-        assert_eq!(license.tier(), payload.tier);
         assert_eq!(license.seats(), payload.seats);
         assert_eq!(license.issued_at(), payload.issued_at);
         assert_eq!(license.expires_at(), payload.expires_at);

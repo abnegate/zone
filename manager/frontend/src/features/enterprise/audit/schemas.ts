@@ -31,7 +31,6 @@ export const DeliveryHealth = {
 
 export const StreamingPause = {
   Unlicensed: 'unlicensed',
-  Edition: 'edition',
   Lapsed: 'lapsed',
   Unverified: 'unverified',
 } as const;
@@ -106,7 +105,6 @@ export const DELIVERY_HEALTHS = [
 
 export const STREAMING_PAUSES = [
   StreamingPause.Unlicensed,
-  StreamingPause.Edition,
   StreamingPause.Lapsed,
   StreamingPause.Unverified,
 ] as const;

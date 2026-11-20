@@ -1,0 +1,106 @@
+name: License Signer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'runner/zone_license/**'
+      - 'runner/zone_enterprise/**'
+      - 'runner/Cargo.toml'
+      - 'runner/Cargo.lock'
+      - '.dockerignore'
+      - '.github/workflows/license-signer.yml'
+  pull_request:
+    paths:
+      - 'runner/zone_license/**'
+      - 'runner/zone_enterprise/**'
+      - 'runner/Cargo.toml'
+      - 'runner/Cargo.lock'
+      - '.dockerignore'
+      - '.github/workflows/license-signer.yml'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: runner
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: runner
+          shared-key: license-test
+          cache-on-failure: true
+
+      - name: Run tests
+        run: cargo test -p zone_license --locked
+        env:
+          RUST_BACKTRACE: 1
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: runner
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: runner
+          shared-key: license-clippy
+          cache-on-failure: true
+
+      - name: Run Clippy
+        run: cargo clippy -p zone_license --all-targets --locked -- -D warnings
+
+  image:
+    name: Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the signer image
+        run: docker build --file runner/zone_license/Dockerfile --tag zone-license:ci .
+
+      - name: Check the binary starts in the runtime image
+        run: docker run --rm zone-license:ci --help

@@ -62,16 +62,10 @@ export function LicenseSummary({ response, changing, onRemove }: LicenseSummaryP
       )}
       <dl className="license-details">
         {license && (
-          <>
-            <div className="license-detail">
-              <dt>Customer</dt>
-              <dd>{license.customer}</dd>
-            </div>
-            <div className="license-detail">
-              <dt>Tier</dt>
-              <dd>{editionLabel(license.tier)}</dd>
-            </div>
-          </>
+          <div className="license-detail">
+            <dt>Customer</dt>
+            <dd>{license.customer}</dd>
+          </div>
         )}
         <div className="license-detail">
           <dt>Seats</dt>

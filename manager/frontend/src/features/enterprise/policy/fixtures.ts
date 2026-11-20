@@ -48,7 +48,7 @@ export const ACTIVE_ORGANIZATION: OrganizationPolicyResponse = {
 export const LAPSED_ORGANIZATION: OrganizationPolicyResponse = {
   entitled: false,
   enforced: true,
-  edition: Edition.Team,
+  edition: Edition.Enterprise,
   status: LicenseStatus.Lapsed,
   editable: false,
   policy: ORGANIZATION_RULES,

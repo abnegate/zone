@@ -13,7 +13,7 @@ export type ProviderField = (typeof ProviderField)[keyof typeof ProviderField];
 
 const MESSAGES: Readonly<Record<SsoAdminCodeValue, string>> = {
   [SsoAdminCode.LicenseRequired]:
-    'Changing single sign-on needs an active Zone Team or Enterprise license.',
+    'Changing single sign-on needs a Zone Enterprise license that is active or in its grace period.',
   [SsoAdminCode.ProviderNotFound]:
     'This provider no longer exists. It may have been deleted somewhere else.',
   [SsoAdminCode.ProviderRequired]:

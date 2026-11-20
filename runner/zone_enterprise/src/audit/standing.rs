@@ -12,23 +12,16 @@ use crate::status::{Status, status};
 #[serde(rename_all = "snake_case")]
 pub enum Pause {
     Unlicensed,
-    Edition,
     Lapsed,
     Unverified,
 }
 
 impl Pause {
-    pub const ALL: [Self; 4] = [
-        Self::Unlicensed,
-        Self::Edition,
-        Self::Lapsed,
-        Self::Unverified,
-    ];
+    pub const ALL: [Self; 3] = [Self::Unlicensed, Self::Lapsed, Self::Unverified];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Unlicensed => "unlicensed",
-            Self::Edition => "edition",
             Self::Lapsed => "lapsed",
             Self::Unverified => "unverified",
         }
@@ -53,8 +46,8 @@ pub struct Standing {
 }
 
 impl Standing {
-    /// `applies` is deliberately not `Feature::enforced`: a lapse or a downgrade keeps deleting
-    /// what the company committed to delete, and only removing the license returns to Community.
+    /// `applies` deliberately ignores the status: a lapse keeps deleting what the company committed
+    /// to delete, and only removing the license returns to Community.
     pub fn of(license: Option<&License>, unverified: bool, now: DateTime<Utc>) -> Self {
         let entitled = |feature: Feature| !unverified && feature.entitled(license, now);
         let status = status(license, now);
@@ -77,9 +70,6 @@ fn pause(license: Option<&License>, unverified: bool, status: Status) -> Option<
     if license.is_none() {
         return Some(Pause::Unlicensed);
     }
-    if !Feature::AuditStreaming.enforced(license) {
-        return Some(Pause::Edition);
-    }
     if status == Status::Lapsed {
         return Some(Pause::Lapsed);
     }
@@ -93,14 +83,9 @@ mod tests {
 
     use super::*;
     use crate::fixtures;
-    use crate::payload::Payload;
-    use crate::tier::Tier;
 
-    fn license(tier: Tier) -> License {
-        fixtures::license(&Payload {
-            tier,
-            ..fixtures::payload()
-        })
+    fn license() -> License {
+        fixtures::license(&fixtures::payload())
     }
 
     fn active(license: &License) -> DateTime<Utc> {
@@ -133,25 +118,8 @@ mod tests {
     }
 
     #[test]
-    fn active_team_exports_but_neither_streams_nor_edits_retention() {
-        let team = license(Tier::Team);
-        assert_eq!(
-            Standing::of(Some(&team), false, active(&team)),
-            Standing {
-                edition: Edition::Team,
-                status: Status::Active,
-                export: true,
-                streaming: false,
-                retention: false,
-                applies: true,
-                pause: Some(Pause::Edition),
-            }
-        );
-    }
-
-    #[test]
     fn active_enterprise_is_entitled_to_everything() {
-        let enterprise = license(Tier::Enterprise);
+        let enterprise = license();
         assert_eq!(
             Standing::of(Some(&enterprise), false, active(&enterprise)),
             Standing {
@@ -168,7 +136,7 @@ mod tests {
 
     #[test]
     fn enterprise_in_grace_keeps_everything() {
-        let enterprise = license(Tier::Enterprise);
+        let enterprise = license();
         assert_eq!(
             Standing::of(Some(&enterprise), false, grace(&enterprise)),
             Standing {
@@ -184,18 +152,8 @@ mod tests {
     }
 
     #[test]
-    fn team_in_grace_still_exports() {
-        let team = license(Tier::Team);
-        let standing = Standing::of(Some(&team), false, grace(&team));
-        assert_eq!(standing.status, Status::Grace);
-        assert!(standing.export);
-        assert!(!standing.streaming);
-        assert_eq!(standing.pause, Some(Pause::Edition));
-    }
-
-    #[test]
     fn lapsed_enterprise_pauses_streaming_and_export_but_keeps_applying_retention() {
-        let enterprise = license(Tier::Enterprise);
+        let enterprise = license();
         assert_eq!(
             Standing::of(Some(&enterprise), false, lapsed(&enterprise)),
             Standing {
@@ -206,23 +164,6 @@ mod tests {
                 retention: false,
                 applies: true,
                 pause: Some(Pause::Lapsed),
-            }
-        );
-    }
-
-    #[test]
-    fn lapsed_team_keeps_applying_retention_and_reports_its_edition() {
-        let team = license(Tier::Team);
-        assert_eq!(
-            Standing::of(Some(&team), false, lapsed(&team)),
-            Standing {
-                edition: Edition::Team,
-                status: Status::Lapsed,
-                export: false,
-                streaming: false,
-                retention: false,
-                applies: true,
-                pause: Some(Pause::Edition),
             }
         );
     }
@@ -246,7 +187,7 @@ mod tests {
 
     #[test]
     fn unverified_takes_precedence_over_a_license() {
-        let enterprise = license(Tier::Enterprise);
+        let enterprise = license();
         let standing = Standing::of(Some(&enterprise), true, active(&enterprise));
         assert_eq!(standing.pause, Some(Pause::Unverified));
         assert!(!standing.export && !standing.streaming && !standing.retention);
@@ -255,7 +196,7 @@ mod tests {
 
     #[test]
     fn serializes_its_wire_shape() {
-        let enterprise = license(Tier::Enterprise);
+        let enterprise = license();
         assert_eq!(
             serde_json::to_value(Standing::of(Some(&enterprise), false, lapsed(&enterprise)))
                 .unwrap(),
@@ -279,7 +220,7 @@ mod tests {
     #[test]
     fn pauses_are_the_wire_contract() {
         let values: Vec<&str> = Pause::ALL.iter().map(|pause| pause.as_str()).collect();
-        assert_eq!(values, ["unlicensed", "edition", "lapsed", "unverified"]);
+        assert_eq!(values, ["unlicensed", "lapsed", "unverified"]);
         for pause in Pause::ALL {
             assert_eq!(serde_json::to_value(pause).unwrap(), pause.as_str());
             assert_eq!(pause.to_string(), pause.as_str());

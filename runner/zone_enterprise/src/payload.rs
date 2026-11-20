@@ -3,13 +3,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::Error;
-use crate::tier::Tier;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Payload {
     pub id: Uuid,
     pub customer: String,
-    pub tier: Tier,
     pub seats: u32,
     pub issued_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
@@ -39,10 +37,9 @@ mod tests {
     use super::*;
     use crate::fixtures;
 
-    const KEYS: [&str; 7] = [
+    const KEYS: [&str; 6] = [
         "id",
         "customer",
-        "tier",
         "seats",
         "issued_at",
         "expires_at",
@@ -57,7 +54,6 @@ mod tests {
             json!({
                 "id": "0193a8e2-7c4b-7d10-8f00-4d2c5a9b1e01",
                 "customer": "Acme Ltd",
-                "tier": "team",
                 "seats": 25,
                 "issued_at": "2026-11-01T00:00:00Z",
                 "expires_at": "2027-11-01T00:00:00Z",
@@ -79,15 +75,6 @@ mod tests {
         let mut expected = KEYS.to_vec();
         expected.sort_unstable();
         assert_eq!(keys, expected);
-    }
-
-    #[test]
-    fn serializes_enterprise_tier_lowercase() {
-        let payload = Payload {
-            tier: Tier::Enterprise,
-            ..fixtures::payload()
-        };
-        assert_eq!(serde_json::to_value(payload).unwrap()["tier"], "enterprise");
     }
 
     #[test]
@@ -113,6 +100,22 @@ mod tests {
             serde_json::from_value::<Payload>(value).unwrap(),
             fixtures::payload()
         );
+    }
+
+    #[test]
+    fn decodes_a_legacy_payload_that_names_a_tier() {
+        for tier in ["team", "enterprise"] {
+            let mut value = serde_json::to_value(fixtures::payload()).unwrap();
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert("tier".into(), Value::from(tier));
+            assert_eq!(
+                serde_json::from_value::<Payload>(value).unwrap(),
+                fixtures::payload(),
+                "tier {tier}"
+            );
+        }
     }
 
     #[test]

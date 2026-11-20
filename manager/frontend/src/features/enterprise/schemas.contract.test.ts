@@ -13,7 +13,6 @@ import {
   LicenseResponseSchema,
   SeatsSchema,
   SetLicenseRequestSchema,
-  TIERS,
   UNVERIFIED_CODES,
   UnverifiedSchema,
 } from './schemas';
@@ -116,10 +115,6 @@ describe('the license vocabularies match the server', () => {
     expect(sorted(LICENSE_STATUSES)).toEqual(
       sorted(rustVariants(read(join(ENTERPRISE, 'status.rs')), 'Status'))
     );
-  });
-
-  test('tiers', () => {
-    expect(sorted(TIERS)).toEqual(sorted(rustVariants(read(join(ENTERPRISE, 'tier.rs')), 'Tier')));
   });
 
   test('the console models every refusal code the server sends, and no other', () => {

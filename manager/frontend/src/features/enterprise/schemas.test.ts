@@ -36,11 +36,15 @@ describe('LicenseResponseSchema', () => {
     });
   }
 
-  it('reads a lapsed license that keeps its Team edition', () => {
+  it('reads a lapsed license that keeps its Enterprise edition', () => {
     const parsed = LicenseResponseSchema.parse(LAPSED);
-    expect(parsed.edition).toBe('team');
+    expect(parsed.edition).toBe('enterprise');
     expect(parsed.status).toBe('lapsed');
-    expect(parsed.license?.tier).toBe('team');
+    expect(parsed.license).toEqual(ACME_LICENSE);
+  });
+
+  it('rejects the Team edition, which Zone no longer sells', () => {
+    expect(LicenseResponseSchema.safeParse({ ...ACTIVE, edition: 'team' }).success).toBe(false);
   });
 
   for (const code of UNVERIFIED_CODES) {
@@ -93,15 +97,6 @@ describe('LicenseResponseSchema', () => {
   it('rejects seats that leave the licensed count out instead of sending null', () => {
     expect(
       LicenseResponseSchema.safeParse({ ...COMMUNITY, seats: { used: 1, over: false } }).success
-    ).toBe(false);
-  });
-
-  it('rejects a license whose tier is Community', () => {
-    expect(
-      LicenseResponseSchema.safeParse({
-        ...ACTIVE,
-        license: { ...ACME_LICENSE, tier: 'community' },
-      }).success
     ).toBe(false);
   });
 });
