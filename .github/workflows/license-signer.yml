@@ -3,6 +3,8 @@ name: License Signer
 on:
   push:
     branches: [main]
+    tags:
+      - 'license-signer-v*'
     paths:
       - 'runner/zone_license/**'
       - 'runner/zone_enterprise/**'
@@ -104,3 +106,48 @@ jobs:
 
       - name: Check the binary starts in the runtime image
         run: docker run --rm zone-license:ci --help
+
+  publish:
+    name: Publish
+    needs: [test, clippy, image]
+    if: startsWith(github.ref, 'refs/tags/license-signer-v')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: license-signer-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Sign in to the GitHub Container Registry
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+
+      - name: Build and push
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/zone-license
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          version="${TAG#license-signer-v}"
+          docker build --file runner/zone_license/Dockerfile \
+            --label "org.opencontainers.image.source=$SOURCE" \
+            --tag "$IMAGE:$version" .
+          docker run --rm "$IMAGE:$version" --help
+          docker push "$IMAGE:$version"
+          case "$version" in
+            *-*) ;;
+            *)
+              docker tag "$IMAGE:$version" "$IMAGE:latest"
+              docker push "$IMAGE:latest"
+              ;;
+          esac

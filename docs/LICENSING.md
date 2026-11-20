@@ -95,7 +95,7 @@ license that every Zone release in the field accepts.
 Build the signer and generate a key pair, from `runner`:
 
 ```sh
-cargo run --release -p zone_license -- keygen --output zone-license-2026-2.key --key-id 2026-2
+cargo run --release -p zone_license -- keygen --output zone-license-2026-3.key --key-id 2026-3
 ```
 
 `keygen` writes the private key to a new file with mode `0600`, and refuses to
@@ -106,7 +106,7 @@ the key:
   `runner/zone_enterprise/src/production.rs`;
 - the public key in base64, to record beside the key id;
 - the key id: the one you passed with `--key-id`, or else the next free one
-  for the current year, such as `2026-2`. An id may use only letters, digits,
+  for the current year, such as `2026-3`. An id may use only letters, digits,
   `-`, `_` and `.`, because it's pasted into Rust source; `keygen` refuses any
   other before it generates or prints anything.
 
@@ -529,22 +529,23 @@ withdrawn early: it runs to its expiry, plus the grace period.
 
 Rotate when the private key is lost, suspected leaked, or simply old.
 
-The first key, `2026-1`, is already trusted by every release. Its private key
-may not be recoverable, in which case the signer has to move to a new key
-before it can issue anything:
+Releases trust `2026-1` and `2026-2`, and the signer signs with `2026-2`. The
+private key of `2026-1` was never recovered, so it stays trusted only so that
+its licenses keep verifying. To move to another key:
 
 1. Generate the new key:
 
    ```sh
-   zone-license keygen --output zone-license-2026-2.key --key-id 2026-2
+   zone-license keygen --output zone-license-2027-1.key --key-id 2027-1
    ```
 
-2. Add `2026-2` to `production::KEYS` in
-   `runner/zone_enterprise/src/production.rs`, after `2026-1`. The keyring is a
-   list, so licenses signed with an older key keep verifying.
-3. Update the keyring tests in the same file, merge, and ship a release.
+2. Paste the entry `keygen` prints into `production::KEYS` in
+   `runner/zone_enterprise/src/production.rs`, after the last key. The keyring
+   is a list, so licenses signed with an older key keep verifying.
+3. Add the key and its base64 public key to `PUBLISHED` in the same file's
+   tests, merge, and ship a release.
 4. Store the new private key as the signer's secret, set
-   `ZONE_LICENSE_KEY_ID=2026-2`, and redeploy the signer built from that
+   `ZONE_LICENSE_KEY_ID` to the new id, and redeploy the signer built from that
    release.
 5. Keep the cold backup of the new key.
 
@@ -748,54 +749,11 @@ and send the key with the installation steps.
 
 The **License Signer** workflow, `.github/workflows/license-signer.yml`, runs
 on changes to the signer. Its `test` job runs the `zone_license` tests, its
-`clippy` job lints them, and its `image` job builds the Docker image without
-pushing it and checks that the binary starts in it.
+`clippy` job lints them, and its `image` job builds the Docker image and checks
+that the binary starts in it.
 
-To publish the image to the GitHub Container Registry, add a trigger on
-release tags, such as `license-signer-v*`, and a job that runs after the
-existing jobs pass, only on those tags, with permission to write packages:
-
-```yaml
-on:
-  push:
-    tags:
-      - 'license-signer-v*'
-
-jobs:
-  publish:
-    name: Publish
-    needs: [test, clippy, image]
-    if: startsWith(github.ref, 'refs/tags/license-signer-v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Sign in to the GitHub Container Registry
-        env:
-          ACTOR: ${{ github.actor }}
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
-
-      - name: Build and push
-        env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/zone-license
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -eu
-          version="${TAG#license-signer-v}"
-          docker build -f runner/zone_license/Dockerfile -t "$IMAGE:$version" -t "$IMAGE:latest" .
-          docker push "$IMAGE:$version"
-          docker push "$IMAGE:latest"
-```
-
-Name the workflow's actual job ids in `needs`. Keep `contents: read` as the
-workflow's permissions and grant `packages: write` only to this job, so pull
-requests never get it. Pin any action you add to a commit SHA, as the other
-workflows do. The image holds no secrets: the signing key, the webhook secret
+Pushing a tag such as `license-signer-v1.0.0` also runs its `publish` job,
+once the others pass, which pushes the image to
+`ghcr.io/abnegate/zone-license` as `1.0.0` and `latest`. Only that job can
+write packages. The image holds no secrets: the signing key, the webhook secret
 and the SMTP password all reach the container at runtime.

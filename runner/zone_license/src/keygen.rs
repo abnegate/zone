@@ -12,7 +12,7 @@ use crate::keygen_error::KeygenError;
 use crate::private_key::{PrivateKey, SEED_LENGTH};
 use crate::variable::Variable;
 
-const BYTES_PER_LINE: usize = 15;
+const BYTES_PER_LINE: usize = 14;
 const KEY_ID_SEPARATOR: char = '-';
 const KEY_ID_PUNCTUATION: [char; 3] = ['-', '_', '.'];
 const PRODUCTION_SOURCE: &str = "runner/zone_enterprise/src/production.rs";
@@ -48,7 +48,7 @@ pub fn run(
         report,
         "Trust it by adding this entry to KEYS in {PRODUCTION_SOURCE}:"
     )?;
-    writeln!(report, "{},", entry(&key_id, &public))?;
+    writeln!(report, "{}", entry(&key_id, &public))?;
     writeln!(
         report,
         "Sign with {}={key_id} once a release carries it.",
@@ -87,11 +87,11 @@ pub fn entry(key_id: &str, public: &[u8; 32]) -> String {
         .chunks(BYTES_PER_LINE)
         .map(|chunk| {
             let bytes: Vec<String> = chunk.iter().map(|byte| format!("{byte:#04x}")).collect();
-            format!("        {},", bytes.join(", "))
+            format!("            {},", bytes.join(", "))
         })
         .collect();
     format!(
-        "(\n    \"{key_id}\",\n    [\n{}\n    ],\n)",
+        "    (\n        \"{key_id}\",\n        [\n{}\n        ],\n    ),",
         lines.join("\n")
     )
 }
@@ -198,9 +198,11 @@ mod tests {
 
     #[test]
     fn renders_production_rs_exactly() {
-        let public = Keyring::production().get("2026-1").unwrap().bytes();
-        let rendered = entry("2026-1", &public);
-        assert!(PRODUCTION.contains(&rendered), "{rendered}");
+        let keyring = Keyring::production();
+        for id in keyring.ids() {
+            let rendered = entry(id, &keyring.get(id).unwrap().bytes());
+            assert!(PRODUCTION.contains(&rendered), "{rendered}");
+        }
     }
 
     #[test]
@@ -240,6 +242,17 @@ mod tests {
             !stderr.contains(&key.encode()),
             "the report leaked the private key"
         );
+    }
+
+    #[test]
+    fn prints_the_entry_exactly_as_it_is_pasted() {
+        let (stdout, stderr) = run_to_strings(&KeygenArguments {
+            key_id: Some("2026-3".into()),
+            ..KeygenArguments::default()
+        });
+        let public = PrivateKey::parse(&stdout).unwrap().public();
+        let pasted = format!(":\n{}\nSign with", entry("2026-3", &public));
+        assert!(stderr.contains(&pasted), "{stderr}");
     }
 
     #[test]
