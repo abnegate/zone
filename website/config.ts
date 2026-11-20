@@ -4,7 +4,7 @@ export const site: Site = {
   name: 'Zone',
   domain: 'zone.abnegate.dev',
   repository: 'https://github.com/abnegate/zone',
-  checkoutURL: 'https://buy.polar.sh/REPLACE_WITH_POLAR_CHECKOUT_LINK',
+  checkoutURL: 'https://buy.polar.sh/polar_cl_MFvv7Q0eFuxGBzyPPNFGhhGtAPcfQGpgUnLEu14oZsz',
   contactEmail: 'sales@zone.abnegate.dev',
   price: {
     currency: 'USD',
@@ -14,8 +14,6 @@ export const site: Site = {
 };
 
 export const unconfirmed: ReadonlyArray<keyof Site> = [
-  'checkoutURL',
   'contactEmail',
   'domain',
-  'price',
 ];
