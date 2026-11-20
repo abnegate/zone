@@ -24,6 +24,7 @@ use super::warmup::Warmup;
 use crate::config::SourceIndexConfig;
 use crate::services::audit::retention;
 use crate::services::mcp_servers::load;
+use crate::services::worktree;
 use crate::state::AppState;
 use crate::workers::analytics::AnalyticsPolicy;
 use crate::workers::promotion::PromotionPolicy;
@@ -49,11 +50,12 @@ pub enum Periodic {
     McpConvergence,
     PullRequestWatch,
     AuditRetention,
+    WorktreeCleanup,
 }
 
 impl Periodic {
     /// Every sweep, in the order the server used to spawn them, then those added since.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::KnowledgeRefresh,
         Self::SourceResync,
         Self::AnswerPromotion,
@@ -66,6 +68,7 @@ impl Periodic {
         Self::McpConvergence,
         Self::PullRequestWatch,
         Self::AuditRetention,
+        Self::WorktreeCleanup,
     ];
 
     pub fn name(self) -> &'static str {
@@ -82,6 +85,7 @@ impl Periodic {
             Self::McpConvergence => "mcp-convergence",
             Self::PullRequestWatch => "pull-request-watch",
             Self::AuditRetention => "audit-retention",
+            Self::WorktreeCleanup => "worktree-cleanup",
         }
     }
 
@@ -101,6 +105,7 @@ impl Periodic {
             Self::McpConvergence => load::CONVERGENCE_INTERVAL_SECONDS,
             Self::PullRequestWatch => pull_requests::WATCH_INTERVAL_SECONDS,
             Self::AuditRetention => retention::SWEEP_INTERVAL_SECONDS,
+            Self::WorktreeCleanup => worktree::SWEEP_INTERVAL_SECONDS,
         };
         Duration::from_secs(seconds)
     }
@@ -126,6 +131,8 @@ impl Periodic {
             Self::PullRequestWatch => Warmup::Period,
             // Rows a period past their deadline are deleted an hour after start-up just the same.
             Self::AuditRetention => Warmup::Period,
+            // A worktree has to sit idle for a day before it can go, so an hour's wait costs nothing.
+            Self::WorktreeCleanup => Warmup::Period,
             // Long enough to be out of the way of start-up, short enough that a
             // server coming back up picks up files whose embeddings failed.
             Self::SourceResync => Warmup::After(source_resync::FIRST_POLL_DELAY),
@@ -163,7 +170,9 @@ impl Periodic {
             // reads: the status GitHub reports now.
             | Self::PullRequestWatch
             // The next pass deletes whatever expired since, in the same batches.
-            | Self::AuditRetention => Catchup::Skip,
+            | Self::AuditRetention
+            // The next pass reads the same worktrees and removes whatever this one would have.
+            | Self::WorktreeCleanup => Catchup::Skip,
             // These two never ticked on a grid at all. Both were `sleep` loops,
             // so the wait has always been measured from the end of the previous
             // pass rather than from a fixed alignment, and both queue work
@@ -219,6 +228,7 @@ pub fn periodic(state: AppState) -> Registry {
             Periodic::McpConvergence => converge_mcp_servers(schedule, state.clone()),
             Periodic::PullRequestWatch => watch_pull_requests(schedule, state.clone()),
             Periodic::AuditRetention => apply_audit_retention(schedule, state.clone()),
+            Periodic::WorktreeCleanup => clean_worktrees(schedule, state.clone()),
         };
         registry.register(Arc::new(sweep));
     }
@@ -417,6 +427,24 @@ fn apply_audit_retention(schedule: Schedule, state: AppState) -> Sweep {
     })
 }
 
+fn clean_worktrees(schedule: Schedule, state: AppState) -> Sweep {
+    Sweep::new(Periodic::WorktreeCleanup.name(), schedule, move || {
+        let state = state.clone();
+        async move {
+            let tally = worktree::sweep(&state).await.map_err(Failure::new)?;
+            if tally.removed > 0 || tally.failed > 0 {
+                tracing::info!(
+                    removed = tally.removed,
+                    kept = tally.kept,
+                    failed = tally.failed,
+                    "Swept agent worktrees"
+                );
+            }
+            Ok(())
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -444,11 +472,12 @@ mod tests {
                 "mcp-convergence",
                 "pull-request-watch",
                 "audit-retention",
+                "worktree-cleanup",
             ],
             "main.rs spawned nine workers; eight of them are periodic sweeps and the ninth, \
              reminders, is a dispatch loop that stayed where it was. MCP convergence, the pull \
-             request watch and the audit retention sweep joined them later. Dropping one here \
-             would silently stop that background work."
+             request watch, the audit retention sweep and the worktree cleanup joined them \
+             later. Dropping one here would silently stop that background work."
         );
     }
 
@@ -475,6 +504,7 @@ mod tests {
             (Periodic::SubagentRecovery, 60),
             (Periodic::McpConvergence, 60),
             (Periodic::AuditRetention, 60 * 60),
+            (Periodic::WorktreeCleanup, 60 * 60),
         ] {
             assert_eq!(
                 periodic.period(&sources),

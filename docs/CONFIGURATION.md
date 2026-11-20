@@ -798,6 +798,38 @@ their absolute paths as before.
   only inside the directory it starts in, so other mounted folders are read-only to
   it. The compose default, `danger-full-access`, has no such limit.
 
+### Agent worktrees
+
+A chat agent starts work with `git fetch --prune origin && git worktree add
+.worktrees/<branch> -b <branch> origin/main`, in whichever of the workspace's
+**Folders** it is working in. The `worktree-cleanup` housekeeping sweep removes
+them again. Once an hour, for every folder any workspace mounted that is in a git
+repository and has a `.worktrees/` directory, it runs `git worktree remove`,
+without `--force`, on each worktree under `.worktrees/` that is:
+
+- **Unlocked**: `git worktree lock` keeps a worktree for as long as it is locked.
+- **Idle**: neither its `HEAD` nor its `HEAD` reflog has changed for 24 hours,
+  so a worktree just added off main, which is trivially merged, survives.
+- **Clean**: no staged or unstaged changes and no untracked files. Ignored files,
+  such as build output, don't count and go with the worktree. An excludes file
+  named in git's global configuration doesn't apply, so a file only it ignores
+  keeps the worktree.
+- **Merged**: its `HEAD` is on the remote's default branch, which is what
+  `origin/HEAD` names, else `origin/main`, else `origin/master`; a repository
+  with none of them keeps every worktree. A commit counts as merged when it is an
+  ancestor of that branch, or when its whole change since the two diverged
+  landed there as one commit, matched by `git patch-id`, which is what a squash
+  merge leaves. Zone doesn't fetch: the prompt's `git fetch` keeps
+  `origin/main` current.
+
+The branch is kept, any directory a branch name's prefix made under
+`.worktrees/` goes once it is empty, and a worktree anywhere else, such as
+`.claude/worktrees/`, is never touched. The sweep also adds `/.worktrees/` to the
+repository's `info/exclude` once, so the host's own `git status` doesn't list
+agent worktrees. Each removal and each failure is logged, and a repository that
+fails doesn't stop the sweep. Git runs with `GIT_OPTIONAL_LOCKS=0`, so reading a
+status doesn't rewrite the index under an open editor.
+
 ### `ZONE_PROJECT_CLONE_DIR`
 - **Default**: `clones` beside `ZONE_AGENT_STATE_DIR`, so
   `$XDG_STATE_HOME/zone/clones`, falling back to
