@@ -7,7 +7,7 @@ use lettre::Address;
 use zone_enterprise::Keyring;
 
 use crate::config_error::ConfigError;
-use crate::polar::WebhookSecret;
+use crate::polar::{AccessToken, WebhookSecret};
 use crate::private_key::PrivateKey;
 use crate::problem::Problem;
 use crate::signer::Signer;
@@ -29,6 +29,8 @@ pub struct Config {
     pub signer: Signer,
     pub secret: WebhookSecret,
     pub products: Vec<String>,
+    pub access_token: Option<AccessToken>,
+    pub keyring: Keyring,
     pub listen: SocketAddr,
     pub smtp: SmtpConfig,
 }
@@ -67,6 +69,7 @@ impl Config {
                 }
                 Some(products)
             });
+        let access_token = value(Variable::AccessToken).map(AccessToken::new);
         let listen = parsed(
             value(Variable::Listen),
             Variable::Listen,
@@ -116,6 +119,8 @@ impl Config {
                 signer: signer?,
                 secret: WebhookSecret::new(&secret?),
                 products: products?,
+                access_token,
+                keyring: keyring.clone(),
                 listen: listen?,
                 smtp: SmtpConfig::new(
                     host?,
@@ -140,6 +145,7 @@ impl fmt::Debug for Config {
             .field("signer", &self.signer)
             .field("secret", &self.secret)
             .field("products", &self.products)
+            .field("access_token", &self.access_token)
             .field("listen", &self.listen)
             .field("smtp_host", &self.smtp.host)
             .field("smtp_port", &self.smtp.port)
@@ -246,6 +252,7 @@ mod tests {
     const SECRET: &str = "whsec_config-test-secret";
     const PASSWORD: &str = "hunter2-not-a-real-password";
     const PRODUCT: &str = "prod_a";
+    const ACCESS_TOKEN: &str = "polar_oat_config-test-token";
     const REQUIRED: [Variable; 7] = [
         Variable::WebhookSecret,
         Variable::Products,
@@ -513,6 +520,46 @@ mod tests {
         assert_eq!(config.signer.key_id(), KEY_ID);
         assert_eq!(config.smtp.host, "smtp.example.test");
         assert_eq!(config.smtp.sender.address, "licenses@example.test");
+    }
+
+    #[test]
+    fn the_access_token_is_optional() {
+        let config = load(&complete()).unwrap();
+        assert_eq!(config.access_token, None);
+    }
+
+    #[test]
+    fn a_blank_access_token_counts_as_unset() {
+        for blank in ["", "  "] {
+            let config = load(&with(&[(Variable::AccessToken, blank)])).unwrap();
+            assert_eq!(config.access_token, None, "{blank:?}");
+        }
+    }
+
+    #[test]
+    fn reads_the_access_token_trimmed() {
+        let config = load(&with(&[(
+            Variable::AccessToken,
+            &format!(" {ACCESS_TOKEN} \n"),
+        )]))
+        .unwrap();
+        assert_eq!(config.access_token, Some(AccessToken::new(ACCESS_TOKEN)));
+    }
+
+    #[test]
+    fn keeps_the_keyring_it_was_given() {
+        let config = load(&complete()).unwrap();
+        assert_eq!(config.keyring, keyring());
+    }
+
+    #[test]
+    fn debug_redacts_the_access_token() {
+        let config = load(&with(&[(Variable::AccessToken, ACCESS_TOKEN)])).unwrap();
+        let shown = format!("{config:?} {config:#?}");
+        assert!(!shown.contains(ACCESS_TOKEN), "{shown}");
+        assert!(!shown.contains("config-test-token"), "{shown}");
+        assert!(shown.contains("access_token"), "{shown}");
+        assert!(shown.contains("[redacted]"), "{shown}");
     }
 
     #[test]
