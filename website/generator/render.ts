@@ -62,13 +62,11 @@ export function rootFor(page: Page, basePath: string): string {
 }
 
 export function siteValues(site: Site): Record<string, string> {
-  const { currency, seatMonthly, minimumSeats } = site.price;
+  const { currency, seatMonthly } = site.price;
   return {
     siteName: site.name,
     seatMonthly: formatMoney(seatMonthly, currency),
     seatAnnual: formatMoney(seatMonthly * 12, currency),
-    minimumSeats: String(minimumSeats),
-    minimumAnnual: formatMoney(seatMonthly * 12 * minimumSeats, currency),
     currency,
     checkoutURL: site.checkoutURL,
     contactEmail: site.contactEmail,

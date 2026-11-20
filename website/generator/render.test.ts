@@ -60,10 +60,9 @@ describe('price', () => {
   test('derives the yearly figures from the monthly seat price', () => {
     const values = siteValues({
       ...site,
-      price: { currency: 'USD', seatMonthly: 25, minimumSeats: 5 },
+      price: { currency: 'USD', seatMonthly: 25 },
     });
     expect(values.seatAnnual).toBe('$300');
-    expect(values.minimumAnnual).toBe('$1,500');
     expect(values.contactHref).toBe(`mailto:${site.contactEmail}`);
   });
 

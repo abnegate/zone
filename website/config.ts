@@ -9,7 +9,6 @@ export const site: Site = {
   price: {
     currency: 'USD',
     seatMonthly: 25,
-    minimumSeats: 5,
   },
 };
 
