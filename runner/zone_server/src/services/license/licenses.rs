@@ -279,6 +279,7 @@ mod tests {
                 issued_at: now - TimeDelta::days(400),
                 expires_at: now + expires_in,
                 key_id: KEY_ID.into(),
+                subscription: None,
             },
             &signing(),
         )

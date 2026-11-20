@@ -175,6 +175,7 @@ async fn each_issuing_order_emails_a_license_for_its_period_and_a_retry_resends_
         assert_eq!(payload.issued_at, instant(&period["current_period_start"]));
         assert_eq!(payload.expires_at, instant(&period["current_period_end"]));
         assert_eq!(payload.key_id, KEY_ID);
+        assert_eq!(license.subscription(), period["id"].as_str());
 
         let (status, retried) = service.deliver(body, now() - 90).await;
         assert_eq!(status, StatusCode::ACCEPTED, "{retried}");

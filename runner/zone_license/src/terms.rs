@@ -8,4 +8,5 @@ pub struct Terms {
     pub seats: u32,
     pub issued_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    pub subscription: Option<String>,
 }

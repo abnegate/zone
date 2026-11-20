@@ -345,6 +345,7 @@ async fn the_service_reports_licensed_seats_beside_the_used_ones() {
                 issued_at: now - TimeDelta::days(1),
                 expires_at: now + TimeDelta::days(365),
                 key_id: KEY_ID.into(),
+                subscription: None,
             },
             &signing,
         ))

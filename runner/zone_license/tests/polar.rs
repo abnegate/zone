@@ -318,6 +318,16 @@ fn subscription_create_issues_the_first_year() {
 }
 
 #[test]
+fn every_issuing_order_carries_its_subscription_into_the_terms() {
+    for body in [CREATE, CYCLE, UPDATE] {
+        assert_eq!(
+            issued(&event(body)).terms().subscription.as_deref(),
+            Some(SUBSCRIPTION)
+        );
+    }
+}
+
+#[test]
 fn subscription_cycle_issues_the_next_period() {
     assert_eq!(
         decide(&event(CYCLE), &products()),

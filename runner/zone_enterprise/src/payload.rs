@@ -12,6 +12,8 @@ pub struct Payload {
     pub issued_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub key_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription: Option<String>,
 }
 
 impl Payload {
@@ -25,6 +27,13 @@ impl Payload {
         if self.customer.trim().is_empty() {
             return Err(Error::Payload("customer must not be blank".into()));
         }
+        if self
+            .subscription
+            .as_deref()
+            .is_some_and(|subscription| subscription.trim().is_empty())
+        {
+            return Err(Error::Payload("subscription must not be blank".into()));
+        }
         Ok(())
     }
 }
@@ -36,6 +45,8 @@ mod tests {
 
     use super::*;
     use crate::fixtures;
+
+    const SUBSCRIPTION: &str = "b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c";
 
     const KEYS: [&str; 6] = [
         "id",
@@ -75,6 +86,56 @@ mod tests {
         let mut expected = KEYS.to_vec();
         expected.sort_unstable();
         assert_eq!(keys, expected);
+    }
+
+    #[test]
+    fn serializes_no_subscription_to_the_legacy_bytes() {
+        assert_eq!(
+            serde_json::to_string(&fixtures::payload()).unwrap(),
+            r#"{"id":"0193a8e2-7c4b-7d10-8f00-4d2c5a9b1e01","customer":"Acme Ltd","seats":25,"issued_at":"2026-11-01T00:00:00Z","expires_at":"2027-11-01T00:00:00Z","key_id":"test-1"}"#
+        );
+    }
+
+    #[test]
+    fn serializes_a_subscription_after_the_contract_keys() {
+        let payload = Payload {
+            subscription: Some(SUBSCRIPTION.into()),
+            ..fixtures::payload()
+        };
+        let mut expected = serde_json::to_value(fixtures::payload()).unwrap();
+        expected
+            .as_object_mut()
+            .unwrap()
+            .insert("subscription".into(), Value::from(SUBSCRIPTION));
+        assert_eq!(serde_json::to_value(&payload).unwrap(), expected);
+        assert!(
+            serde_json::to_string(&payload).unwrap().ends_with(&format!(
+                r#""key_id":"test-1","subscription":"{SUBSCRIPTION}"}}"#
+            )),
+            "subscription is not serialized last"
+        );
+    }
+
+    #[test]
+    fn decodes_a_payload_without_a_subscription_as_none() {
+        let value = serde_json::to_value(fixtures::payload()).unwrap();
+        assert!(!value.as_object().unwrap().contains_key("subscription"));
+        assert_eq!(
+            serde_json::from_value::<Payload>(value)
+                .unwrap()
+                .subscription,
+            None
+        );
+    }
+
+    #[test]
+    fn round_trips_a_subscription() {
+        let payload = Payload {
+            subscription: Some(SUBSCRIPTION.into()),
+            ..fixtures::payload()
+        };
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        assert_eq!(serde_json::from_slice::<Payload>(&bytes).unwrap(), payload);
     }
 
     #[test]
@@ -183,6 +244,34 @@ mod tests {
             assert!(
                 matches!(error, Error::Payload(_)),
                 "accepted customer {customer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_a_subscription() {
+        assert_eq!(
+            Payload {
+                subscription: Some(SUBSCRIPTION.into()),
+                ..fixtures::payload()
+            }
+            .validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn refuses_a_blank_subscription() {
+        for subscription in ["", "   ", "\t\n"] {
+            let error = Payload {
+                subscription: Some(subscription.into()),
+                ..fixtures::payload()
+            }
+            .validate()
+            .unwrap_err();
+            assert!(
+                matches!(error, Error::Payload(_)),
+                "accepted subscription {subscription:?}"
             );
         }
     }

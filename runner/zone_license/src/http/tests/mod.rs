@@ -171,6 +171,7 @@ async fn a_paid_order_sends_a_license_and_names_it() {
     assert_eq!(license.payload().id, id);
     assert_eq!(license.payload().customer, "Acme Ltd");
     assert_eq!(license.payload().seats, 5);
+    assert_eq!(license.subscription(), Some(SUBSCRIPTION));
 }
 
 #[tokio::test]
