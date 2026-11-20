@@ -48,7 +48,7 @@ pub fn run(
         report,
         "Trust it by adding this entry to KEYS in {PRODUCTION_SOURCE}:"
     )?;
-    writeln!(report, "{},", entry(&key_id, &public))?;
+    writeln!(report, "{}", entry(&key_id, &public))?;
     writeln!(
         report,
         "Sign with {}={key_id} once a release carries it.",
@@ -242,6 +242,17 @@ mod tests {
             !stderr.contains(&key.encode()),
             "the report leaked the private key"
         );
+    }
+
+    #[test]
+    fn prints_the_entry_exactly_as_it_is_pasted() {
+        let (stdout, stderr) = run_to_strings(&KeygenArguments {
+            key_id: Some("2026-3".into()),
+            ..KeygenArguments::default()
+        });
+        let public = PrivateKey::parse(&stdout).unwrap().public();
+        let pasted = format!(":\n{}\nSign with", entry("2026-3", &public));
+        assert!(stderr.contains(&pasted), "{stderr}");
     }
 
     #[test]

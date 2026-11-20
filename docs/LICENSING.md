@@ -95,7 +95,7 @@ license that every Zone release in the field accepts.
 Build the signer and generate a key pair, from `runner`:
 
 ```sh
-cargo run --release -p zone_license -- keygen --output zone-license-2026-2.key --key-id 2026-2
+cargo run --release -p zone_license -- keygen --output zone-license-2026-3.key --key-id 2026-3
 ```
 
 `keygen` writes the private key to a new file with mode `0600`, and refuses to
@@ -106,7 +106,7 @@ the key:
   `runner/zone_enterprise/src/production.rs`;
 - the public key in base64, to record beside the key id;
 - the key id: the one you passed with `--key-id`, or else the next free one
-  for the current year, such as `2026-2`. An id may use only letters, digits,
+  for the current year, such as `2026-3`. An id may use only letters, digits,
   `-`, `_` and `.`, because it's pasted into Rust source; `keygen` refuses any
   other before it generates or prints anything.
 
