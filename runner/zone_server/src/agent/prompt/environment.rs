@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use super::Vcs;
 use crate::agent::tools::host_root;
+use crate::services::scratch::Scratch;
 use crate::services::time_zone::TimeZone;
 
 /// Fallback zone name when the host exposes no IANA identifier.
@@ -34,6 +35,8 @@ pub struct Environment {
     /// Whether the workspace has an active GitHub source for zone's own
     /// GitHub tools to act on.
     pub github: bool,
+    /// Where a run's temporary files and build output go.
+    pub scratch: Option<Scratch>,
 }
 
 impl Environment {
@@ -51,6 +54,7 @@ impl Environment {
             workspace: None,
             effort: None,
             github: false,
+            scratch: None,
         }
     }
 
@@ -67,6 +71,7 @@ impl Environment {
             workspace: None,
             effort: None,
             github: false,
+            scratch: None,
         }
     }
 
@@ -92,6 +97,11 @@ impl Environment {
 
     pub fn with_effort(mut self, effort: Effort) -> Self {
         self.effort = Some(effort);
+        self
+    }
+
+    pub fn with_scratch(mut self, scratch: Scratch) -> Self {
+        self.scratch = Some(scratch);
         self
     }
 

@@ -72,6 +72,7 @@ use crate::db::users;
 use crate::db::workspace_members;
 use crate::services::mcp_servers::load;
 use crate::services::mcp_servers::organization::OrganizationHub;
+use crate::services::scratch::Scratch;
 use crate::state::AppState;
 use crate::utils::text::truncate;
 
@@ -773,6 +774,17 @@ impl ChatTools {
     pub fn with_task_lease(mut self, pool: sqlx::PgPool, run: Uuid, owner: Uuid) -> Self {
         self.context.session = Session::Task(run);
         self.lease = Some(TaskLease { pool, run, owner });
+        self
+    }
+
+    /// Every command the run starts finds `TMPDIR` and `CARGO_TARGET_DIR` in
+    /// its `scratch`, which goes when the run ends.
+    pub fn with_scratch(mut self, scratch: &Scratch) -> Self {
+        for (name, value) in scratch.variables() {
+            self.context
+                .environment
+                .set(name, value.display().to_string());
+        }
         self
     }
 
@@ -3324,6 +3336,59 @@ mod tests {
     /// both unreachable on the task surface and exhaustible by a stranger.
     /// Dispatched through the registry the profile really assembles, with the
     /// context it really threads, because that pairing is the thing at issue.
+    /// Agents named `/tmp/zone-build` and the like themselves and never
+    /// removed them, filling the disk. A run's commands find their temporary
+    /// directory and cargo's target directory in the run's scratch instead,
+    /// which goes when the run does.
+    #[tokio::test]
+    async fn a_task_run_s_commands_build_and_write_temporary_files_in_its_scratch() {
+        let directory = tempfile::TempDir::new().expect("a temporary working directory");
+        let root = directory.path().join("root");
+        crate::services::checkout::Checkout::directory(&root).unwrap();
+        let scratch = Scratch::create(&root, Uuid::new_v4(), Uuid::new_v4()).unwrap();
+        let checkout = directory.path().join("checkout");
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::write(
+            checkout.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(checkout.join("src").join("lib.rs"), "").unwrap();
+        std::fs::write(
+            checkout.join("Makefile"),
+            "temporary:\n\t@echo \"$$TMPDIR\"\n",
+        )
+        .unwrap();
+        let state = AppState::for_tests();
+        let tools = ChatTools::for_task(&state, checkout, Uuid::new_v4(), None)
+            .await
+            .with_scratch(&scratch);
+        let [temporary, target] = scratch.variables().map(|(_, value)| value);
+
+        let made = tools
+            .execute("run_command", r#"{"command":"make","args":["temporary"]}"#)
+            .await;
+        let metadata = tools
+            .execute(
+                "run_command",
+                r#"{"command":"cargo","args":["metadata","--format-version","1","--no-deps","--offline"]}"#,
+            )
+            .await;
+
+        assert!(made.success, "{:?}", made.error);
+        let made = made.output.unwrap();
+        assert!(
+            made.contains(&temporary.display().to_string()),
+            "temporary files land outside the run's scratch: {made}"
+        );
+        assert!(metadata.success, "{:?}", metadata.error);
+        let metadata = metadata.output.unwrap();
+        assert!(
+            metadata.contains(&format!("\"target_directory\":\"{}\"", target.display())),
+            "cargo builds outside the run's scratch: {metadata}"
+        );
+    }
+
     #[tokio::test]
     async fn a_wait_a_leased_tool_set_opens_is_charged_to_its_run() {
         let directory = tempfile::TempDir::new().expect("a temporary working directory");

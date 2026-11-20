@@ -28,6 +28,7 @@ use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router::{self, Chosen};
 use crate::services::policy;
 use crate::services::route::Unusable;
+use crate::services::scratch::Scratch;
 use crate::state::AppState;
 
 pub const REMEDY: &str = "Sign in again under Organization Settings > AI Settings.";
@@ -382,6 +383,20 @@ pub fn in_directory(backend: LlmBackend, directory: &Path) -> LlmBackend {
     backend.configured(|settings| settings.with_working_directory(directory))
 }
 
+/// `backend` with a coding agent whose temporary files and build output land
+/// in a run's `scratch` rather than in the host's temporary directory. An
+/// endpoint runs nothing.
+pub fn in_scratch(backend: LlmBackend, scratch: &Scratch) -> LlmBackend {
+    backend.configured(|settings| {
+        scratch
+            .variables()
+            .into_iter()
+            .fold(settings, |settings, (name, value)| {
+                settings.with_variable(name, value.display().to_string())
+            })
+    })
+}
+
 /// `backend` with a coding agent that commits as `author`.
 ///
 /// A chat's agent runs git itself, so without this a commit it makes carries
@@ -679,6 +694,32 @@ mod tests {
             variable(&settings, "GIT_COMMITTER_EMAIL"),
             Some("ada@example.test")
         );
+    }
+
+    /// A run's agent writes its temporary files and builds into the run's
+    /// scratch, which goes with the run, rather than into the host's `/tmp`.
+    #[test]
+    fn an_agent_in_a_run_s_scratch_builds_and_writes_temporary_files_there() {
+        let holder = tempfile::tempdir().unwrap();
+        let root = holder.path().join("root");
+        crate::services::checkout::Checkout::directory(&root).unwrap();
+        let scratch = Scratch::create(&root, Uuid::new_v4(), Uuid::new_v4()).unwrap();
+
+        let (_, settings, _) = cli(Ok(in_scratch(
+            LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
+            &scratch,
+        )));
+
+        for (name, value) in scratch.variables() {
+            assert_eq!(
+                variable(&settings, name),
+                Some(value.display().to_string().as_str())
+            );
+        }
+        assert!(matches!(
+            in_scratch(LlmBackend::Http, &scratch),
+            LlmBackend::Http
+        ));
     }
 
     /// An endpoint runs no git, so there is no identity to hand it.

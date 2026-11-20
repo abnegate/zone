@@ -42,6 +42,7 @@ use crate::db::{
     users,
 };
 use crate::services::github_app::{Credential, Error as GitHubError, Provider};
+use crate::services::scratch::Scratch;
 
 const ROOT: &str = "zone-checkouts-v1";
 
@@ -356,6 +357,9 @@ pub struct Checkout {
     /// is one. A run with no repository has none, and its directory is
     /// removed as a plain directory is.
     worktree: Option<GitCheckout>,
+    /// Where the run's tools put temporary files and build output, removed
+    /// whenever the run ends, even when its worktree is kept.
+    scratch: Scratch,
     /// Whether [`Checkout::finish`] already ended the checkout, leaving
     /// `Drop` nothing to do.
     finished: bool,
@@ -590,10 +594,12 @@ impl Checkout {
         Self::validate_root(root)?;
         let path = root.join(format!("{run}.{owner}"));
         Self::directory(&path)?;
+        let scratch = Scratch::create(root, run, owner)?;
         Ok(Self {
             path,
             baseline: None,
             worktree: None,
+            scratch,
             finished: false,
         })
     }
@@ -835,6 +841,35 @@ impl Checkout {
                 }
             }
         }
+        Self::recover_scratch(pool, root).await?;
+        Ok(removed)
+    }
+
+    /// Remove the scratch of every run that has ended, which only a run that
+    /// crashed or was cut off leaves behind.
+    async fn recover_scratch(pool: &PgPool, root: &Path) -> Result<u64, String> {
+        let directory = Scratch::root(root);
+        let entries = {
+            let directory = directory.clone();
+            Self::filesystem(move || Self::entries(&directory)).await?
+        };
+        let mut removed = 0;
+        for (run, path) in entries {
+            if !Self::ended(pool, run)
+                .await
+                .map_err(|_| "Cannot inspect task scratch ownership".to_string())?
+            {
+                continue;
+            }
+            let directory = directory.clone();
+            match Self::detailed(move || Self::remove_entry(&directory, &path)).await {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::error!(%run, %error, "Failed to recover a run's scratch; will retry")
+                }
+            }
+        }
         Ok(removed)
     }
 
@@ -1024,19 +1059,27 @@ impl Checkout {
             })
     }
 
-    /// End the run's checkout. A plain directory is removed. A worktree is
-    /// left to recovery, the one path that knows whether another run still
-    /// works in its base clone: removing it means restoring the base's shared
-    /// configuration first, which would undo what a sibling run's tools
-    /// wrote there while that run still relies on it.
+    /// End the run's checkout. Its scratch goes, and so does a plain
+    /// directory. A worktree is left to recovery, the one path that knows
+    /// whether another run still works in its base clone: removing it means
+    /// restoring the base's shared configuration first, which would undo
+    /// what a sibling run's tools wrote there while that run still relies on
+    /// it.
     pub async fn finish(mut self) {
         self.finished = true;
-        if self.worktree.is_some() || !self.root_is_safe() {
+        if !self.root_is_safe() {
             return;
         }
-        let path = self.path.clone();
+        let (path, scratch, plain) = (
+            self.path.clone(),
+            self.scratch.clone(),
+            self.worktree.is_none(),
+        );
         if Self::filesystem(move || {
-            Self::release(&path);
+            scratch.remove();
+            if plain {
+                Self::release(&path);
+            }
             Ok(())
         })
         .await
@@ -1076,18 +1119,25 @@ impl Checkout {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    pub fn scratch(&self) -> &Scratch {
+        &self.scratch
+    }
 }
 
 impl Drop for Checkout {
     /// The fallback for a run that never reached [`Checkout::finish`]: it
     /// panicked or was cancelled. It does what `finish` does without waiting
-    /// on anything: a plain directory is removed and a worktree is left to
-    /// recovery.
+    /// on anything: its scratch and a plain directory are removed, and a
+    /// worktree is left to recovery.
     fn drop(&mut self) {
-        if self.finished || self.worktree.is_some() || !self.root_is_safe() {
+        if self.finished || !self.root_is_safe() {
             return;
         }
-        Self::release(&self.path);
+        self.scratch.remove();
+        if self.worktree.is_none() {
+            Self::release(&self.path);
+        }
     }
 }
 
@@ -1772,6 +1822,103 @@ mod tests {
         drop(sibling);
     }
 
+    /// Agents left their build output in `/tmp` and nothing removed it. A
+    /// run's scratch goes whenever the run ends, finished or dropped, even
+    /// though its worktree stays for recovery to judge.
+    #[tokio::test]
+    async fn a_run_s_scratch_goes_when_it_ends_though_its_worktree_stays() {
+        let (_holder, root) = private_root();
+        let base = base_clone(&root);
+        let finished = run_worktree(&root, &base, "zone/finished");
+        let cancelled = run_worktree(&root, &base, "zone/cancelled");
+        let mut ended = Vec::new();
+        for checkout in [&finished, &cancelled] {
+            let output = checkout.scratch().path().join("target").join("debug");
+            std::fs::create_dir_all(&output).unwrap();
+            std::fs::write(output.join("zone_server"), "binary").unwrap();
+            ended.push((
+                checkout.path().to_path_buf(),
+                checkout.scratch().path().to_path_buf(),
+            ));
+        }
+
+        finished.finish().await;
+        drop(cancelled);
+
+        for (worktree, scratch) in ended {
+            assert!(!scratch.exists(), "{} outlived its run", scratch.display());
+            assert!(worktree.exists(), "the worktree waits for recovery");
+        }
+    }
+
+    /// A run that crashed never reached `finish` or `Drop`; recovery takes
+    /// its scratch once the run has ended, and leaves a live run's alone.
+    #[tokio::test]
+    async fn recovery_removes_the_scratch_of_runs_that_ended() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .unwrap();
+        let organization = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO organizations(id,name,slug) VALUES($1,'Scratch recovery',$1::text)",
+        )
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO workspaces(id,organization_id,name,slug) VALUES($1,$2,'Scratch recovery',$1::text)").bind(workspace).bind(organization).execute(&pool).await.unwrap();
+        let (_holder, root) = private_root();
+        let mut scratch = Vec::new();
+        for _ in 0..2 {
+            let task = crate::db::tasks::create_task(
+                &pool,
+                workspace,
+                &[],
+                "Recover scratch",
+                "Regression",
+                None,
+                None,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            let run = crate::db::tasks::create_task_run(&pool, task.id)
+                .await
+                .unwrap();
+            let owner = Uuid::new_v4();
+            assert!(
+                crate::db::tasks::claim_task_run(&pool, run.id, owner)
+                    .await
+                    .unwrap()
+            );
+            let checkout = Checkout::create(&root, run.id, owner).unwrap();
+            std::fs::write(checkout.scratch().path().join("tmp").join("left"), "x").unwrap();
+            scratch.push((run.id, owner, checkout.scratch().path().to_path_buf()));
+            std::mem::forget(checkout);
+        }
+        let (crashed, owner, crashed_scratch) = &scratch[0];
+        crate::db::tasks::complete_owned_task_run(
+            &pool,
+            *crashed,
+            Some(*owner),
+            "failed",
+            Some("orphaned"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(Checkout::recover_scratch(&pool, &root).await.unwrap(), 1);
+        assert!(
+            !crashed_scratch.exists(),
+            "a crashed run's scratch was left"
+        );
+        assert!(scratch[1].2.exists(), "a live run's scratch was removed");
+    }
+
     /// A run with no repository has a plain directory, removed as before.
     #[test]
     fn a_directory_that_is_no_worktree_is_removed_as_it_always_was() {
@@ -2253,6 +2400,7 @@ mod tests {
         assert!(!path.exists());
         assert!(second.path().exists());
         drop(second);
+        std::fs::remove_dir(Scratch::root(&root)).expect("every run's scratch went with it");
         std::fs::remove_dir(root).unwrap();
     }
 
