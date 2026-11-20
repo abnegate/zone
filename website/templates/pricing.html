@@ -1,0 +1,208 @@
+<section class="hero hero-compact">
+  <div class="container hero-inner">
+    <p class="eyebrow">Pricing</p>
+    <h1>Free for everyone. Paid when a company needs control.</h1>
+    <p class="lead">
+      Zone Community is free and has no caps. Zone Enterprise adds single sign-on, agent and model
+      policy and audit export for the admins, security and finance teams who answer for how a
+      company uses AI.
+    </p>
+  </div>
+</section>
+
+<section class="section section-tight" aria-labelledby="plans-heading">
+  <div class="container">
+    <h2 id="plans-heading" class="visually-hidden">Editions</h2>
+    <div class="plans">
+      <article class="plan" aria-labelledby="community-heading">
+        <h3 id="community-heading">Community</h3>
+        <p class="plan-price"><span class="amount">$0</span> <span class="unit">forever</span></p>
+        <p class="plan-summary">Free, MIT-licensed and self-hosted. No seat, workspace or usage caps.</p>
+        <ul class="checklist">
+          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Chats, agents, tasks, auto projects and reviews</li>
+          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Claude Code, Codex and API-key agents</li>
+          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Local models, ComfyUI, training, knowledge and search</li>
+          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>GitHub pull requests and releases</li>
+          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Organizations, workspaces, built-in roles and the audit log</li>
+          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Single-node Compose and Helm installs</li>
+        </ul>
+        <a class="button button-secondary plan-action" href="{{ root }}#get-started">Install Community</a>
+      </article>
+      <article class="plan plan-featured" aria-labelledby="enterprise-heading">
+        <h3 id="enterprise-heading">Zone Enterprise</h3>
+        <p class="plan-price">
+          <span class="amount">{{ seatMonthly }}</span>
+          <span class="unit">per seat per month, billed annually</span>
+        </p>
+        <p class="plan-summary">
+          {{ seatAnnual }} per seat per year, for as few or as many seats as you need.
+          Self-hosted, on the same image as Community.
+        </p>
+        <ul class="checklist">
+          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Everything in Community</li>
+          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>SSO over OIDC, with SSO-only login and a break-glass admin</li>
+          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Agent and model policy per organization and workspace</li>
+          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Audit export, streaming to a webhook, S3 or syslog, and retention</li>
+        </ul>
+        <p class="plan-coming-heading"><span class="badge">Coming</span></p>
+        <ul class="coming-list">
+          <li>SAML</li>
+          <li>SCIM provisioning</li>
+          <li>Custom roles</li>
+          <li>Spend reports</li>
+          <li>HA reference architecture</li>
+          <li>LTS releases</li>
+          <li>Air-gapped install bundle</li>
+          <li>Support SLA</li>
+        </ul>
+        <a class="button button-primary plan-action" href="{{ checkoutURL }}">Buy Zone Enterprise</a>
+        <p class="plan-note">
+          Checkout is handled by Polar. Choose your seat count there; the license key is emailed to
+          your billing contact.
+        </p>
+      </article>
+    </div>
+    <p class="contact-line">
+      Buying for a large organization, or need an invoice instead of a card payment?
+      <a href="{{ contactHref }}">Email {{ contactEmail }}</a>.
+    </p>
+  </div>
+</section>
+
+<section class="section section-sunken" aria-labelledby="buying-heading">
+  <div class="container">
+    <h2 id="buying-heading">How buying works</h2>
+    <p class="section-lead">Zone never handles your money and never phones home. It only verifies a key.</p>
+    <ol class="steps">
+      <li>
+        <h3>Check out</h3>
+        <p>Buy Zone Enterprise with Polar for the number of seats you need.</p>
+      </li>
+      <li>
+        <h3>Get your key</h3>
+        <p>Your license key is emailed to the billing contact on the order.</p>
+      </li>
+      <li>
+        <h3>Paste it in</h3>
+        <p>An admin pastes the key into <strong>Settings &rarr; License</strong>. Enterprise features unlock in place: same image, same data, no reinstall.</p>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="section" aria-labelledby="seats-heading">
+  <div class="container split">
+    <div>
+      <h2 id="seats-heading">What counts as a seat</h2>
+      <p class="section-lead">
+        A seat is an organization member who signed in during the calendar month. Members who are
+        deactivated, or who did not sign in that month, are free.
+      </p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>For example:</strong> an organization has 40 members, and 32 of them sign in during
+        March. That is 32 seats for March.
+      </p>
+      <p>
+        Seats are soft-enforced. If you go over your licensed count, admins see a banner and the
+        difference is trued up at renewal. Nobody is ever blocked from signing in because of a seat
+        count.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="section section-sunken" aria-labelledby="faq-heading">
+  <div class="container narrow">
+    <h2 id="faq-heading">Licensing questions</h2>
+    <div class="faq">
+      <details>
+        <summary>Does Zone contact a license server?</summary>
+        <p>
+          No. A license key is signed, and Zone checks the signature against a public key built into
+          Zone, at startup and whenever an admin pastes a new key. Verification happens entirely on
+          your server, with no phone-home.
+        </p>
+      </details>
+      <details>
+        <summary>Does Zone Enterprise work in an air-gapped install?</summary>
+        <p>
+          Yes. Because keys are verified offline, an install with no internet access verifies a key
+          exactly like any other. Paste the key into Settings &rarr; License as usual. A packaged
+          air-gapped install bundle is coming.
+        </p>
+      </details>
+      <details>
+        <summary>What happens when our license expires?</summary>
+        <p>
+          You get a 30-day grace period after the expiry date. After that, expiry still never locks
+          anyone out or loosens security: SSO login keeps working and existing policies keep being
+          enforced. What pauses until you renew is editing policies, and audit export and
+          streaming.
+        </p>
+      </details>
+      <details>
+        <summary>What if we use more seats than we bought?</summary>
+        <p>
+          Nothing is blocked. Admins see a banner showing the overage, and the extra seats are trued
+          up at renewal at your per-seat price.
+        </p>
+      </details>
+      <details>
+        <summary>Can we change our seat count or renew?</summary>
+        <p>
+          Yes. Renewals and seat changes go through Polar, and each one emails a new key to your
+          billing contact. Paste it into Settings &rarr; License to replace the old one. If you
+          cancel, your current key keeps working until it expires.
+        </p>
+      </details>
+      <details>
+        <summary>Who handles sales tax and VAT?</summary>
+        <p>
+          Polar is the merchant of record. It calculates, collects and remits VAT, GST and US sales
+          tax where they apply, and shows any tax at checkout. Prices on this page are in
+          {{ currency }}.
+        </p>
+      </details>
+      <details>
+        <summary>Do we get an invoice?</summary>
+        <p>
+          Polar handles payment, receipts and invoices. Larger deals can be invoiced through Polar
+          at the same per-seat price; <a href="{{ contactHref }}">email us</a>.
+        </p>
+      </details>
+      <details>
+        <summary>Do we need to reinstall to upgrade from Community?</summary>
+        <p>
+          No. Community and Enterprise are the same image. Without a license Zone runs as Community;
+          pasting a license unlocks the Enterprise features on your existing install and data.
+        </p>
+      </details>
+      <details>
+        <summary>Can our security team read the Enterprise code?</summary>
+        <p>
+          Yes. The Enterprise code, including the license check, is in the public repository under the
+          Zone Enterprise License. See <a href="{{ root }}licensing/">Licensing</a>.
+        </p>
+      </details>
+      <details>
+        <summary>Is anything in Community capped or time-limited?</summary>
+        <p>
+          No. Community is MIT-licensed, with no seat, workspace or usage caps, and no expiry.
+        </p>
+      </details>
+    </div>
+  </div>
+</section>
+
+<section class="section" aria-labelledby="contact-heading">
+  <div class="container cta">
+    <h2 id="contact-heading">Questions before you buy?</h2>
+    <p class="section-lead">Talk to us about larger deals, invoicing or anything on this page.</p>
+    <div class="actions">
+      <a class="button button-primary" href="{{ checkoutURL }}">Buy Zone Enterprise</a>
+      <a class="button button-secondary" href="{{ contactHref }}">Email {{ contactEmail }}</a>
+    </div>
+  </div>
+</section>

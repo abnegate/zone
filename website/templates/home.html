@@ -1,0 +1,216 @@
+<section class="hero">
+  <svg class="hero-mark" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+    <path d="M17 10H42L30.267 21H8V19C8 14.029 12.029 10 17 10ZM47 10C54 10 57 18 51 24L17 54C10 54 7 46 13 40L47 10ZM47 54H22L33.733 43H56V45C56 49.971 51.971 54 47 54Z"/>
+  </svg>
+  <div class="container hero-inner">
+    <p class="eyebrow">Self-hosted AI workspace</p>
+    <h1>Your AI, your data, your infrastructure.</h1>
+    <p class="lead">
+      Zone runs chat, coding agents and local models on hardware you own. Claude Code, Codex and
+      Ollama are the engines; Zone is everything around them that turns what they produce into work
+      you can trust.
+    </p>
+    <div class="actions">
+      <a class="button button-primary" href="#get-started">Get started free</a>
+      <a class="button button-secondary" href="{{ root }}pricing/">Zone Enterprise pricing</a>
+    </div>
+    <ul class="facts" aria-label="At a glance">
+      <li>MIT licensed</li>
+      <li>Runs on your hardware</li>
+      <li>No seat, workspace or usage caps</li>
+      <li>No telemetry from Zone itself</li>
+    </ul>
+  </div>
+</section>
+
+<section class="section" aria-labelledby="parts-heading">
+  <div class="container">
+    <h2 id="parts-heading">One platform, three parts</h2>
+    <p class="section-lead">
+      The parts describe what you use Zone for, not separate installs. Every feature ships in the
+      same stack, and setup decides which local models and media runtimes to switch on.
+    </p>
+    <div class="cards cards-three">
+      <article class="card">
+        <h3>Zone</h3>
+        <p class="card-for">A private AI workspace for anyone.</p>
+        <ul class="list">
+          <li>Chat with history, web search and agent tools. A tool call that writes to the host, runs a command or leaves the workspace waits for your approval.</li>
+          <li>A knowledge base per workspace with semantic search.</li>
+          <li>Sources from GitHub, GitLab, local folders and web pages.</li>
+          <li>Local models through Ollama, routed by LiteLLM.</li>
+          <li>Desktop apps for macOS and Linux, Android and iOS apps, and the <code>zone</code> CLI.</li>
+        </ul>
+      </article>
+      <article class="card">
+        <h3>Zone Code</h3>
+        <p class="card-for">For teams that want their backlog worked.</p>
+        <ul class="list">
+          <li>Claude Code and Codex agents, signed in with your organization&rsquo;s own Claude or ChatGPT subscriptions.</li>
+          <li>Several agent accounts, handing over mid-answer when one hits its limit.</li>
+          <li>Auto projects: describe a project, answer the interview, and Zone plans, builds, reviews with a second model and merges.</li>
+          <li>Checked work: every change gets a receipt built from the tool call, not from the model&rsquo;s account of it.</li>
+          <li>Pull request upkeep: fixes failing checks and repairs merge conflicts.</li>
+        </ul>
+      </article>
+      <article class="card">
+        <h3>Zone Studio</h3>
+        <p class="card-for">For making images, video and your own models.</p>
+        <ul class="list">
+          <li>Image, image edit, audio and video generation through ComfyUI.</li>
+          <li>LoRA, full fine-tune and pivotal training, on your machine or on Runpod.</li>
+          <li>Fine-tunes of chat models with MLX on the host.</li>
+          <li>Character cards as a chat&rsquo;s persona.</li>
+        </ul>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="section section-sunken" aria-labelledby="hardware-heading">
+  <div class="container split">
+    <div>
+      <h2 id="hardware-heading">Runs where your code and data already live</h2>
+      <p class="section-lead">
+        There is no hosted Zone. You run it on your own machines or your own cloud account, and it
+        works with the model providers you already pay for.
+      </p>
+    </div>
+    <ul class="feature-list">
+      <li>
+        <h3>Your hardware</h3>
+        <p>Docker Compose on one machine, or Helm charts for Kubernetes. Only the reverse proxy publishes public ports.</p>
+      </li>
+      <li>
+        <h3>Your models</h3>
+        <p>Local models through Ollama, alongside Claude Code, Codex and API-key providers.</p>
+      </li>
+      <li>
+        <h3>Your teams</h3>
+        <p>Organizations and workspaces with email invitations, built-in roles and an audit log.</p>
+      </li>
+      <li>
+        <h3>Your privacy</h3>
+        <p>Zone itself sends no telemetry. Optional private web search can route the stack&rsquo;s internet traffic through a VPN.</p>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<section class="section" aria-labelledby="editions-heading">
+  <div class="container">
+    <h2 id="editions-heading">Community and Enterprise</h2>
+    <p class="section-lead">
+      Community is everything a person or a team needs to use Zone, free. Enterprise adds what a
+      company&rsquo;s admins, security and finance teams need. Both are the same image: pasting a
+      license key unlocks Enterprise in place.
+    </p>
+    <div class="table-wrap">
+      <table class="comparison">
+        <caption class="visually-hidden">Features in Zone Community and Zone Enterprise</caption>
+        <thead>
+          <tr>
+            <th scope="col">Feature</th>
+            <th scope="col">Community <span class="quiet">Free, MIT</span></th>
+            <th scope="col">Enterprise <span class="quiet">{{ seatMonthly }} / seat / month</span></th>
+          </tr>
+        </thead>
+        <tbody>
+            <tr>
+              <th scope="row">Chats, agents, tasks, auto projects and reviews</th>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+            </tr>
+            <tr>
+              <th scope="row">Claude Code, Codex and API-key agents</th>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+            </tr>
+            <tr>
+              <th scope="row">Local models, ComfyUI, training, knowledge and search</th>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+            </tr>
+            <tr>
+              <th scope="row">GitHub pull requests and releases</th>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+            </tr>
+            <tr>
+              <th scope="row">Organizations, workspaces and the built-in roles</th>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+            </tr>
+            <tr>
+              <th scope="row">Audit log in the console</th>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+            </tr>
+            <tr>
+              <th scope="row">Single-node Compose and Helm installs</th>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+            </tr>
+            <tr>
+              <th scope="row">No seat, workspace or usage caps</th>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+            </tr>
+            <tr>
+              <th scope="row">SSO over OIDC, SSO-only login and a break-glass admin</th>
+              <td class="mark"><span class="dash" aria-hidden="true">&mdash;</span><span class="visually-hidden">Not included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+            </tr>
+            <tr>
+              <th scope="row">Agent and model policy per organization and workspace</th>
+              <td class="mark"><span class="dash" aria-hidden="true">&mdash;</span><span class="visually-hidden">Not included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+            </tr>
+            <tr>
+              <th scope="row">Audit export, streaming to a webhook, S3 or syslog, and retention</th>
+              <td class="mark"><span class="dash" aria-hidden="true">&mdash;</span><span class="visually-hidden">Not included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+            </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="coming">
+      <span class="badge">Coming</span>
+      SAML, SCIM, custom roles, spend reports, an HA reference architecture, LTS releases, an
+      air-gapped install bundle and a support SLA.
+    </p>
+    <div class="actions">
+      <a class="button button-secondary" href="{{ root }}pricing/">See Enterprise pricing</a>
+    </div>
+  </div>
+</section>
+
+<section class="section section-sunken" id="get-started" aria-labelledby="get-started-heading" tabindex="-1">
+  <div class="container split">
+    <div>
+      <h2 id="get-started-heading">Get started</h2>
+      <p class="section-lead">
+        Install Ollama and Docker, then run setup. It asks which features to enable, shows how much
+        disk each one needs and downloads those models.
+      </p>
+      <ul class="list">
+        <li>Docker 20.10+ and Docker Compose v2</li>
+        <li>Ollama listening on port 11434: run <code>ollama serve</code> in its own terminal unless it already runs as a service</li>
+        <li>8&nbsp;GB of RAM for chat only; more for vision, image and video models</li>
+      </ul>
+      <p class="docs-links">
+        <a href="{{ repository }}#quick-start">Quick start</a>
+        <a href="{{ repository }}/blob/main/helm/QUICK_START.md">Kubernetes with Helm</a>
+        <a href="{{ repository }}/blob/main/docs/CONFIGURATION.md">Configuration</a>
+      </p>
+    </div>
+    <div class="terminal">
+      <p class="terminal-title">Terminal</p>
+      <pre><code><span class="prompt" aria-hidden="true">$ </span>git clone {{ repository }}.git
+<span class="prompt" aria-hidden="true">$ </span>cd zone
+<span class="prompt" aria-hidden="true">$ </span>./scripts/setup.sh
+<span class="prompt" aria-hidden="true">$ </span>make up</code></pre>
+      <p class="terminal-note">Then open <code>https://manager.localhost</code>.</p>
+    </div>
+  </div>
+</section>
