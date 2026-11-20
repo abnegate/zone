@@ -1689,8 +1689,9 @@ once approved, and its file tools read whatever else the server's user can.
 - **Compose.** The manager service mounts the `zone_manager_agent_state` volume
   at `/app/agent-state` and passes `ZONE_AGENT_STATE_DIR`,
   `ZONE_AGENT_HOST_LOGIN` (default `false`), `ZONE_LLM_BACKEND` (default
-  `litellm`), `ZONE_CHAT_AGENT_CWD` (default `/app/workspace`),
-  `ZONE_HOST_ROOT` (empty by default, mounted at `/host`),
+  `litellm`), `ZONE_CHAT_AGENT_CWD` (default `/app/workspace`, on the
+  `zone_manager_workspace` volume), `ZONE_HOST_ROOT` (empty by default,
+  mounted at `/host`),
   `ZONE_IN_CONTAINER` (`1`), `ZONE_PROJECT_CLONE_DIR` (`/tmp/repos`, on the
   `zone_manager_repos` volume),
   `ZONE_AGENT_ENV_PASSTHROUGH`, `ZONE_CODEX_SANDBOX` (default
