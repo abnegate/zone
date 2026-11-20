@@ -274,6 +274,7 @@ mod tests {
                 issued_at: "2026-11-01T00:00:00Z".parse().unwrap(),
                 expires_at,
                 key_id: KEY_ID.into(),
+                subscription: None,
             },
             &signing,
         );

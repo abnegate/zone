@@ -236,6 +236,7 @@ fn expiring(expires_in: TimeDelta) -> String {
             issued_at: expires_at - TimeDelta::days(365),
             expires_at,
             key_id: KEY_ID.into(),
+            subscription: None,
         },
         &SigningKey::from_bytes(&SEED),
     )

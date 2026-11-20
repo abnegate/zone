@@ -30,6 +30,7 @@ pub fn run(
             .issued_at
             .unwrap_or_else(|| Utc::now().trunc_subsecs(0)),
         expires_at: arguments.expires_at,
+        subscription: arguments.subscription,
     };
     let license = signer.sign(&terms)?;
     writeln!(stdout, "{license}")?;
@@ -84,6 +85,7 @@ mod tests {
                 private_key_file: Some(path),
                 issued_at: None,
                 id: None,
+                subscription: None,
             },
         }
     }
@@ -118,6 +120,50 @@ mod tests {
         assert_eq!(payload.issued_at, issued_at);
         assert_eq!(payload.expires_at, expires_at());
         assert_eq!(payload.key_id, KEY_ID);
+        assert_eq!(payload.subscription, None);
+    }
+
+    #[test]
+    fn signs_the_subscription_it_is_given() {
+        let fixture = fixture();
+        let subscription = "b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c";
+        let mut stdout = Vec::new();
+        run(
+            SignArguments {
+                subscription: Some(subscription.into()),
+                ..fixture.arguments
+            },
+            &keyring(),
+            &mut stdout,
+        )
+        .unwrap();
+        let license = keyring()
+            .verify(&String::from_utf8(stdout).unwrap())
+            .unwrap();
+        assert_eq!(license.subscription(), Some(subscription));
+    }
+
+    #[test]
+    fn refuses_a_blank_subscription() {
+        let fixture = fixture();
+        let mut stdout = Vec::new();
+        let error = run(
+            SignArguments {
+                subscription: Some("  ".into()),
+                ..fixture.arguments
+            },
+            &keyring(),
+            &mut stdout,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SignError::License(zone_enterprise::Error::Payload(_))
+            ),
+            "got {error:?}"
+        );
+        assert!(stdout.is_empty());
     }
 
     #[test]

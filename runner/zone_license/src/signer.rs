@@ -37,6 +37,7 @@ impl Signer {
             issued_at: terms.issued_at,
             expires_at: terms.expires_at,
             key_id: self.key_id.clone(),
+            subscription: terms.subscription.clone(),
         };
         payload.validate()?;
         Ok(zone_enterprise::sign(&payload, &self.key))
@@ -77,6 +78,7 @@ mod tests {
 
     const KEY_ID: &str = "test-1";
     const SEED: [u8; 32] = [3; 32];
+    const SUBSCRIPTION: &str = "b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c";
 
     fn signer() -> Signer {
         Signer::new(PrivateKey::new(SEED), KEY_ID)
@@ -99,6 +101,7 @@ mod tests {
             seats: 25,
             issued_at: issued_at(),
             expires_at: issued_at() + TimeDelta::days(365),
+            subscription: None,
         }
     }
 
@@ -122,8 +125,36 @@ mod tests {
         assert_eq!(payload.issued_at, terms.issued_at);
         assert_eq!(payload.expires_at, terms.expires_at);
         assert_eq!(payload.key_id, KEY_ID);
+        assert_eq!(payload.subscription, None);
         assert_eq!(license.key_id(), KEY_ID);
         assert_eq!(license.text(), text);
+    }
+
+    #[test]
+    fn a_signed_license_carries_the_subscription() {
+        let signer = signer();
+        let text = signer
+            .sign(&Terms {
+                subscription: Some(SUBSCRIPTION.into()),
+                ..terms()
+            })
+            .unwrap();
+        let license = keyring(KEY_ID, signer.public()).verify(&text).unwrap();
+        assert_eq!(license.subscription(), Some(SUBSCRIPTION));
+    }
+
+    #[test]
+    fn refuses_a_blank_subscription() {
+        let error = signer()
+            .sign(&Terms {
+                subscription: Some(" ".into()),
+                ..terms()
+            })
+            .unwrap_err();
+        assert!(
+            matches!(error, zone_enterprise::Error::Payload(_)),
+            "got {error:?}"
+        );
     }
 
     #[test]

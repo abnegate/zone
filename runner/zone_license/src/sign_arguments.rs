@@ -28,4 +28,7 @@ pub struct SignArguments {
     /// Defaults to a random UUID.
     #[arg(long)]
     pub id: Option<Uuid>,
+    /// The Polar subscription id, which lets an online server renew the license. Omit it for a key that never renews.
+    #[arg(long)]
+    pub subscription: Option<String>,
 }
