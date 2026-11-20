@@ -13,7 +13,4 @@ export const site: Site = {
   },
 };
 
-export const unconfirmed: ReadonlyArray<keyof Site> = [
-  'contactEmail',
-  'domain',
-];
+export const unconfirmed: ReadonlyArray<keyof Site> = ['contactEmail', 'domain'];
