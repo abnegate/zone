@@ -407,6 +407,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_exclude_line_waits_for_a_writer_holding_the_file_lock() {
+        use nix::fcntl::{Flock, FlockArg};
+
+        let fixture = Fixture::new();
+        fixture.worktree("feat/racing");
+        let repository = Repository::open(&fixture.checkout).await.unwrap();
+        let path = fixture.checkout.join(".git/info/exclude");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let held = Flock::lock(file, FlockArg::LockExclusive).unwrap();
+
+        let waited = tokio::time::timeout(Duration::from_millis(300), repository.exclude()).await;
+        assert!(
+            waited.is_err(),
+            "the sweep appended while another writer held the lock"
+        );
+        drop(held);
+        repository.exclude().await.unwrap();
+
+        assert_eq!(
+            fixture
+                .exclude()
+                .lines()
+                .filter(|line| *line == "/.worktrees/")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn leaves_a_folder_without_agent_worktrees_untouched() {
         let fixture = Fixture::new();
 

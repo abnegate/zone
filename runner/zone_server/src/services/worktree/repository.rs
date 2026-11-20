@@ -1,12 +1,12 @@
 //! A mounted folder whose chat agents keep worktrees under `.worktrees/`, and the rule that
 //! decides which of them can go.
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use abnegate_vcs::worktree::is_worktree;
-use tokio::io::AsyncWriteExt;
+use nix::fcntl::{Flock, FlockArg};
 
 use super::entry::Entry;
 use super::git;
@@ -138,29 +138,9 @@ impl Repository {
         let prefix = git::read(&self.folder, &["rev-parse", "--show-prefix"]).await?;
         let pattern = format!("/{prefix}{AREA}/");
         let information = PathBuf::from(common).join("info");
-        let path = information.join("exclude");
-        let existing = match tokio::fs::read_to_string(&path).await {
-            Ok(existing) => existing,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-            Err(error) => return Err(error),
-        };
-        if existing.lines().any(|line| line.trim() == pattern) {
-            return Ok(false);
-        }
-        let separator = if existing.is_empty() || existing.ends_with('\n') {
-            ""
-        } else {
-            "\n"
-        };
-        tokio::fs::create_dir_all(&information).await?;
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await?;
-        file.write_all(format!("{separator}{pattern}\n").as_bytes())
-            .await?;
-        Ok(true)
+        tokio::task::spawn_blocking(move || append_once(&information, &pattern))
+            .await
+            .map_err(io::Error::other)?
     }
 
     /// The remote's default branch as a full ref: what `origin/HEAD` names, else `origin/main`,
@@ -288,4 +268,28 @@ async fn last_active(worktree: &Path) -> io::Result<SystemTime> {
         Err(error) => return Err(error),
     };
     Ok(logged.map_or(head, |logged| logged.max(head)))
+}
+
+/// Append `pattern` to `information/exclude` unless a line already holds it, under an exclusive
+/// lock on the file so two sweeps never both decide it is missing.
+fn append_once(information: &Path, pattern: &str) -> io::Result<bool> {
+    std::fs::create_dir_all(information)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(information.join("exclude"))?;
+    let mut file = Flock::lock(file, FlockArg::LockExclusive).map_err(|(_, error)| error)?;
+    let mut existing = String::new();
+    file.read_to_string(&mut existing)?;
+    if existing.lines().any(|line| line.trim() == pattern) {
+        return Ok(false);
+    }
+    let separator = if existing.is_empty() || existing.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    file.write_all(format!("{separator}{pattern}\n").as_bytes())?;
+    Ok(true)
 }

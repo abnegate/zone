@@ -819,14 +819,15 @@ without `--force`, on each worktree under `.worktrees/` that is:
   `origin/HEAD` names, else `origin/main`, else `origin/master`; a repository
   with none of them keeps every worktree. A commit counts as merged when it is an
   ancestor of that branch, or when its whole change since the two diverged
-  landed there as one commit, matched by `git patch-id`, which is what a squash
-  merge leaves. Zone doesn't fetch: the prompt's `git fetch` keeps
+  landed there as one commit, matched by `git patch-id --verbatim`, which is
+  what a squash merge leaves. That match needs Git 2.39 or later; with an
+  older git the check fails and the worktree is kept. Zone doesn't fetch: the prompt's `git fetch` keeps
   `origin/main` current.
 
 The branch is kept, any directory a branch name's prefix made under
 `.worktrees/` goes once it is empty, and a worktree anywhere else, such as
 `.claude/worktrees/`, is never touched. The sweep also adds `/.worktrees/` to the
-repository's `info/exclude` once, so the host's own `git status` doesn't list
+repository's `info/exclude` once, under a lock on the file, so the host's own `git status` doesn't list
 agent worktrees. Each removal and each failure is logged, and a repository that
 fails doesn't stop the sweep. Git runs with `GIT_OPTIONAL_LOCKS=0`, so reading a
 status doesn't rewrite the index under an open editor.
