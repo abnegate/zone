@@ -69,7 +69,7 @@ async fn require_active_session(state: &AppState, access: &AccessClaims) -> Resu
         Err(error) => {
             tracing::error!(%error, %session_id, %user_id, "Failed to validate authentication session");
             Err(AuthError {
-                status: StatusCode::UNAUTHORIZED,
+                status: StatusCode::SERVICE_UNAVAILABLE,
                 message: "Unable to validate session".to_string(),
             })
         }
@@ -426,5 +426,41 @@ mod tests {
         let cloned = auth_user.clone();
         assert_eq!(cloned.0.email, auth_user.0.email);
         assert_eq!(cloned.0.roles, auth_user.0.roles);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_database_is_unavailable_not_unauthorized() {
+        let state = AppState::new(
+            crate::state::test_config(),
+            crate::state::unreachable_pool(),
+            None,
+        );
+        let token = super::super::jwt::create_session_access_token(
+            Uuid::new_v4(),
+            "test@example.com",
+            vec![],
+            vec![],
+            false,
+            Uuid::new_v4(),
+            state.config().jwt_secret(),
+            chrono::Duration::minutes(15),
+        )
+        .expect("token");
+        let request = Request::builder()
+            .header("Authorization", format!("Bearer {token}"))
+            .body(())
+            .expect("request");
+        let (mut parts, ()) = request.into_parts();
+
+        let error =
+            <AuthUser as FromRequestParts<AppState>>::from_request_parts(&mut parts, &state)
+                .await
+                .expect_err("no database to confirm the session");
+
+        assert_eq!(
+            error.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a client signs out on 401, so an outage must not answer with one"
+        );
     }
 }

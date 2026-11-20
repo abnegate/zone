@@ -264,6 +264,7 @@ export function AuthProvider({
         return response.access_token;
       } catch (err) {
         if (err instanceof RefreshError && !err.credentialRejected) {
+          setState((s) => ({ ...s, isAuthenticated: s.refreshToken !== null }));
           scheduleRefreshRef.current?.(RETRY_REFRESH_SECONDS);
           return null;
         }
