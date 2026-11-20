@@ -5,6 +5,7 @@ import type {
   LicenseRefusalSchema,
   LicenseResponseSchema,
   LicenseStatusSchema,
+  RenewalSchema,
   SeatsSchema,
   SetLicenseRequestSchema,
   UnverifiedSchema,
@@ -20,3 +21,6 @@ export type LicenseRefusalBody = z.infer<typeof LicenseRefusalSchema>;
 export type LicenseRefusalCode = LicenseRefusalBody['code'];
 export type Unverified = z.infer<typeof UnverifiedSchema>;
 export type UnverifiedCode = Unverified['code'];
+export type Renewal = z.infer<typeof RenewalSchema>;
+export type RenewalMode = Renewal['mode'];
+export type RenewalOutcome = NonNullable<Renewal['outcome']>;
