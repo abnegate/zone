@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::Grant;
+use crate::auth::{Grant, Permission};
 use crate::db::audit::{AuditContext, log_action};
 use crate::db::custom_roles::{EXCEEDS, EXCEEDS_MESSAGE, Summary};
 use crate::db::workspaces;
@@ -272,6 +272,15 @@ pub fn exceeds() -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::FORBIDDEN,
         Json(ErrorResponse::with_code(EXCEEDS_MESSAGE, EXCEEDS)),
+    )
+}
+
+/// What a route's guard answers a caller without `permission`, for a caller
+/// who lost it after the guard admitted them.
+pub fn revoked(permission: Permission) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse::new(permission.refusal())),
     )
 }
 

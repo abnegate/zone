@@ -147,6 +147,7 @@ where
 #[derive(Debug)]
 pub enum Removal {
     Removed,
+    Revoked,
     Forbidden,
     Uncovered,
     Missing,
@@ -160,6 +161,10 @@ pub enum Removal {
 /// strip access. This is the one a route wants: it counts and removes with the
 /// privileged rows locked, so two removals arriving together cannot each read
 /// a count that says one may go.
+///
+/// The route admitted the caller on `workspace_members:delete`, but a
+/// demotion, removal or role edit can take it away before the locks are
+/// taken, so the caller must still hold it as read under them.
 pub async fn remove_guarded(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -169,9 +174,11 @@ pub async fn remove_guarded(
     let mut transaction = pool.begin().await?;
 
     let privileged = lock_privileged(&mut transaction, workspace_id).await?;
-    let Some((caller, target)) =
-        lock_parties(&mut transaction, workspace_id, caller, user_id).await?
-    else {
+    let (caller, target) = lock_parties(&mut transaction, workspace_id, caller, user_id).await?;
+    if !caller.allows(Permission::WorkspaceMembersDelete) {
+        return Ok(Removal::Revoked);
+    }
+    let Some(target) = target else {
         return Ok(Removal::Missing);
     };
     if outranked(&caller, &target.membership) {
@@ -691,6 +698,7 @@ impl Privileged {
 /// What the caller holds and the target's own role, both held for the length
 /// of the transaction: a demotion of the caller that lands first is what the
 /// change is judged by, and a caller who is no longer a member holds nothing.
+/// The target is `None` unless they are an active member.
 ///
 /// Both member rows are locked before either custom role is, the order an
 /// edit of a role keeps, so a change never holds a role while it waits for a
@@ -705,24 +713,21 @@ async fn lock_parties(
     workspace_id: Uuid,
     caller: Uuid,
     user_id: Uuid,
-) -> DbResult<Option<(Grant, Target)>> {
+) -> DbResult<(Grant, Option<Target>)> {
     let caller = Seat::lock(transaction, workspace_id, caller, Lock::Share).await?;
-    let Some(target) = Seat::lock(transaction, workspace_id, user_id, Lock::Update).await? else {
-        return Ok(None);
-    };
+    let target = Seat::lock(transaction, workspace_id, user_id, Lock::Update).await?;
     let caller = match caller {
         Some(caller) => caller.membership(transaction).await?.grant,
         None => Grant::default(),
     };
-    let organization_id = target.organization_id;
-    let membership = target.membership(transaction).await?;
-    Ok(Some((
-        caller,
-        Target {
-            organization_id,
-            membership,
-        },
-    )))
+    let target = match target {
+        Some(target) => Some(Target {
+            organization_id: target.organization_id,
+            membership: target.membership(transaction).await?,
+        }),
+        None => None,
+    };
+    Ok((caller, target))
 }
 
 struct Target {
@@ -774,6 +779,7 @@ pub struct Assigned {
 #[derive(Debug)]
 pub enum RoleChange {
     Applied(Box<Assigned>),
+    Revoked,
     Forbidden,
     Uncovered,
     Missing,
@@ -792,10 +798,12 @@ pub enum RoleChange {
 /// the length of the transaction: the second demotion waits, then counts what
 /// the first actually left.
 ///
-/// The caller must hold everything the target holds now and everything the
-/// assignment grants, judged by what the caller holds under this transaction.
-/// A workspace is stricter than an organization: only the administrators
-/// permission grants admin, not just owner. A custom role is read under a
+/// The caller is judged by what they hold as read under this transaction, not
+/// by what admitted the request: a demotion, removal or role edit can land in
+/// between. They must still hold `workspace_members:update`, everything the
+/// target holds now and everything the assignment grants. A workspace is
+/// stricter than an organization: only the administrators permission grants
+/// admin, not just owner. A custom role is read under a
 /// share lock, so an edit to it waits for the assignment and counts the new
 /// holder.
 ///
@@ -811,9 +819,11 @@ pub async fn change_role(
     let mut transaction = pool.begin().await?;
 
     let privileged = lock_privileged(&mut transaction, workspace_id).await?;
-    let Some((caller, target)) =
-        lock_parties(&mut transaction, workspace_id, caller, user_id).await?
-    else {
+    let (caller, target) = lock_parties(&mut transaction, workspace_id, caller, user_id).await?;
+    if !caller.allows(Permission::WorkspaceMembersUpdate) {
+        return Ok(RoleChange::Revoked);
+    }
+    let Some(target) = target else {
         return Ok(RoleChange::Missing);
     };
     if outranked(&caller, &target.membership) {

@@ -23,7 +23,9 @@ use crate::db::workspaces;
 use crate::state::AppState;
 use crate::sync::hook::Removal;
 
-use super::common::{AuditEvent, ErrorResponse, MembershipResponse, Timestamps, audit, exceeds};
+use super::common::{
+    AuditEvent, ErrorResponse, MembershipResponse, Timestamps, audit, exceeds, revoked,
+};
 
 const WORKSPACE_NOT_FOUND: &str = "Workspace not found";
 const MEMBER_NOT_FOUND: &str = "Member not found";
@@ -541,6 +543,9 @@ pub async fn update_member_role(
     };
     let assigned = match change {
         RoleChange::Applied(assigned) => *assigned,
+        RoleChange::Revoked => {
+            return revoked(Permission::WorkspaceMembersUpdate).into_response();
+        }
         RoleChange::Forbidden => {
             return refusal(
                 StatusCode::FORBIDDEN,
@@ -593,6 +598,9 @@ pub async fn remove_member(
         Ok(workspace_members::Removal::Removed) => {
             audit_member(&state, &member, actions::MEMBER_REMOVED, path.user_id, None).await;
             StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(workspace_members::Removal::Revoked) => {
+            revoked(Permission::WorkspaceMembersDelete).into_response()
         }
         Ok(workspace_members::Removal::Forbidden) => refusal(
             StatusCode::FORBIDDEN,

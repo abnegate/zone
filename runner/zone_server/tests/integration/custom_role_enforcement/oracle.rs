@@ -6,10 +6,12 @@
 //! owner, only an owner seated an organization owner or a workspace admin or
 //! owner, and the last owner and last admin floors held. The member and
 //! workspace routes then admitted only admins and owners, so the database
-//! never saw a lower caller. Permissions add one rule, that a caller holds
-//! everything the target holds and everything it is given. For every caller
-//! the old routes admitted, that rule never decides anything; the matrix
-//! proves it before it compares the database with the oracle.
+//! never saw a lower caller; it now refuses one itself, as revoked, the way
+//! it refuses a caller demoted after the route admitted them. Permissions add
+//! one rule, that a caller holds everything the target holds and everything
+//! it is given. For every caller the old routes admitted, that rule never
+//! decides anything; the matrix proves it before it compares the database
+//! with the oracle.
 //!
 //! Every caller is seated, beside the target or as the target, because the
 //! database judges the caller by the membership it reads under its own locks.
@@ -35,6 +37,7 @@ const WORKSPACE_ROLES: [WorkspaceRole; 4] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
     Changed,
+    Revoked,
     Forbidden,
     Uncovered,
     Missing,
@@ -48,6 +51,7 @@ impl From<organization_members::RoleChange> for Outcome {
     fn from(change: organization_members::RoleChange) -> Self {
         match change {
             organization_members::RoleChange::Applied(_) => Self::Changed,
+            organization_members::RoleChange::Revoked => Self::Revoked,
             organization_members::RoleChange::Forbidden => Self::Forbidden,
             organization_members::RoleChange::Uncovered => Self::Uncovered,
             organization_members::RoleChange::Missing => Self::Missing,
@@ -62,6 +66,7 @@ impl From<workspace_members::RoleChange> for Outcome {
     fn from(change: workspace_members::RoleChange) -> Self {
         match change {
             workspace_members::RoleChange::Applied(_) => Self::Changed,
+            workspace_members::RoleChange::Revoked => Self::Revoked,
             workspace_members::RoleChange::Forbidden => Self::Forbidden,
             workspace_members::RoleChange::Uncovered => Self::Uncovered,
             workspace_members::RoleChange::Missing => Self::Missing,
@@ -77,6 +82,7 @@ impl From<organization_members::Removal> for Outcome {
     fn from(removal: organization_members::Removal) -> Self {
         match removal {
             organization_members::Removal::Removed => Self::Changed,
+            organization_members::Removal::Revoked => Self::Revoked,
             organization_members::Removal::Forbidden => Self::Forbidden,
             organization_members::Removal::Uncovered => Self::Uncovered,
             organization_members::Removal::Missing => Self::Missing,
@@ -89,6 +95,7 @@ impl From<workspace_members::Removal> for Outcome {
     fn from(removal: workspace_members::Removal) -> Self {
         match removal {
             workspace_members::Removal::Removed => Self::Changed,
+            workspace_members::Removal::Revoked => Self::Revoked,
             workspace_members::Removal::Forbidden => Self::Forbidden,
             workspace_members::Removal::Uncovered => Self::Uncovered,
             workspace_members::Removal::Missing => Self::Missing,
@@ -238,15 +245,27 @@ fn old_workspace_removal(
     Outcome::Changed
 }
 
-/// The old rules plus the subset rule, in the order the guarded changes ask
-/// them. Built-in sets nest, so holding another role's permissions is
-/// outranking or equalling it.
+/// The member routes admitted only admins and owners.
+fn old_organization_admits(caller: OrgRole) -> bool {
+    caller >= OrgRole::Admin
+}
+
+fn old_workspace_admits(caller: WorkspaceRole) -> bool {
+    caller >= WorkspaceRole::Admin
+}
+
+/// The old routes' admission, then the old rules plus the subset rule, in the
+/// order the guarded changes ask them. Built-in sets nest, so holding another
+/// role's permissions is outranking or equalling it.
 fn expected_organization_change(
     caller: OrgRole,
     target: OrgRole,
     granted: OrgRole,
     owners: usize,
 ) -> Outcome {
+    if !old_organization_admits(caller) {
+        return Outcome::Revoked;
+    }
     if !old_organization_outranks(caller, target) {
         return Outcome::Forbidden;
     }
@@ -263,6 +282,9 @@ fn expected_organization_change(
 }
 
 fn expected_organization_removal(caller: OrgRole, target: OrgRole, owners: usize) -> Outcome {
+    if !old_organization_admits(caller) {
+        return Outcome::Revoked;
+    }
     if old_organization_outranks(caller, target) && target > caller {
         return Outcome::Uncovered;
     }
@@ -275,6 +297,9 @@ fn expected_workspace_change(
     granted: WorkspaceRole,
     seats: (usize, usize),
 ) -> Outcome {
+    if !old_workspace_admits(caller) {
+        return Outcome::Revoked;
+    }
     if !old_workspace_outranks(caller, target) {
         return Outcome::Forbidden;
     }
@@ -295,6 +320,9 @@ fn expected_workspace_removal(
     target: WorkspaceRole,
     seats: (usize, usize),
 ) -> Outcome {
+    if !old_workspace_admits(caller) {
+        return Outcome::Revoked;
+    }
     if old_workspace_outranks(caller, target) && target > caller {
         return Outcome::Uncovered;
     }

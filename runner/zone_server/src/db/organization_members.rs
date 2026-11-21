@@ -236,6 +236,7 @@ impl Seat {
 /// What the caller holds and the target's own role, both held for the length
 /// of the transaction: a demotion of the caller that lands first is what the
 /// change is judged by, and a caller who is no longer a member holds nothing.
+/// The target is `None` unless they are an active member.
 ///
 /// Both member rows are locked before either custom role is: an edit of a
 /// role holds its editor's member row while it waits for the role, so a change
@@ -250,18 +251,18 @@ async fn lock_parties(
     organization_id: Uuid,
     caller: Uuid,
     user_id: Uuid,
-) -> DbResult<Option<(Grant, Membership<OrgRole>)>> {
+) -> DbResult<(Grant, Option<Membership<OrgRole>>)> {
     let caller = Seat::lock(transaction, organization_id, caller, Lock::Share).await?;
-    let Some(target) = Seat::lock(transaction, organization_id, user_id, Lock::Update).await?
-    else {
-        return Ok(None);
-    };
+    let target = Seat::lock(transaction, organization_id, user_id, Lock::Update).await?;
     let caller = match caller {
         Some(caller) => caller.membership(transaction, organization_id).await?.grant,
         None => Grant::default(),
     };
-    let target = target.membership(transaction, organization_id).await?;
-    Ok(Some((caller, target)))
+    let target = match target {
+        Some(target) => Some(target.membership(transaction, organization_id).await?),
+        None => None,
+    };
+    Ok((caller, target))
 }
 
 /// Only the administrators permission touches an admin or owner.
@@ -292,6 +293,7 @@ async fn lock_owners(
 #[derive(Debug)]
 pub enum Removal {
     Removed,
+    Revoked,
     Forbidden,
     Uncovered,
     Missing,
@@ -304,6 +306,10 @@ pub enum Removal {
 /// strip access. This is the one a route wants: it counts and removes with the
 /// owner rows locked, so two removals arriving together cannot each read a
 /// count that says one may go.
+///
+/// The route admitted the caller on `members:delete`, but a demotion, removal
+/// or role edit can take it away before the locks are taken, so the caller
+/// must still hold it as read under them.
 pub async fn remove_guarded(
     pool: &PgPool,
     organization_id: Uuid,
@@ -313,9 +319,11 @@ pub async fn remove_guarded(
     let mut transaction = pool.begin().await?;
 
     let owners = lock_owners(&mut transaction, organization_id).await?;
-    let Some((caller, target)) =
-        lock_parties(&mut transaction, organization_id, caller, user_id).await?
-    else {
+    let (caller, target) = lock_parties(&mut transaction, organization_id, caller, user_id).await?;
+    if !caller.allows(Permission::MembersDelete) {
+        return Ok(Removal::Revoked);
+    }
+    let Some(target) = target else {
         return Ok(Removal::Missing);
     };
     if outranked(&caller, &target) {
@@ -603,6 +611,7 @@ pub struct Assigned {
 #[derive(Debug)]
 pub enum RoleChange {
     Applied(Box<Assigned>),
+    Revoked,
     Forbidden,
     Uncovered,
     Missing,
@@ -618,11 +627,12 @@ pub enum RoleChange {
 /// none. Lock the owner rows for the length of the transaction: the second
 /// demotion waits, then counts what the first actually left.
 ///
-/// The caller must hold everything the target holds now and everything the
-/// assignment grants, judged by what the caller holds under this transaction.
-/// Only the administrators permission touches an admin or owner, or seats an
-/// owner; an admin seating an admin is this organization's policy,
-/// deliberately. A custom role is read under a share lock, so an edit to it
+/// The caller is judged by what they hold as read under this transaction, not
+/// by what admitted the request: a demotion, removal or role edit can land in
+/// between. They must still hold `members:update`, everything the target
+/// holds now and everything the assignment grants. Only the administrators
+/// permission touches an admin or owner, or seats an owner; an admin seating
+/// an admin is this organization's policy, deliberately. A custom role is read under a share lock, so an edit to it
 /// waits for the assignment and counts the new holder.
 ///
 /// Locks are taken owners first, then the caller, the target and the roles,
@@ -637,9 +647,11 @@ pub async fn change_role(
     let mut transaction = pool.begin().await?;
 
     let owners = lock_owners(&mut transaction, organization_id).await?;
-    let Some((caller, target)) =
-        lock_parties(&mut transaction, organization_id, caller, user_id).await?
-    else {
+    let (caller, target) = lock_parties(&mut transaction, organization_id, caller, user_id).await?;
+    if !caller.allows(Permission::MembersUpdate) {
+        return Ok(RoleChange::Revoked);
+    }
+    let Some(target) = target else {
         return Ok(RoleChange::Missing);
     };
     if outranked(&caller, &target) {

@@ -1461,7 +1461,7 @@ async fn organization_assignments_refuse_missing_roles_escalation_and_the_last_o
         &pool,
         organization,
         Scope::Organization,
-        &[Permission::MembersUpdate],
+        &[Permission::MembersUpdate, Permission::MembersDelete],
     )
     .await;
     seat_organization(&pool, organization, owner, OrgRole::Owner, None).await;
@@ -1584,11 +1584,15 @@ async fn workspace_assignments_follow_the_same_rules() {
     let admin = user(&pool).await;
     let member = user(&pool).await;
     let narrow = user(&pool).await;
-    let writing = composed(
+    let managers = composed(
         &pool,
         organization,
         Scope::Workspace,
-        &[Permission::WorkspaceWrite],
+        &[
+            Permission::WorkspaceWrite,
+            Permission::WorkspaceMembersUpdate,
+            Permission::WorkspaceMembersDelete,
+        ],
     )
     .await;
     seat_workspace(&pool, workspace, owner, WorkspaceRole::Owner, None).await;
@@ -1599,7 +1603,7 @@ async fn workspace_assignments_follow_the_same_rules() {
         workspace,
         narrow,
         WorkspaceRole::Viewer,
-        Some(writing),
+        Some(managers),
     )
     .await;
     let writers = composed(

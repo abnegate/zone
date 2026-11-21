@@ -13,13 +13,15 @@ use zone_server::db::custom_roles::{AMBIGUOUS_ASSIGNMENT, EXCEEDS};
 use zone_server::db::organization_members::{self, OrgRole};
 use zone_server::db::workspace_members::{self, WorkspaceRole};
 
+use super::locking::waiting;
 use super::{
     Call, composed, describe, fixture, holding_organization, holding_workspace, licensed,
     organization_holder, refused_with, role, seat_organization, seat_workspace, user,
     workspace_holder,
 };
+use crate::common::TestResponse;
 use crate::common::policy::Fixture;
-use crate::common::sso::lapsed;
+use crate::common::sso::{Account, lapsed};
 
 fn organization_members_path(fixture: &Fixture) -> String {
     format!("/api/organizations/{}/members", fixture.organization)
@@ -891,6 +893,114 @@ async fn a_removed_member_is_told_the_membership_is_inactive() {
             );
         }
     }
+
+    fixture.cleanup().await;
+}
+
+/// Sends `call` as `account` while a transaction setting the account's own
+/// role in `scope` to `role` is open, and lets it land once the route waits
+/// for that row: the guard read the caller before the demotion, the member
+/// change reads them after it.
+async fn behind_a_demotion(
+    fixture: &Fixture,
+    call: &Call,
+    account: &Account,
+    statement: &'static str,
+    scope: Uuid,
+    role: &'static str,
+) -> TestResponse {
+    let mut demotion = fixture.pool().begin().await.expect("a transaction");
+    sqlx::query(statement)
+        .bind(scope)
+        .bind(account.id)
+        .bind(role)
+        .execute(&mut *demotion)
+        .await
+        .expect("the caller is demoted");
+    let (response, ()) = tokio::join!(call.send(fixture, &account.token), async {
+        assert!(
+            waiting(fixture.pool(), 1).await,
+            "the route waits for the caller's row"
+        );
+        demotion.commit().await.expect("the demotion lands");
+    });
+    response
+}
+
+#[tokio::test]
+async fn an_organization_admin_demoted_mid_change_reads_the_guards_refusal() {
+    let fixture = fixture().await;
+    let admin = fixture.member(OrgRole::Admin, None).await;
+    let target = organization_member(&fixture).await;
+
+    let call = Call::patch(
+        format!("{}/{target}", organization_members_path(&fixture)),
+        json!({ "role": OrgRole::Member.as_str() }),
+    );
+    let response = behind_a_demotion(
+        &fixture,
+        &call,
+        &admin,
+        "UPDATE organization_members SET role = $3 WHERE organization_id = $1 AND user_id = $2",
+        fixture.organization,
+        OrgRole::Member.as_str(),
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        describe(&call, &response)
+    );
+    assert_eq!(
+        response.json_value()["error"],
+        Permission::MembersUpdate.refusal(),
+        "{}",
+        describe(&call, &response)
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_workspace_admin_demoted_mid_removal_reads_the_guards_refusal() {
+    let fixture = fixture().await;
+    let admin = fixture
+        .member(OrgRole::Member, Some(WorkspaceRole::Admin))
+        .await;
+    let target = workspace_viewer(&fixture).await;
+
+    let call = Call::delete(format!("{}/{target}", workspace_members_path(&fixture)));
+    let response = behind_a_demotion(
+        &fixture,
+        &call,
+        &admin,
+        "UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2",
+        fixture.workspace,
+        WorkspaceRole::Member.as_str(),
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        describe(&call, &response)
+    );
+    assert_eq!(
+        response.json_value()["error"],
+        Permission::WorkspaceMembersDelete.refusal(),
+        "{}",
+        describe(&call, &response)
+    );
+    assert!(
+        workspace_members::membership(fixture.pool(), fixture.workspace, target)
+            .await
+            .expect("the membership is read")
+            .is_some(),
+        "the target keeps their seat"
+    );
 
     fixture.cleanup().await;
 }

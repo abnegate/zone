@@ -25,7 +25,9 @@ use crate::services::login::devices;
 use crate::state::AppState;
 use crate::sync::hook::Removal;
 
-use super::common::{AuditEvent, ErrorResponse, MembershipResponse, Timestamps, audit, exceeds};
+use super::common::{
+    AuditEvent, ErrorResponse, MembershipResponse, Timestamps, audit, exceeds, revoked,
+};
 
 const INVALID_ROLE: &str = "Invalid role. Must be one of: member, admin, owner";
 const INTERNAL_ERROR: &str = "Internal server error";
@@ -699,6 +701,7 @@ pub async fn update_member_role(
             .await;
             Json(response).into_response()
         }
+        Ok(RoleChange::Revoked) => revoked(Permission::MembersUpdate).into_response(),
         Ok(RoleChange::Forbidden) => refusal(
             StatusCode::FORBIDDEN,
             "Only owners can change the role of an admin or owner",
@@ -735,6 +738,7 @@ pub async fn remove_member(
             audit_member(&state, &member, actions::MEMBER_REMOVED, path.user_id, None).await;
             StatusCode::NO_CONTENT.into_response()
         }
+        Ok(MemberRemoval::Revoked) => revoked(Permission::MembersDelete).into_response(),
         Ok(MemberRemoval::Forbidden) => refusal(
             StatusCode::FORBIDDEN,
             "Only owners can remove admins or owners",
