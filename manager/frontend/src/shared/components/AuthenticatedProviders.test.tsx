@@ -1,12 +1,21 @@
-import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
-import { type QueryClient, useQueryClient } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query';
+import { act, render, screen } from '@testing-library/react';
+import { StrictMode } from 'react';
+
+const load = mock(() => new Promise<never>(() => {}));
 
 let client: QueryClient | null = null;
+let reading = false;
+
+function Loader() {
+  useQuery({ queryKey: ['reader'], queryFn: load });
+  return null;
+}
 
 function Reader() {
   client = useQueryClient();
-  return <div data-testid="outlet" />;
+  return <div data-testid="outlet">{reading && <Loader />}</div>;
 }
 
 mock.module('react-router-dom', () => ({
@@ -39,6 +48,11 @@ afterAll(() => {
 });
 
 describe('AuthenticatedProviders', () => {
+  beforeEach(() => {
+    load.mockClear();
+    reading = false;
+  });
+
   it('watches for a chat that stops and waits, on every signed-in page', () => {
     render(<AuthenticatedProviders />);
 
@@ -54,5 +68,20 @@ describe('AuthenticatedProviders', () => {
     render(<AuthenticatedProviders />);
 
     expect(client?.getQueryCache().getAll()).toHaveLength(0);
+  });
+
+  it('keeps a read that starts on the first render when strict mode remounts it', async () => {
+    reading = true;
+    render(
+      <StrictMode>
+        <AuthenticatedProviders />
+      </StrictMode>
+    );
+    await act(async () => {});
+
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(client?.getQueryCache().find({ queryKey: ['reader'] })?.state.fetchStatus).toBe(
+      'fetching'
+    );
   });
 });

@@ -21,10 +21,13 @@ afterAll(() => {
   mock.restore();
 });
 
-function render(options?: Parameters<typeof useLicense>[0]) {
-  const queryClient = new QueryClient({
+function client(): QueryClient {
+  return new QueryClient({
     defaultOptions: { queries: { retryDelay: 0, gcTime: 0 } },
   });
+}
+
+function render(options?: Parameters<typeof useLicense>[0], queryClient: QueryClient = client()) {
   const wrapper = ({ children }: { children: ReactNode }) =>
     createElement(QueryClientProvider, { client: queryClient }, children);
   return renderHook(() => useLicense(options), { wrapper });
@@ -127,6 +130,39 @@ describe('useLicense', () => {
 
     await waitFor(() => expect(result.current.response).toEqual(ACTIVE));
     expect(get).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows a refusal to a later reader without asking again', async () => {
+    get.mockRejectedValue(
+      new ApiError('Failed to load the license: This needs a server admin.', HttpStatus.Forbidden)
+    );
+    const shared = client();
+    const first = render(undefined, shared);
+    await waitFor(() => expect(first.result.current.error).not.toBeNull());
+
+    const second = render(undefined, shared);
+    await act(async () => {});
+
+    expect(second.result.current.loading).toBe(false);
+    expect(second.result.current.error).toBe(
+      'Failed to load the license: This needs a server admin.'
+    );
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks again for a later reader after the server kept failing', async () => {
+    get.mockRejectedValue(new ApiError('Failed to load the license: 502', HttpStatus.BadGateway));
+    const shared = client();
+    const first = render(undefined, shared);
+    await waitFor(() => expect(first.result.current.error).not.toBeNull());
+    expect(get).toHaveBeenCalledTimes(LICENSE_RETRY_LIMIT + 1);
+
+    get.mockReset();
+    get.mockResolvedValue(ACTIVE);
+    const second = render(undefined, shared);
+
+    await waitFor(() => expect(second.result.current.response).toEqual(ACTIVE));
+    expect(get).toHaveBeenCalledTimes(1);
   });
 
   it('loads again on refresh', async () => {

@@ -4,7 +4,7 @@ export { LicenseSection } from './LicenseSection';
 export { LicenseSummary } from './LicenseSummary';
 export { MemberCapBanner } from './MemberCapBanner';
 export { MemberCapRefusal } from './MemberCapRefusal';
-export { LICENSE_PATH, PlanUpgradeNotice } from './PlanUpgradeNotice';
+export { PlanUpgradeNotice } from './PlanUpgradeNotice';
 export { RemoveLicenseDialog } from './RemoveLicenseDialog';
 export { Switch } from './Switch';
 export { ToneBadge } from './ToneBadge';

@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { type Query, useQuery } from '@tanstack/react-query';
 import { useCallback } from 'react';
 import { ApiError } from '../../../api/ApiError';
 import { HttpStatus } from '../../../api/HttpStatus';
@@ -27,6 +27,11 @@ function retryLoad(failures: number, error: Error): boolean {
   return !refused(error) && failures < LICENSE_RETRY_LIMIT;
 }
 
+function retryMount(query: Query<LicenseResponse>): boolean {
+  const { error } = query.state;
+  return error === null || !refused(error);
+}
+
 export interface LicenseOptions {
   enabled?: boolean;
 }
@@ -36,6 +41,7 @@ export function useLicense({ enabled = true }: LicenseOptions = {}): LicenseStat
     queryKey: licenseQueryKeys.current,
     queryFn: () => licenseApi.get(),
     retry: retryLoad,
+    retryOnMount: retryMount,
     enabled,
   });
 

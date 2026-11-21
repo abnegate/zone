@@ -11,6 +11,7 @@ import {
   TEAM_LAPSED,
   UNCOUNTED_COMMUNITY,
 } from '../fixtures';
+import { LICENSE_PATH } from '../licensePath';
 import { PRICING_URL } from '../pricing';
 import type { LicenseResponse } from '../types';
 
@@ -21,11 +22,9 @@ mock.module('../api', () => ({ licenseApi: { get, set: mock(), remove: mock() } 
 mock.module('../../auth/context', () => ({ useAuth }));
 
 let MemberCapBanner: typeof import('./MemberCapBanner').MemberCapBanner;
-let LICENSE_PATH: string;
 
 beforeAll(async () => {
   ({ MemberCapBanner } = await import('./MemberCapBanner'));
-  ({ LICENSE_PATH } = await import('./PlanUpgradeNotice'));
 });
 
 afterAll(() => {
@@ -57,7 +56,7 @@ describe('MemberCapBanner', () => {
     const banner = await screen.findByRole('status');
     expect(banner).toHaveClass('member-cap-banner');
     expect(banner).toHaveTextContent(
-      '5 people were active this month, 2 more than the 3 members Zone Community allows'
+      '5 people were active this month, 2 more than the 3 members this server allows without an active Zone Team or Enterprise license'
     );
     expect(banner).toHaveTextContent('Everyone keeps access');
     expect(banner).not.toHaveTextContent(/block|lock|suspend|disable|lose|remov/i);

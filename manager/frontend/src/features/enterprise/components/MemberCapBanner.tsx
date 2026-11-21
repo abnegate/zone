@@ -2,9 +2,9 @@ import { buttonVariants } from '@zone/ui';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../../auth/context';
 import { useLicense } from '../hooks/useLicense';
+import { LICENSE_PATH } from '../licensePath';
 import { overMemberNotice } from '../members';
 import { PRICING_URL } from '../pricing';
-import { LICENSE_PATH } from './PlanUpgradeNotice';
 import './MemberCapBanner.css';
 
 export function MemberCapBanner() {

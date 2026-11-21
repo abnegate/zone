@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { LICENSE_PATH } from '../licensePath';
 import { Plan } from '../schemas';
 import type { Plan as PlanValue } from '../types';
-import { LICENSE_PATH, PlanUpgradeNotice } from './PlanUpgradeNotice';
+import { PlanUpgradeNotice } from './PlanUpgradeNotice';
 
 const MESSAGE = 'Spend limits are part of Zone Team. Add a license to set them.';
 
@@ -33,9 +34,5 @@ describe('PlanUpgradeNotice', () => {
 
     expect(screen.getByRole('heading', { name: 'Available on Enterprise' })).toBeInTheDocument();
     expect(screen.queryByText(/Available on Team/)).not.toBeInTheDocument();
-  });
-
-  it('links to the server License settings', () => {
-    expect(LICENSE_PATH).toBe('/settings/server/license');
   });
 });

@@ -245,7 +245,9 @@ describe('LicenseSection', () => {
       expect(details().Members).toBe('3 of 3 members this month');
       const notice = screen.getByRole('status');
       expect(notice).toHaveClass('alert-warning');
-      expect(notice).toHaveTextContent('reached the 3 active members Zone Community allows');
+      expect(notice).toHaveTextContent(
+        'reached the 3 active members it allows without an active Zone Team or Enterprise license'
+      );
       expect(notice).toHaveTextContent(
         'new members are refused until a Team or Enterprise license is added'
       );
@@ -263,7 +265,7 @@ describe('LicenseSection', () => {
       const alert = screen.getByRole('status');
       expect(alert).toHaveClass('alert-warning');
       expect(alert).toHaveTextContent(
-        '5 people were active this month, 2 more than the 3 members Zone Community allows'
+        '5 people were active this month, 2 more than the 3 members this server allows without an active Zone Team or Enterprise license'
       );
       expect(alert).toHaveTextContent('Everyone keeps access');
       expect(alert).not.toHaveTextContent(/block|lock|suspend|disable|lose/i);

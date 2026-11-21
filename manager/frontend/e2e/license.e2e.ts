@@ -1,13 +1,12 @@
 import type { Page } from '@playwright/test';
 import { ACTIVE, COMMUNITY, LAPSED, UNVERIFIED } from '../src/features/enterprise/fixtures';
+import { LICENSE_PATH } from '../src/features/enterprise/licensePath';
 import { PRICING_URL } from '../src/features/enterprise/pricing';
 import type { LicenseResponse } from '../src/features/enterprise/types';
 import { expect, test } from './fixtures';
 import { expectNoSidewaysScroll, shoot } from './helpers/screenshots';
 import { setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
-
-const LICENSE_PATH = '/settings/server/license';
 
 const LICENSE_API = /\/api\/license$/;
 
