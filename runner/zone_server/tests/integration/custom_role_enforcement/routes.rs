@@ -1,10 +1,11 @@
 //! Every organization and workspace route, called by a custom-role holder
 //! with exactly the permission the route checks and by one without it.
 //!
-//! A holder with the permission is never refused with 403; a route that only
-//! reads answers it outright. A holder of only the base permission is refused
-//! with 403. A route no custom role may reach, because it checks a permission
-//! that isn't composable, refuses a holder of every composable permission.
+//! A holder with the permission is answered exactly what its probe earns
+//! past every guard, so a guard that turns it away with any status is caught.
+//! A holder of only the base permission is refused with 403. A route no
+//! custom role may reach, because it checks a permission that isn't
+//! composable, refuses a holder of every composable permission.
 //! Each route is called with the smallest body it accepts, and every failing
 //! route is reported together.
 
@@ -12,7 +13,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use axum::http::StatusCode;
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 use zone_server::auth::{Permission, Scope};
 use zone_server::db::organization_members::OrgRole;
@@ -23,12 +24,23 @@ use super::{
     Call, composable, describe, licensed, organization_holder, seat_organization, seat_workspace,
     user, workspace_holder,
 };
+use crate::common::TestResponse;
 use crate::common::policy::Fixture;
 use crate::common::sso::Account;
 
 const REFUSED_URL: &str = "http://127.0.0.1:1/mcp";
 
+/// Enough of a UUID to keep MCP server names unique within their 32-character limit.
+const PROBE_SUFFIX: usize = 12;
+
 const EXPORTED_RANGE: &str = "start_date=2020-01-01&end_date=2020-12-31";
+
+/// What a guard tells someone it turns away as outside the tenant.
+const TURNED_AWAY: [&str; 3] = [
+    "Organization not found",
+    "Workspace not found",
+    "Project not found",
+];
 
 /// Checked only while merging a GitHub pull request, which these tests have none of.
 const UNROUTED: [Permission; 1] = [Permission::PullRequestsOverride];
@@ -266,6 +278,89 @@ impl Route {
         }
     }
 
+    /// What the matrix's caller for this route is answered for its probe: the
+    /// holder of exactly its permission, or, for a permission no custom role
+    /// may hold, the holder of every composable one. A probe that names an
+    /// absent target is answered 404 by the handler past every guard, and a
+    /// destination probe with no settings is answered 400 by its validation.
+    fn admitted(self) -> StatusCode {
+        match self {
+            Self::DeleteOrganization | Self::CreateRole | Self::DeleteWorkspace => {
+                StatusCode::FORBIDDEN
+            }
+            Self::AddMember
+            | Self::CreateInvitation
+            | Self::CreateWorkspace
+            | Self::CreateMcpServer
+            | Self::CreateTask
+            | Self::CreateChat
+            | Self::AddWorkspaceMember => StatusCode::CREATED,
+            Self::RemoveMember
+            | Self::SyncGitHubInstallations
+            | Self::ClearAiSettings
+            | Self::SignOutAgent
+            | Self::ClearTheme
+            | Self::RemoveWorkspaceMember
+            | Self::ClearWorkspaceAiSettings => StatusCode::NO_CONTENT,
+            Self::RevokeInvitation
+            | Self::UpdateDevice
+            | Self::DeleteGitHubApp
+            | Self::InstallGitHubApp
+            | Self::DeleteGitHubInstallation
+            | Self::UpdateMcpServer
+            | Self::DeleteMcpServer
+            | Self::SignOutAgentLogin
+            | Self::ReadAuditLog
+            | Self::ReadAuditDestination
+            | Self::DeleteProjectSync
+            | Self::RotateProjectSyncSecret => StatusCode::NOT_FOUND,
+            Self::CreateAuditDestination => StatusCode::BAD_REQUEST,
+            Self::ReadOrganization
+            | Self::ListMembers
+            | Self::ListWorkspaces
+            | Self::ReadGitHub
+            | Self::ListRepositories
+            | Self::ListMcpServers
+            | Self::ReadOrganizationPolicy
+            | Self::ListAgents
+            | Self::ListRoles
+            | Self::UpdateOrganization
+            | Self::ChangeMember
+            | Self::ListInvitations
+            | Self::ListDevices
+            | Self::ReadDevicePolicy
+            | Self::SetDevicePolicy
+            | Self::RegisterGitHubApp
+            | Self::ReadAiSettings
+            | Self::UpdateAiSettings
+            | Self::UpdateOrganizationPolicy
+            | Self::ListAuditLogs
+            | Self::ExportAuditLogs
+            | Self::ListAuditDestinations
+            | Self::ReadAuditRetention
+            | Self::UpdateAuditRetention
+            | Self::ListAuditExports
+            | Self::ReadWorkspace
+            | Self::ListWorkspaceMembers
+            | Self::ReadHostDirectories
+            | Self::ReadAnalytics
+            | Self::ListPullRequests
+            | Self::ListReleases
+            | Self::ReadTheme
+            | Self::ListTasks
+            | Self::ReadWorkspaceAiSettings
+            | Self::ReadWorkspaceMcpServers
+            | Self::ReadWorkspacePolicy
+            | Self::UpdateHostDirectories
+            | Self::UpdateTheme
+            | Self::UpdateWorkspace
+            | Self::ChangeWorkspaceMember
+            | Self::UpdateWorkspaceAiSettings
+            | Self::UpdateWorkspaceMcpServers
+            | Self::UpdateWorkspacePolicy => StatusCode::OK,
+        }
+    }
+
     /// The call, with fresh targets for a route that changes or removes one.
     async fn call(self, fixture: &Fixture, project: Uuid) -> Call {
         let organization = format!("/api/organizations/{}", fixture.organization);
@@ -381,10 +476,16 @@ impl Route {
                 format!("{organization}/audit-retention"),
                 json!({ "days": null }),
             ),
-            Self::ListAuditExports => Call::get(format!("{organization}/audit-exports")),
+            Self::ListAuditExports => {
+                Call::get(format!("{organization}/audit-exports?{EXPORTED_RANGE}"))
+            }
             Self::CreateRole => Call::post(
                 format!("{organization}/roles"),
-                json!({ "name": format!("Role {absent}"), "scope": Scope::Workspace.name(), "permissions": [] }),
+                json!({
+                    "name": format!("Role {absent}"),
+                    "scope": Scope::Workspace.name(),
+                    "permissions": [],
+                }),
             ),
             Self::ReadWorkspace => Call::get(workspace),
             Self::ListWorkspaceMembers => Call::get(format!("{workspace}/members")),
@@ -466,7 +567,7 @@ impl Route {
 
 fn mcp_server() -> serde_json::Value {
     json!({
-        "name": format!("probe-{}", Uuid::new_v4().simple()),
+        "name": format!("probe-{}", &Uuid::new_v4().simple().to_string()[..PROBE_SUFFIX]),
         "transport": "http",
         "url": REFUSED_URL,
     })
@@ -503,6 +604,30 @@ async fn holder(fixture: &Fixture, scope: Scope, permissions: &[Permission]) -> 
     }
 }
 
+/// How the answer to `route`'s caller departs from [`Route::admitted`], if it
+/// does. A 404 must come from the handler's own lookup: one naming the
+/// organization, workspace or project is a guard turning the caller away.
+fn departure(route: Route, response: &TestResponse) -> Option<String> {
+    let expected = route.admitted();
+    if response.status != expected {
+        return Some(format!(
+            "is answered {} instead of {expected}",
+            response.status
+        ));
+    }
+    let error = serde_json::from_slice::<Value>(response.bytes())
+        .ok()
+        .and_then(|body| body["error"].as_str().map(str::to_string));
+    match error {
+        Some(error)
+            if expected == StatusCode::NOT_FOUND && TURNED_AWAY.contains(&error.as_str()) =>
+        {
+            Some(format!("is turned away as an outsider with \"{error}\""))
+        }
+        _ => None,
+    }
+}
+
 /// Calls every route as the holders it names, returning each departure from
 /// the contract.
 async fn departures(fixture: &Fixture, scope: Scope, routes: &[Route]) -> Vec<String> {
@@ -533,9 +658,9 @@ async fn departures(fixture: &Fixture, scope: Scope, routes: &[Route]) -> Vec<St
         if Some(permission) == scope.base() {
             let call = route.call(fixture, project).await;
             let response = call.send(fixture, &base.token).await;
-            if !response.status.is_success() {
+            if let Some(departure) = departure(*route, &response) {
                 departures.push(format!(
-                    "{route:?}: a holder of {} only is refused: {}",
+                    "{route:?}: a holder of {} only {departure}: {}",
                     permission.name(),
                     describe(&call, &response)
                 ));
@@ -546,9 +671,9 @@ async fn departures(fixture: &Fixture, scope: Scope, routes: &[Route]) -> Vec<St
         if !permission.composable() {
             let call = route.call(fixture, project).await;
             let response = call.send(fixture, &everything.token).await;
-            if response.status != StatusCode::FORBIDDEN {
+            if let Some(departure) = departure(*route, &response) {
                 departures.push(format!(
-                    "{route:?}: a holder of every composable permission is not refused {}: {}",
+                    "{route:?}: a holder of every composable permission without {} {departure}: {}",
                     permission.name(),
                     describe(&call, &response)
                 ));
@@ -563,9 +688,9 @@ async fn departures(fixture: &Fixture, scope: Scope, routes: &[Route]) -> Vec<St
 
         let call = route.call(fixture, project).await;
         let response = call.send(fixture, &granted.token).await;
-        if response.status == StatusCode::FORBIDDEN {
+        if let Some(departure) = departure(*route, &response) {
             departures.push(format!(
-                "{route:?}: a holder of {} is refused: {}",
+                "{route:?}: a holder of {} {departure}: {}",
                 permission.name(),
                 describe(&call, &response)
             ));
