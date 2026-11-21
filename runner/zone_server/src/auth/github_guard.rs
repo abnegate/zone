@@ -6,25 +6,28 @@ use super::middleware::AuthError;
 use super::middleware::AuthUser;
 use super::middleware::require_permission;
 use super::permission::Permission;
-use super::workspace_guard::WorkspaceWriter;
+use super::workspace_guard::WorkspaceMember;
+use super::workspace_guard::WorkspacePermit;
 use crate::state::AppState;
 
 #[derive(Debug, Clone)]
-pub struct PullRequestMerger(pub WorkspaceWriter);
+pub struct PullRequestMerger(pub WorkspaceMember);
 
 #[derive(Debug, Clone)]
-pub struct ReleaseCreator(pub WorkspaceWriter);
+pub struct ReleaseCreator(pub WorkspaceMember);
+
+type Writer = WorkspacePermit<{ Permission::WorkspaceWrite.index() }>;
 
 async fn permitted<S>(
     parts: &mut Parts,
     state: &S,
     permission: Permission,
-) -> Result<WorkspaceWriter, AuthError>
+) -> Result<WorkspaceMember, AuthError>
 where
     S: Send + Sync,
     AppState: FromRef<S>,
 {
-    let writer = WorkspaceWriter::from_request_parts(parts, state).await?;
+    let WorkspacePermit(writer) = Writer::from_request_parts(parts, state).await?;
     let user = AuthUser::from_request_parts(parts, state).await?;
     require_permission(&user.0, permission)?;
     Ok(writer)
