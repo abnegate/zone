@@ -9,6 +9,25 @@ use crate::sso::saml::{Malformed, Refusal};
 
 const DEEP: usize = 100_000;
 const WIDE: usize = 100_000;
+const ACS_BODY_LIMIT: usize = 1 << 20;
+const AMPLIFYING_CHILDREN: usize = 60_000;
+const AMPLIFYING_NAMESPACE_LENGTH: usize = 1 << 18;
+
+/// Declares `p` on the element opened by `start` with a long URI that the
+/// element never uses, then appends `children` empty `p:a` elements before
+/// `end`. Exclusive canonicalization must render the declaration on every
+/// child, so the canonical form grows by the URI length per six input bytes.
+fn amplified(xml: &str, start: &str, end: &str, children: usize) -> String {
+    amplified_with(xml, start, end, children, AMPLIFYING_NAMESPACE_LENGTH)
+}
+
+fn amplified_with(xml: &str, start: &str, end: &str, children: usize, length: usize) -> String {
+    assert!(xml.contains(start), "the XML has no {start}");
+    assert!(xml.contains(end), "the XML has no {end}");
+    let declaration = format!(" xmlns:p=\"urn:{}\" ", "u".repeat(length));
+    xml.replacen(start, &format!("{start}{declaration}"), 1)
+        .replacen(end, &format!("{}{end}", "<p:a/>".repeat(children)), 1)
+}
 
 fn nested(depth: usize) -> String {
     let mut xml = String::with_capacity(depth * 8);
@@ -32,6 +51,7 @@ fn every_refusal_completes_the_sentence() {
         Refusal::Transform,
         Refusal::Algorithm,
         Refusal::Digest,
+        Refusal::Oversized,
         Refusal::Signature,
         Refusal::DuplicateId,
         Refusal::AssertionCount,

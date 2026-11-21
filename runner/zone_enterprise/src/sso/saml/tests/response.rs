@@ -4,7 +4,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 
-use super::DEEP;
+use super::{ACS_BODY_LIMIT, AMPLIFYING_CHILDREN, DEEP, amplified};
 use crate::sso::saml::instant;
 use crate::sso::saml::testing::{
     ACS_URL, ASSERTION_ID, CERTIFICATE, Claim, ENTITY_ID, Key, OTHER_CERTIFICATE, Options,
@@ -1435,4 +1435,24 @@ IssueInstant=\"{INSTANT}\" Destination=\"{ACS_URL}\" InResponseTo=\"{REQUEST_ID}
     let started = Instant::now();
     assert_eq!(refusal(consume_xml(&xml)), Refusal::AssertionCount);
     assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
+}
+
+#[test]
+fn a_response_amplifying_its_canonical_form_is_refused_in_bounded_time() {
+    for sign_response in [false, true] {
+        let xml = amplified(
+            &response_xml(&Options {
+                sign_response,
+                ..options()
+            }),
+            ASSERTION_START,
+            ASSERTION_END,
+            AMPLIFYING_CHILDREN,
+        );
+        let encoded = STANDARD.encode(&xml);
+        assert!(encoded.len() < ACS_BODY_LIMIT, "{} bytes", encoded.len());
+        let started = Instant::now();
+        assert_eq!(refusal(consume_encoded(&encoded)), Refusal::Oversized);
+        assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
+    }
 }

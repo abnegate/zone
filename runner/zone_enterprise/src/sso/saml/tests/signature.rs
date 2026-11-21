@@ -4,7 +4,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{TimeZone, Utc};
 
-use super::{DEEP, nested};
+use super::{ACS_BODY_LIMIT, AMPLIFYING_CHILDREN, DEEP, amplified, nested};
 use crate::sso::saml::canonical::exclusive;
 use crate::sso::saml::testing::{
     ASSERTION_ID, CERTIFICATE, Key, OTHER_CERTIFICATE, Options, RESPONSE_ID, SCHEMA_PREFIX,
@@ -33,6 +33,8 @@ const SIGNATURE_END: &str = "</ds:Signature>";
 const INCLUSIVE_START: &str = "<ec:InclusiveNamespaces";
 const INCLUSIVE_END: &str = "</ec:InclusiveNamespaces>";
 const ISSUER_END: &str = "</saml2:Issuer>";
+const ASSERTION_START: &str = "<saml2:Assertion";
+const ASSERTION_END: &str = "</saml2:Assertion>";
 const SCHEMA_DECLARATION: &str = "xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"";
 
 fn options() -> Options {
@@ -206,7 +208,7 @@ fn an_openssl_signed_assertion_matches_its_xmllint_canonical_form() {
     let assertion = named(&document, uri::ASSERTION, "Assertion");
     let signature = named(&document, uri::DSIG, "Signature");
     assert_eq!(
-        String::from_utf8(exclusive(&document, assertion, Some(signature), &[])).unwrap(),
+        String::from_utf8(exclusive(&document, assertion, Some(signature), &[]).unwrap()).unwrap(),
         include_str!("fixtures/signed/assertion.c14n")
     );
     assert_eq!(pinned(xml, FIXTURE_SIGNED_ASSERTION_ID), Ok(true));
@@ -236,12 +238,15 @@ fn an_openssl_signed_assertion_with_a_prefix_list_verifies() {
     let assertion = named(&document, uri::ASSERTION, "Assertion");
     let signature = named(&document, uri::DSIG, "Signature");
     assert_eq!(
-        String::from_utf8(exclusive(
-            &document,
-            assertion,
-            Some(signature),
-            &[SCHEMA_PREFIX.to_owned()]
-        ))
+        String::from_utf8(
+            exclusive(
+                &document,
+                assertion,
+                Some(signature),
+                &[SCHEMA_PREFIX.to_owned()]
+            )
+            .unwrap()
+        )
         .unwrap(),
         include_str!("fixtures/signed/prefix_list.c14n")
     );
@@ -682,8 +687,8 @@ fn the_transform_prefix_list_feeds_only_the_digest() {
     let document = parse(&xml);
     let assertion = named(&document, uri::ASSERTION, "Assertion");
     let signature = named(&document, uri::DSIG, "Signature");
-    let with = exclusive(&document, assertion, Some(signature), &schema().unwrap());
-    let without = exclusive(&document, assertion, Some(signature), &[]);
+    let with = exclusive(&document, assertion, Some(signature), &schema().unwrap()).unwrap();
+    let without = exclusive(&document, assertion, Some(signature), &[]).unwrap();
     assert!(
         String::from_utf8(with)
             .unwrap()
@@ -708,8 +713,8 @@ fn the_canonicalization_prefix_list_feeds_only_signed_info() {
     });
     let document = parse(&xml);
     let signed_info = named(&document, uri::DSIG, "SignedInfo");
-    let with = exclusive(&document, signed_info, None, &schema().unwrap());
-    let without = exclusive(&document, signed_info, None, &[]);
+    let with = exclusive(&document, signed_info, None, &schema().unwrap()).unwrap();
+    let without = exclusive(&document, signed_info, None, &[]).unwrap();
     assert!(
         String::from_utf8(with)
             .unwrap()
@@ -787,4 +792,45 @@ fn a_signed_deeply_nested_element_verifies() {
     let xml = sign(&xml, "_deep", Key::Primary);
     assert_eq!(pinned(&xml, "_deep"), Ok(true));
     assert!(started.elapsed() < BOUND * 3);
+}
+
+fn within_the_acs_body_limit(xml: &str) {
+    let encoded = STANDARD.encode(xml);
+    assert!(encoded.len() < ACS_BODY_LIMIT, "{} bytes", encoded.len());
+}
+
+/// The digest input is canonicalized before any key is involved, so anyone
+/// who can start a sign-in can send it. Its canonical form here would be
+/// about 15 GB; it is refused as soon as it outgrows the document.
+#[test]
+fn an_assertion_amplifying_its_digest_input_is_refused_in_bounded_time() {
+    let xml = amplified(
+        &response_xml(&options()),
+        ASSERTION_START,
+        ASSERTION_END,
+        AMPLIFYING_CHILDREN,
+    );
+    within_the_acs_body_limit(&xml);
+    let started = Instant::now();
+    assert_eq!(assertion_outcome(&xml), Err(Refusal::Oversized));
+    assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
+}
+
+/// InclusiveNamespaces lies inside the excluded Signature, so the digest
+/// still matches and the attacker reaches the SignedInfo canonicalization,
+/// which is buffered for the RSA check. One child proves that path is
+/// reached: it fails only at the signature.
+#[test]
+fn a_signed_info_amplifying_its_canonical_form_is_refused_in_bounded_time() {
+    let xml = signed_assertion(Signing {
+        signed_info_prefixes: schema(),
+        ..Signing::default()
+    });
+    let reached = amplified(&xml, INCLUSIVE_START, INCLUSIVE_END, 1);
+    assert_eq!(pinned(&reached, ASSERTION_ID), Err(Refusal::Signature));
+    let xml = amplified(&xml, INCLUSIVE_START, INCLUSIVE_END, AMPLIFYING_CHILDREN);
+    within_the_acs_body_limit(&xml);
+    let started = Instant::now();
+    assert_eq!(pinned(&xml, ASSERTION_ID), Err(Refusal::Oversized));
+    assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
 }

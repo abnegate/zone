@@ -1,6 +1,7 @@
 mod assertion;
 mod attribute;
 mod authorization;
+mod budget;
 mod builder;
 pub mod canonical;
 mod certificate;
@@ -33,6 +34,7 @@ pub mod service_metadata;
 mod service_provider;
 mod signature;
 mod signature_method;
+mod sink;
 #[cfg(any(test, feature = "signing"))]
 pub mod testing;
 #[cfg(test)]

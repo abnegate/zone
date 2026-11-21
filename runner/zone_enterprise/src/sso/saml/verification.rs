@@ -33,14 +33,15 @@ pub fn verify(document: &Document, element: NodeId, keys: &[&[u8]]) -> Result<bo
         return Err(Refusal::Reference);
     }
 
-    let content = canonical::exclusive(
+    let mut digest = signature.digest_method().context();
+    canonical::stream(
         document,
         element,
         Some(signature.node()),
         signature.reference_prefixes(),
-    );
-    let digest = signature.digest_method().digest(&content);
-    constant_time::verify_slices_are_equal(digest.as_ref(), signature.digest())
+        &mut digest,
+    )?;
+    constant_time::verify_slices_are_equal(digest.finish().as_ref(), signature.digest())
         .map_err(|_| Refusal::Digest)?;
 
     let signed_info = canonical::exclusive(
@@ -48,7 +49,7 @@ pub fn verify(document: &Document, element: NodeId, keys: &[&[u8]]) -> Result<bo
         signature.signed_info(),
         None,
         signature.signed_info_prefixes(),
-    );
+    )?;
     let parameters = signature.method().parameters();
     let verified = keys.iter().any(|key| {
         UnparsedPublicKey::new(parameters, key)

@@ -167,7 +167,7 @@ pub fn sign_with(xml: &str, element_id: &str, signing: &Signing) -> String {
         .get(element_id)
         .expect("the XML to sign has the element");
     let reference_prefixes = signing.reference_prefixes.clone().unwrap_or_default();
-    let content = canonical::exclusive(&document, element, None, &reference_prefixes);
+    let content = canonical::unbounded(&document, element, None, &reference_prefixes);
     let digest_method = DigestMethod::parse(signing.digest_method).unwrap_or(DigestMethod::Sha256);
     let digest = STANDARD.encode(digest_method.digest(&content));
     let fragment = Document::parse(signature_xml(element_id, signing, &digest).as_bytes())
@@ -178,7 +178,7 @@ pub fn sign_with(xml: &str, element_id: &str, signing: &Signing) -> String {
         .next()
         .expect("the test signature has SignedInfo");
     let signed_info_prefixes = signing.signed_info_prefixes.clone().unwrap_or_default();
-    let message = canonical::exclusive(&document, signed_info, None, &signed_info_prefixes);
+    let message = canonical::unbounded(&document, signed_info, None, &signed_info_prefixes);
     let value = document
         .children_named(signature, uri::DSIG, SIGNATURE_VALUE)
         .next()
@@ -299,7 +299,7 @@ fn serialize(document: &Document) -> String {
         .collect();
     prefixes.sort_unstable();
     prefixes.dedup();
-    String::from_utf8(canonical::exclusive(
+    String::from_utf8(canonical::unbounded(
         document,
         document.root(),
         None,

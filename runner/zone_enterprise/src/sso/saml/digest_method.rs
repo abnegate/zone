@@ -1,4 +1,4 @@
-use aws_lc_rs::digest::{self, Algorithm, Digest, SHA256, SHA384, SHA512};
+use aws_lc_rs::digest::{self, Algorithm, Context, Digest, SHA256, SHA384, SHA512};
 
 use crate::sso::saml::refusal::Refusal;
 use crate::sso::saml::uri;
@@ -30,6 +30,10 @@ impl DigestMethod {
 
     pub fn digest(self, data: &[u8]) -> Digest {
         digest::digest(self.algorithm(), data)
+    }
+
+    pub fn context(self) -> Context {
+        Context::new(self.algorithm())
     }
 
     fn algorithm(self) -> &'static Algorithm {

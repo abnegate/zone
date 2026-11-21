@@ -1,11 +1,16 @@
 use std::time::{Duration, Instant};
 
-use super::{DEEP, WIDE, nested};
-use crate::sso::saml::canonical::{DEFAULT_PREFIX, exclusive};
-use crate::sso::saml::{Document, NodeId, uri};
+use super::{AMPLIFYING_CHILDREN, DEEP, WIDE, amplified, amplified_with, nested};
+use crate::sso::saml::canonical::{DEFAULT_PREFIX, GROWTH, exclusive, unbounded};
+use crate::sso::saml::{Document, NodeId, Refusal, uri};
 
 const BOUND: Duration = Duration::from_secs(10);
 const LONG_NAMESPACE_LENGTH: usize = 1_000_000;
+const SHORT_NAMESPACE_LENGTH: usize = 100;
+const BOUNDARY_CHILDREN: usize = 64;
+const EMPTY_ROOT: &str = "<r></r>";
+const ROOT_START: &str = "<r";
+const ROOT_END: &str = "</r>";
 
 fn document(xml: &str) -> Document {
     Document::parse(xml.as_bytes()).unwrap()
@@ -13,7 +18,7 @@ fn document(xml: &str) -> Document {
 
 fn whole(input: &[u8]) -> String {
     let document = Document::parse(input).unwrap();
-    String::from_utf8(exclusive(&document, document.root(), None, &[])).unwrap()
+    String::from_utf8(exclusive(&document, document.root(), None, &[]).unwrap()).unwrap()
 }
 
 fn named(document: &Document, local: &str) -> NodeId {
@@ -34,7 +39,7 @@ fn subset(xml: &str, local: &str, inclusive: &[&str]) -> String {
         .iter()
         .map(|prefix| (*prefix).to_owned())
         .collect();
-    String::from_utf8(exclusive(&document, apex, None, &inclusive)).unwrap()
+    String::from_utf8(exclusive(&document, apex, None, &inclusive).unwrap()).unwrap()
 }
 
 fn matches_xmllint(input: &[u8], expected: &[u8]) {
@@ -152,7 +157,8 @@ fn an_inclusive_prefix_is_rendered_once_where_it_is_in_scope() {
     let document = document(xml);
     let inclusive = vec!["xs".to_owned()];
     assert_eq!(
-        String::from_utf8(exclusive(&document, document.root(), None, &inclusive)).unwrap(),
+        String::from_utf8(exclusive(&document, document.root(), None, &inclusive).unwrap())
+            .unwrap(),
         "<saml:AttributeStatement xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n  <saml:Attribute Name=\"email\">\n    <saml:AttributeValue xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"xs:string\">jane@acme.com</saml:AttributeValue>\n  </saml:Attribute>\n</saml:AttributeStatement>"
     );
     assert_eq!(
@@ -222,7 +228,8 @@ fn omits_the_excluded_node() {
         .find(|id| document.is(*id, uri::DSIG, "Signature"))
         .unwrap();
     assert_eq!(
-        String::from_utf8(exclusive(&document, document.root(), Some(signature), &[])).unwrap(),
+        String::from_utf8(exclusive(&document, document.root(), Some(signature), &[]).unwrap())
+            .unwrap(),
         "<saml2:Assertion xmlns:saml2=\"urn:a\" ID=\"a\">\n  <saml2:Issuer>idp</saml2:Issuer>\n  \n  <saml2:Subject></saml2:Subject>\n</saml2:Assertion>"
     );
 }
@@ -231,9 +238,13 @@ fn omits_the_excluded_node() {
 fn excluding_the_apex_or_naming_a_text_node_renders_nothing() {
     let document = document("<a>text</a>");
     let root = document.root();
-    assert!(exclusive(&document, root, Some(root), &[]).is_empty());
+    assert!(
+        exclusive(&document, root, Some(root), &[])
+            .unwrap()
+            .is_empty()
+    );
     let text = document.children(root)[0];
-    assert!(exclusive(&document, text, None, &[]).is_empty());
+    assert!(exclusive(&document, text, None, &[]).unwrap().is_empty());
 }
 
 /// C14N 1.0 section 1.1, without comments: comment nodes are dropped, so a
@@ -252,7 +263,7 @@ fn canonicalizes_a_hundred_thousand_levels_without_recursion() {
     let xml = nested(DEEP);
     let document = document(&xml);
     let started = Instant::now();
-    let canonical = exclusive(&document, document.root(), None, &[]);
+    let canonical = exclusive(&document, document.root(), None, &[]).unwrap();
     assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
     assert_eq!(canonical, xml.as_bytes());
 }
@@ -279,7 +290,7 @@ fn a_hundred_thousand_inclusive_prefixes_over_a_hundred_thousand_elements_finish
     let xml = format!(r#"<r xmlns:p0="urn:p">{}</r>"#, "<a/>".repeat(WIDE));
     let document = document(&xml);
     let started = Instant::now();
-    let canonical = exclusive(&document, document.root(), None, &inclusive);
+    let canonical = exclusive(&document, document.root(), None, &inclusive).unwrap();
     assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
     assert_eq!(
         String::from_utf8(canonical).unwrap(),
@@ -301,7 +312,7 @@ fn attributes_in_namespaces_with_a_long_common_prefix_sort_in_bounded_time() {
     let xml = format!(r#"<a xmlns:p="{stem}1" xmlns:q="{stem}2"{attributes}/>"#);
     let document = document(&xml);
     let started = Instant::now();
-    let canonical = exclusive(&document, document.root(), None, &[]);
+    let canonical = exclusive(&document, document.root(), None, &[]).unwrap();
     assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
     locals.sort_unstable();
     let sorted: String = ["p", "q"]
@@ -316,4 +327,48 @@ fn attributes_in_namespaces_with_a_long_common_prefix_sort_in_bounded_time() {
         String::from_utf8(canonical).unwrap(),
         format!(r#"<a xmlns:p="{stem}1" xmlns:q="{stem}2"{sorted}></a>"#)
     );
+}
+
+/// Exc-c14n section 3: `r` never uses `p`, so every `p:a` child renders
+/// `xmlns:p` itself. The canonical form would be gigabytes, so it is refused
+/// as soon as it outgrows the document instead of being built.
+#[test]
+fn a_namespace_amplified_onto_every_child_is_refused_in_bounded_time() {
+    let document = document(&amplified(
+        EMPTY_ROOT,
+        ROOT_START,
+        ROOT_END,
+        AMPLIFYING_CHILDREN,
+    ));
+    let started = Instant::now();
+    assert_eq!(
+        exclusive(&document, document.root(), None, &[]),
+        Err(Refusal::Oversized)
+    );
+    assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
+}
+
+#[test]
+fn amplified_output_is_kept_up_to_growth_times_the_document_size() {
+    let mut kept = false;
+    let mut refused = false;
+    for children in 1..=BOUNDARY_CHILDREN {
+        let document = document(&amplified_with(
+            EMPTY_ROOT,
+            ROOT_START,
+            ROOT_END,
+            children,
+            SHORT_NAMESPACE_LENGTH,
+        ));
+        let full = unbounded(&document, document.root(), None, &[]);
+        let bounded = exclusive(&document, document.root(), None, &[]);
+        if full.len() <= GROWTH * document.size() {
+            assert_eq!(bounded, Ok(full), "{children} children");
+            kept = true;
+        } else {
+            assert_eq!(bounded, Err(Refusal::Oversized), "{children} children");
+            refused = true;
+        }
+    }
+    assert!(kept && refused);
 }

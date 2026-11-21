@@ -11,6 +11,7 @@ pub struct Document {
     pub(super) nodes: Vec<Node>,
     pub(super) parents: Vec<Option<NodeId>>,
     pub(super) root: NodeId,
+    pub(super) size: usize,
 }
 
 impl Document {
@@ -22,6 +23,10 @@ impl Document {
 
     pub fn root(&self) -> NodeId {
         self.root
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
     }
 
     pub fn node(&self, id: NodeId) -> Option<&Node> {

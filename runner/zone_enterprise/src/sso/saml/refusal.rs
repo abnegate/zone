@@ -18,6 +18,8 @@ pub enum Refusal {
     Algorithm,
     #[error("its signed content doesn't match its digest")]
     Digest,
+    #[error("its canonical form is far larger than the response itself")]
+    Oversized,
     #[error("its signature doesn't verify against the identity provider's certificates")]
     Signature,
     #[error("two of its elements share an ID")]

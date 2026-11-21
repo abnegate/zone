@@ -102,6 +102,7 @@ impl Builder {
             nodes: self.nodes,
             parents: self.parents,
             root,
+            size: input.len(),
         })
     }
 
