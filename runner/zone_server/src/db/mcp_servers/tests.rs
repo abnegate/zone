@@ -711,12 +711,12 @@ async fn only_administrators_create() {
     fixture.create(stdio("admin")).await;
 
     assert!(
-        authorize_admin(&fixture.pool, fixture.organization, fixture.admin)
+        authorize_update(&fixture.pool, fixture.organization, fixture.admin)
             .await
             .is_ok()
     );
     assert!(matches!(
-        authorize_admin(&fixture.pool, fixture.organization, fixture.member).await,
+        authorize_update(&fixture.pool, fixture.organization, fixture.member).await,
         Err(McpServerError::Forbidden(_))
     ));
     assert_eq!(fixture.count("mcp_servers").await, 2);
@@ -1960,7 +1960,7 @@ async fn a_custom_role_manages_servers_only_with_the_servers_permission() {
     .await
     .expect("the servers permission creates a server");
     assert!(
-        authorize_admin(&fixture.pool, fixture.organization, manager)
+        authorize_update(&fixture.pool, fixture.organization, manager)
             .await
             .is_ok()
     );
@@ -2093,9 +2093,69 @@ async fn a_custom_role_of_another_organization_grants_nothing() {
     assert!(
         matches!(
             created,
-            Err(McpServerError::Forbidden(ORGANIZATION_FORBIDDEN))
+            Err(McpServerError::NotFound(ORGANIZATION_NOT_FOUND))
         ),
         "{created:?}"
     );
     assert_eq!(fixture.count("mcp_servers").await, 0);
+}
+
+/// Without the base permission of its scope a membership is no membership, so
+/// the holder of a role that grants nothing is answered as an outsider is.
+#[tokio::test]
+async fn a_role_that_grants_nothing_reads_no_workspace_servers() {
+    let fixture = tenant().await;
+    let other = tenant().await;
+    let foreign = custom_role(
+        &other.pool,
+        other.organization,
+        Scope::Organization,
+        &[Permission::McpServersUpdate],
+    )
+    .await;
+    let roaming = custom_role(
+        &other.pool,
+        other.organization,
+        Scope::Workspace,
+        &[Permission::WorkspaceMcpServersUpdate],
+    )
+    .await;
+    let wanderer = user(&fixture.pool).await;
+    join_organization(
+        &fixture.pool,
+        fixture.organization,
+        wanderer,
+        OrgRole::Member,
+    )
+    .await;
+    for member in [fixture.member, wanderer] {
+        join_workspace(
+            &fixture.pool,
+            fixture.workspace,
+            member,
+            WorkspaceRole::Viewer,
+        )
+        .await;
+    }
+    hold_organization_role(&fixture.pool, fixture.organization, fixture.member, foreign).await;
+    hold_workspace_role(&fixture.pool, fixture.workspace, wanderer, roaming).await;
+
+    let mut connection = fixture.pool.acquire().await.expect("a connection");
+    for (user, expected) in [
+        (fixture.member, ORGANIZATION_NOT_FOUND),
+        (wanderer, WORKSPACE_NOT_FOUND),
+    ] {
+        let answer = authorize_workspace(
+            &mut connection,
+            fixture.organization,
+            fixture.workspace,
+            user,
+            false,
+        )
+        .await;
+        assert!(
+            matches!(answer, Err(McpServerError::NotFound(missing)) if missing == expected),
+            "expected {expected}, got {answer:?}"
+        );
+    }
 }

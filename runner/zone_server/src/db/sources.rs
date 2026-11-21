@@ -766,6 +766,7 @@ pub async fn list_active_index_sources(pool: &PgPool) -> DbResult<Vec<ActiveInde
                         WHEN $3 THEN 1
                         ELSE 2
                     END,
+                    wm.custom_role_id IS NULL DESC,
                     wm.created_at
                 LIMIT 1
             ) AS user_id
@@ -1507,6 +1508,30 @@ mod tests {
             .execute(&pool)
             .await
             .expect("the users are removed");
+    }
+
+    /// Among writers of equal rank a built-in member acts before a custom
+    /// holder, whoever joined first, so the indexer's identity never hinges
+    /// on seating order.
+    #[tokio::test]
+    async fn the_indexer_prefers_a_built_in_writer_to_an_earlier_custom_one() {
+        let tenant = crate::db::tenant::Tenant::new().await;
+        let custom = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;
+        let member = tenant.user().await;
+        tenant.workspace_member(member, WorkspaceRole::Member).await;
+        let source = widgets(&tenant.pool, tenant.workspace, None, None).await;
+
+        let actor = list_active_index_sources(&tenant.pool)
+            .await
+            .expect("the listing")
+            .into_iter()
+            .find(|candidate| candidate.id == source.id)
+            .expect("the active source")
+            .user_id;
+        tenant.cleanup().await;
+
+        assert_ne!(actor, Some(custom), "the custom holder seated first acted");
+        assert_eq!(actor, Some(member));
     }
 
     #[tokio::test]

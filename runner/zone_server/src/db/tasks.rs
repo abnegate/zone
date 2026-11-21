@@ -2230,6 +2230,8 @@ pub async fn mark_pr_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::Scope;
+    use crate::db::tenant::Tenant;
 
     #[test]
     fn a_placeholder_is_the_first_line_of_the_description_cut_on_a_word() {
@@ -2272,5 +2274,69 @@ mod tests {
             "[ ] Rotate the keys"
         );
         assert_eq!(placeholder_title("* Rotate the keys"), "Rotate the keys");
+    }
+
+    /// The run's publication checks follow the actor's custom role: a viewer
+    /// holding `workspace:write` publishes, and the same actor narrowed to the
+    /// base permission is fenced out.
+    #[tokio::test]
+    async fn a_custom_writer_publishes_until_its_role_stops_granting_write() {
+        let tenant = Tenant::new().await;
+        let actor = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;
+        let task = create_task_as(
+            &tenant.pool,
+            tenant.workspace,
+            &[],
+            "Publication",
+            "Held by a role",
+            None,
+            None,
+            true,
+            None,
+            Some(actor),
+        )
+        .await
+        .expect("a task");
+        let run = create_task_run_as(&tenant.pool, task.id, Some(actor))
+            .await
+            .expect("a run");
+        let owner = Uuid::new_v4();
+        let claimed = claim_task_run(&tenant.pool, run.id, owner)
+            .await
+            .expect("the claim");
+        let execution = Execution {
+            task: task.id,
+            run: run.id,
+            owner,
+            actor: Some(actor),
+        };
+        let pool = &tenant.pool;
+        let publish = |branch: &'static str| async move {
+            (
+                execution.authorized(pool, false).await.expect("the check"),
+                execution.authorized(pool, true).await.expect("the check"),
+                update_task_branch(pool, &execution, branch)
+                    .await
+                    .expect("the branch"),
+                update_task_pr(pool, &execution, "url", branch, pull_requests::Status::Open)
+                    .await
+                    .expect("the pull request"),
+            )
+        };
+
+        let writing = publish("written").await;
+        let reading = tenant.custom_role(Scope::Workspace, &[]).await;
+        tenant.hold_workspace_role(actor, reading).await;
+        let narrowed = publish("narrowed").await;
+        let stored = get_task(&tenant.pool, task.id).await.expect("the task");
+        tenant.cleanup().await;
+
+        assert!(claimed, "the run was not claimed");
+        assert_eq!(writing, (true, true, true, true));
+        assert_eq!(narrowed, (false, false, false, false));
+        assert_eq!(
+            stored.and_then(|task| task.branch_name).as_deref(),
+            Some("written")
+        );
     }
 }

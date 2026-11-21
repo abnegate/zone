@@ -321,13 +321,13 @@ struct Caller {
     workspace_id: Uuid,
 }
 
-/// Confirm the caller is a member of project `id`'s workspace holding the
-/// `permission` the request needs.
+/// Confirm the caller may read project `id`'s workspace and holds
+/// `permission` there when the request needs more than reading.
 async fn authorize(
     state: &AppState,
     auth: &AuthUser,
     id: Uuid,
-    permission: Permission,
+    permission: Option<Permission>,
 ) -> Result<Caller, ServerError> {
     let user_id = user_id(auth)?;
     let workspace_id = projects::get_project(state.db(), id)
@@ -337,7 +337,7 @@ async fn authorize(
     if !workspace_members::can_read(state.db(), workspace_id, user_id).await? {
         return Err(project_not_found());
     }
-    if permission != Permission::WorkspaceRead
+    if let Some(permission) = permission
         && !workspace_members::permits(state.db(), workspace_id, user_id, permission).await?
     {
         return Err(ServerError::Forbidden(
@@ -437,7 +437,7 @@ pub async fn list(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ServerError> {
-    authorize(&state, &auth, id, Permission::WorkspaceRead).await?;
+    authorize(&state, &auth, id, None).await?;
     let rows = sync_config::list_sync_configs(state.db(), id).await?;
     Ok(Json(SyncConfigsListResponse {
         configs: rows.into_iter().map(SyncConfigData::from).collect(),
@@ -455,7 +455,7 @@ pub async fn create(
     Path(id): Path<Uuid>,
     Json(req): Json<CreateSyncConfigRequest>,
 ) -> Result<Response, ServerError> {
-    let caller = authorize(&state, &auth, id, Permission::ProjectSyncsUpdate).await?;
+    let caller = authorize(&state, &auth, id, Some(Permission::ProjectSyncsUpdate)).await?;
     let (provider, config) = validate(&req)?;
     let provider_name = provider.as_str();
     if sync_config::get_sync_config_by_project_provider(state.db(), id, provider_name)
@@ -533,7 +533,7 @@ pub async fn set_webhook_secret(
     Path((id, config_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<WebhookSecretRequest>,
 ) -> Result<Response, ServerError> {
-    let caller = authorize(&state, &auth, id, Permission::ProjectSyncsUpdate).await?;
+    let caller = authorize(&state, &auth, id, Some(Permission::ProjectSyncsUpdate)).await?;
     let secret = match req.secret.as_deref() {
         Some(supplied) => WebhookSecret::supplied(supplied)?,
         None => WebhookSecret::generate(),
@@ -582,7 +582,7 @@ pub async fn delete(
     auth: AuthUser,
     Path((id, config_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, ServerError> {
-    let caller = authorize(&state, &auth, id, Permission::ProjectSyncsUpdate).await?;
+    let caller = authorize(&state, &auth, id, Some(Permission::ProjectSyncsUpdate)).await?;
     let row = owned_config(&state, id, config_id).await?;
     if !sync_config::delete_sync_config(state.db(), row.id).await? {
         return Err(config_not_found());

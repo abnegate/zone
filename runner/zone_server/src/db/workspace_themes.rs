@@ -184,3 +184,52 @@ pub async fn delete_authorized(
     transaction.commit().await?;
     Ok(deleted)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::tenant::Tenant;
+
+    const COLOR: &str = "#112233";
+
+    fn colored() -> Update<'static> {
+        Update {
+            primary_color_light: Some(COLOR),
+            secondary_color_light: None,
+            primary_color_dark: None,
+            secondary_color_dark: None,
+            font_family: None,
+            font_size_base: None,
+            border_radius: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_custom_role_writes_the_theme_only_with_workspace_write() {
+        let tenant = Tenant::new().await;
+        let writer = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;
+        let reader = tenant.workspace_holder(&[]).await;
+
+        let written = upsert_authorized(&tenant.pool, tenant.workspace, writer, colored()).await;
+        let refused = upsert_authorized(&tenant.pool, tenant.workspace, reader, colored()).await;
+        let read = get_authorized(&tenant.pool, tenant.workspace, reader).await;
+        let kept = delete_authorized(&tenant.pool, tenant.workspace, reader).await;
+        let cleared = delete_authorized(&tenant.pool, tenant.workspace, writer).await;
+        tenant.cleanup().await;
+
+        assert!(
+            written.is_ok_and(|theme| theme.primary_color_light.as_deref() == Some(COLOR)),
+            "a holder of workspace:write is refused the theme"
+        );
+        assert!(
+            matches!(refused, Err(AccessError::Forbidden(_))),
+            "{refused:?}"
+        );
+        assert!(
+            read.is_ok_and(|theme| theme.is_some()),
+            "a holder of workspace:read cannot read the theme"
+        );
+        assert!(matches!(kept, Err(AccessError::Forbidden(_))), "{kept:?}");
+        assert!(matches!(cleared, Ok(true)), "{cleared:?}");
+    }
+}

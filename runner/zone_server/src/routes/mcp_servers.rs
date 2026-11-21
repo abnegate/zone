@@ -784,7 +784,7 @@ pub async fn create(
 ) -> Result<(StatusCode, Json<McpServerResponse>), Refusal> {
     let user = caller(&auth)?;
     let Json(request) = request?;
-    mcp_servers::authorize_admin(state.db(), org_id, user).await?;
+    mcp_servers::authorize_update(state.db(), org_id, user).await?;
     let new = request.validated(state.config().mcp_commands)?;
     if taken(&state, &new.name).await {
         return Err(Refusal::Taken);
@@ -810,7 +810,7 @@ pub async fn list_providers(
     Path(org_id): Path<Uuid>,
 ) -> Result<Json<ProviderMcpServerListResponse>, Refusal> {
     let user = caller(&auth)?;
-    mcp_servers::authorize_admin(state.db(), org_id, user).await?;
+    mcp_servers::authorize_update(state.db(), org_id, user).await?;
     let stored = mcp_servers::list_authorized(state.db(), state.master_key(), org_id, user).await?;
     let instance = state.mcp().configured().await;
     let taken: BTreeSet<String> = stored
@@ -863,7 +863,7 @@ pub async fn import(
 ) -> Result<Json<ImportedMcpServersResponse>, Refusal> {
     let user = caller(&auth)?;
     let Json(request) = request?;
-    mcp_servers::authorize_admin(state.db(), org_id, user).await?;
+    mcp_servers::authorize_update(state.db(), org_id, user).await?;
     let provider = request.provider;
     let found = providers::of(&state, org_id, provider)
         .await
@@ -1006,7 +1006,7 @@ pub async fn update(
 ) -> Result<Json<McpServerResponse>, Refusal> {
     let user = caller(&auth)?;
     let Json(request) = request?;
-    mcp_servers::authorize_admin(state.db(), path.org_id, user).await?;
+    mcp_servers::authorize_update(state.db(), path.org_id, user).await?;
     let stored = mcp_servers::get_authorized(
         state.db(),
         state.master_key(),
@@ -1090,7 +1090,7 @@ pub async fn reconnect(
     Path(path): Path<McpServerPath>,
 ) -> Result<(StatusCode, Json<McpServerResponse>), Refusal> {
     let user = caller(&auth)?;
-    mcp_servers::authorize_admin(state.db(), path.org_id, user).await?;
+    mcp_servers::authorize_update(state.db(), path.org_id, user).await?;
     let record = mcp_servers::get_authorized(
         state.db(),
         state.master_key(),

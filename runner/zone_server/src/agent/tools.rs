@@ -2255,6 +2255,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_task_writer_is_whoever_their_custom_role_lets_write() {
+        use crate::auth::Permission;
+        use crate::db::tenant::Tenant;
+
+        let tenant = Tenant::new().await;
+        let writer = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;
+        let reader = tenant.workspace_holder(&[]).await;
+        let state =
+            crate::state::AppState::new(crate::state::test_config(), tenant.pool.clone(), None);
+
+        let writes = super::task_writer(&state, tenant.workspace, writer).await;
+        let reads = super::task_writer(&state, tenant.workspace, reader).await;
+        tenant.cleanup().await;
+
+        assert!(
+            writes,
+            "a viewer holding workspace:write cannot act on tasks"
+        );
+        assert!(!reads, "a viewer holding only workspace:read acts on tasks");
+    }
+
+    #[tokio::test]
     async fn a_tool_left_out_is_neither_listed_nor_offered_nor_run() {
         let question = super::super::question::ASK_USER;
         let tools = ChatTools::for_task(
