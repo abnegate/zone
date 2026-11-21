@@ -301,7 +301,7 @@ give workspace roles.
 | Action | When | Resource | Recorded values |
 |---|---|---|---|
 | `role.created` | A custom role is created | `role`, with the role's ID | The new `name`, `description`, `scope` and `permissions` |
-| `role.updated` | A custom role is edited | `role`, with the role's ID | The values before and after |
+| `role.updated` | A custom role's name, description or permissions change; an edit that changes none of them isn't recorded | `role`, with the role's ID | The values before and after |
 | `role.deleted` | A custom role is deleted | `role`, with the role's ID | The values before |
 | `member.role_changed` | A member is given a built-in or custom role | The membership | `user_id`, `role` and `custom_role` |
 

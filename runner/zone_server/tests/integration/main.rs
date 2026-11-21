@@ -70,6 +70,7 @@ mod connect;
 mod console_contract;
 mod context;
 mod cross_tenant_authorization;
+mod custom_roles;
 mod deferred_tool;
 mod devices;
 mod discovery;

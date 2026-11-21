@@ -27,6 +27,7 @@ pub mod projects;
 pub mod pull_requests;
 pub mod refresh_query;
 pub mod releases;
+pub mod roles;
 pub mod sessions;
 pub mod sources;
 pub mod sso;
@@ -580,6 +581,14 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/organizations/{org_id}/workspaces/{ws_id}/agent-policy",
             get(policy::workspace::get).patch(policy::workspace::update),
+        )
+        .route(
+            "/api/organizations/{org_id}/roles",
+            get(roles::list).post(roles::create),
+        )
+        .route(
+            "/api/organizations/{org_id}/roles/{role_id}",
+            patch(roles::update).delete(roles::delete),
         )
         .route(
             "/api/organizations/{org_id}/mcp-servers",
