@@ -17,13 +17,12 @@ use sqlx::Postgres;
 use sqlx::QueryBuilder;
 use uuid::Uuid;
 
+use crate::auth::Permission;
 use crate::secret::Unseal;
 use crate::services::mcp_servers::validation;
 
 use super::organization_members;
-use super::organization_members::OrgRole;
 use super::workspace_members;
-use super::workspace_members::WorkspaceRole;
 
 const COLUMNS: &str = "id, organization_id, name, transport, command, arguments, url, tools, enabled, secrets, created_by, created_at, updated_at";
 
@@ -291,10 +290,10 @@ async fn authorize_organization(
     connection: &mut PgConnection,
     organization: Uuid,
     user: Uuid,
-    minimum: OrgRole,
+    permission: Permission,
 ) -> McpServerResult<()> {
-    match organization_members::lock_role(connection, organization, user).await? {
-        Some(role) if role >= minimum => Ok(()),
+    match organization_members::lock_membership(connection, organization, user).await? {
+        Some(membership) if membership.grant.allows(permission) => Ok(()),
         Some(_) => Err(McpServerError::Forbidden(ORGANIZATION_FORBIDDEN)),
         None => Err(McpServerError::NotFound(ORGANIZATION_NOT_FOUND)),
     }
@@ -307,7 +306,13 @@ async fn authorize_workspace(
     user: Uuid,
     write: bool,
 ) -> McpServerResult<()> {
-    authorize_organization(&mut *connection, organization, user, OrgRole::Member).await?;
+    authorize_organization(
+        &mut *connection,
+        organization,
+        user,
+        Permission::OrganizationRead,
+    )
+    .await?;
     let owned: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM workspaces WHERE id = $1 AND organization_id = $2 FOR SHARE",
     )
@@ -318,9 +323,13 @@ async fn authorize_workspace(
     if owned.is_none() {
         return Err(McpServerError::NotFound(WORKSPACE_NOT_FOUND));
     }
-    match workspace_members::lock_role(connection, workspace, user).await? {
-        Some(WorkspaceRole::Owner | WorkspaceRole::Admin) => Ok(()),
-        Some(_) if !write => Ok(()),
+    let required = if write {
+        Permission::WorkspaceMcpServersUpdate
+    } else {
+        Permission::WorkspaceRead
+    };
+    match workspace_members::lock_membership(connection, workspace, user).await? {
+        Some(membership) if membership.grant.allows(required) => Ok(()),
         Some(_) => Err(McpServerError::Forbidden(WORKSPACE_FORBIDDEN)),
         None => Err(McpServerError::NotFound(WORKSPACE_NOT_FOUND)),
     }
@@ -363,7 +372,13 @@ pub async fn list_authorized(
     user: Uuid,
 ) -> McpServerResult<Vec<McpServerRecord>> {
     let mut transaction = pool.begin().await?;
-    authorize_organization(&mut transaction, organization, user, OrgRole::Member).await?;
+    authorize_organization(
+        &mut transaction,
+        organization,
+        user,
+        Permission::OrganizationRead,
+    )
+    .await?;
     let rows = rows(&mut *transaction, organization).await?;
     transaction.commit().await?;
     open_all(rows, key)
@@ -378,7 +393,13 @@ pub async fn get_authorized(
     user: Uuid,
 ) -> McpServerResult<McpServerRecord> {
     let mut transaction = pool.begin().await?;
-    authorize_organization(&mut transaction, organization, user, OrgRole::Member).await?;
+    authorize_organization(
+        &mut transaction,
+        organization,
+        user,
+        Permission::OrganizationRead,
+    )
+    .await?;
     let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM mcp_servers WHERE organization_id = $1 AND id = $2"
     )))
@@ -406,7 +427,13 @@ pub async fn create_authorized(
     distinct(&secrets.headers)?;
     let sealed = seal(&secrets, key)?;
     let mut transaction = pool.begin().await?;
-    authorize_organization(&mut transaction, organization, user, OrgRole::Admin).await?;
+    authorize_organization(
+        &mut transaction,
+        organization,
+        user,
+        Permission::McpServersUpdate,
+    )
+    .await?;
     let row: Row = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "INSERT INTO mcp_servers (organization_id, name, transport, command, arguments, url, tools, enabled, secrets, created_by) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING {COLUMNS}"
@@ -438,7 +465,13 @@ pub async fn update_authorized(
     changes: McpServerChanges,
 ) -> McpServerResult<McpServerRecord> {
     let mut transaction = pool.begin().await?;
-    authorize_organization(&mut transaction, organization, user, OrgRole::Admin).await?;
+    authorize_organization(
+        &mut transaction,
+        organization,
+        user,
+        Permission::McpServersUpdate,
+    )
+    .await?;
     let stored: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM mcp_servers WHERE organization_id = $1 AND id = $2 FOR UPDATE"
     )))
@@ -552,7 +585,13 @@ pub async fn delete_authorized(
     user: Uuid,
 ) -> McpServerResult<McpServerRecord> {
     let mut transaction = pool.begin().await?;
-    authorize_organization(&mut transaction, organization, user, OrgRole::Admin).await?;
+    authorize_organization(
+        &mut transaction,
+        organization,
+        user,
+        Permission::McpServersUpdate,
+    )
+    .await?;
     let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "DELETE FROM mcp_servers WHERE organization_id = $1 AND id = $2 RETURNING {COLUMNS}"
     )))
@@ -566,10 +605,16 @@ pub async fn delete_authorized(
         .record(Secrets::default()))
 }
 
-/// Whether `user` administers `organization`.
+/// Whether `user` may manage the MCP servers of `organization`.
 pub async fn authorize_admin(pool: &PgPool, organization: Uuid, user: Uuid) -> McpServerResult<()> {
     let mut transaction = pool.begin().await?;
-    authorize_organization(&mut transaction, organization, user, OrgRole::Admin).await?;
+    authorize_organization(
+        &mut transaction,
+        organization,
+        user,
+        Permission::McpServersUpdate,
+    )
+    .await?;
     transaction.commit().await?;
     Ok(())
 }

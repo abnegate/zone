@@ -9,6 +9,7 @@ use zone_context::embeddings::providers::{
     PROVIDER_BEDROCK, PROVIDER_OPENAI, PROVIDER_SELF_HOSTED,
 };
 
+use crate::auth::Permission;
 use crate::services::endpoint;
 use crate::services::hosts::Hosts;
 
@@ -16,12 +17,7 @@ mod layer;
 
 pub use layer::Layer;
 
-use super::{
-    DbResult,
-    chats::provider::Choice,
-    organization_members::{self, OrgRole},
-    workspace_members::{self, WorkspaceRole},
-};
+use super::{DbResult, chats::provider::Choice, organization_members, workspace_members};
 
 pub const PROVIDER_ANTHROPIC: &str = "anthropic";
 pub const PROVIDER_CLAUDE_CODE: &str = "claude_code";
@@ -381,17 +377,15 @@ fn host(url: &str) -> String {
 }
 
 /// The organization's own settings carry its provider credentials, so reading
-/// them takes an administrator, not just a seat; `minimum` says which.
+/// them takes a permission, not just a seat; `permission` says which.
 pub(crate) async fn authorize_organization(
     connection: &mut PgConnection,
     organization_id: Uuid,
     user_id: Uuid,
-    minimum: OrgRole,
+    permission: Permission,
 ) -> AccessResult<()> {
-    let role = organization_members::lock_role(connection, organization_id, user_id).await?;
-
-    match role {
-        Some(role) if role >= minimum => Ok(()),
+    match organization_members::lock_membership(connection, organization_id, user_id).await? {
+        Some(membership) if membership.grant.allows(permission) => Ok(()),
         Some(_) => Err(AccessError::Forbidden(
             "Only organization admins can manage AI settings",
         )),
@@ -420,21 +414,31 @@ pub(crate) async fn authorize_workspace(
     }
 
     // Membership proves the caller belongs to the tenant that owns the
-    // workspace; the workspace role below decides whether they may write. The
-    // organization admin rule guards organization-wide settings only.
-    authorize_organization(&mut *connection, organization_id, user_id, OrgRole::Member).await?;
+    // workspace; the workspace grant below decides whether they may write. The
+    // organization's own permission guards organization-wide settings only.
+    authorize_organization(
+        &mut *connection,
+        organization_id,
+        user_id,
+        Permission::OrganizationRead,
+    )
+    .await?;
 
-    let role = workspace_members::lock_role(connection, workspace_id, user_id).await?;
+    let required = if write {
+        Permission::WorkspaceAiSettingsUpdate
+    } else {
+        Permission::WorkspaceRead
+    };
+    let membership = workspace_members::lock_membership(connection, workspace_id, user_id).await?;
 
     // These settings override the organization's for every chat in the
-    // workspace, so writing them takes the workspace's own administrators --
-    // the rank the organization route demands for the settings this one
-    // overrides. A base URL written here never receives the organization's
+    // workspace, so writing them takes the workspace's own settings
+    // permission, the counterpart of the one the organization route demands
+    // for the settings this one overrides. A base URL written here never receives the organization's
     // credential (see `overlay_endpoint`). Every member still reads them,
     // because their chats run under them.
-    match role {
-        Some(WorkspaceRole::Owner | WorkspaceRole::Admin) => Ok(()),
-        Some(_) if !write => Ok(()),
+    match membership {
+        Some(membership) if membership.grant.allows(required) => Ok(()),
         Some(_) => Err(AccessError::Forbidden(
             "Only workspace admins can change AI settings",
         )),
@@ -670,7 +674,13 @@ pub async fn get_org_authorized(
     user_id: Uuid,
 ) -> AccessResult<Option<OrgAiSettingsRow>> {
     let mut transaction = pool.begin().await?;
-    authorize_organization(&mut transaction, organization_id, user_id, OrgRole::Admin).await?;
+    authorize_organization(
+        &mut transaction,
+        organization_id,
+        user_id,
+        Permission::AiSettingsRead,
+    )
+    .await?;
     let settings = get_org(&mut *transaction, organization_id).await?;
     transaction.commit().await?;
     Ok(settings)
@@ -825,7 +835,13 @@ pub async fn upsert_org_authorized(
 ) -> AccessResult<OrganizationSave> {
     let mut transaction = pool.begin().await?;
     lock_organization(&mut transaction, CLAIM_ORGANIZATION, organization_id).await?;
-    authorize_organization(&mut transaction, organization_id, user_id, OrgRole::Admin).await?;
+    authorize_organization(
+        &mut transaction,
+        organization_id,
+        user_id,
+        Permission::AiSettingsUpdate,
+    )
+    .await?;
     validate(&update, hosts)?;
     let saved = saved_endpoints(&mut transaction, ORGANIZATION_ENDPOINTS, organization_id).await?;
     validate_keys(&update, &saved, &SavedEndpoints::default(), hosts)?;
@@ -866,7 +882,13 @@ pub async fn delete_org_authorized(
 ) -> AccessResult<Option<u64>> {
     let mut transaction = pool.begin().await?;
     lock_organization(&mut transaction, CLAIM_ORGANIZATION, organization_id).await?;
-    authorize_organization(&mut transaction, organization_id, user_id, OrgRole::Admin).await?;
+    authorize_organization(
+        &mut transaction,
+        organization_id,
+        user_id,
+        Permission::AiSettingsUpdate,
+    )
+    .await?;
     let saved = saved_endpoints(&mut transaction, ORGANIZATION_ENDPOINTS, organization_id).await?;
     let deleted = delete_org(&mut *transaction, organization_id).await?;
     let unrouted_workspaces =
@@ -1429,9 +1451,297 @@ pub async fn effective_comfyui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::{Grant, Scope};
     use crate::config::ComfyUiConfig;
+    use crate::db::custom_roles::{self, Creation, Definition};
+    use crate::db::organization_members::OrgRole;
+    use crate::db::workspace_members::WorkspaceRole;
     use crate::services::provider::Provider;
     use abnegate_secret::OptionalSecretExtension;
+
+    const ORGANIZATION_FORBIDDEN: &str = "Only organization admins can manage AI settings";
+    const WORKSPACE_FORBIDDEN: &str = "Only workspace admins can change AI settings";
+
+    struct Tenant {
+        pool: PgPool,
+        organization: Uuid,
+        workspace: Uuid,
+    }
+
+    impl Tenant {
+        async fn new() -> Self {
+            let url = std::env::var("TEST_DATABASE_URL").expect("isolated test database");
+            let pool = PgPool::connect(&url)
+                .await
+                .expect("the test database accepts connections");
+            let organization = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Settings', $1::text)",
+            )
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization");
+            let workspace = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, 'Settings', $1::text)",
+            )
+            .bind(workspace)
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("a workspace");
+            Self {
+                pool,
+                organization,
+                workspace,
+            }
+        }
+
+        async fn user(&self) -> Uuid {
+            let user = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO users (id, email, password_hash) VALUES ($1, $1::text || '@zone.test', 'test-only')",
+            )
+            .bind(user)
+            .execute(&self.pool)
+            .await
+            .expect("a user");
+            user
+        }
+
+        async fn organization_member(&self, role: OrgRole) -> Uuid {
+            let user = self.user().await;
+            sqlx::query(
+                "INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, $3)",
+            )
+            .bind(self.organization)
+            .bind(user)
+            .bind(role.as_str())
+            .execute(&self.pool)
+            .await
+            .expect("an organization membership");
+            user
+        }
+
+        async fn workspace_member(&self, user: Uuid, role: WorkspaceRole) {
+            sqlx::query(
+                "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)",
+            )
+            .bind(self.workspace)
+            .bind(user)
+            .bind(role.as_str())
+            .execute(&self.pool)
+            .await
+            .expect("a workspace membership");
+        }
+
+        async fn custom_role(&self, scope: Scope, permissions: &[Permission]) -> Uuid {
+            let names: Vec<String> = permissions
+                .iter()
+                .map(|permission| permission.name().to_owned())
+                .collect();
+            let grant = Grant::compose(scope, &names).expect("a composable grant");
+            let name = Uuid::new_v4().to_string();
+            let definition = Definition {
+                name: &name,
+                description: None,
+                scope,
+                grant: &grant,
+            };
+            let creator = self.user().await;
+            match custom_roles::create(&self.pool, self.organization, &definition, creator)
+                .await
+                .expect("a custom role")
+            {
+                Creation::Created(role) => role.id,
+                Creation::NameTaken => panic!("a fresh name is never taken"),
+            }
+        }
+
+        async fn hold(&self, table: &str, column: &str, scope: Uuid, user: Uuid, role: Uuid) {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE {table} SET custom_role_id = $3 WHERE {column} = $1 AND user_id = $2"
+            )))
+            .bind(scope)
+            .bind(user)
+            .bind(role)
+            .execute(&self.pool)
+            .await
+            .expect("a custom role assignment");
+        }
+
+        async fn hold_organization_role(&self, user: Uuid, role: Uuid) {
+            self.hold(
+                "organization_members",
+                "organization_id",
+                self.organization,
+                user,
+                role,
+            )
+            .await;
+        }
+
+        async fn hold_workspace_role(&self, user: Uuid, role: Uuid) {
+            self.hold(
+                "workspace_members",
+                "workspace_id",
+                self.workspace,
+                user,
+                role,
+            )
+            .await;
+        }
+
+        async fn organization_access(
+            &self,
+            user: Uuid,
+            permission: Permission,
+        ) -> AccessResult<()> {
+            let mut connection = self.pool.acquire().await.expect("a connection");
+            authorize_organization(&mut connection, self.organization, user, permission).await
+        }
+
+        async fn workspace_access(&self, user: Uuid, write: bool) -> AccessResult<()> {
+            let mut connection = self.pool.acquire().await.expect("a connection");
+            authorize_workspace(
+                &mut connection,
+                self.organization,
+                self.workspace,
+                user,
+                write,
+            )
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn organization_settings_follow_the_callers_permissions() {
+        let tenant = Tenant::new().await;
+        let admin = tenant.organization_member(OrgRole::Admin).await;
+        let member = tenant.organization_member(OrgRole::Member).await;
+        let reader = tenant.organization_member(OrgRole::Member).await;
+        let outsider = tenant.user().await;
+        let reading = tenant
+            .custom_role(Scope::Organization, &[Permission::AiSettingsRead])
+            .await;
+        tenant.hold_organization_role(reader, reading).await;
+
+        for permission in [Permission::AiSettingsRead, Permission::AiSettingsUpdate] {
+            assert!(tenant.organization_access(admin, permission).await.is_ok());
+            let refused = tenant.organization_access(member, permission).await;
+            assert!(
+                matches!(refused, Err(AccessError::Forbidden(ORGANIZATION_FORBIDDEN))),
+                "{refused:?}"
+            );
+            let missing = tenant.organization_access(outsider, permission).await;
+            assert!(
+                matches!(
+                    missing,
+                    Err(AccessError::NotFound("Organization not found"))
+                ),
+                "{missing:?}"
+            );
+        }
+        assert!(
+            tenant
+                .organization_access(reader, Permission::AiSettingsRead)
+                .await
+                .is_ok()
+        );
+        let refused = tenant
+            .organization_access(reader, Permission::AiSettingsUpdate)
+            .await;
+        assert!(
+            matches!(refused, Err(AccessError::Forbidden(ORGANIZATION_FORBIDDEN))),
+            "{refused:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_custom_role_reads_organization_settings_it_was_granted() {
+        let tenant = Tenant::new().await;
+        let reader = tenant.organization_member(OrgRole::Member).await;
+        let updating = tenant
+            .custom_role(
+                Scope::Organization,
+                &[Permission::AiSettingsRead, Permission::AiSettingsUpdate],
+            )
+            .await;
+        tenant.hold_organization_role(reader, updating).await;
+
+        let read = get_org_authorized(&tenant.pool, tenant.organization, reader).await;
+        assert!(matches!(read, Ok(None)), "{read:?}");
+        let deleted = delete_org_authorized(&tenant.pool, tenant.organization, reader).await;
+        assert!(matches!(deleted, Ok(None)), "{deleted:?}");
+    }
+
+    #[tokio::test]
+    async fn workspace_settings_take_the_workspace_settings_permission_to_write() {
+        let tenant = Tenant::new().await;
+        let admin = tenant.organization_member(OrgRole::Member).await;
+        let viewer = tenant.organization_member(OrgRole::Member).await;
+        let configurer = tenant.organization_member(OrgRole::Member).await;
+        let writer = tenant.organization_member(OrgRole::Member).await;
+        tenant.workspace_member(admin, WorkspaceRole::Admin).await;
+        tenant.workspace_member(viewer, WorkspaceRole::Viewer).await;
+        tenant
+            .workspace_member(configurer, WorkspaceRole::Viewer)
+            .await;
+        tenant.workspace_member(writer, WorkspaceRole::Viewer).await;
+        let configuring = tenant
+            .custom_role(Scope::Workspace, &[Permission::WorkspaceAiSettingsUpdate])
+            .await;
+        let writing = tenant
+            .custom_role(
+                Scope::Workspace,
+                &[
+                    Permission::WorkspaceWrite,
+                    Permission::WorkspaceMcpServersUpdate,
+                ],
+            )
+            .await;
+        tenant.hold_workspace_role(configurer, configuring).await;
+        tenant.hold_workspace_role(writer, writing).await;
+
+        for user in [admin, viewer, configurer, writer] {
+            assert!(tenant.workspace_access(user, false).await.is_ok());
+        }
+        for user in [admin, configurer] {
+            assert!(tenant.workspace_access(user, true).await.is_ok());
+        }
+        for user in [viewer, writer] {
+            let refused = tenant.workspace_access(user, true).await;
+            assert!(
+                matches!(refused, Err(AccessError::Forbidden(WORKSPACE_FORBIDDEN))),
+                "{refused:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_workspace_member_outside_the_organization_finds_nothing() {
+        let tenant = Tenant::new().await;
+        let stranger = tenant.user().await;
+        tenant
+            .workspace_member(stranger, WorkspaceRole::Owner)
+            .await;
+        let unseated = tenant.organization_member(OrgRole::Admin).await;
+
+        let stranger = tenant.workspace_access(stranger, false).await;
+        assert!(
+            matches!(
+                stranger,
+                Err(AccessError::NotFound("Organization not found"))
+            ),
+            "{stranger:?}"
+        );
+        let unseated = tenant.workspace_access(unseated, false).await;
+        assert!(
+            matches!(unseated, Err(AccessError::NotFound("Workspace not found"))),
+            "{unseated:?}"
+        );
+    }
 
     fn settings(fast: Option<&str>, image: Option<&str>) -> EffectiveAiSettings {
         EffectiveAiSettings {

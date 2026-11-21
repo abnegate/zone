@@ -26,10 +26,10 @@ use super::console::Console;
 use super::error::Error;
 use super::pending::{self, Pending, WINDOW};
 use super::{audit, devices, homes, receipts, usage};
+use crate::auth::Permission;
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow, Insert};
 use crate::db::ai_settings::{self, AccessError};
-use crate::db::organization_members::OrgRole;
 use crate::db::{organizations, sessions};
 use crate::state::AppState;
 
@@ -398,7 +398,7 @@ async fn record(
 }
 
 /// Whether whoever started the sign-in still manages the organization, in the session they
-/// started it in. Their role stays locked until `connection`'s transaction ends.
+/// started it in. Their membership stays locked until `connection`'s transaction ends.
 async fn authorize(
     state: &AppState,
     connection: &mut PgConnection,
@@ -408,7 +408,7 @@ async fn authorize(
         &mut *connection,
         pending.organization,
         pending.user,
-        OrgRole::Admin,
+        Permission::AgentLoginsUpdate,
     )
     .await;
     match access {
