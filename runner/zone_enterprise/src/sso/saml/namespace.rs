@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Namespace {
-    pub(super) prefix: Option<String>,
-    pub(super) uri: String,
+    pub(super) prefix: Option<Arc<str>>,
+    pub(super) uri: Arc<str>,
 }
 
 impl Namespace {

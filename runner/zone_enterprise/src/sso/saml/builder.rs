@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use quick_xml::errors::IllFormedError;
 use quick_xml::escape::EscapeError;
@@ -11,6 +12,8 @@ use quick_xml::{Reader, XmlVersion};
 use crate::sso::saml::attribute::Attribute;
 use crate::sso::saml::document::Document;
 use crate::sso::saml::element::Element;
+use crate::sso::saml::frame::Frame;
+use crate::sso::saml::interner::Interner;
 use crate::sso::saml::malformed::Malformed;
 use crate::sso::saml::namespace::Namespace;
 use crate::sso::saml::node::Node;
@@ -27,8 +30,9 @@ const ENTITY_DEPTH: usize = 1;
 pub(super) struct Builder {
     nodes: Vec<Node>,
     parents: Vec<Option<NodeId>>,
-    open: Vec<(NodeId, usize)>,
-    scope: Scope<String, String>,
+    open: Vec<Frame>,
+    scope: Scope<Arc<str>, Arc<str>>,
+    interner: Interner,
     text: String,
     root: Option<NodeId>,
     version: XmlVersion,
@@ -36,13 +40,15 @@ pub(super) struct Builder {
 
 impl Builder {
     pub(super) fn new() -> Self {
+        let mut interner = Interner::default();
         let mut scope = Scope::new();
-        scope.bind(XML_PREFIX.to_owned(), uri::XML.to_owned());
+        scope.bind(interner.intern(XML_PREFIX), interner.intern(uri::XML));
         Self {
             nodes: Vec::new(),
             parents: Vec::new(),
             open: Vec::new(),
             scope,
+            interner,
             text: String::new(),
             root: None,
             version: XmlVersion::Implicit1_0,
@@ -166,32 +172,31 @@ impl Builder {
     }
 
     fn leaf(&mut self, node: Node) {
-        if let Some(parent) = self.parent() {
-            self.flush(parent);
-            self.insert(node, Some(parent));
+        if !self.open.is_empty() {
+            self.flush();
+            self.insert(node);
         }
     }
 
     fn parent(&self) -> Option<NodeId> {
-        self.open.last().map(|(id, _)| *id)
+        self.open.last().map(|frame| frame.id)
     }
 
-    fn flush(&mut self, parent: NodeId) {
-        if !self.text.is_empty() {
+    fn flush(&mut self) {
+        if !self.text.is_empty() && !self.open.is_empty() {
             let text = std::mem::take(&mut self.text);
-            self.insert(Node::Text(text), Some(parent));
+            self.insert(Node::Text(text));
         }
     }
 
-    fn insert(&mut self, node: Node, parent: Option<NodeId>) -> NodeId {
+    fn insert(&mut self, node: Node) -> NodeId {
         let id = NodeId(self.nodes.len());
+        let parent = self.open.last_mut().map(|frame| {
+            frame.children.push(id);
+            frame.id
+        });
         self.nodes.push(node);
         self.parents.push(parent);
-        if let Some(parent) = parent
-            && let Some(Node::Element(element)) = self.nodes.get_mut(parent.0)
-        {
-            element.children.push(id);
-        }
         id
     }
 
@@ -219,18 +224,16 @@ impl Builder {
             }
             match attribute.key.as_namespace_binding() {
                 Some(PrefixDeclaration::Default) => {
-                    let declaration = default(&value)?;
-                    self.scope.bind(DEFAULT.to_owned(), value.into_owned());
-                    declarations.push(declaration);
+                    default(&value)?;
+                    declarations.push(self.bind(None, &value));
                 }
                 Some(PrefixDeclaration::Named(prefix)) => {
                     let prefix = utf8(prefix)?;
-                    if let Some(declaration) = named(prefix, &value)? {
-                        self.scope.bind(prefix.to_owned(), value.into_owned());
-                        declarations.push(declaration);
+                    if named(prefix, &value)? {
+                        declarations.push(self.bind(Some(prefix), &value));
                     }
                 }
-                None => attributes.push((attribute.key, value.into_owned())),
+                None => attributes.push((attribute.key, value.into_owned().into_boxed_str())),
             }
         }
         let (prefix, local) = split(start.name())?;
@@ -247,43 +250,56 @@ impl Builder {
         for (key, value) in attributes {
             let (prefix, local) = split(key)?;
             let namespace = prefix.map(|prefix| self.resolve(prefix)).transpose()?;
-            if !expanded.insert((namespace.clone(), local.to_owned())) {
+            let identity = namespace.as_deref().map(std::ptr::from_ref);
+            if !expanded.insert((identity, local)) {
                 return Err(Malformed::DuplicateAttribute);
             }
             resolved.push(Attribute {
-                prefix: prefix.map(str::to_owned),
-                local: local.to_owned(),
-                namespace,
+                name: self.interner.name(prefix, local, namespace),
                 value,
             });
         }
         let element = Node::Element(Element {
-            prefix: prefix.map(str::to_owned),
-            local: local.to_owned(),
-            namespace,
-            attributes: resolved,
-            declarations,
-            children: Vec::new(),
+            name: self.interner.name(prefix, local, namespace),
+            attributes: resolved.into_boxed_slice(),
+            declarations: declarations.into_boxed_slice(),
+            children: Box::default(),
         });
-        if let Some(parent) = parent {
-            self.flush(parent);
-        }
-        let id = self.insert(element, parent);
+        self.flush();
+        let id = self.insert(element);
         if parent.is_none() {
             self.root = Some(id);
         }
-        self.open.push((id, mark));
+        self.open.push(Frame {
+            id,
+            mark,
+            children: Vec::new(),
+        });
         Ok(())
     }
 
     fn end(&mut self) {
-        if let Some((id, mark)) = self.open.pop() {
-            self.flush(id);
-            self.scope.restore(mark);
+        self.flush();
+        if let Some(frame) = self.open.pop() {
+            if let Some(Node::Element(element)) = self.nodes.get_mut(frame.id.0) {
+                element.children = frame.children.into_boxed_slice();
+            }
+            self.scope.restore(frame.mark);
         }
     }
 
-    fn resolve(&self, prefix: &str) -> Result<String, Malformed> {
+    fn bind(&mut self, prefix: Option<&str>, uri: &str) -> Namespace {
+        let prefix = prefix.map(|prefix| self.interner.intern(prefix));
+        let uri = self.interner.intern(uri);
+        let key = match &prefix {
+            Some(prefix) => Arc::clone(prefix),
+            None => self.interner.intern(DEFAULT),
+        };
+        self.scope.bind(key, Arc::clone(&uri));
+        Namespace { prefix, uri }
+    }
+
+    fn resolve(&self, prefix: &str) -> Result<Arc<str>, Malformed> {
         if prefix == XMLNS_PREFIX {
             return Err(Malformed::Namespace);
         }
@@ -291,23 +307,21 @@ impl Builder {
     }
 }
 
-fn default(value: &str) -> Result<Namespace, Malformed> {
+fn default(value: &str) -> Result<(), Malformed> {
     if value == uri::XML || value == uri::XMLNS {
-        return Err(Malformed::Namespace);
+        Err(Malformed::Namespace)
+    } else {
+        Ok(())
     }
-    Ok(Namespace {
-        prefix: None,
-        uri: value.to_owned(),
-    })
 }
 
-fn named(prefix: &str, value: &str) -> Result<Option<Namespace>, Malformed> {
+fn named(prefix: &str, value: &str) -> Result<bool, Malformed> {
     if !ncname(prefix) {
         return Err(Malformed::Name);
     }
     if prefix == XML_PREFIX {
         return if value == uri::XML {
-            Ok(None)
+            Ok(false)
         } else {
             Err(Malformed::Namespace)
         };
@@ -315,10 +329,7 @@ fn named(prefix: &str, value: &str) -> Result<Option<Namespace>, Malformed> {
     if prefix == XMLNS_PREFIX || value.is_empty() || value == uri::XML || value == uri::XMLNS {
         return Err(Malformed::Namespace);
     }
-    Ok(Some(Namespace {
-        prefix: Some(prefix.to_owned()),
-        uri: value.to_owned(),
-    }))
+    Ok(true)
 }
 
 fn split(name: QName<'_>) -> Result<(Option<&str>, &str), Malformed> {

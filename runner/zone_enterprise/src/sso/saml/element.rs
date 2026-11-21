@@ -1,28 +1,29 @@
+use std::sync::Arc;
+
 use crate::sso::saml::attribute::Attribute;
+use crate::sso::saml::name::Name;
 use crate::sso::saml::namespace::Namespace;
 use crate::sso::saml::node_id::NodeId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Element {
-    pub(super) prefix: Option<String>,
-    pub(super) local: String,
-    pub(super) namespace: Option<String>,
-    pub(super) attributes: Vec<Attribute>,
-    pub(super) declarations: Vec<Namespace>,
-    pub(super) children: Vec<NodeId>,
+    pub(super) name: Arc<Name>,
+    pub(super) attributes: Box<[Attribute]>,
+    pub(super) declarations: Box<[Namespace]>,
+    pub(super) children: Box<[NodeId]>,
 }
 
 impl Element {
     pub fn prefix(&self) -> Option<&str> {
-        self.prefix.as_deref()
+        self.name.prefix.as_deref()
     }
 
     pub fn local(&self) -> &str {
-        &self.local
+        &self.name.local
     }
 
     pub fn namespace(&self) -> Option<&str> {
-        self.namespace.as_deref()
+        self.name.namespace.as_deref()
     }
 
     pub fn attributes(&self) -> &[Attribute] {
@@ -38,13 +39,13 @@ impl Element {
     }
 
     pub fn is(&self, namespace: &str, local: &str) -> bool {
-        self.namespace() == Some(namespace) && self.local == local
+        self.namespace() == Some(namespace) && self.local() == local
     }
 
     pub fn attribute(&self, local: &str) -> Option<&str> {
         self.attributes
             .iter()
-            .find(|attribute| attribute.namespace.is_none() && attribute.local == local)
+            .find(|attribute| attribute.namespace().is_none() && attribute.local() == local)
             .map(Attribute::value)
     }
 

@@ -279,7 +279,9 @@ fn splice(document: &mut Document, parent: NodeId, fragment: Document) -> NodeId
         .position(|child| document.is(*child, uri::ASSERTION, ISSUER))
         .map_or(0, |issuer| issuer + 1);
     if let Some(Node::Element(element)) = document.nodes.get_mut(parent.0) {
-        element.children.insert(position, root);
+        let mut children = std::mem::take(&mut element.children).into_vec();
+        children.insert(position, root);
+        element.children = children.into_boxed_slice();
     }
     root
 }
