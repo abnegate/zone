@@ -122,10 +122,19 @@ struct StoredRole {
     updated_at: DateTime<Utc>,
 }
 
-impl From<StoredRole> for CustomRoleRow {
-    fn from(role: StoredRole) -> Self {
-        let scope = Scope::parse(&role.scope).unwrap_or(Scope::Server);
-        Self {
+const SCOPE_COLUMN: &str = "scope";
+
+impl TryFrom<StoredRole> for CustomRoleRow {
+    type Error = sqlx::Error;
+
+    fn try_from(role: StoredRole) -> Result<Self, Self::Error> {
+        let scope = Scope::parse(&role.scope)
+            .filter(|scope| scope.base().is_some())
+            .ok_or_else(|| sqlx::Error::ColumnDecode {
+                index: SCOPE_COLUMN.to_owned(),
+                source: format!("{} is not the scope of a custom role", role.scope).into(),
+            })?;
+        Ok(Self {
             id: role.id,
             organization_id: role.organization_id,
             name: role.name,
@@ -136,7 +145,7 @@ impl From<StoredRole> for CustomRoleRow {
             created_by: role.created_by,
             created_at: role.created_at,
             updated_at: role.updated_at,
-        }
+        })
     }
 }
 
@@ -165,7 +174,7 @@ pub async fn list(pool: &PgPool, organization_id: Uuid) -> DbResult<Vec<CustomRo
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(CustomRoleRow::from).collect())
+    rows.into_iter().map(CustomRoleRow::try_from).collect()
 }
 
 pub async fn get(
@@ -196,7 +205,7 @@ where
     .fetch_optional(executor)
     .await?;
 
-    Ok(row.map(CustomRoleRow::from))
+    row.map(CustomRoleRow::try_from).transpose()
 }
 
 pub async fn create(
@@ -240,15 +249,24 @@ pub async fn create(
 /// Widening a workspace role that people already hold reaches into every
 /// workspace they hold it in, including ones the editor does not administer,
 /// so it needs the administrators permission. Narrowing never does.
+///
+/// The editor's membership is share-locked before the role, as every role
+/// change locks member rows before role rows: a demotion in flight lands first
+/// and the widening is judged by what the editor holds after it.
 pub async fn update(
     pool: &PgPool,
     organization_id: Uuid,
     role_id: Uuid,
     change: &Change<'_>,
-    caller: &Grant,
+    editor: Uuid,
 ) -> DbResult<Update> {
     let mut transaction = pool.begin().await?;
 
+    let caller =
+        super::organization_members::lock_membership(&mut transaction, organization_id, editor)
+            .await?
+            .map(|membership| membership.grant)
+            .unwrap_or_default();
     if !lock_for_update(&mut transaction, organization_id, role_id).await? {
         return Ok(Update::Missing);
     }
@@ -441,18 +459,19 @@ impl Reference {
         (
             format!(
                 r#"{member}.custom_role_id AS assigned_role_id,
-                cr.id AS custom_role_id,
-                cr.name AS custom_role_name,
+                custom_role.id AS custom_role_id,
+                custom_role.name AS custom_role_name,
                 ARRAY(
-                    SELECT crp.permission FROM custom_role_permissions crp
-                    WHERE crp.role_id = cr.id
+                    SELECT custom_role_permission.permission
+                    FROM custom_role_permissions custom_role_permission
+                    WHERE custom_role_permission.role_id = custom_role.id
                 ) AS custom_role_permissions"#
             ),
             format!(
-                r#"LEFT JOIN custom_roles cr
-                ON cr.id = {member}.custom_role_id
-                AND cr.organization_id = {organization}
-                AND cr.scope = '{scope}'"#
+                r#"LEFT JOIN custom_roles custom_role
+                ON custom_role.id = {member}.custom_role_id
+                AND custom_role.organization_id = {organization}
+                AND custom_role.scope = '{scope}'"#
             ),
         )
     }
@@ -491,4 +510,131 @@ pub(crate) async fn held(
             None => (None, Grant::default()),
         },
     )
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    use super::{Creation, Definition};
+    use crate::auth::{Grant, Permission, Scope};
+    use crate::db::organization_members::OrgRole;
+    use crate::db::workspace_members::WorkspaceRole;
+
+    /// A fresh custom role of `scope` in `organization` holding `granted` and the scope's base.
+    pub async fn role(
+        pool: &PgPool,
+        organization: Uuid,
+        creator: Uuid,
+        scope: Scope,
+        granted: &[Permission],
+    ) -> Uuid {
+        let names: Vec<String> = granted
+            .iter()
+            .map(|permission| permission.name().to_owned())
+            .collect();
+        let grant = Grant::compose(scope, &names).expect("the role composes");
+        let name = format!("Custom {}", Uuid::new_v4());
+        let definition = Definition {
+            name: &name,
+            description: None,
+            scope,
+            grant: &grant,
+        };
+        match super::create(pool, organization, &definition, creator)
+            .await
+            .expect("the role is created")
+        {
+            Creation::Created(role) => role.id,
+            Creation::NameTaken => panic!("a fresh role name was taken"),
+        }
+    }
+
+    /// Gives an organization member `role`, with the built-in column pinned to member as every
+    /// custom holder's is.
+    pub async fn assign_organization(pool: &PgPool, organization: Uuid, user: Uuid, role: Uuid) {
+        sqlx::query(
+            "UPDATE organization_members SET role = $3, custom_role_id = $4 \
+             WHERE organization_id = $1 AND user_id = $2",
+        )
+        .bind(organization)
+        .bind(user)
+        .bind(OrgRole::Member.as_str())
+        .bind(role)
+        .execute(pool)
+        .await
+        .expect("the organization custom role is assigned");
+    }
+
+    /// Gives a workspace member `role`, with the built-in column pinned to viewer as every custom
+    /// holder's is.
+    pub async fn assign_workspace(pool: &PgPool, workspace: Uuid, user: Uuid, role: Uuid) {
+        sqlx::query(
+            "UPDATE workspace_members SET role = $3, custom_role_id = $4 \
+             WHERE workspace_id = $1 AND user_id = $2",
+        )
+        .bind(workspace)
+        .bind(user)
+        .bind(WorkspaceRole::Viewer.as_str())
+        .bind(role)
+        .execute(pool)
+        .await
+        .expect("the workspace custom role is assigned");
+    }
+
+    /// Moves a workspace member onto a fresh workspace custom role holding `granted` and the base.
+    pub async fn hold(
+        pool: &PgPool,
+        organization: Uuid,
+        workspace: Uuid,
+        user: Uuid,
+        granted: &[Permission],
+    ) {
+        let role = role(pool, organization, user, Scope::Workspace, granted).await;
+        assign_workspace(pool, workspace, user, role).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stored(scope: &str) -> StoredRole {
+        StoredRole {
+            id: Uuid::new_v4(),
+            organization_id: Uuid::new_v4(),
+            name: "Writers".to_owned(),
+            description: None,
+            scope: scope.to_owned(),
+            permissions: vec![Permission::WorkspaceWrite.name().to_owned()],
+            members: 0,
+            created_by: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_stored_role_of_a_custom_scope_decodes_with_its_grant() {
+        for scope in [Scope::Organization, Scope::Workspace] {
+            let row = CustomRoleRow::try_from(stored(scope.name())).expect("the role decodes");
+            assert_eq!(row.scope, scope);
+            assert_eq!(
+                row.grant,
+                Grant::stored(scope, [Permission::WorkspaceWrite.name()])
+            );
+        }
+    }
+
+    #[test]
+    fn a_stored_scope_no_custom_role_may_have_is_a_decode_error() {
+        for scope in [Scope::Server.name(), "planet", ""] {
+            let error = CustomRoleRow::try_from(stored(scope)).expect_err("the scope is refused");
+            assert!(
+                matches!(&error, sqlx::Error::ColumnDecode { index, .. } if index == SCOPE_COLUMN),
+                "{scope:?} gave {error:?}"
+            );
+        }
+    }
 }

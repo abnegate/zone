@@ -2,8 +2,8 @@ use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use serde::Serialize;
 
-use super::in_use::InUse;
 use crate::auth::Composition;
 use crate::auth::entitlement::Unentitled;
 use crate::db::custom_roles::EXCEEDS;
@@ -14,13 +14,23 @@ pub const NAME_INVALID: &str = "name_invalid";
 pub const NAME_RESERVED: &str = "name_reserved";
 pub const NAME_TAKEN: &str = "role_name_taken";
 pub const IN_USE: &str = "role_in_use";
+pub const BODY_INVALID: &str = "body_invalid";
+pub const SCOPE_INVALID: &str = "scope_invalid";
 
 const UNAUTHENTICATED: &str = "Invalid user ID in token";
-const SCOPE_INVALID: &str = "A role's scope must be organization or workspace";
+const SCOPE: &str = "A role's scope must be organization or workspace";
 const TAKEN: &str = "Another role in this organization already has this name";
 const WIDENS: &str = "Widening a workspace role that members hold needs administrators:update";
 const HELD: &str = "Members hold this role. Give them another role before deleting it.";
 const FAILED: &str = "Could not load or save the organization's roles";
+
+/// The refusal to delete a role that active members hold, with how many hold it.
+#[derive(Debug, Serialize)]
+struct InUse {
+    error: &'static str,
+    code: &'static str,
+    members: i64,
+}
 
 #[derive(Debug)]
 pub enum Refusal {
@@ -73,12 +83,15 @@ impl IntoResponse for Refusal {
             Self::Unentitled(unentitled) => unentitled.into_response(),
             Self::Body(rejection) => (
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(rejection.body_text())),
+                Json(ErrorResponse::with_code(
+                    rejection.body_text(),
+                    BODY_INVALID,
+                )),
             )
                 .into_response(),
             Self::Scope => (
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(SCOPE_INVALID)),
+                Json(ErrorResponse::with_code(SCOPE, SCOPE_INVALID)),
             )
                 .into_response(),
             Self::Invalid { message, code } => (

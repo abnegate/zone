@@ -1153,7 +1153,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        crate::db::actions::testing::hold(&pool, organization, workspace, user, &[]).await;
+        crate::db::custom_roles::testing::hold(&pool, organization, workspace, user, &[]).await;
         assert!(
             create_document(&pool, workspace, user, "Denied", "Denied")
                 .await
@@ -1161,7 +1161,7 @@ mod tests {
                 .is_none(),
             "a custom role holding only workspace:read created a document"
         );
-        crate::db::actions::testing::hold(
+        crate::db::custom_roles::testing::hold(
             &pool,
             organization,
             workspace,

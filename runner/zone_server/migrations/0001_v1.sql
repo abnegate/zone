@@ -1730,7 +1730,7 @@ CREATE FUNCTION workspace_permits(p_user_id uuid, p_workspace_id uuid, p_permiss
               p_permission = 'workspace:read'
               OR (
                 EXISTS (SELECT 1 FROM custom_role_permissions p WHERE p.role_id = r.id AND p.permission = p_permission)
-                AND EXISTS (SELECT 1 FROM workspace_role_permissions b WHERE b.permission = p_permission)
+                AND EXISTS (SELECT 1 FROM workspace_role_permissions b WHERE b.role = 'admin' AND b.permission = p_permission)
               )
             )
         )

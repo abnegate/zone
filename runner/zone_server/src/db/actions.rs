@@ -482,58 +482,9 @@ pub async fn tail_task_log(
 }
 
 #[cfg(test)]
-pub(crate) mod testing {
-    use sqlx::PgPool;
-    use uuid::Uuid;
-
-    use crate::auth::{Grant, Permission, Scope};
-    use crate::db::custom_roles::{self, Creation, Definition};
-    use crate::db::workspace_members::WorkspaceRole;
-
-    /// Moves `user` onto a fresh workspace custom role holding `granted` and
-    /// the base, with the built-in column pinned to viewer as every custom
-    /// holder's is.
-    pub async fn hold(
-        pool: &PgPool,
-        organization: Uuid,
-        workspace: Uuid,
-        user: Uuid,
-        granted: &[Permission],
-    ) {
-        let names: Vec<String> = granted
-            .iter()
-            .map(|permission| permission.name().to_string())
-            .collect();
-        let grant = Grant::compose(Scope::Workspace, &names).expect("the role composes");
-        let definition = Definition {
-            name: &format!("Custom {}", Uuid::new_v4()),
-            description: None,
-            scope: Scope::Workspace,
-            grant: &grant,
-        };
-        let Creation::Created(role) = custom_roles::create(pool, organization, &definition, user)
-            .await
-            .expect("the role is created")
-        else {
-            panic!("a fresh role name was taken");
-        };
-        sqlx::query(
-            "UPDATE workspace_members SET role = $3, custom_role_id = $4 \
-             WHERE workspace_id = $1 AND user_id = $2",
-        )
-        .bind(workspace)
-        .bind(user)
-        .bind(WorkspaceRole::Viewer.as_str())
-        .bind(role.id)
-        .execute(pool)
-        .await
-        .expect("the custom role is assigned");
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::custom_roles::testing;
     use crate::db::reminders;
     use crate::db::reminders::Delivered;
     use crate::db::reminders::Sweep;
