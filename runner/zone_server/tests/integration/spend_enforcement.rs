@@ -43,6 +43,7 @@ type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 const COMPLETIONS: &str = "/chat/completions";
 const ROUTES: &str = "/v2/model/info";
+const TAGS: &str = "/api/tags";
 const MODEL: &str = "gpt-4o";
 const OTHER_MODEL: &str = "gpt-4o-mini";
 const CONCURRENT: usize = 8;
@@ -190,6 +191,52 @@ impl Chatting {
             .get_auth(&format!("/api/chats/{}", self.chat), &self.owner().token)
             .await;
         (response.status.as_u16(), response.json_value())
+    }
+
+    /// A task the owner created in the fixture's workspace.
+    async fn task(&self) -> Uuid {
+        let created = self
+            .http()
+            .post_json_auth(
+                &format!("/api/workspaces/{}/tasks", self.fixture.policy.workspace),
+                &json!({"title": "Spend", "description": "A task"}),
+                &self.owner().token,
+            )
+            .await
+            .json_value();
+        created["task"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a task, not {created}"))
+            .parse()
+            .unwrap()
+    }
+
+    /// The workspace's models as `GET /api/models` lists them, and the status and model of
+    /// `task` once the owner picks a model for it.
+    async fn previewed(&self, task: Uuid) -> (u16, Value, u16, Value) {
+        let token = &self.owner().token;
+        let models = self
+            .http()
+            .get_auth(
+                &format!("/api/models?workspace_id={}", self.fixture.policy.workspace),
+                token,
+            )
+            .await;
+        let changed = self
+            .http()
+            .put_json_auth(
+                &format!("/api/tasks/{task}"),
+                &json!({"model_name": MODEL}),
+                token,
+            )
+            .await;
+        let changed_body = changed.json_value();
+        (
+            models.status.as_u16(),
+            models.json_value(),
+            changed.status.as_u16(),
+            changed_body["task"]["model_name"].clone(),
+        )
     }
 
     /// The completions the turns asked LiteLLM for, titles left out.
@@ -350,6 +397,39 @@ async fn a_used_up_budget_refuses_nothing_that_sends_no_completions() {
     assert!(
         fixture.received(GENERATE_PATH).await.is_empty(),
         "a request refused or sending no completions registered a key"
+    );
+    chatting.cleanup().await;
+}
+
+#[tokio::test]
+async fn listing_models_and_picking_a_task_model_register_no_key_and_ignore_a_used_up_budget() {
+    let chatting = Chatting::new("spend_previews").await;
+    let fixture = &chatting.fixture;
+    fixture.licensed().await;
+    Mock::given(method("GET"))
+        .and(path(TAGS))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": [{
+            "name": MODEL, "size": 1, "digest": "test", "modified_at": "2026-11-01T00:00:00Z"
+        }]})))
+        .mount(&fixture.litellm)
+        .await;
+    let task = chatting.task().await;
+
+    let before = chatting.previewed(task).await;
+    fixture.charge(&fixture.automation(), OVER).await;
+    fixture.budget(workspace(fixture), LIMIT, true).await;
+    let after = chatting.previewed(task).await;
+
+    assert_eq!(before.0, 200, "{}", before.1);
+    assert_eq!(before.2, 200, "picking a task model failed: {}", before.3);
+    assert_eq!(before.3, MODEL);
+    assert_eq!(
+        after, before,
+        "a used-up budget changed a request that sends no completions"
+    );
+    assert!(
+        fixture.received(GENERATE_PATH).await.is_empty(),
+        "a request that sends no completions registered a key"
     );
     chatting.cleanup().await;
 }

@@ -447,7 +447,7 @@ async fn admitted(
     actor: Uuid,
     model: Option<&str>,
 ) -> Result<(), Box<Response>> {
-    let route = Route::for_workspace(state, task.workspace_id).await;
+    let route = Route::preview_workspace(state, task.workspace_id).await;
     let Err(denial) = route.precheck(model).await else {
         return Ok(());
     };
