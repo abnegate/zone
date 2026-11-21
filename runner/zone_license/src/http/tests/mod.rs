@@ -34,7 +34,7 @@ const EMAIL: &str = "billing@acme.test";
 const PRODUCT: &str = "5f0c8a9e-6b1d-4c2e-9a3f-7d4e1b2c3a40";
 
 #[derive(Default)]
-struct Recording {
+pub(super) struct Recording {
     sent: Mutex<Vec<(String, Letter)>>,
 }
 
@@ -50,7 +50,7 @@ impl Outbox for Recording {
 }
 
 impl Recording {
-    fn sent(&self) -> Vec<(String, Letter)> {
+    pub(super) fn sent(&self) -> Vec<(String, Letter)> {
         self.sent.lock().unwrap().clone()
     }
 }

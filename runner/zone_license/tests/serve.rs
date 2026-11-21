@@ -12,9 +12,9 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 use zone_enterprise::{Keyring, License, TrustedKey};
-use zone_license::http::{HEALTH_PATH, WEBHOOK_PATH};
+use zone_license::http::{HEALTH_PATH, RENEW_PATH, WEBHOOK_PATH};
 use zone_license::mail::MailError;
-use zone_license::polar::{ID_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, signature};
+use zone_license::polar::{AccessToken, ID_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, signature};
 use zone_license::{Config, PrivateKey, ServeError, Variable, serve};
 
 use crate::support::smtp::{Delivered, SENDER, SmtpSink};
@@ -76,8 +76,14 @@ fn signing_key() -> (PrivateKey, Keyring) {
 
 impl Service {
     async fn start(sink: &SmtpSink) -> Self {
+        Self::starting(sink, None).await
+    }
+
+    async fn starting(sink: &SmtpSink, access_token: Option<AccessToken>) -> Self {
         let (key, keyring) = signing_key();
-        let server = serve::start(config(sink, &key, &keyring)).await.unwrap();
+        let mut config = config(sink, &key, &keyring);
+        config.access_token = access_token;
+        let server = serve::start(config).await.unwrap();
         let address = server.address().unwrap();
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(server.run(async {
@@ -115,6 +121,16 @@ impl Service {
             serde_json::from_str(&text).unwrap()
         };
         (status, body)
+    }
+
+    async fn renew(&self, body: Value) -> StatusCode {
+        self.client
+            .post(format!("http://{}{RENEW_PATH}", self.address))
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .status()
     }
 
     fn license(&self, message: &Delivered) -> (String, License) {
@@ -292,5 +308,29 @@ async fn health_answers_over_http() {
         response.json::<Value>().await.unwrap(),
         json!({ "status": "ok" })
     );
+    service.stop().await;
+}
+
+#[tokio::test]
+async fn renewal_is_not_found_without_an_access_token() {
+    let sink = SmtpSink::start().await;
+    let service = Service::start(&sink).await;
+
+    let status = service.renew(json!({ "license": "not a key" })).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(sink.messages().is_empty());
+    service.stop().await;
+}
+
+#[tokio::test]
+async fn renewal_answers_once_an_access_token_is_set() {
+    let sink = SmtpSink::start().await;
+    let service = Service::starting(&sink, Some(AccessToken::new("polar_oat_serve-test"))).await;
+
+    let status = service.renew(json!({ "license": "not a key" })).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(sink.messages().is_empty());
     service.stop().await;
 }
