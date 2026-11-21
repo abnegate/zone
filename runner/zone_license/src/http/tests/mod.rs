@@ -11,6 +11,7 @@ use zone_enterprise::{Keyring, TrustedKey};
 
 use super::*;
 use crate::license_id;
+use crate::logging;
 use crate::mail::{Letter, MailError, Outbox};
 use crate::polar::{ID_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, WebhookSecret, signature};
 use crate::private_key::PrivateKey;
@@ -224,38 +225,17 @@ async fn a_body_changed_after_signing_is_refused() {
     refused(request).await;
 }
 
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn an_unsigned_delivery_is_not_a_warning() {
-    let captured = Captured::default();
-    let writer = captured.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .with_writer(move || writer.clone())
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
-    refused(delivery(
-        CREATE,
-        Utc::now().timestamp(),
-        b"whsec_another-secret",
-    ))
+    let logged = logging::capture(
+        tracing::Level::WARN,
+        refused(delivery(
+            CREATE,
+            Utc::now().timestamp(),
+            b"whsec_another-secret",
+        )),
+    )
     .await;
-
-    let logged = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
     assert_eq!(logged, "");
 }
 

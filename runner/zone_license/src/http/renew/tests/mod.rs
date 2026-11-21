@@ -1,5 +1,4 @@
 use std::net::TcpListener;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use axum::Router;
@@ -19,6 +18,7 @@ use super::*;
 use crate::http::tests::Recording;
 use crate::http::{RENEW_BODY_LIMIT, RENEW_PATH, Renewer, router};
 use crate::license_id;
+use crate::logging;
 use crate::polar::{self, AccessToken, Proxy, WebhookSecret};
 use crate::private_key::PrivateKey;
 use crate::renewal::SETTLEMENT;
@@ -486,20 +486,6 @@ async fn the_route_takes_only_post() {
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
 }
 
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 async fn logged(level: tracing::Level, response: ResponseTemplate, key: &str) -> String {
     logged_at(level, response, key, settled).await
 }
@@ -510,19 +496,11 @@ async fn logged_at(
     key: &str,
     clock: fn() -> DateTime<Utc>,
 ) -> String {
-    let captured = Captured::default();
-    let writer = captured.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(level)
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
     let server = polar(response).await;
-    renewing_at(client(&server), asking(key), clock).await;
-
-    String::from_utf8(captured.0.lock().unwrap().clone()).unwrap()
+    logging::capture(level, async {
+        renewing_at(client(&server), asking(key), clock).await;
+    })
+    .await
 }
 
 #[tokio::test]

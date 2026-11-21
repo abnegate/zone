@@ -12,6 +12,8 @@ pub mod keygen;
 mod keygen_arguments;
 mod keygen_error;
 pub mod license_id;
+#[cfg(test)]
+mod logging;
 pub mod mail;
 pub mod order_error;
 pub mod polar;
