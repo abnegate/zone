@@ -15,7 +15,7 @@ export const pages: ReadonlyArray<Page> = [
     output: 'pricing/index.html',
     title: 'Pricing · Zone',
     description:
-      'Zone Community is free with no caps. Zone Enterprise adds SSO, agent and model policy and audit export, billed annually per seat.',
+      'Zone Community is free with no caps. Zone Enterprise adds SSO, agent and model policy and audit export, per seat, billed monthly or yearly.',
     navigationLabel: 'Pricing',
     indexed: true,
     linksFromBasePath: false,

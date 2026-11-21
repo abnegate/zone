@@ -8,7 +8,8 @@ export const site: Site = {
   contactEmail: 'zone@bitecode.ltd',
   price: {
     currency: 'USD',
-    seatMonthly: 25,
+    seatMonthly: 20,
+    seatYearly: 200,
   },
 };
 

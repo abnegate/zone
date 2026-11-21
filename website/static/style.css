@@ -58,6 +58,9 @@
   --radius-small: 10px;
   --gutter: 16px;
   --width: 1120px;
+  --measure: 760px;
+  --gap: 1.5rem;
+  --pad: 1.75rem;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -233,8 +236,8 @@ strong {
   padding-inline: var(--gutter);
 }
 
-.narrow {
-  max-width: calc(760px + 2 * var(--gutter));
+.narrow > * {
+  max-width: var(--measure);
 }
 
 .quiet {
@@ -471,7 +474,7 @@ strong {
 
 .cards {
   display: grid;
-  gap: 1.25rem;
+  gap: var(--gap);
   margin-top: 2.5rem;
 }
 
@@ -482,7 +485,7 @@ strong {
 }
 
 .card {
-  padding: 1.75rem;
+  padding: var(--pad);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -526,7 +529,7 @@ strong {
 
 .feature-list {
   display: grid;
-  gap: 1.5rem;
+  gap: var(--gap);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -641,14 +644,14 @@ tbody tr:last-child > td {
 
 .license-list {
   display: grid;
-  gap: 1rem;
+  gap: var(--gap);
   margin: 2rem 0 0;
   padding: 0;
   list-style: none;
 }
 
 .license-list li {
-  padding: 1.25rem 1.5rem;
+  padding: var(--pad);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -751,20 +754,19 @@ tbody tr:last-child > td {
 
 .plans {
   display: grid;
-  gap: 1.5rem;
+  gap: var(--gap);
 }
 
 @media (min-width: 900px) {
   .plans {
-    grid-template-columns: 1fr 1.15fr;
-    align-items: start;
+    grid-template-columns: 1fr 1fr;
   }
 }
 
 .plan {
   display: flex;
   flex-direction: column;
-  padding: clamp(1.5rem, 4vw, 2.25rem);
+  padding: var(--pad);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -772,7 +774,10 @@ tbody tr:last-child > td {
 }
 
 .plan-featured {
-  border: 2px solid var(--accent);
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 1px var(--accent),
+    var(--shadow);
 }
 
 .plan h3 {
@@ -865,7 +870,7 @@ tbody tr:last-child > td {
 
 .steps {
   display: grid;
-  gap: 1.25rem;
+  gap: var(--gap);
   margin: 2.5rem 0 0;
   padding: 0;
   list-style: none;
@@ -885,7 +890,7 @@ tbody tr:last-child > td {
 
 .steps li {
   position: relative;
-  padding: 1.5rem 1.5rem 1.25rem;
+  padding: var(--pad);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -927,7 +932,7 @@ tbody tr:last-child > td {
 
 .callout {
   margin-top: 1.5rem;
-  padding: 1.5rem;
+  padding: var(--pad);
   border: 1px solid var(--border);
   border-left: 4px solid var(--brand);
   border-radius: var(--radius-small);
