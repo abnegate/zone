@@ -51,7 +51,9 @@ pub struct Stored {
 
 impl Fixture {
     pub async fn new(prefix: &'static str) -> Self {
-        let litellm = MockServer::start().await;
+        // A pooled server keeps its address across tests, and the key registry is keyed by
+        // LiteLLM's address for the whole process.
+        let litellm = MockServer::builder().start().await;
         let config = Config {
             litellm_host: litellm.uri(),
             litellm_key: MASTER.to_string(),

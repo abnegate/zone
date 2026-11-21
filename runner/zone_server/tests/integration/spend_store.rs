@@ -1398,6 +1398,25 @@ async fn verify_registers_again_a_key_litellm_lost() {
 }
 
 #[tokio::test]
+async fn a_fixture_never_sees_keys_an_earlier_fixture_registered() {
+    let earlier = Fixture::new("spend_isolated_earlier").await;
+    earlier.licensed().await;
+    attributed(&earlier).await;
+    let host = earlier.client().host().to_string();
+    assert_eq!(registry::tokens(&host).len(), 1);
+    earlier.cleanup().await;
+
+    let fixture = Fixture::new("spend_isolated").await;
+    let host = fixture.client().host().to_string();
+    assert!(
+        registry::tokens(&host).is_empty(),
+        "{host} still holds another fixture's keys"
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn verify_leaves_keys_litellm_still_has() {
     let fixture = Fixture::new("spend_verify_present").await;
     fixture.licensed().await;
