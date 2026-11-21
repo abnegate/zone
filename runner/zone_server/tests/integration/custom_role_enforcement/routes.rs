@@ -9,6 +9,7 @@
 //! route is reported together.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use axum::http::StatusCode;
 use serde_json::json;
@@ -555,8 +556,8 @@ async fn departures(fixture: &Fixture, scope: Scope, routes: &[Route]) -> Vec<St
             continue;
         }
 
-        if !holders.contains_key(&permission) {
-            holders.insert(permission, holder(fixture, scope, &[permission]).await);
+        if let Entry::Vacant(slot) = holders.entry(permission) {
+            slot.insert(holder(fixture, scope, &[permission]).await);
         }
         let granted = &holders[&permission];
 
