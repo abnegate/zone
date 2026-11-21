@@ -203,14 +203,22 @@ async fn updated(
     access::administer(&mut transaction, organization, user).await?;
     standing.require()?;
     let Json(patch) = body.map_err(Refusal::Body)?;
-    let current = locked(&mut transaction, organization, budget).await?;
+    let month = Month::current();
+    let current = locked(&mut transaction, organization, budget, month).await?;
     let next = patch.applied(&current.budget)?;
     if next == current.budget {
         transaction.rollback().await?;
         return Ok(current.into());
     }
-    let month = Month::current();
-    let saved = budgets::update(&mut transaction, current.id, &next, user, month).await?;
+    let saved = budgets::update(
+        &mut transaction,
+        organization,
+        current.id,
+        &next,
+        user,
+        month,
+    )
+    .await?;
     budgets::refresh(&mut transaction, current.id, month).await?;
     transaction.commit().await?;
     record(
@@ -237,8 +245,8 @@ async fn deleted(
     let mut transaction = state.db().begin().await?;
     access::administer(&mut transaction, organization, user).await?;
     standing.require()?;
-    let current = locked(&mut transaction, organization, budget).await?;
-    budgets::delete(&mut transaction, current.id).await?;
+    let current = locked(&mut transaction, organization, budget, Month::current()).await?;
+    budgets::delete(&mut transaction, organization, current.id).await?;
     transaction.commit().await?;
     record(
         state,
@@ -270,11 +278,12 @@ async fn locked(
     connection: &mut PgConnection,
     organization: Uuid,
     budget: Option<Uuid>,
+    month: Month,
 ) -> Result<BudgetRow, Refusal> {
     let Some(budget) = budget else {
         return Err(Refusal::Missing(BUDGET_MISSING));
     };
-    budgets::lock(connection, organization, budget)
+    budgets::lock(connection, organization, budget, month)
         .await?
         .ok_or(Refusal::Missing(BUDGET_MISSING))
 }

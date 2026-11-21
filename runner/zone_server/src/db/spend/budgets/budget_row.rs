@@ -11,7 +11,6 @@ pub struct BudgetRow {
     pub workspace_name: Option<String>,
     pub user_name: Option<String>,
     pub user_email: Option<String>,
-    /// What the target spent in the month the row was read for.
     pub spent: Microdollars,
     pub updated_at: DateTime<Utc>,
 }

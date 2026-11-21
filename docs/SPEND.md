@@ -260,10 +260,13 @@ relies on it. Zone stores only the rows sent under one of its keys, by
 
 ### The overlap
 
-A run reads from 35 minutes before where the last run ended to the moment it
-started. When it succeeds, the next run picks up from that moment; when it
-fails, the next run reads the same window again. The first run starts 35
-minutes before Zone derived its first key. With no keys, a run does nothing.
+A run reads from 35 minutes before the cursor to the moment it started. After
+each full page it stores, the cursor moves to that page's last request; once
+a page comes back short, it moves to the moment the run started. When a page
+fails, the run stops there and the next run reads from 35 minutes before the
+last request it stored, so a backlog too deep to read in one run still drains
+over the following runs. The cursor never moves back. The first run starts 35 minutes before Zone
+derived its first key. With no keys, a run does nothing.
 
 The overlap exists because LiteLLM logs a request once it finishes, under the
 time it started, and writes logs in batches about every 10 seconds. Zone gives
@@ -285,8 +288,8 @@ mean ingestion is behind.
 
 A request shows up in reports after it finishes, once LiteLLM writes its log
 and the next run reads it: usually within about a minute. The report's
-`ingested_through`, shown as **Counted through**, is where the last
-successful run ended.
+`ingested_through`, shown as **Counted through**, is the cursor: how far
+ingestion has read.
 
 Hard limits work from the same figures, so a budget can go over its limit.
 After each run the sweep settles every budget for the month: it marks every
@@ -359,9 +362,10 @@ budget gets the same notices as a hard one.
 
 A notice goes:
 
-- by email, when SMTP is configured, to the organization's active owners and
+- by email, when SMTP is configured, to the organization's owners and
   admins, and for a workspace budget to that workspace's owners and admins
-  too, one at a time, each waiting up to 60 seconds;
+  too, once per address and never to a deactivated account, one at a time,
+  each waiting up to 60 seconds;
 - to the server's notification channels:
   [`ZONE_NOTIFY_SLACK_WEBHOOK`](CONFIGURATION.md#zone_notify_slack_webhook),
   [`ZONE_NOTIFY_DISCORD_WEBHOOK`](CONFIGURATION.md#zone_notify_discord_webhook)

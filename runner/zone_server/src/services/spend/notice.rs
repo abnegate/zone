@@ -1,19 +1,14 @@
 //! Tells an organization's admins that a budget reached its alert threshold or its limit, once a
 //! month: by mail, one admin at a time, and through the server's notification channels.
 
-use std::collections::HashSet;
-
 use abnegate_notify::{Fanout, Notification, Severity};
 use serde_json::json;
 use zone_enterprise::spend::{Month, Scope};
 
 use super::error::Error;
-use crate::db::DbResult;
 use crate::db::audit::{self, AuditContext, actions, resources};
-use crate::db::organization_members::{self, OrgRole};
 use crate::db::organizations;
-use crate::db::spend::budgets::{self, Announcement, BudgetRow, Crossing};
-use crate::db::workspace_members::{self, WorkspaceRole};
+use crate::db::spend::budgets::{self, Announcement, BudgetRow, Crossing, Recipient};
 use crate::services::mail::{SEND_TIMEOUT, Template};
 use crate::state::AppState;
 
@@ -46,7 +41,7 @@ pub async fn announce(
         ),
         hard: row.budget.hard,
     };
-    let recipients = recipients(state, row).await?;
+    let recipients = budgets::recipients(pool, row.organization_id, row.target.workspace).await?;
     let mailed = mail(state, &notice, &recipients).await;
     let broadcast = broadcast(fanout, &notice).await;
     if !delivered(mailed, broadcast) {
@@ -119,12 +114,6 @@ impl Notice {
     }
 }
 
-/// Who a notice is addressed to.
-struct Recipient {
-    email: String,
-    name: String,
-}
-
 /// Which budget a notice is about, in words: its organization, its workspace or its member.
 pub(super) fn label(row: &BudgetRow, organization: &str) -> String {
     match row.target.scope {
@@ -141,37 +130,6 @@ pub(super) fn label(row: &BudgetRow, organization: &str) -> String {
             }
         }
     }
-}
-
-/// The organization's active owners and admins, then, for a workspace's budget, the workspace's,
-/// each once.
-async fn recipients(state: &AppState, row: &BudgetRow) -> DbResult<Vec<Recipient>> {
-    let pool = state.db();
-    let mut people: Vec<(String, Option<String>)> =
-        organization_members::list_members_with_users(pool, row.organization_id)
-            .await?
-            .into_iter()
-            .filter(|member| member.member.role >= OrgRole::Admin)
-            .map(|member| (member.email, member.display_name))
-            .collect();
-    if let Some(workspace) = row.target.workspace {
-        people.extend(
-            workspace_members::list_members_with_users(pool, workspace)
-                .await?
-                .into_iter()
-                .filter(|member| member.member.role >= WorkspaceRole::Admin)
-                .map(|member| (member.email, member.display_name)),
-        );
-    }
-    let mut seen = HashSet::new();
-    Ok(people
-        .into_iter()
-        .filter(|(email, _)| seen.insert(email.to_lowercase()))
-        .map(|(email, name)| Recipient {
-            name: name.unwrap_or_else(|| email.clone()),
-            email,
-        })
-        .collect())
 }
 
 /// Mails each recipient in turn, waiting on each send. None when there is no mail or no one to
