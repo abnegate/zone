@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::sso::saml::attribute::Attribute;
 use crate::sso::saml::document::Document;
 use crate::sso::saml::element::Element;
 use crate::sso::saml::node::Node;
@@ -12,7 +13,7 @@ const XML_PREFIX: &str = "xml";
 
 enum Step {
     Enter(NodeId),
-    Leave(NodeId, usize, usize),
+    Leave { id: NodeId, mark: usize },
 }
 
 pub fn exclusive(
@@ -26,7 +27,7 @@ pub fn exclusive(
         return output.into_bytes();
     }
     let prefixes = prefixes(inclusive);
-    let mut scope = inherited(document, element, &prefixes);
+    let ranks = ranks(document, element);
     let mut rendered = Scope::new();
     let mut steps = vec![Step::Enter(element)];
     while let Some(step) = steps.pop() {
@@ -34,15 +35,17 @@ pub fn exclusive(
             Step::Enter(id) if excluded == Some(id) => {}
             Step::Enter(id) => match document.node(id) {
                 Some(Node::Element(current)) => {
-                    let marks = (scope.mark(), rendered.mark());
-                    for declaration in current.declarations() {
-                        let prefix = declaration.prefix().unwrap_or(DEFAULT);
-                        if prefixes.contains(prefix) {
-                            scope.bind(prefix, declaration.uri());
-                        }
-                    }
-                    start(current, &prefixes, &scope, &mut rendered, &mut output);
-                    steps.push(Step::Leave(id, marks.0, marks.1));
+                    let mark = rendered.mark();
+                    // Every element below the apex has its parent in the output, so an
+                    // inclusive prefix it does not redeclare is already rendered with its
+                    // in-scope value.
+                    let inclusive = if id == element {
+                        in_scope(document, id, &prefixes)
+                    } else {
+                        declared(current, &prefixes)
+                    };
+                    start(current, inclusive, &ranks, &mut rendered, &mut output);
+                    steps.push(Step::Leave { id, mark });
                     steps.extend(current.children().iter().rev().copied().map(Step::Enter));
                 }
                 Some(Node::Text(text)) => escape_text(text, &mut output),
@@ -57,14 +60,13 @@ pub fn exclusive(
                 }
                 Some(Node::Comment) | None => {}
             },
-            Step::Leave(id, scope_mark, rendered_mark) => {
+            Step::Leave { id, mark } => {
                 if let Some(current) = document.element(id) {
                     output.push_str("</");
                     qualified(current.prefix(), current.local(), &mut output);
                     output.push('>');
                 }
-                scope.restore(scope_mark);
-                rendered.restore(rendered_mark);
+                rendered.restore(mark);
             }
         }
     }
@@ -111,13 +113,36 @@ fn prefixes(inclusive: &[String]) -> HashSet<&str> {
         .collect()
 }
 
-fn inherited<'a>(
+fn ranks(document: &Document, apex: NodeId) -> HashMap<*const str, usize> {
+    let mut seen = HashSet::new();
+    let mut namespaces: Vec<&str> = document
+        .descendants(apex)
+        .filter_map(|id| document.element(id))
+        .flat_map(Element::attributes)
+        .filter_map(Attribute::namespace)
+        .filter(|namespace| seen.insert(std::ptr::from_ref(*namespace)))
+        .collect();
+    namespaces.sort_unstable();
+    let mut ranks = HashMap::with_capacity(namespaces.len());
+    let mut rank = 0;
+    let mut previous = None;
+    for namespace in namespaces {
+        if previous.is_some_and(|last| last != namespace) {
+            rank += 1;
+        }
+        ranks.insert(std::ptr::from_ref(namespace), rank);
+        previous = Some(namespace);
+    }
+    ranks
+}
+
+fn in_scope<'a>(
     document: &'a Document,
-    element: NodeId,
-    prefixes: &HashSet<&'a str>,
-) -> Scope<&'a str, &'a str> {
+    apex: NodeId,
+    prefixes: &HashSet<&str>,
+) -> Vec<(&'a str, &'a str)> {
     let mut found: HashMap<&str, &str> = HashMap::new();
-    let mut ancestor = document.parent(element);
+    let mut ancestor = Some(apex);
     while let Some(id) = ancestor {
         if let Some(current) = document.element(id) {
             for declaration in current.declarations() {
@@ -129,44 +154,42 @@ fn inherited<'a>(
         }
         ancestor = document.parent(id);
     }
-    let mut scope = Scope::new();
-    for (prefix, uri) in found {
-        scope.bind(prefix, uri);
-    }
-    scope
+    found.into_iter().collect()
+}
+
+fn declared<'a>(element: &'a Element, prefixes: &HashSet<&str>) -> Vec<(&'a str, &'a str)> {
+    element
+        .declarations()
+        .iter()
+        .map(|declaration| (declaration.prefix().unwrap_or(DEFAULT), declaration.uri()))
+        .filter(|(prefix, _)| prefixes.contains(prefix))
+        .collect()
 }
 
 fn start<'a>(
     element: &'a Element,
-    prefixes: &HashSet<&'a str>,
-    scope: &Scope<&'a str, &'a str>,
+    mut candidates: Vec<(&'a str, &'a str)>,
+    ranks: &HashMap<*const str, usize>,
     rendered: &mut Scope<&'a str, &'a str>,
     output: &mut String,
 ) {
-    let mut candidates = vec![(
+    candidates.push((
         element.prefix().unwrap_or(DEFAULT),
         element.namespace().unwrap_or(DEFAULT),
-    )];
+    ));
     for attribute in element.attributes() {
         if let Some(prefix) = attribute.prefix() {
             candidates.push((prefix, attribute.namespace().unwrap_or(DEFAULT)));
         }
     }
-    for prefix in prefixes {
-        match scope.lookup(prefix) {
-            Some(uri) => candidates.push((prefix, uri)),
-            None if prefix.is_empty() => candidates.push((DEFAULT, DEFAULT)),
-            None => {}
-        }
-    }
     candidates.retain(|(prefix, _)| *prefix != XML_PREFIX);
-    candidates.sort_unstable();
+    candidates.sort_unstable_by_key(|(prefix, _)| *prefix);
     candidates.dedup_by_key(|(prefix, _)| *prefix);
     output.push('<');
     qualified(element.prefix(), element.local(), output);
     for (prefix, uri) in candidates {
         let differs = match rendered.lookup(prefix) {
-            Some(current) => *current != uri,
+            Some(current) => !same(current, uri),
             None => !(prefix.is_empty() && uri.is_empty()),
         };
         if !differs {
@@ -182,9 +205,13 @@ fn start<'a>(
         escape_attribute(uri, output);
         output.push('"');
     }
-    let mut attributes: Vec<_> = element.attributes().iter().collect();
+    let mut attributes: Vec<&Attribute> = element.attributes().iter().collect();
     attributes.sort_unstable_by_key(|attribute| {
-        (attribute.namespace().unwrap_or(DEFAULT), attribute.local())
+        let rank = attribute
+            .namespace()
+            .and_then(|namespace| ranks.get(&std::ptr::from_ref(namespace)))
+            .copied();
+        (rank, attribute.local())
     });
     for attribute in attributes {
         output.push(' ');
@@ -194,6 +221,10 @@ fn start<'a>(
         output.push('"');
     }
     output.push('>');
+}
+
+fn same(left: &str, right: &str) -> bool {
+    std::ptr::eq(left, right) || left == right
 }
 
 fn qualified(prefix: Option<&str>, local: &str, output: &mut String) {

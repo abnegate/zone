@@ -1,10 +1,11 @@
 use std::time::{Duration, Instant};
 
-use super::{DEEP, nested};
+use super::{DEEP, WIDE, nested};
 use crate::sso::saml::canonical::{DEFAULT_PREFIX, exclusive};
 use crate::sso::saml::{Document, NodeId, uri};
 
 const BOUND: Duration = Duration::from_secs(10);
+const LONG_NAMESPACE_LENGTH: usize = 1_000_000;
 
 fn document(xml: &str) -> Document {
     Document::parse(xml.as_bytes()).unwrap()
@@ -254,4 +255,65 @@ fn canonicalizes_a_hundred_thousand_levels_without_recursion() {
     let canonical = exclusive(&document, document.root(), None, &[]);
     assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
     assert_eq!(canonical, xml.as_bytes());
+}
+
+/// Exc-c14n section 3 with C14N 1.0 section 2.3: below the apex an inclusive
+/// prefix is rendered only where an element's own declaration changes the
+/// value its nearest output ancestor rendered.
+#[test]
+fn an_inclusive_prefix_redeclared_below_the_apex_renders_where_its_value_changes() {
+    let xml = r#"<r xmlns:p="urn:p" xmlns="urn:d"><s xmlns:q="urn:q"><t xmlns:p="urn:p2" xmlns=""><u xmlns:p="urn:p2" xmlns:q="urn:q"/></t><v xmlns:p="urn:p"/></s></r>"#;
+    assert_eq!(
+        subset(xml, "s", &["p", "q", DEFAULT_PREFIX]),
+        r#"<s xmlns="urn:d" xmlns:p="urn:p" xmlns:q="urn:q"><t xmlns="" xmlns:p="urn:p2"><u></u></t><v></v></s>"#
+    );
+    assert_eq!(
+        subset(xml, "s", &[]),
+        r#"<s xmlns="urn:d"><t xmlns=""><u></u></t><v></v></s>"#
+    );
+}
+
+#[test]
+fn a_hundred_thousand_inclusive_prefixes_over_a_hundred_thousand_elements_finish_in_bounded_time() {
+    let inclusive: Vec<String> = (0..WIDE).map(|index| format!("p{index}")).collect();
+    let xml = format!(r#"<r xmlns:p0="urn:p">{}</r>"#, "<a/>".repeat(WIDE));
+    let document = document(&xml);
+    let started = Instant::now();
+    let canonical = exclusive(&document, document.root(), None, &inclusive);
+    assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
+    assert_eq!(
+        String::from_utf8(canonical).unwrap(),
+        format!(r#"<r xmlns:p0="urn:p">{}</r>"#, "<a></a>".repeat(WIDE))
+    );
+}
+
+/// Exc-c14n section 3 with C14N 1.0 section 2.2: attributes sort by
+/// namespace URI then local name, even when the namespaces share a long
+/// common prefix.
+#[test]
+fn attributes_in_namespaces_with_a_long_common_prefix_sort_in_bounded_time() {
+    let stem = format!("urn:{}", "n".repeat(LONG_NAMESPACE_LENGTH));
+    let mut locals: Vec<String> = (0..WIDE / 2).map(|index| format!("x{index}")).collect();
+    let attributes: String = locals
+        .iter()
+        .map(|local| format!(r#" q:{local}="" p:{local}="""#))
+        .collect();
+    let xml = format!(r#"<a xmlns:p="{stem}1" xmlns:q="{stem}2"{attributes}/>"#);
+    let document = document(&xml);
+    let started = Instant::now();
+    let canonical = exclusive(&document, document.root(), None, &[]);
+    assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
+    locals.sort_unstable();
+    let sorted: String = ["p", "q"]
+        .iter()
+        .flat_map(|prefix| {
+            locals
+                .iter()
+                .map(move |local| format!(r#" {prefix}:{local}="""#))
+        })
+        .collect();
+    assert_eq!(
+        String::from_utf8(canonical).unwrap(),
+        format!(r#"<a xmlns:p="{stem}1" xmlns:q="{stem}2"{sorted}></a>"#)
+    );
 }

@@ -221,7 +221,10 @@ fn algorithm(document: &Document, method: NodeId) -> Result<&str, Refusal> {
 
 fn decoded(document: &Document, element: NodeId) -> Option<Vec<u8>> {
     let text = document.text(element)?;
-    let compact: String = text.chars().filter(|c| !is_whitespace(*c)).collect();
+    let compact: String = text
+        .chars()
+        .filter(|character| !is_whitespace(*character))
+        .collect();
     STANDARD
         .decode(compact)
         .ok()
