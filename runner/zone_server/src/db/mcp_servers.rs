@@ -292,10 +292,13 @@ async fn authorize_organization(
     user: Uuid,
     permission: Permission,
 ) -> McpServerResult<()> {
-    match organization_members::lock_membership(connection, organization, user).await? {
-        Some(membership) if membership.grant.allows(permission) => Ok(()),
-        Some(_) => Err(McpServerError::Forbidden(ORGANIZATION_FORBIDDEN)),
-        None => Err(McpServerError::NotFound(ORGANIZATION_NOT_FOUND)),
+    let membership = organization_members::lock_membership(connection, organization, user).await?;
+    match membership.map(|membership| membership.grant) {
+        Some(grant) if grant.allows(permission) => Ok(()),
+        Some(grant) if grant.allows(Permission::OrganizationRead) => {
+            Err(McpServerError::Forbidden(ORGANIZATION_FORBIDDEN))
+        }
+        _ => Err(McpServerError::NotFound(ORGANIZATION_NOT_FOUND)),
     }
 }
 
@@ -328,10 +331,13 @@ async fn authorize_workspace(
     } else {
         Permission::WorkspaceRead
     };
-    match workspace_members::lock_membership(connection, workspace, user).await? {
-        Some(membership) if membership.grant.allows(required) => Ok(()),
-        Some(_) => Err(McpServerError::Forbidden(WORKSPACE_FORBIDDEN)),
-        None => Err(McpServerError::NotFound(WORKSPACE_NOT_FOUND)),
+    let membership = workspace_members::lock_membership(connection, workspace, user).await?;
+    match membership.map(|membership| membership.grant) {
+        Some(grant) if grant.allows(required) => Ok(()),
+        Some(grant) if grant.allows(Permission::WorkspaceRead) => {
+            Err(McpServerError::Forbidden(WORKSPACE_FORBIDDEN))
+        }
+        _ => Err(McpServerError::NotFound(WORKSPACE_NOT_FOUND)),
     }
 }
 
@@ -606,7 +612,11 @@ pub async fn delete_authorized(
 }
 
 /// Whether `user` may manage the MCP servers of `organization`.
-pub async fn authorize_admin(pool: &PgPool, organization: Uuid, user: Uuid) -> McpServerResult<()> {
+pub async fn authorize_update(
+    pool: &PgPool,
+    organization: Uuid,
+    user: Uuid,
+) -> McpServerResult<()> {
     let mut transaction = pool.begin().await?;
     authorize_organization(
         &mut transaction,
