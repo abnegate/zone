@@ -606,8 +606,8 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let expected = bots::expected(config, &rows, &comments, &threads);
     let reviews = submitted_reviews(pr, &step.reference, &step.token, &expected).await;
-    let mut waiting: Vec<_> = Vec::new();
-    for kind in expected {
+    let mut waiting: Vec<SignalKind> = Vec::new();
+    for kind in &expected {
         // A bot's verdict on a head moves as its threads get resolved, so it
         // is read again every tick and recorded again only when it changed;
         // a thread that is gone from the new reading counts as addressed.
@@ -617,7 +617,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             .max_by_key(|row| (row.round, row.created_at));
         let Some(round) = bots::round(kind, &comments, &reviews, &threads, &head) else {
             if previous.is_none() {
-                waiting.push(kind);
+                waiting.push(kind.clone());
             }
             continue;
         };
@@ -651,7 +651,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 round: next,
                 head: &head,
                 reviewer_kind: ReviewerKind::Bot,
-                reviewer: round.reviewer,
+                reviewer: &round.reviewer,
                 author_model: None,
                 same_model: false,
                 verdict: round.verdict,
@@ -685,10 +685,21 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             };
             return step.set(Stage::AwaitingReviews, Some(&reason)).await;
         }
-        if !asked {
-            for kind in &waiting {
+        // A bot whose review command this build does not know is waited for
+        // and never prodded: a guessed command only posts a comment that bot
+        // ignores, and the grace still runs out on it.
+        let askable: Vec<&SignalKind> = waiting
+            .iter()
+            .filter(|kind| kind.trigger_command().is_some())
+            .collect();
+        if !asked && !askable.is_empty() {
+            let asking: Vec<String> = askable
+                .iter()
+                .map(|kind| bots::display_name(kind.reviewer()))
+                .collect();
+            for command in askable.iter().filter_map(|kind| kind.trigger_command()) {
                 if let Err(error) = pr
-                    .post_issue_comment(&step.reference, &step.token, kind.trigger_command())
+                    .post_issue_comment(&step.reference, &step.token, command)
                     .await
                 {
                     tracing::warn!(task_id = %step.task.task_id, %error, "Could not ask a review bot to review");
@@ -706,7 +717,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                     Stage::AwaitingReviews,
                     Some(&format!(
                         "asked {} to review {}",
-                        names.join(", "),
+                        asking.join(", "),
                         short(&head)
                     )),
                 )

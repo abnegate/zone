@@ -1,11 +1,16 @@
 //! What the review bots already on a repository said about a change.
 //!
-//! CodeRabbit and Greptile review a pull request on their own schedule and
-//! leave a summary comment naming the head they read; `services::github::readiness`
-//! already knows how to read those. Here a bot's summary on the current head
-//! becomes a round of review like any other -- a review by a model that did
-//! not write the change -- and its unresolved threads become findings a
-//! fix-up run has to answer.
+//! A review bot reviews a pull request on its own schedule and leaves a
+//! summary comment naming the head it read; `services::github::readiness`
+//! knows how to read those, by vendor knowledge for the bots this build knows
+//! and by the conventions they share for every other. Here a bot's summary on
+//! the current head becomes a round of review like any other -- a review by a
+//! model that did not write the change -- and its unresolved threads become
+//! findings a fix-up run has to answer.
+//!
+//! Which bot that is, is the repository's business. A bot nobody configured is
+//! expected once it has shown itself on the pull request, so adopting a new
+//! reviewer takes no change here.
 
 use crate::config::AutoProjectConfig;
 use crate::db::auto_projects::Finding;
@@ -29,11 +34,11 @@ const DETAIL_CHARS: usize = 800;
 const SUMMARY_CHARS: usize = 600;
 
 /// The bots this deployment reads: the configured ones, or every bot the
-/// build knows. An unrecognised name is logged and skipped rather than
-/// silently waited for.
+/// build knows plus whichever others turn up on the pull request. A blank
+/// name is logged and skipped rather than silently waited for.
 pub fn recognised(config: &AutoProjectConfig) -> Vec<SignalKind> {
     if config.review_bots.is_empty() {
-        return SignalKind::ALL.to_vec();
+        return SignalKind::known().to_vec();
     }
     // Aliases (`coderabbit`, `coderabbitai`) parse to one kind; naming both
     // must not make the pipeline wait for, trigger or record the bot twice.
@@ -42,17 +47,14 @@ pub fn recognised(config: &AutoProjectConfig) -> Vec<SignalKind> {
         match SignalKind::parse(name) {
             Some(kind) if !kinds.contains(&kind) => kinds.push(kind),
             Some(_) => {}
-            None => tracing::warn!(
-                name,
-                "ZONE_AUTO_REVIEW_BOTS names a review bot this build does not know"
-            ),
+            None => tracing::warn!("ZONE_AUTO_REVIEW_BOTS names a review bot with a blank name"),
         }
     }
     kinds
 }
 
 /// Whether a comment's author is this bot.
-fn authored(kind: SignalKind, author: &str) -> bool {
+fn authored(kind: &SignalKind, author: &str) -> bool {
     kind.as_signal().authored(author)
 }
 
@@ -60,7 +62,9 @@ fn authored(kind: SignalKind, author: &str) -> bool {
 ///
 /// A bot the operator named is always expected. Otherwise a bot is expected
 /// once it has shown itself: a row from an earlier round, a summary on the
-/// conversation, or a thread on the diff.
+/// conversation, or a thread on the diff. A bot this build has no vendor
+/// knowledge of shows itself the same way, through the `[bot]` login GitHub
+/// puts on its comments, and is read generically from there.
 pub fn expected(
     config: &AutoProjectConfig,
     prior: &[ReviewRow],
@@ -68,7 +72,7 @@ pub fn expected(
     threads: &[ReviewThreadRecord],
 ) -> Vec<SignalKind> {
     let explicit = !config.review_bots.is_empty();
-    recognised(config)
+    let mut expected: Vec<SignalKind> = recognised(config)
         .into_iter()
         .filter(|kind| {
             explicit
@@ -77,21 +81,44 @@ pub fn expected(
                     .any(|row| row.is_bot() && row.reviewer == kind.reviewer())
                 || comments
                     .iter()
-                    .any(|comment| authored(*kind, &comment.author))
+                    .any(|comment| authored(kind, &comment.author))
                 || threads.iter().any(|thread| {
                     thread
                         .comments
                         .iter()
-                        .any(|comment| authored(*kind, &comment.author))
+                        .any(|comment| authored(kind, &comment.author))
                 })
         })
-        .collect()
+        .collect();
+    if explicit {
+        return expected;
+    }
+    for comment in comments {
+        let Some(kind) = unnamed(&comment.author) else {
+            continue;
+        };
+        if !expected.contains(&kind) {
+            expected.push(kind);
+        }
+    }
+    expected
+}
+
+/// The bot behind a comment's author, when GitHub marked that author a bot.
+///
+/// GitHub suffixes a bot's login with `[bot]` on the REST responses these
+/// comments are read from, which is the only thing that separates a bot from a
+/// person here. A person's comment never starts a round of bot review.
+fn unnamed(author: &str) -> Option<SignalKind> {
+    let login = author.trim();
+    login.strip_suffix("[bot]")?;
+    SignalKind::parse(login)
 }
 
 /// One bot's review of one head, ready to record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BotRound {
-    pub reviewer: &'static str,
+    pub reviewer: String,
     pub verdict: Verdict,
     pub summary: String,
     pub findings: Vec<Finding>,
@@ -114,7 +141,7 @@ struct Score {
 /// range: a rate-limited CodeRabbit still posts a walkthrough whose range
 /// names the new head. A head with neither is one the bot has not answered.
 pub fn round(
-    kind: SignalKind,
+    kind: &SignalKind,
     comments: &[IssueComment],
     reviews: &[ReviewRecord],
     threads: &[ReviewThreadRecord],
@@ -151,13 +178,16 @@ pub fn round(
             }
         })
         .collect();
-    let verdict = if score.confidence.satisfies(signal.required()) && findings.is_empty() {
+    // The bar is the one for the scale this bot published on: its own, where
+    // this build knows it, and full marks where it does not.
+    let required = signal.requirement(Some(score.confidence));
+    let verdict = if score.confidence.satisfies(required) && findings.is_empty() {
         Verdict::Approve
     } else {
         Verdict::RequestChanges
     };
     Some(BotRound {
-        reviewer: kind.reviewer(),
+        reviewer: kind.reviewer().to_string(),
         verdict,
         summary: score.text,
         findings,
@@ -200,7 +230,7 @@ fn summarized(
 
 /// The score in the bot's latest review submitted on `head` that carries one.
 fn reviewed(
-    kind: SignalKind,
+    kind: &SignalKind,
     signal: &dyn ReviewSignal,
     reviews: &[ReviewRecord],
     head: &CommitSha,
@@ -256,11 +286,13 @@ fn excerpt(text: &str, limit: usize) -> String {
     cut
 }
 
-/// The display name a notice uses for a bot.
+/// The display name a notice uses for a bot. A bot this build has no vendor
+/// knowledge of is named by its own account, as GitHub writes it.
 pub fn display_name(reviewer: &str) -> String {
     match SignalKind::parse(reviewer) {
         Some(SignalKind::CodeRabbit) => "CodeRabbit".to_string(),
         Some(SignalKind::Greptile) => "Greptile".to_string(),
+        Some(SignalKind::Other(account)) => account,
         None => reviewer.to_string(),
     }
 }
@@ -278,15 +310,23 @@ mod tests {
             review_bots: vec![
                 "coderabbit".to_string(),
                 "coderabbitai".to_string(),
-                "unknown-bot".to_string(),
+                "appwrite".to_string(),
+                "   ".to_string(),
             ],
             ..Default::default()
         };
-        assert_eq!(recognised(&config), vec![SignalKind::CodeRabbit]);
+        assert_eq!(
+            recognised(&config),
+            vec![
+                SignalKind::CodeRabbit,
+                SignalKind::Other("appwrite".to_string())
+            ],
+            "a bot this build has no vendor knowledge of is still waited for; a blank name is not"
+        );
         assert_eq!(
             recognised(&AutoProjectConfig::default()),
-            SignalKind::ALL.to_vec(),
-            "no configuration means every bot the build knows"
+            SignalKind::known().to_vec(),
+            "no configuration starts from every bot the build knows"
         );
     }
 
@@ -325,7 +365,7 @@ mod tests {
             ),
         )];
         let threads = vec![thread("coderabbitai", false)];
-        let round = round(SignalKind::CodeRabbit, &comments, &[], &threads, HEAD).unwrap();
+        let round = round(&SignalKind::CodeRabbit, &comments, &[], &threads, HEAD).unwrap();
         assert_eq!(round.reviewer, "coderabbitai");
         assert_eq!(round.verdict, Verdict::RequestChanges);
         assert_eq!(round.findings.len(), 1);
@@ -341,7 +381,7 @@ mod tests {
             "coderabbitai",
             "Actionable comments posted: 0\n\nReviewed between 1111111111111111111111111111111111111111 and 2222222222222222222222222222222222222222",
         )];
-        assert!(round(SignalKind::CodeRabbit, &stale, &[], &[], HEAD).is_none());
+        assert!(round(&SignalKind::CodeRabbit, &stale, &[], &[], HEAD).is_none());
         let clean = vec![comment(
             "coderabbitai",
             &format!(
@@ -349,7 +389,7 @@ mod tests {
             ),
         )];
         let round = round(
-            SignalKind::CodeRabbit,
+            &SignalKind::CodeRabbit,
             &clean,
             &[],
             &[thread("coderabbitai", true)],
@@ -371,7 +411,7 @@ mod tests {
             include_str!("fixtures/coderabbit-review-limit-reached.md"),
         )];
         assert_eq!(
-            round(SignalKind::CodeRabbit, &comments, &[], &[], head),
+            round(&SignalKind::CodeRabbit, &comments, &[], &[], head),
             None,
             "a summary that names the head but carries no review is not a review of the head"
         );
@@ -415,7 +455,7 @@ mod tests {
     #[test]
     fn a_paid_coderabbit_review_of_the_head_with_an_open_thread_requests_changes() {
         let round = round(
-            SignalKind::CodeRabbit,
+            &SignalKind::CodeRabbit,
             &[unscored_walkthrough()],
             &paid_reviews(PAID_REVIEW, PAID_HEAD),
             &[thread("coderabbitai", false)],
@@ -440,7 +480,7 @@ mod tests {
             "Actionable comments posted: 0",
         );
         let round = round(
-            SignalKind::CodeRabbit,
+            &SignalKind::CodeRabbit,
             &[],
             &paid_reviews(&clean, PAID_HEAD),
             &[thread("coderabbitai", true)],
@@ -460,7 +500,7 @@ mod tests {
         )];
         assert_eq!(
             round(
-                SignalKind::CodeRabbit,
+                &SignalKind::CodeRabbit,
                 &comments,
                 &paid_reviews(PAID_REVIEW, PAID_HEAD),
                 &[thread("coderabbitai", false)],
@@ -480,7 +520,7 @@ mod tests {
             HEAD,
             "2026-09-28T02:51:09Z",
         )];
-        assert_eq!(round(SignalKind::Greptile, &[], &reviews, &[], HEAD), None);
+        assert_eq!(round(&SignalKind::Greptile, &[], &reviews, &[], HEAD), None);
     }
 
     #[test]
@@ -498,8 +538,43 @@ mod tests {
         config.review_bots = vec!["coderabbit".into(), "nobody".into()];
         assert_eq!(
             expected(&config, &[], &[], &[]),
-            vec![SignalKind::CodeRabbit]
+            vec![
+                SignalKind::CodeRabbit,
+                SignalKind::Other("nobody".to_string())
+            ],
+            "a deployment that names a bot waits for it, known here or not"
         );
         assert_eq!(display_name("greptile-apps"), "Greptile");
+        assert_eq!(display_name("appwrite[bot]"), "appwrite");
+    }
+
+    #[test]
+    fn a_bot_nobody_configured_is_expected_once_it_comments() {
+        let config = AutoProjectConfig::default();
+        let summary = format!("Confidence Score: 5/5\n\nLast reviewed commit: {HEAD}");
+        assert_eq!(
+            expected(&config, &[], &[comment("appwrite[bot]", &summary)], &[]),
+            vec![SignalKind::Other("appwrite".to_string())],
+            "a bot shows itself by commenting under a login GitHub marked a bot's"
+        );
+        assert!(
+            expected(&config, &[], &[comment("a-colleague", &summary)], &[]).is_empty(),
+            "a person's comment never makes a bot expected"
+        );
+
+        let kind = SignalKind::Other("appwrite".to_string());
+        let comments = vec![comment("appwrite[bot]", &summary)];
+        let clean = round(&kind, &comments, &[], &[thread("appwrite", true)], HEAD)
+            .expect("the bot summarised this head");
+        assert_eq!(clean.reviewer, "appwrite");
+        assert_eq!(clean.verdict, Verdict::Approve);
+        assert!(clean.findings.is_empty());
+        assert_eq!(clean.external_id.as_deref(), Some("41"));
+
+        let open = round(&kind, &comments, &[], &[thread("appwrite", false)], HEAD)
+            .expect("the bot summarised this head");
+        assert_eq!(open.verdict, Verdict::RequestChanges);
+        assert_eq!(open.findings.len(), 1);
+        assert_eq!(open.findings[0].reviewer.as_deref(), Some("appwrite"));
     }
 }

@@ -502,10 +502,18 @@ fn a_configured_review_signal_set_is_validated_when_the_source_is_read() {
             .reviewers(),
         vec!["greptile-apps".to_string()]
     );
-    let error = Github::new(configuration(Some(vec!["sonarcloud".into()])), &config)
+    assert_eq!(
+        Github::new(configuration(Some(vec!["sonarcloud".into()])), &config)
+            .unwrap()
+            .signals
+            .reviewers(),
+        vec!["sonarcloud".to_string()],
+        "a bot this build has no vendor knowledge of is read generically, not refused"
+    );
+    let error = Github::new(configuration(Some(vec!["  ".into()])), &config)
         .err()
-        .expect("an unrecognised review signal is rejected");
-    assert!(error.contains("sonarcloud"), "{error}");
+        .expect("a blank review signal name is rejected");
+    assert!(error.contains("blank"), "{error}");
 }
 
 #[tokio::test]
