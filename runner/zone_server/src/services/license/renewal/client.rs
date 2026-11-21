@@ -86,17 +86,25 @@ impl Client {
 }
 
 async fn read(response: Response) -> Answer {
-    let body = match abnegate_http::read_capped(response, BODY_LIMIT).await {
-        Ok(body) => body,
+    match abnegate_http::read_capped(response, BODY_LIMIT).await {
+        Ok(body) => parse(&body),
         Err(error) => {
             tracing::warn!(%error, "Could not read the license server's answer");
-            return Answer::Unreachable;
+            Answer::Unreachable
         }
-    };
-    match serde_json::from_slice::<Renewed>(&body) {
+    }
+}
+
+fn parse(body: &[u8]) -> Answer {
+    match serde_json::from_slice::<Renewed>(body) {
         Ok(renewed) => Answer::Renewed(renewed.license),
         Err(error) => {
-            tracing::warn!(%error, "The license server's answer is not a renewed key");
+            tracing::warn!(
+                category = ?error.classify(),
+                line = error.line(),
+                column = error.column(),
+                "The license server's answer is not a renewed key"
+            );
             Answer::Malformed
         }
     }
