@@ -139,15 +139,12 @@ pub struct WorkspaceScope {
 }
 
 /// Whether `actor` may act on the workspace as a task initiator: an active
-/// member of at least member standing. The tool set a run is built with
-/// keys on this, and so does everything the prompt offers only because that
-/// tool set has it.
+/// member holding `workspace:write`. The tool set a run is built with keys on
+/// this, and so does everything the prompt offers only because that tool set
+/// has it.
 pub(crate) async fn task_writer(state: &AppState, workspace: Uuid, actor: Uuid) -> bool {
-    match workspace_members::get_member(state.db(), workspace, actor).await {
-        Ok(Some(member)) => {
-            member.is_active && member.role >= workspace_members::WorkspaceRole::Member
-        }
-        Ok(None) => false,
+    match workspace_members::can_write(state.db(), workspace, actor).await {
+        Ok(permitted) => permitted,
         Err(error) => {
             tracing::warn!(%error, "Could not authorize task actor");
             false
