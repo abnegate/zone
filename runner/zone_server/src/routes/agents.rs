@@ -22,9 +22,8 @@ use uuid::Uuid;
 use zone_enterprise::policy::{Denial, Effective};
 
 use crate::auth::jwt::Claims;
-use crate::auth::{AuthSession, AuthUser};
+use crate::auth::{AuthSession, AuthUser, Permission};
 use crate::db::ai_settings::{self, AccessError};
-use crate::db::organization_members::OrgRole;
 use crate::routes::policy::asked;
 use crate::services::login::caller::Caller;
 use crate::services::login::status::{AgentStatus, Viewer};
@@ -332,7 +331,7 @@ async fn viewer(state: &AppState, claims: &Claims, organization: Uuid) -> Result
         &mut connection,
         organization,
         user,
-        OrgRole::Admin,
+        Permission::AgentLoginsUpdate,
     )
     .await
     {
