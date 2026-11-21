@@ -265,9 +265,9 @@ unless:
 
 One instance ingests at a time, under the database advisory lock
 `SPEND_LOCK`. Each run reads `GET /spend/logs/v2` 1,000 rows a page, oldest
-first, until a page comes back short. LiteLLM stops counting its `total` at 10,000, so Zone never
-relies on it. Zone stores only the rows sent under one of its keys, by
-`request_id`, and drops the rest.
+first, until a page comes back short. LiteLLM stops counting its `total` at
+10,000, so Zone never relies on it. Zone stores only the rows sent under one
+of its keys, by `request_id`, and drops the rest.
 
 ### The overlap
 
@@ -403,7 +403,9 @@ next run.
 Requests that send nothing to LiteLLM aren't refused: creating a chat
 (`POST /api/chats`), changing its model (`PUT /api/chats/{id}`) and opening it
 (`GET /api/chats/{id}`) work as usual, with the chat's context, while a budget
-is used up.
+is used up. So do listing a workspace's models
+(`GET /api/models?workspace_id={id}`) and choosing a task's model
+(`PUT /api/tasks/{id}`).
 
 The message says whose budget is used up:
 
@@ -554,12 +556,12 @@ another organization gives an empty report.
 | Field | Meaning |
 |---|---|
 | `report` | `null` while the server doesn't enforce spend. |
-| `ingested_through` | Where the last successful ingest run ended, or `null` before the first. |
+| `ingested_through` | The cursor: how far ingestion has read, or `null` before ingestion has read a page. |
 | `total` | Spend, requests and tokens over the range. |
 | `daily` | One entry per UTC day of the range, with days that had nothing as zeros. |
 | `workspaces` | Per workspace. A `null` ID is a deleted workspace. |
 | `users` | Per person. A `null` ID is Automation when `automated` is `true`, and a deleted member, shown as **Former member**, when it's `false`. |
-| `models` | Per model: LiteLLM's `model_group`, or `model` without one. |
+| `models` | Per model: LiteLLM's `model_group`; else `model`; else `unknown`. |
 | `providers` | Per provider: LiteLLM's `custom_llm_provider`, or `unknown`. |
 | `uncounted` | The [reasons](#what-isnt-counted) traffic in the organization goes uncounted. |
 
