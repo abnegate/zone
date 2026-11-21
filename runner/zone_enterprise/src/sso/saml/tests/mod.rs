@@ -1,5 +1,6 @@
 mod canonical;
 mod document;
+mod signature;
 mod testing;
 
 use crate::sso::saml::{Malformed, Refusal};

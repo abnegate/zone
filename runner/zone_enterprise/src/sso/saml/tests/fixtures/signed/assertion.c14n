@@ -1,0 +1,16 @@
+<saml2:Assertion xmlns:saml2="urn:oasis:names:tc:SAML:2.0:assertion" ID="_fixture-assertion-8a02" IssueInstant="2026-11-21T10:00:00Z" Version="2.0">
+      <saml2:Issuer>https://idp.example.com/metadata</saml2:Issuer>
+      <saml2:Subject>
+        <saml2:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">jane@acme.com</saml2:NameID>
+        <saml2:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+          <saml2:SubjectConfirmationData InResponseTo="_request-7f3c9a" NotOnOrAfter="2026-11-21T10:05:00Z" Recipient="https://zone.example.com/api/auth/sso/saml/acs"></saml2:SubjectConfirmationData>
+        </saml2:SubjectConfirmation>
+      </saml2:Subject>
+      <saml2:Conditions NotBefore="2026-11-21T09:59:30Z" NotOnOrAfter="2026-11-21T10:05:00Z">
+        <saml2:AudienceRestriction><saml2:Audience>https://zone.example.com/api/auth/sso/saml/metadata</saml2:Audience></saml2:AudienceRestriction>
+      </saml2:Conditions>
+      <saml2:AuthnStatement AuthnInstant="2026-11-21T10:00:00Z" SessionIndex="_fixture-assertion-8a02"><saml2:AuthnContext><saml2:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml2:AuthnContextClassRef></saml2:AuthnContext></saml2:AuthnStatement>
+      <saml2:AttributeStatement>
+        <saml2:Attribute Name="email" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"><saml2:AttributeValue xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:string">jane@acme.com</saml2:AttributeValue></saml2:Attribute>
+      </saml2:AttributeStatement>
+  </saml2:Assertion>
