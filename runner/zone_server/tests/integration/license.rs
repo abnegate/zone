@@ -968,14 +968,9 @@ async fn the_last_renewal_attempt_is_reported_until_another_key_is_set() {
         .assert_status(StatusCode::OK);
     let attempted_at = Utc::now().trunc_subsecs(0) - TimeDelta::hours(2);
     assert!(
-        license_renewal::record(
-            fixture.pool(),
-            &key,
-            Outcome::Unreachable.as_str(),
-            attempted_at
-        )
-        .await
-        .unwrap()
+        license_renewal::record(fixture.pool(), &key, Outcome::Unreachable, attempted_at)
+            .await
+            .unwrap()
     );
 
     let read = fixture.get(&admin.token).await;
@@ -1010,7 +1005,7 @@ async fn removing_a_key_with_a_recorded_attempt_reports_no_renewal() {
         .put(&admin.token, &key)
         .await
         .assert_status(StatusCode::OK);
-    license_renewal::record(fixture.pool(), &key, Outcome::Ended.as_str(), Utc::now())
+    license_renewal::record(fixture.pool(), &key, Outcome::Ended, Utc::now())
         .await
         .unwrap();
 
@@ -1028,7 +1023,7 @@ async fn a_stored_key_that_no_longer_verifies_reports_no_renewal_whatever_was_re
     let admin = fixture.register().await;
     let key = retired();
     licenses::replace(fixture.pool(), &key).await.unwrap();
-    license_renewal::record(fixture.pool(), &key, Outcome::Refused.as_str(), Utc::now())
+    license_renewal::record(fixture.pool(), &key, Outcome::Refused, Utc::now())
         .await
         .unwrap();
 

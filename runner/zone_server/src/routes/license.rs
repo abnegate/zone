@@ -123,8 +123,8 @@ pub struct RenewalResponse {
 }
 
 impl RenewalResponse {
-    pub fn new(license: &License, enabled: bool, attempt: Option<LicenseRenewal>) -> Self {
-        let mode = Mode::of(license, enabled);
+    pub fn new(license: &License, running: bool, attempt: Option<LicenseRenewal>) -> Self {
+        let mode = Mode::of(license, running);
         let Some(attempt) = attempt else {
             return Self {
                 mode,
@@ -193,7 +193,7 @@ fn counted(seats: DbResult<Seats>, license: Option<&License>) -> SeatsResponse {
 
 fn attempted(renewal: DbResult<Option<LicenseRenewal>>) -> Option<LicenseRenewal> {
     renewal.unwrap_or_else(|error| {
-        tracing::error!(%error, "Could not read the renewal status; reporting it as unknown");
+        tracing::warn!(%error, "Could not read the license renewal status; reporting no attempt");
         None
     })
 }
@@ -212,7 +212,7 @@ async fn renewal(state: &AppState, license: Option<&License>) -> Option<RenewalR
     let attempt = attempted(license_renewal::get(state.db()).await);
     Some(RenewalResponse::new(
         license,
-        state.config().license_renewal.enabled,
+        state.renewal().is_some(),
         attempt,
     ))
 }
@@ -307,6 +307,7 @@ mod tests {
 
     use super::*;
     use crate::services::license::LAPSED;
+    use crate::state::{test_config, unreachable_pool};
 
     const KEY_ID: &str = "test-1";
     const SEED: [u8; 32] = [0x11; 32];
@@ -625,6 +626,25 @@ mod tests {
             attempted(Ok(Some(attempt("current")))),
             Some(attempt("current"))
         );
+    }
+
+    #[tokio::test]
+    async fn the_renewal_mode_follows_whether_the_sweep_can_run() {
+        let license = subscribed();
+        let running = AppState::new(test_config(), unreachable_pool(), None);
+        let stopped = AppState::new(test_config(), unreachable_pool(), None);
+        stopped.without_renewal();
+
+        for (state, mode) in [(running, Mode::Automatic), (stopped, Mode::Disabled)] {
+            state.disable_mcp();
+            let renewal = renewal(&state, Some(&license))
+                .await
+                .expect("a verified license is answered with its renewal");
+
+            assert_eq!(renewal.mode, mode);
+            assert_eq!(renewal.attempted_at, None);
+            assert_eq!(renewal.outcome, None);
+        }
     }
 
     #[test]

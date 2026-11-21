@@ -1,7 +1,10 @@
+use std::io::Write;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use reqwest::header::{CONTENT_TYPE, LOCATION, USER_AGENT as USER_AGENT_HEADER};
 use serde_json::{Value, json};
+use tracing::Level;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -11,8 +14,39 @@ const RENEW_PATH: &str = "/licenses/renew";
 const ELSEWHERE_PATH: &str = "/elsewhere";
 const KEY: &str = "zone-license-v1.current";
 const RENEWED: &str = "zone-license-v1.renewed";
+const SECRET: &str = "zone-license-v1.secret-key-text";
 const SHORT_TIMEOUT: Duration = Duration::from_millis(200);
 const SLOW_ANSWER: Duration = Duration::from_secs(3);
+
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Captured {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("the captured log")
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn logged<T>(work: impl FnOnce() -> T) -> (T, String) {
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_max_level(Level::DEBUG)
+        .with_ansi(false)
+        .finish();
+    let value = tracing::subscriber::with_default(subscriber, work);
+    let log = String::from_utf8_lossy(&captured.0.lock().expect("the captured log")).into_owned();
+    (value, log)
+}
 
 fn settings(server: &MockServer) -> Settings {
     Settings {
@@ -53,10 +87,33 @@ fn the_body_limit_is_sixty_four_kibibytes() {
 }
 
 #[test]
-fn a_client_builds_with_the_system_proxy() {
-    let settings = Settings::default();
-    assert!(Client::new(&settings, Proxy::System).is_ok());
-    assert!(Client::new(&settings, Proxy::Direct).is_ok());
+fn a_client_is_configured_only_while_renewal_is_on() {
+    assert!(Client::configured(&Settings::default()).is_some());
+    let off = Settings {
+        enabled: false,
+        ..Settings::default()
+    };
+    assert!(Client::configured(&off).is_none());
+}
+
+#[test]
+fn a_body_that_does_not_parse_is_logged_without_its_contents() {
+    for body in [
+        format!("\"{SECRET}\""),
+        format!("{{\"license\": [\"{SECRET}\"]}}"),
+        format!("{{\"license\": \"{SECRET}"),
+    ] {
+        let (answer, log) = logged(|| parse(body.as_bytes()));
+
+        assert_eq!(answer, Answer::Malformed, "{body}");
+        assert!(log.contains("WARN"), "{log}");
+        assert!(
+            log.contains("The license server's answer is not a renewed key"),
+            "{log}"
+        );
+        assert!(log.contains("category="), "{log}");
+        assert!(!log.contains(SECRET), "the log quotes the body: {log}");
+    }
 }
 
 #[tokio::test]

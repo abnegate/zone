@@ -34,6 +34,7 @@ use crate::pull::PullRegistry;
 use crate::services::chat::pull_request::StatusCache;
 use crate::services::github::snapshots::Snapshots;
 use crate::services::github_app::Provider;
+use crate::services::license::renewal;
 use crate::services::license::{Licenses, Stored};
 use crate::services::mail::AccountMail;
 use crate::services::mcp_servers::hubs::Hubs;
@@ -133,6 +134,7 @@ struct AppStateInner {
     pub github: OnceLock<Provider>,
     pub network_denial: OnceCell<NetworkDenial>,
     pub licenses: Licenses,
+    pub renewal: OnceLock<Option<renewal::Client>>,
     pub oidc: Oidc,
     /// Terminal frames for task runs, for sockets and waits to subscribe to.
     /// The process's one instance, which the writers that finish a run also
@@ -265,6 +267,7 @@ impl AppState {
                 github: OnceLock::new(),
                 network_denial: OnceCell::new(),
                 licenses: Licenses::new(),
+                renewal: OnceLock::new(),
                 oidc: Oidc::new(),
                 task_progress: task_progress::progress(),
                 device_connections: DashMap::new(),
@@ -468,6 +471,26 @@ impl AppState {
 
     pub fn licenses(&self) -> &Licenses {
         &self.inner.licenses
+    }
+
+    /// The client the renewal sweep asks the license server with, decided once so the sweep and
+    /// the renewal mode the license API reports agree. `None` when renewal is off or its client
+    /// did not build, and nothing renews.
+    pub fn renewal(&self) -> Option<&renewal::Client> {
+        self.inner
+            .renewal
+            .get_or_init(|| renewal::Client::configured(&self.inner.config.license_renewal))
+            .as_ref()
+    }
+
+    /// Stands in for a renewal client that did not build. Panics if [`Self::renewal`] already
+    /// decided.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn without_renewal(&self) {
+        assert!(
+            self.inner.renewal.set(None).is_ok(),
+            "without_renewal must run before the first renewal() call"
+        );
     }
 
     pub fn oidc(&self) -> &Oidc {

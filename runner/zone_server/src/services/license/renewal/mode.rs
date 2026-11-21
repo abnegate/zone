@@ -10,8 +10,8 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn of(license: &License, enabled: bool) -> Self {
-        match (license.subscription(), enabled) {
+    pub fn of(license: &License, running: bool) -> Self {
+        match (license.subscription(), running) {
             (None, _) => Self::Manual,
             (Some(_), true) => Self::Automatic,
             (Some(_), false) => Self::Disabled,

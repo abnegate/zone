@@ -86,6 +86,66 @@ fn a_metadata_address_is_refused() {
 }
 
 #[test]
+fn a_url_with_credentials_is_refused() {
+    for refused in [
+        "https://user:secret@licenses.example.com/renew",
+        "http://user@localhost:8080/renew",
+    ] {
+        assert_eq!(
+            Settings::from_lookup(lookup(&[(URL_VARIABLE, refused)])),
+            Err(SettingsError::Credentials),
+            "{refused}"
+        );
+    }
+}
+
+#[test]
+fn plain_http_to_a_public_host_is_refused() {
+    for refused in [
+        "http://licenses.bitecode.ltd/licenses/renew",
+        "http://8.8.8.8/licenses/renew",
+        "http://[2606:4700::6810:84e5]/licenses/renew",
+    ] {
+        assert_eq!(
+            Settings::from_lookup(lookup(&[(URL_VARIABLE, refused)])),
+            Err(SettingsError::Plaintext),
+            "{refused}"
+        );
+    }
+}
+
+#[test]
+fn plain_http_to_a_loopback_or_private_host_is_accepted() {
+    for accepted in [
+        "http://127.0.0.1:8080/licenses/renew",
+        "http://localhost:8080/licenses/renew",
+        "http://[::1]:8080/licenses/renew",
+        "http://10.0.0.5/licenses/renew",
+        "http://172.16.4.2/licenses/renew",
+        "http://192.168.1.20/licenses/renew",
+        "http://[fd12:3456::1]/licenses/renew",
+        "http://signer:8080/licenses/renew",
+        CUSTOM_URL,
+    ] {
+        let settings = Settings::from_lookup(lookup(&[(URL_VARIABLE, accepted)]))
+            .unwrap_or_else(|error| panic!("{accepted}: {error}"));
+        assert_eq!(settings.url.as_str(), accepted);
+    }
+}
+
+#[test]
+fn https_to_a_public_host_is_accepted() {
+    for accepted in [
+        "https://signer.example.com/licenses/renew",
+        "https://8.8.8.8/licenses/renew",
+    ] {
+        let settings = Settings::from_lookup(lookup(&[(URL_VARIABLE, accepted)]))
+            .unwrap_or_else(|error| panic!("{accepted}: {error}"));
+        assert_eq!(settings.url.as_str(), accepted);
+    }
+}
+
+#[test]
 fn a_bad_url_is_refused_even_with_renewal_off() {
     assert_eq!(
         Settings::from_lookup(lookup(&[
@@ -98,16 +158,27 @@ fn a_bad_url_is_refused_even_with_renewal_off() {
 
 #[test]
 fn messages_are_fixed_and_name_no_url() {
-    assert_eq!(
-        SettingsError::Url.message(),
-        "ZONE_LICENSE_RENEWAL_URL must be an http or https URL"
-    );
-    assert_eq!(
-        SettingsError::Metadata.message(),
-        "ZONE_LICENSE_RENEWAL_URL must not name a cloud metadata address"
-    );
-    for error in [SettingsError::Url, SettingsError::Metadata] {
+    let cases = [
+        (
+            SettingsError::Url,
+            "ZONE_LICENSE_RENEWAL_URL must be an http or https URL",
+        ),
+        (
+            SettingsError::Credentials,
+            "ZONE_LICENSE_RENEWAL_URL must not carry a user name or password",
+        ),
+        (
+            SettingsError::Metadata,
+            "ZONE_LICENSE_RENEWAL_URL must not name a cloud metadata address",
+        ),
+        (
+            SettingsError::Plaintext,
+            "ZONE_LICENSE_RENEWAL_URL must use https unless it names a loopback or private network host",
+        ),
+    ];
+    for (error, expected) in cases {
         let message = error.message();
+        assert_eq!(message, expected);
         assert!(message.starts_with(URL_VARIABLE), "{message}");
         assert!(!message.contains("://"), "{message}");
         assert!(!message.contains("169.254"), "{message}");

@@ -3,12 +3,12 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
-use zone_enterprise::License;
+use zone_enterprise::{License, Status};
 
 use super::{Answer, Client, Outcome, accepts, due};
 use crate::db::audit::{AuditContext, actions, log_action, resources};
 use crate::db::{DbResult, license_renewal};
-use crate::services::license::{Change, Licenses, SetError, summary};
+use crate::services::license::{Change, Licenses, summary};
 use crate::state::AppState;
 
 pub const INTERVAL_SECONDS: u64 = 86_400;
@@ -18,9 +18,8 @@ pub async fn run(state: &AppState, client: &Client) -> DbResult<Option<Outcome>>
     renew(state.licenses(), state.db(), client, Utc::now()).await
 }
 
-/// Asks the license server for a key renewing the stored license once it is due, and records
-/// what came of it. `None` when nothing was asked, or when the stored key changed while the
-/// answer was on its way, so the answer no longer applies.
+/// `None` when nothing was asked, or when the stored key changed while the answer was on its
+/// way, so the answer no longer applies.
 pub async fn renew(
     licenses: &Licenses,
     pool: &PgPool,
@@ -70,30 +69,29 @@ async fn install(
         );
         return settle(pool, license, Outcome::Rejected, now).await;
     }
-    match licenses
-        .renew(pool, license.text(), renewed.text(), now)
-        .await
-    {
-        Ok(Some(change)) => {
-            audit(pool, &change).await;
-            license_renewal::record(pool, change.current.text(), Outcome::Renewed.as_str(), now)
-                .await?;
-            report(Outcome::Renewed, license.id(), Some(change.current.id()));
-            Ok(Some(Outcome::Renewed))
-        }
-        Ok(None) => {
-            tracing::info!(
-                license = %license.id(),
-                renewed = %renewed.id(),
-                "The stored license changed while it was being renewed, so the renewed key was dropped"
-            );
-            Ok(None)
-        }
-        Err(SetError::Refused(_) | SetError::Lapsed) => {
-            settle(pool, license, Outcome::Rejected, now).await
-        }
-        Err(SetError::Database(error)) => Err(error),
+    if renewed.status(now) == Status::Lapsed {
+        tracing::warn!(
+            license = %license.id(),
+            renewed = %renewed.id(),
+            "The renewed license key has already lapsed"
+        );
+        return settle(pool, license, Outcome::Rejected, now).await;
     }
+    let Some(change) = licenses
+        .renew(pool, license.text(), renewed.clone())
+        .await?
+    else {
+        tracing::info!(
+            license = %license.id(),
+            renewed = %renewed.id(),
+            "The stored license changed while it was being renewed, so the renewed key was dropped"
+        );
+        return Ok(None);
+    };
+    audit(pool, &change).await;
+    license_renewal::record(pool, change.current.text(), Outcome::Renewed, now).await?;
+    report(Outcome::Renewed, license.id(), Some(change.current.id()));
+    Ok(Some(Outcome::Renewed))
 }
 
 async fn settle(
@@ -102,7 +100,7 @@ async fn settle(
     outcome: Outcome,
     now: DateTime<Utc>,
 ) -> DbResult<Option<Outcome>> {
-    license_renewal::record(pool, license.text(), outcome.as_str(), now).await?;
+    license_renewal::record(pool, license.text(), outcome, now).await?;
     report(outcome, license.id(), None);
     Ok(Some(outcome))
 }

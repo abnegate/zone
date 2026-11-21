@@ -1,11 +1,13 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, SubsecRound, TimeDelta, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use tokio::sync::Notify;
 use uuid::Uuid;
 use wiremock::matchers::{body_json, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 use zone_enterprise::{Keyring, License, Payload, SigningKey, TrustedKey, sign};
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::license_renewal::{self, LicenseRenewal};
@@ -23,8 +25,18 @@ const TRUSTED_SEED: [u8; 32] = [0x11; 32];
 const UNTRUSTED_SEED: [u8; 32] = [0x22; 32];
 const CUSTOMER: &str = "Acme Ltd";
 const SUBSCRIPTION: &str = "6f1f4b1e-4a8e-4f4e-9a55-0d6f3b8c2a11";
-const ANSWER_DELAY: Duration = Duration::from_millis(750);
-const ADMIN_DELAY: Duration = Duration::from_millis(150);
+const ANSWER_DELAY: Duration = Duration::from_secs(5);
+const REFUSED_RECORD: &str = "renewal records are refused";
+const REFUSE_RECORDS: &str = "
+    CREATE FUNCTION refuse_renewal_record() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+        RAISE EXCEPTION 'renewal records are refused';
+    END
+    $$;
+    CREATE TRIGGER refuse_renewal_record BEFORE UPDATE OF renewal_outcome ON licenses
+        FOR EACH ROW WHEN (NEW.renewal_outcome IS NOT NULL)
+        EXECUTE FUNCTION refuse_renewal_record();
+";
 
 #[derive(Debug, sqlx::FromRow)]
 struct Audit {
@@ -34,6 +46,18 @@ struct Audit {
     old_values: Option<Value>,
     new_values: Option<Value>,
     row: String,
+}
+
+struct Arrival {
+    template: ResponseTemplate,
+    arrived: Arc<Notify>,
+}
+
+impl Respond for Arrival {
+    fn respond(&self, _: &Request) -> ResponseTemplate {
+        self.arrived.notify_one();
+        self.template.clone()
+    }
 }
 
 struct Fixture {
@@ -69,9 +93,18 @@ impl Fixture {
     }
 
     async fn renew(&self, server: &MockServer) -> Option<Outcome> {
-        renewal::renew(&self.licenses, self.pool(), &client(server), self.now)
+        self.attempt(server).await.unwrap()
+    }
+
+    async fn attempt(&self, server: &MockServer) -> Result<Option<Outcome>, sqlx::Error> {
+        renewal::renew(&self.licenses, self.pool(), &client(server), self.now).await
+    }
+
+    async fn refuse_records(&self) {
+        sqlx::raw_sql(REFUSE_RECORDS)
+            .execute(self.pool())
             .await
-            .unwrap()
+            .unwrap();
     }
 
     async fn stored(&self) -> Option<String> {
@@ -159,12 +192,12 @@ fn client(server: &MockServer) -> Client {
     Client::new(&settings, Proxy::Direct).unwrap()
 }
 
-async fn signer(stored: &License, template: ResponseTemplate, expected: u64) -> MockServer {
+async fn signer(stored: &License, answer: impl Respond + 'static, expected: u64) -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(RENEW_PATH))
         .and(body_json(json!({ "license": stored.text() })))
-        .respond_with(template)
+        .respond_with(answer)
         .expect(expected)
         .mount(&server)
         .await;
@@ -240,12 +273,7 @@ async fn a_renewal_against_a_key_no_longer_stored_leaves_the_admins_key() {
 
     let change = fixture
         .licenses
-        .renew(
-            fixture.pool(),
-            stale.text(),
-            &renewed(&payload),
-            fixture.now,
-        )
+        .renew(fixture.pool(), stale.text(), verified(&renewed(&payload)))
         .await
         .unwrap();
 
@@ -265,15 +293,15 @@ async fn a_key_an_admin_installs_while_the_signer_answers_is_kept() {
     let payload = due();
     let (fixture, stored) = Fixture::storing(&payload).await;
     let admin = verified(&sign(&expiring(TimeDelta::days(365)), &trusted()));
-    let server = signer(
-        &stored,
-        issuing(&renewed(&payload)).set_delay(ANSWER_DELAY),
-        1,
-    )
-    .await;
+    let arrived = Arc::new(Notify::new());
+    let answer = Arrival {
+        template: issuing(&renewed(&payload)).set_delay(ANSWER_DELAY),
+        arrived: Arc::clone(&arrived),
+    };
+    let server = signer(&stored, answer, 1).await;
 
     let (outcome, installed) = tokio::join!(fixture.renew(&server), async {
-        tokio::time::sleep(ADMIN_DELAY).await;
+        arrived.notified().await;
         fixture
             .licenses
             .set(fixture.pool(), admin.text(), fixture.now)
@@ -289,6 +317,32 @@ async fn a_key_an_admin_installs_while_the_signer_answers_is_kept() {
     );
     assert_eq!(fixture.status().await, None);
     assert!(fixture.audits().await.is_empty());
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_renewal_that_cannot_be_recorded_fails_and_keeps_the_installed_key() {
+    let payload = due();
+    let (fixture, stored) = Fixture::storing(&payload).await;
+    let text = renewed(&payload);
+    let renewed = verified(&text);
+    let server = signer(&stored, issuing(&text), 1).await;
+    fixture.refuse_records().await;
+
+    let error = fixture.attempt(&server).await.unwrap_err();
+
+    assert_eq!(
+        error.as_database_error().map(|error| error.message()),
+        Some(REFUSED_RECORD),
+        "{error:?}"
+    );
+    assert_eq!(fixture.stored().await.as_deref(), Some(renewed.text()));
+    assert_eq!(
+        fixture.licenses.current(fixture.pool()).await,
+        Some(renewed.clone())
+    );
+    assert_eq!(fixture.status().await, None);
+    assert_eq!(fixture.audits().await.len(), 1);
     fixture.cleanup().await;
 }
 

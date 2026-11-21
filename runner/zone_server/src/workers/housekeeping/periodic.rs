@@ -23,7 +23,7 @@ use super::sweep::Sweep;
 use super::warmup::Warmup;
 use crate::config::SourceIndexConfig;
 use crate::services::audit::retention;
-use crate::services::license::renewal::{self, Client, Proxy};
+use crate::services::license::renewal::{self, Client};
 use crate::services::mcp_servers::load;
 use crate::services::worktree;
 use crate::state::AppState;
@@ -239,8 +239,8 @@ pub fn periodic(state: AppState) -> Registry {
             Periodic::PullRequestWatch => watch_pull_requests(schedule, state.clone()),
             Periodic::AuditRetention => apply_audit_retention(schedule, state.clone()),
             Periodic::WorktreeCleanup => clean_worktrees(schedule, state.clone()),
-            Periodic::LicenseRenewal => match renewal_client(&state) {
-                Some(client) => renew_license(schedule, state.clone(), client),
+            Periodic::LicenseRenewal => match state.renewal() {
+                Some(client) => renew_license(schedule, state.clone(), client.clone()),
                 None => continue,
             },
         };
@@ -459,21 +459,6 @@ fn clean_worktrees(schedule: Schedule, state: AppState) -> Sweep {
     })
 }
 
-fn renewal_client(state: &AppState) -> Option<Client> {
-    let settings = &state.config().license_renewal;
-    if !settings.enabled {
-        tracing::info!("License renewal is off on this server");
-        return None;
-    }
-    match Client::new(settings, Proxy::System) {
-        Ok(client) => Some(client),
-        Err(error) => {
-            tracing::error!(%error, "License renewal cannot start: its HTTP client did not build");
-            None
-        }
-    }
-}
-
 fn renew_license(schedule: Schedule, state: AppState, client: Client) -> Sweep {
     Sweep::new(Periodic::LicenseRenewal.name(), schedule, move || {
         let state = state.clone();
@@ -626,6 +611,17 @@ mod tests {
         config.license_renewal.enabled = false;
         let state = AppState::new(config, lazy_pool(), None);
         state.disable_mcp();
+
+        let names = periodic(state).names();
+
+        assert!(!names.contains(&"license-renewal"), "{names:?}");
+        assert!(names.contains(&"audit-retention"), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn license_renewal_is_left_out_when_its_client_did_not_build() {
+        let state = AppState::for_tests();
+        state.without_renewal();
 
         let names = periodic(state).names();
 
