@@ -1386,46 +1386,6 @@ mod tests {
         );
     }
 
-    /// A migrated database of a test's own, for one that stores the server-wide license.
-    struct Isolated {
-        admin: PgPool,
-        pool: PgPool,
-        name: String,
-    }
-
-    impl Isolated {
-        async fn create() -> Self {
-            let admin = PgPool::connect(
-                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
-            )
-            .await
-            .expect("the test database");
-            // Identifiers contain only this prefix and UUID hexadecimal.
-            let name = format!("repair_{}", Uuid::new_v4().simple());
-            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-                .execute(&admin)
-                .await
-                .expect("a database of the test's own");
-            let options = (*admin.connect_options()).clone().database(&name);
-            let pool = PgPool::connect_with(options)
-                .await
-                .expect("the test's own database");
-            crate::db::migrations::run(&pool).await.expect("the schema");
-            Self { admin, pool, name }
-        }
-
-        async fn remove(self) {
-            self.pool.close().await;
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "DROP DATABASE {} WITH (FORCE)",
-                self.name
-            )))
-            .execute(&self.admin)
-            .await
-            .expect("the test's database to be dropped");
-        }
-    }
-
     #[tokio::test]
     async fn a_repair_moved_onto_the_instance_is_attributed_and_held_to_its_budget() {
         use chrono::{TimeDelta, Utc};
@@ -1449,7 +1409,7 @@ mod tests {
             })
             .mount(&litellm)
             .await;
-        let database = Isolated::create().await;
+        let database = crate::db::disposable::Database::create("repair").await;
         let pool = database.pool.clone();
         let state = AppState::new(instance_config(&litellm.uri()), pool.clone(), None);
         state.disable_mcp();
