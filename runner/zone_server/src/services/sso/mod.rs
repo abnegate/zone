@@ -4,6 +4,7 @@ pub mod console;
 pub mod enforcement;
 pub mod failure;
 pub mod handoff;
+pub mod imported;
 pub mod posted;
 pub mod providers;
 pub mod revision;

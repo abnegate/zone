@@ -9,7 +9,7 @@ use super::providers::ProviderResponse;
 use crate::auth::ServerAdmin;
 use crate::db::sso::{providers, settings};
 use crate::error::ServerError;
-use crate::services::sso::console::redirect_uri;
+use crate::services::sso::console::{redirect_uri, saml_acs_url, saml_entity_id};
 use crate::state::AppState;
 
 const LOAD_FAILED: &str = "Could not load single sign-on";
@@ -21,7 +21,27 @@ pub struct SettingsResponse {
     pub status: Status,
     pub required: bool,
     pub redirect_uri: String,
+    pub service_provider: ServiceProviderResponse,
     pub providers: Vec<ProviderResponse>,
+}
+
+/// What an admin registers at a SAML identity provider. Zone serves its metadata at its own
+/// entity ID, so those two values are the same address.
+#[derive(Debug, Serialize)]
+pub struct ServiceProviderResponse {
+    pub entity_id: String,
+    pub acs_url: String,
+    pub metadata_url: String,
+}
+
+impl ServiceProviderResponse {
+    pub fn new(app_base_url: &str) -> Self {
+        Self {
+            entity_id: saml_entity_id(app_base_url),
+            acs_url: saml_acs_url(app_base_url),
+            metadata_url: saml_entity_id(app_base_url),
+        }
+    }
 }
 
 pub async fn get(State(state): State<AppState>, _admin: ServerAdmin) -> Response {
@@ -35,12 +55,14 @@ pub async fn get(State(state): State<AppState>, _admin: ServerAdmin) -> Response
         Ok(records) => records,
         Err(error) => return unavailable(&error),
     };
+    let app_base_url = &state.config().app_base_url;
     Json(SettingsResponse {
         entitled: Feature::Sso.entitled(license.as_ref(), now),
         edition: Edition::from(license.as_ref()),
         status: status(license.as_ref(), now),
         required,
-        redirect_uri: redirect_uri(&state.config().app_base_url),
+        redirect_uri: redirect_uri(app_base_url),
+        service_provider: ServiceProviderResponse::new(app_base_url),
         providers: records.iter().map(ProviderResponse::from).collect(),
     })
     .into_response()
@@ -49,4 +71,30 @@ pub async fn get(State(state): State<AppState>, _admin: ServerAdmin) -> Response
 fn unavailable(error: &dyn std::error::Error) -> Response {
     tracing::error!(%error, "Failed to load single sign-on");
     ServerError::Internal(LOAD_FAILED.to_owned()).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn the_service_provider_lives_on_the_app_base_url_origin() {
+        for base in [
+            "https://zone.example.com",
+            "https://zone.example.com/",
+            "https://zone.example.com/console/",
+        ] {
+            assert_eq!(
+                serde_json::to_value(ServiceProviderResponse::new(base)).unwrap(),
+                json!({
+                    "entity_id": "https://zone.example.com/api/auth/sso/saml/metadata",
+                    "acs_url": "https://zone.example.com/api/auth/sso/saml/acs",
+                    "metadata_url": "https://zone.example.com/api/auth/sso/saml/metadata",
+                }),
+                "{base}"
+            );
+        }
+    }
 }
