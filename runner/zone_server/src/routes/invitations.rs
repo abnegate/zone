@@ -14,13 +14,12 @@ use uuid::Uuid;
 
 use crate::auth::{AuthUser, Grant, OrganizationPermit, Permission};
 use crate::db::audit::{actions, resources};
-use crate::db::custom_roles;
 use crate::db::organization_members::OrgRole;
 use crate::db::workspace_members::WorkspaceRole;
 use crate::db::{invitations, organization_members, organizations, users, workspaces};
 use crate::state::AppState;
 
-use super::common::{AuditEvent, ErrorResponse, Timestamps, audit};
+use super::common::{AuditEvent, ErrorResponse, Timestamps, audit, exceeds};
 
 const INVALID_ORGANIZATION_ROLE: &str = "Invalid org_role. Must be one of: member, admin, owner";
 const INVALID_WORKSPACE_ROLE: &str =
@@ -190,13 +189,7 @@ pub async fn create_invitation(
         .grant
         .covers(&Grant::organization(organization_role))
     {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::with_code(
-                custom_roles::EXCEEDS_MESSAGE,
-                custom_roles::EXCEEDS,
-            )),
-        ));
+        return Err(exceeds());
     }
 
     for workspace_id in &workspace_ids {

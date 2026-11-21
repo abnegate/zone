@@ -10,7 +10,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use zone_server::auth::{Grant, Permission, Scope};
 use zone_server::db::custom_roles::{
-    self, Assignment, Change, Creation, Definition, Deletion, Summary, Update,
+    self, Assignment, Change, Creation, Definition, Deletion, Invalid, Summary, Update,
 };
 use zone_server::db::organization_members::{self, OrgRole};
 use zone_server::db::workspace_members::{self, WorkspaceRole};
@@ -1232,21 +1232,30 @@ async fn an_organization_member_is_assigned_a_custom_role_and_back() {
         &[Permission::DevicesRead],
     )
     .await;
-    let caller = Grant::organization(OrgRole::Owner);
 
     let outcome = organization_members::change_role(
         &pool,
         organization,
         member,
         Assignment::Custom(role),
-        &caller,
+        owner,
     )
     .await
     .expect("answered");
-    let organization_members::RoleChange::Applied(row) = outcome else {
+    let organization_members::RoleChange::Applied(assigned) = outcome else {
         panic!("the custom role is assigned: {outcome:?}");
     };
-    assert_eq!(row.role, OrgRole::Member);
+    assert_eq!(assigned.member.role, OrgRole::Member);
+    assert_eq!(
+        assigned
+            .membership
+            .custom_role
+            .as_ref()
+            .map(|summary| summary.id),
+        Some(role),
+        "the change carries the role it assigned"
+    );
+    assert!(assigned.membership.grant.allows(Permission::DevicesRead));
     let membership = organization_members::membership(&pool, organization, member)
         .await
         .expect("answered")
@@ -1270,7 +1279,7 @@ async fn an_organization_member_is_assigned_a_custom_role_and_back() {
         organization,
         member,
         Assignment::BuiltIn(OrgRole::Admin),
-        &caller,
+        owner,
     )
     .await
     .expect("answered");
@@ -1292,11 +1301,20 @@ async fn organization_assignments_refuse_missing_roles_escalation_and_the_last_o
     let organization = organization(&pool).await;
     let elsewhere = self::organization(&pool).await;
     let owner = user(&pool).await;
+    let admin = user(&pool).await;
     let member = user(&pool).await;
+    let narrow = user(&pool).await;
+    let updaters = composed(
+        &pool,
+        organization,
+        Scope::Organization,
+        &[Permission::MembersUpdate],
+    )
+    .await;
     seat_organization(&pool, organization, owner, OrgRole::Owner, None).await;
+    seat_organization(&pool, organization, admin, OrgRole::Admin, None).await;
     seat_organization(&pool, organization, member, OrgRole::Member, None).await;
-    let owners = Grant::organization(OrgRole::Owner);
-    let admins = Grant::organization(OrgRole::Admin);
+    seat_organization(&pool, organization, narrow, OrgRole::Member, Some(updaters)).await;
 
     for missing in [
         composed(&pool, elsewhere, Scope::Organization, &[]).await,
@@ -1308,7 +1326,7 @@ async fn organization_assignments_refuse_missing_roles_escalation_and_the_last_o
             organization,
             member,
             Assignment::Custom(missing),
-            &owners,
+            owner,
         )
         .await
         .expect("answered");
@@ -1325,14 +1343,12 @@ async fn organization_assignments_refuse_missing_roles_escalation_and_the_last_o
         &[Permission::AuditLogsRead],
     )
     .await;
-    let narrow = Grant::compose(Scope::Organization, &names(&[Permission::MembersUpdate]))
-        .expect("a narrow caller composes");
     let outcome = organization_members::change_role(
         &pool,
         organization,
         member,
         Assignment::Custom(auditors),
-        &narrow,
+        narrow,
     )
     .await
     .expect("answered");
@@ -1346,7 +1362,7 @@ async fn organization_assignments_refuse_missing_roles_escalation_and_the_last_o
         organization,
         member,
         Assignment::Custom(auditors),
-        &admins,
+        admin,
     )
     .await
     .expect("answered");
@@ -1360,19 +1376,19 @@ async fn organization_assignments_refuse_missing_roles_escalation_and_the_last_o
         organization,
         member,
         Assignment::BuiltIn(OrgRole::Member),
-        &narrow,
+        narrow,
     )
     .await
     .expect("answered");
     assert!(
-        matches!(outcome, organization_members::RoleChange::Forbidden),
+        matches!(outcome, organization_members::RoleChange::Uncovered),
         "a caller who does not hold the target's permissions cannot touch them: {outcome:?}"
     );
-    let outcome = organization_members::remove_guarded(&pool, organization, member, &narrow)
+    let outcome = organization_members::remove_guarded(&pool, organization, member, narrow)
         .await
         .expect("answered");
     assert!(
-        matches!(outcome, organization_members::Removal::Forbidden),
+        matches!(outcome, organization_members::Removal::Uncovered),
         "{outcome:?}"
     );
 
@@ -1381,7 +1397,7 @@ async fn organization_assignments_refuse_missing_roles_escalation_and_the_last_o
         organization,
         owner,
         Assignment::Custom(auditors),
-        &owners,
+        owner,
     )
     .await
     .expect("answered");
@@ -1395,7 +1411,7 @@ async fn organization_assignments_refuse_missing_roles_escalation_and_the_last_o
         organization,
         owner,
         Assignment::Custom(auditors),
-        &admins,
+        admin,
     )
     .await
     .expect("answered");
@@ -1412,11 +1428,27 @@ async fn workspace_assignments_follow_the_same_rules() {
     let elsewhere = self::organization(&pool).await;
     let workspace = workspace(&pool, organization).await;
     let owner = user(&pool).await;
+    let admin = user(&pool).await;
     let member = user(&pool).await;
+    let narrow = user(&pool).await;
+    let writing = composed(
+        &pool,
+        organization,
+        Scope::Workspace,
+        &[Permission::WorkspaceWrite],
+    )
+    .await;
     seat_workspace(&pool, workspace, owner, WorkspaceRole::Owner, None).await;
+    seat_workspace(&pool, workspace, admin, WorkspaceRole::Admin, None).await;
     seat_workspace(&pool, workspace, member, WorkspaceRole::Member, None).await;
-    let owners = Grant::workspace(WorkspaceRole::Owner);
-    let admins = Grant::workspace(WorkspaceRole::Admin);
+    seat_workspace(
+        &pool,
+        workspace,
+        narrow,
+        WorkspaceRole::Viewer,
+        Some(writing),
+    )
+    .await;
     let writers = composed(
         &pool,
         organization,
@@ -1434,7 +1466,7 @@ async fn workspace_assignments_follow_the_same_rules() {
             workspace,
             member,
             Assignment::Custom(missing),
-            &owners,
+            owner,
         )
         .await
         .expect("answered");
@@ -1444,14 +1476,12 @@ async fn workspace_assignments_follow_the_same_rules() {
         );
     }
 
-    let narrow = Grant::compose(Scope::Workspace, &names(&[Permission::WorkspaceWrite]))
-        .expect("a narrow caller composes");
     let outcome = workspace_members::change_role(
         &pool,
         workspace,
         member,
         Assignment::Custom(writers),
-        &narrow,
+        narrow,
     )
     .await
     .expect("answered");
@@ -1465,50 +1495,54 @@ async fn workspace_assignments_follow_the_same_rules() {
         workspace,
         member,
         Assignment::Custom(writers),
-        &admins,
+        admin,
     )
     .await
     .expect("answered");
-    let workspace_members::RoleChange::Applied(row) = outcome else {
+    let workspace_members::RoleChange::Applied(assigned) = outcome else {
         panic!("an admin assigns the role: {outcome:?}");
     };
-    assert_eq!(row.role, WorkspaceRole::Viewer);
+    assert_eq!(assigned.member.role, WorkspaceRole::Viewer);
+    assert_eq!(
+        assigned
+            .membership
+            .custom_role
+            .as_ref()
+            .map(|summary| summary.id),
+        Some(writers),
+        "the change carries the role it assigned"
+    );
     assert!(
         workspace_members::can_write(&pool, workspace, member)
             .await
             .expect("answered")
     );
 
-    let outcome = workspace_members::remove_guarded(&pool, workspace, member, &narrow)
+    let outcome = workspace_members::remove_guarded(&pool, workspace, member, narrow)
         .await
         .expect("answered");
     assert!(
-        matches!(outcome, workspace_members::Removal::Forbidden),
+        matches!(outcome, workspace_members::Removal::Uncovered),
         "a caller who lacks project_syncs:update cannot remove its holder: {outcome:?}"
     );
 
-    let outcome = workspace_members::change_role(
-        &pool,
-        workspace,
-        owner,
-        Assignment::Custom(writers),
-        &owners,
-    )
-    .await
-    .expect("answered");
+    let outcome =
+        workspace_members::change_role(&pool, workspace, owner, Assignment::Custom(writers), owner)
+            .await
+            .expect("answered");
     assert!(
         matches!(outcome, workspace_members::RoleChange::LastOwner),
         "a custom assignment demotes the last owner: {outcome:?}"
     );
 
-    let admin = user(&pool).await;
-    seat_workspace(&pool, workspace, admin, WorkspaceRole::Admin, None).await;
+    let fellow = user(&pool).await;
+    seat_workspace(&pool, workspace, fellow, WorkspaceRole::Admin, None).await;
     let outcome = workspace_members::change_role(
         &pool,
         workspace,
-        admin,
+        fellow,
         Assignment::Custom(writers),
-        &admins,
+        admin,
     )
     .await
     .expect("answered");
@@ -1522,7 +1556,7 @@ async fn workspace_assignments_follow_the_same_rules() {
         workspace,
         member,
         Assignment::BuiltIn(WorkspaceRole::Admin),
-        &admins,
+        admin,
     )
     .await
     .expect("answered");
@@ -1531,7 +1565,7 @@ async fn workspace_assignments_follow_the_same_rules() {
         "{outcome:?}"
     );
 
-    let outcome = workspace_members::remove_guarded(&pool, workspace, member, &admins)
+    let outcome = workspace_members::remove_guarded(&pool, workspace, member, admin)
         .await
         .expect("answered");
     assert!(
@@ -1553,14 +1587,14 @@ fn an_assignment_names_exactly_one_role() {
     );
     assert_eq!(
         Assignment::<OrgRole>::parse(Some("viewer"), None),
-        Err(custom_roles::UNKNOWN_ROLE)
+        Err(Invalid::Unknown)
     );
     assert_eq!(
         Assignment::<OrgRole>::parse(Some("admin"), Some(role)),
-        Err(custom_roles::AMBIGUOUS_ASSIGNMENT)
+        Err(Invalid::Ambiguous)
     );
     assert_eq!(
         Assignment::<OrgRole>::parse(None, None),
-        Err(custom_roles::AMBIGUOUS_ASSIGNMENT)
+        Err(Invalid::Ambiguous)
     );
 }

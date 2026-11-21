@@ -16,7 +16,6 @@ use crate::auth::{Grant, Permission, Scope};
 
 pub const EXCEEDS: &str = "role_exceeds";
 pub const EXCEEDS_MESSAGE: &str = "This role grants permissions you do not hold";
-pub const UNKNOWN_ROLE: &str = "Unknown role";
 pub const AMBIGUOUS_ASSIGNMENT: &str = "Set exactly one of role or custom_role_id";
 
 const UNIQUE_VIOLATION: &str = "23505";
@@ -43,12 +42,23 @@ pub enum Assignment<R> {
     Custom(Uuid),
 }
 
+/// Why a request names no assignment. Each route words an unknown role in its
+/// own terms, since it lists the roles that route accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Invalid {
+    Unknown,
+    Ambiguous,
+}
+
 impl<R: FromStr> Assignment<R> {
-    pub fn parse(role: Option<&str>, custom_role_id: Option<Uuid>) -> Result<Self, &'static str> {
+    pub fn parse(role: Option<&str>, custom_role_id: Option<Uuid>) -> Result<Self, Invalid> {
         match (role, custom_role_id) {
-            (Some(role), None) => role.parse().map(Self::BuiltIn).map_err(|_| UNKNOWN_ROLE),
+            (Some(role), None) => role
+                .parse()
+                .map(Self::BuiltIn)
+                .map_err(|_| Invalid::Unknown),
             (None, Some(id)) => Ok(Self::Custom(id)),
-            _ => Err(AMBIGUOUS_ASSIGNMENT),
+            _ => Err(Invalid::Ambiguous),
         }
     }
 }

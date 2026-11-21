@@ -148,6 +148,7 @@ where
 pub enum Removal {
     Removed,
     Forbidden,
+    Uncovered,
     Missing,
     LastAdmin,
     LastOwner,
@@ -163,16 +164,20 @@ pub async fn remove_guarded(
     pool: &PgPool,
     workspace_id: Uuid,
     user_id: Uuid,
-    caller: &Grant,
+    caller: Uuid,
 ) -> DbResult<Removal> {
     let mut transaction = pool.begin().await?;
 
     let privileged = lock_privileged(&mut transaction, workspace_id).await?;
+    let caller = lock_caller(&mut transaction, workspace_id, caller).await?;
     let Some(target) = lock_member(&mut transaction, workspace_id, user_id).await? else {
         return Ok(Removal::Missing);
     };
-    if !reaches(caller, &target.membership) {
+    if outranked(&caller, &target.membership) {
         return Ok(Removal::Forbidden);
+    }
+    if !caller.covers(&target.membership.grant) {
+        return Ok(Removal::Uncovered);
     }
 
     if privileged.owners.len() <= 1 && privileged.owns(user_id) {
@@ -619,8 +624,6 @@ struct MembershipRow {
     reference: Reference,
 }
 
-/// Count the number of active admins (admin or owner) in a workspace
-/// Used to prevent removal of the last admin
 /// The workspace's active admins and owners, held for the length of a
 /// transaction so a count taken from them still describes the table when the
 /// update lands.
@@ -691,12 +694,22 @@ struct Target {
     membership: Membership<WorkspaceRole>,
 }
 
-/// Whether `caller` may touch a member holding `target`: admins and owners
-/// only through the workspace administrators permission, and anyone only when
-/// the caller already holds everything the target does.
-fn reaches(caller: &Grant, target: &Membership<WorkspaceRole>) -> bool {
-    (target.role < WorkspaceRole::Admin || caller.allows(Permission::WorkspaceAdministratorsUpdate))
-        && caller.covers(&target.grant)
+/// Only the workspace administrators permission touches an admin or owner.
+fn outranked(caller: &Grant, target: &Membership<WorkspaceRole>) -> bool {
+    target.role >= WorkspaceRole::Admin && !caller.allows(Permission::WorkspaceAdministratorsUpdate)
+}
+
+/// What the caller holds now, under the same transaction as the change it
+/// asks for: a demotion that lands first is what the change is judged by. A
+/// caller who is no longer a member holds nothing.
+async fn lock_caller(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    caller: Uuid,
+) -> DbResult<Grant> {
+    Ok(lock_membership(transaction, workspace_id, caller)
+        .await?
+        .map_or_else(Grant::default, |membership| membership.grant))
 }
 
 async fn lock_privileged(
@@ -726,11 +739,20 @@ async fn lock_privileged(
     })
 }
 
+/// A role change as it landed: the updated row, and what it holds as read
+/// under the change's own locks.
+#[derive(Debug)]
+pub struct Assigned {
+    pub member: WorkspaceMemberRow,
+    pub membership: Membership<WorkspaceRole>,
+}
+
 /// Outcome of a role change that must leave the workspace administrable.
 #[derive(Debug)]
 pub enum RoleChange {
-    Applied(Box<WorkspaceMemberRow>),
+    Applied(Box<Assigned>),
     Forbidden,
+    Uncovered,
     Missing,
     LastAdmin,
     LastOwner,
@@ -748,35 +770,47 @@ pub enum RoleChange {
 /// the first actually left.
 ///
 /// The caller must hold everything the target holds now and everything the
-/// assignment grants. A workspace is stricter than an organization: only the
-/// administrators permission grants admin, not just owner. A custom role is
-/// read under a share lock, so an edit to it waits for the assignment and
-/// counts the new holder.
+/// assignment grants, judged by what the caller holds under this transaction.
+/// A workspace is stricter than an organization: only the administrators
+/// permission grants admin, not just owner. A custom role is read under a
+/// share lock, so an edit to it waits for the assignment and counts the new
+/// holder.
+///
+/// Locks are taken privileged rows first, then the caller, the target and the
+/// roles, so two changes in one workspace queue on the privileged rows.
 pub async fn change_role(
     pool: &PgPool,
     workspace_id: Uuid,
     user_id: Uuid,
     assignment: Assignment<WorkspaceRole>,
-    caller: &Grant,
+    caller: Uuid,
 ) -> DbResult<RoleChange> {
     let mut transaction = pool.begin().await?;
 
     let privileged = lock_privileged(&mut transaction, workspace_id).await?;
+    let caller = lock_caller(&mut transaction, workspace_id, caller).await?;
     let Some(target) = lock_member(&mut transaction, workspace_id, user_id).await? else {
         return Ok(RoleChange::Missing);
     };
-    if !reaches(caller, &target.membership) {
+    if outranked(&caller, &target.membership) {
         return Ok(RoleChange::Forbidden);
     }
+    if !caller.covers(&target.membership.grant) {
+        return Ok(RoleChange::Uncovered);
+    }
 
-    let (role, custom_role_id, granted) = match assignment {
+    let membership = match assignment {
         Assignment::BuiltIn(role) => {
             if role >= WorkspaceRole::Admin
                 && !caller.allows(Permission::WorkspaceAdministratorsUpdate)
             {
                 return Ok(RoleChange::Forbidden);
             }
-            (role, None, Grant::workspace(role))
+            Membership {
+                role,
+                custom_role: None,
+                grant: Grant::workspace(role),
+            }
         }
         Assignment::Custom(role_id) => {
             let Some((summary, grant)) = custom_roles::lock(
@@ -789,10 +823,14 @@ pub async fn change_role(
             else {
                 return Ok(RoleChange::RoleMissing);
             };
-            (WorkspaceRole::Viewer, Some(summary.id), grant)
+            Membership {
+                role: WorkspaceRole::Viewer,
+                custom_role: Some(summary),
+                grant,
+            }
         }
     };
-    if !caller.covers(&granted) {
+    if !caller.covers(&membership.grant) {
         return Ok(RoleChange::Exceeds);
     }
 
@@ -800,7 +838,8 @@ pub async fn change_role(
     // delete the workspace or seat another owner, so a workspace whose last
     // owner steps down -- to admin as readily as to member -- is one nobody can
     // repair. Counting them together would let an owner leave while an admin
-    // stands, which is the state migration 023 exists to undo.
+    // stands.
+    let role = membership.role;
     if role != WorkspaceRole::Owner && privileged.owners.len() <= 1 && privileged.owns(user_id) {
         return Ok(RoleChange::LastOwner);
     }
@@ -821,29 +860,16 @@ pub async fn change_role(
     .bind(workspace_id)
     .bind(user_id)
     .bind(role.as_str())
-    .bind(custom_role_id)
+    .bind(membership.custom_role.as_ref().map(|summary| summary.id))
     .fetch_one(&mut *transaction)
     .await?;
 
     transaction.commit().await?;
 
-    Ok(RoleChange::Applied(Box::new(row.into())))
-}
-
-pub async fn count_admins(pool: &PgPool, workspace_id: Uuid) -> DbResult<i64> {
-    let count = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*) FROM workspace_members
-        WHERE workspace_id = $1
-          AND is_active = TRUE
-          AND (role = 'admin' OR role = 'owner')
-        "#,
-    )
-    .bind(workspace_id)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(count)
+    Ok(RoleChange::Applied(Box::new(Assigned {
+        member: row.into(),
+        membership,
+    })))
 }
 
 #[cfg(test)]

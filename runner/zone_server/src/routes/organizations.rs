@@ -15,16 +15,17 @@ use crate::auth::{
 };
 use crate::db::DbResult;
 use crate::db::audit::{actions, resources};
-use crate::db::custom_roles::{self, Assignment, Summary};
+use crate::db::custom_roles::{AMBIGUOUS_ASSIGNMENT, Assignment, Invalid};
 use crate::db::organization_members::{
-    self, MemberWithUser, OrgRole, OrganizationMemberRow, Removal as MemberRemoval, RoleChange,
+    self, Assigned, MemberWithUser, OrgRole, OrganizationMemberRow, Removal as MemberRemoval,
+    RoleChange,
 };
 use crate::db::{organizations, users, workspaces};
 use crate::services::login::devices;
 use crate::state::AppState;
 use crate::sync::hook::Removal;
 
-use super::common::{AuditEvent, ErrorResponse, Timestamps, audit};
+use super::common::{AuditEvent, ErrorResponse, MembershipResponse, Timestamps, audit, exceeds};
 
 const INVALID_ROLE: &str = "Invalid role. Must be one of: member, admin, owner";
 const INTERNAL_ERROR: &str = "Internal server error";
@@ -39,40 +40,8 @@ fn internal() -> Response {
     refusal(StatusCode::INTERNAL_SERVER_ERROR, INTERNAL_ERROR)
 }
 
-fn exceeds() -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        Json(ErrorResponse::with_code(
-            custom_roles::EXCEEDS_MESSAGE,
-            custom_roles::EXCEEDS,
-        )),
-    )
-        .into_response()
-}
-
-/// What a member holds in their organization: `role` is the highest built-in
-/// role the grant fully covers, so a custom role reads as the rank it matches.
-#[derive(Debug, Clone, Serialize)]
-pub struct MembershipResponse {
-    role: &'static str,
-    custom_role: Option<Summary>,
-    permissions: Grant,
-}
-
-impl MembershipResponse {
-    pub fn new(custom_role: Option<Summary>, grant: Grant) -> Self {
-        Self {
-            role: grant.organization_rank().as_str(),
-            custom_role,
-            permissions: grant,
-        }
-    }
-}
-
-impl From<&OrganizationMember> for MembershipResponse {
-    fn from(member: &OrganizationMember) -> Self {
-        Self::new(member.custom_role.clone(), member.grant.clone())
-    }
+fn held(member: &OrganizationMember) -> MembershipResponse {
+    MembershipResponse::organization(member.custom_role.clone(), member.grant.clone())
 }
 
 #[derive(Debug, Serialize)]
@@ -178,7 +147,7 @@ pub async fn list(State(state): State<AppState>, auth: AuthUser) -> impl IntoRes
                 .into_iter()
                 .map(|membership| {
                     OrganizationResponse::from(membership.organization).with_membership(
-                        MembershipResponse::new(membership.custom_role, membership.grant),
+                        MembershipResponse::organization(membership.custom_role, membership.grant),
                     )
                 })
                 .collect(),
@@ -260,8 +229,7 @@ pub async fn create(
 pub async fn get(State(state): State<AppState>, member: OrganizationMember) -> impl IntoResponse {
     match organizations::get_organization(state.db(), member.organization_id).await {
         Ok(Some(organization)) => Json(SingleOrganizationResponse {
-            organization: OrganizationResponse::from(organization)
-                .with_membership(MembershipResponse::from(&member)),
+            organization: OrganizationResponse::from(organization).with_membership(held(&member)),
         })
         .into_response(),
         Ok(None) => refusal(StatusCode::NOT_FOUND, ORGANIZATION_NOT_FOUND),
@@ -288,8 +256,8 @@ pub async fn update(
     .await
     {
         Ok(Some(organization)) => {
-            let organization = OrganizationResponse::from(organization)
-                .with_membership(MembershipResponse::from(&member));
+            let organization =
+                OrganizationResponse::from(organization).with_membership(held(&member));
             audit(
                 state.db(),
                 AuditEvent {
@@ -466,13 +434,6 @@ impl OrganizationMemberResponse {
     }
 }
 
-impl From<OrganizationMemberRow> for OrganizationMemberResponse {
-    fn from(row: OrganizationMemberRow) -> Self {
-        let membership = MembershipResponse::new(None, Grant::organization(row.role));
-        Self::seat(row, membership)
-    }
-}
-
 impl From<MemberWithUser> for OrganizationMemberResponse {
     fn from(member: MemberWithUser) -> Self {
         Self {
@@ -480,26 +441,31 @@ impl From<MemberWithUser> for OrganizationMemberResponse {
             display_name: member.display_name,
             ..Self::seat(
                 member.member,
-                MembershipResponse::new(member.custom_role, member.grant),
+                MembershipResponse::organization(member.custom_role, member.grant),
             )
         }
     }
 }
 
-/// The member as the console lists them: with the account's email and name
-/// when the account can be read, the bare seat otherwise.
-async fn describe_member(
+/// A member as the console lists them, holding what the write that seated or
+/// changed them recorded, with the account's email and name when it can be
+/// read.
+async fn describe(
     state: &AppState,
     row: OrganizationMemberRow,
+    membership: MembershipResponse,
 ) -> OrganizationMemberResponse {
-    match organization_members::get_member_with_user(state.db(), row.organization_id, row.user_id)
-        .await
-    {
-        Ok(Some(member)) => OrganizationMemberResponse::from(member),
-        Ok(None) => OrganizationMemberResponse::from(row),
+    let seated = OrganizationMemberResponse::seat(row, membership);
+    match users::get_user_by_id(state.db(), seated.user_id).await {
+        Ok(Some(user)) => OrganizationMemberResponse {
+            email: Some(user.email),
+            display_name: user.display_name,
+            ..seated
+        },
+        Ok(None) => seated,
         Err(error) => {
-            tracing::warn!(%error, user_id = %row.user_id, "Failed to read the member's account");
-            OrganizationMemberResponse::from(row)
+            tracing::warn!(%error, user_id = %seated.user_id, "Failed to read the member's account");
+            seated
         }
     }
 }
@@ -522,13 +488,7 @@ async fn audit_member(
             resource_type: resources::MEMBER,
             resource_id: Some(user_id),
             old_values: None,
-            new_values: membership.map(|membership| {
-                serde_json::json!({
-                    "user_id": user_id,
-                    "role": membership.role,
-                    "custom_role": membership.custom_role,
-                })
-            }),
+            new_values: membership.map(|membership| membership.audited(user_id)),
         },
     )
     .await;
@@ -593,7 +553,7 @@ pub async fn add_member(
         );
     }
     if !member.grant.covers(&Grant::organization(role)) {
-        return exceeds();
+        return exceeds().into_response();
     }
 
     let target = match (request.user_id, request.email.as_deref()) {
@@ -658,7 +618,8 @@ pub async fn add_member(
     match added {
         Ok(row) => {
             let user_id = row.user_id;
-            let response = describe_member(&state, row).await;
+            let membership = MembershipResponse::organization(None, Grant::organization(row.role));
+            let response = describe(&state, row, membership).await;
             audit_member(
                 &state,
                 &member,
@@ -692,10 +653,10 @@ pub async fn update_member_role(
     let assignment =
         match Assignment::<OrgRole>::parse(request.role.as_deref(), request.custom_role_id) {
             Ok(assignment) => assignment,
-            Err(custom_roles::UNKNOWN_ROLE) => {
-                return refusal(StatusCode::BAD_REQUEST, INVALID_ROLE);
+            Err(Invalid::Unknown) => return refusal(StatusCode::BAD_REQUEST, INVALID_ROLE),
+            Err(Invalid::Ambiguous) => {
+                return refusal(StatusCode::BAD_REQUEST, AMBIGUOUS_ASSIGNMENT);
             }
-            Err(message) => return refusal(StatusCode::BAD_REQUEST, message),
         };
 
     match assignment {
@@ -715,13 +676,19 @@ pub async fn update_member_role(
         member.organization_id,
         path.user_id,
         assignment,
-        &member.grant,
+        member.user_id,
     )
     .await
     {
-        Ok(RoleChange::Applied(row)) => {
+        Ok(RoleChange::Applied(assigned)) => {
+            let Assigned {
+                member: row,
+                membership,
+            } = *assigned;
             let user_id = row.user_id;
-            let response = describe_member(&state, *row).await;
+            let membership =
+                MembershipResponse::organization(membership.custom_role, membership.grant);
+            let response = describe(&state, row, membership).await;
             audit_member(
                 &state,
                 &member,
@@ -736,12 +703,12 @@ pub async fn update_member_role(
             StatusCode::FORBIDDEN,
             "Only owners can change the role of an admin or owner",
         ),
+        Ok(RoleChange::Uncovered | RoleChange::Exceeds) => exceeds().into_response(),
         Ok(RoleChange::Missing) => refusal(StatusCode::NOT_FOUND, MEMBER_NOT_FOUND),
         Ok(RoleChange::LastOwner) => refusal(
             StatusCode::FORBIDDEN,
             "Cannot demote the last owner of the organization",
         ),
-        Ok(RoleChange::Exceeds) => exceeds(),
         Ok(RoleChange::RoleMissing) => refusal(StatusCode::NOT_FOUND, "Role not found"),
         Err(error) => {
             tracing::error!("Database error: {}", error);
@@ -760,7 +727,7 @@ pub async fn remove_member(
         state.db(),
         member.organization_id,
         path.user_id,
-        &member.grant,
+        member.user_id,
     )
     .await
     {
@@ -772,6 +739,7 @@ pub async fn remove_member(
             StatusCode::FORBIDDEN,
             "Only owners can remove admins or owners",
         ),
+        Ok(MemberRemoval::Uncovered) => exceeds().into_response(),
         Ok(MemberRemoval::LastOwner) => refusal(
             StatusCode::FORBIDDEN,
             "Cannot remove the last owner of the organization",

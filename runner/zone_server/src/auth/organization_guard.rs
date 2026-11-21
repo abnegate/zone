@@ -22,6 +22,15 @@ use crate::{
     state::AppState,
 };
 
+const INACTIVE: &str = "Membership inactive";
+
+fn database(error: sqlx::Error) -> AuthError {
+    AuthError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: format!("Database error: {error}"),
+    }
+}
+
 /// The organization in the path and the signed-in user asking about it.
 async fn identify<S>(
     parts: &mut Parts,
@@ -89,19 +98,27 @@ where
         let app_state = AppState::from_ref(state);
         let (organization_id, user_id) = identify(parts, state, &auth_user).await?;
 
-        let refusal = || AuthError {
+        let refusal = |message: String| AuthError {
             status: StatusCode::FORBIDDEN,
-            message: Permission::OrganizationRead.refusal(),
+            message,
         };
         let membership = organization_members::membership(app_state.db(), organization_id, user_id)
             .await
-            .map_err(|error| AuthError {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                message: format!("Database error: {error}"),
-            })?
-            .ok_or_else(refusal)?;
+            .map_err(database)?;
+        let Some(membership) = membership else {
+            let inactive =
+                organization_members::get_member(app_state.db(), organization_id, user_id)
+                    .await
+                    .map_err(database)?
+                    .is_some_and(|member| !member.is_active);
+            return Err(refusal(if inactive {
+                INACTIVE.to_string()
+            } else {
+                Permission::OrganizationRead.refusal()
+            }));
+        };
         if !membership.grant.allows(Permission::OrganizationRead) {
-            return Err(refusal());
+            return Err(refusal(Permission::OrganizationRead.refusal()));
         }
 
         Ok(Self {

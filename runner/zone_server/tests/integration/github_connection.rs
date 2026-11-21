@@ -8,7 +8,6 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 use wiremock::{MockServer, ResponseTemplate};
-use zone_server::auth::Grant;
 use zone_server::db::custom_roles::Assignment;
 use zone_server::db::github_apps::{self, AppRow, OwnerType};
 use zone_server::db::github_connection_states::{self, Purpose};
@@ -927,7 +926,7 @@ async fn callback_manifest_demoted_user_fails() {
         tenant.organization,
         admin.user,
         Assignment::BuiltIn(OrgRole::Member),
-        &Grant::organization(OrgRole::Owner),
+        tenant.user,
     )
     .await
     .expect("the demotion runs");

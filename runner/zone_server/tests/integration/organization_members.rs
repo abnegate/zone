@@ -6,7 +6,6 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use zone_server::auth::Grant;
 use zone_server::db::custom_roles::Assignment;
 use zone_server::db::{organization_members, organizations, users};
 
@@ -352,25 +351,23 @@ async fn test_list_user_organizations_returns_all_orgs() {
 #[tokio::test]
 async fn test_change_role_promotes_member() {
     let pool = create_test_pool().await;
-    let (org_id, user_id, _) = setup_test_data(&pool).await;
+    let (org_id, user_id, owner_id) = setup_test_data(&pool).await;
 
-    // Add member as Member
-    organization_members::add_member(
-        &pool,
-        org_id,
-        user_id,
-        organization_members::OrgRole::Member,
-        None,
-    )
-    .await
-    .expect("Failed to add member");
+    for (member, role) in [
+        (owner_id, organization_members::OrgRole::Owner),
+        (user_id, organization_members::OrgRole::Member),
+    ] {
+        organization_members::add_member(&pool, org_id, member, role, None)
+            .await
+            .expect("Failed to add member");
+    }
 
     let result = organization_members::change_role(
         &pool,
         org_id,
         user_id,
         Assignment::BuiltIn(organization_members::OrgRole::Admin),
-        &Grant::organization(organization_members::OrgRole::Owner),
+        owner_id,
     )
     .await
     .expect("Failed to change role");
@@ -378,7 +375,7 @@ async fn test_change_role_promotes_member() {
     let organization_members::RoleChange::Applied(updated) = result else {
         panic!("An owner should promote a member to admin, got {result:?}");
     };
-    assert_eq!(updated.role, organization_members::OrgRole::Admin);
+    assert_eq!(updated.member.role, organization_members::OrgRole::Admin);
 }
 
 #[tokio::test]

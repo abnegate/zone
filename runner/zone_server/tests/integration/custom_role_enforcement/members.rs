@@ -1,17 +1,20 @@
 //! Custom roles through the member routes: adding and reactivating members,
-//! the rank member lists report, escalation, and what the license gates.
+//! the rank member lists report, escalation, what the license gates, what an
+//! assignment answers and audits, invitations, and the refusals a former
+//! member reads.
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
 use zone_enterprise::LICENSE_REQUIRED;
 use zone_server::auth::{Permission, Scope};
-use zone_server::db::custom_roles::EXCEEDS;
+use zone_server::db::audit::actions;
+use zone_server::db::custom_roles::{AMBIGUOUS_ASSIGNMENT, EXCEEDS};
 use zone_server::db::organization_members::{self, OrgRole};
 use zone_server::db::workspace_members::{self, WorkspaceRole};
 
 use super::{
-    Call, composed, describe, holding_organization, holding_workspace, licensed,
+    Call, composed, describe, fixture, holding_organization, holding_workspace, licensed,
     organization_holder, refused_with, role, seat_organization, seat_workspace, user,
     workspace_holder,
 };
@@ -546,6 +549,347 @@ async fn a_lapsed_license_keeps_enforcing_custom_roles() {
             "{}",
             describe(call, &response)
         );
+    }
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_unparsable_assignment_keeps_each_routes_own_refusal() {
+    let fixture = fixture().await;
+    let member = organization_member(&fixture).await;
+    let viewer = workspace_viewer(&fixture).await;
+
+    for (path, unknown) in [
+        (
+            format!("{}/{member}", organization_members_path(&fixture)),
+            "Invalid role. Must be one of: member, admin, owner",
+        ),
+        (
+            format!("{}/{viewer}", workspace_members_path(&fixture)),
+            "Invalid role. Must be one of: viewer, member, admin, owner",
+        ),
+    ] {
+        for (body, refusal) in [
+            (json!({ "role": "boss" }), unknown),
+            (
+                json!({ "role": "member", "custom_role_id": Uuid::new_v4() }),
+                AMBIGUOUS_ASSIGNMENT,
+            ),
+            (json!({}), AMBIGUOUS_ASSIGNMENT),
+        ] {
+            let call = Call::patch(path.clone(), body);
+            let response = call.send(&fixture, &fixture.owner.token).await;
+            assert_eq!(
+                response.status,
+                StatusCode::BAD_REQUEST,
+                "{}",
+                describe(&call, &response)
+            );
+            assert_eq!(
+                response.json_value()["error"],
+                refusal,
+                "{}",
+                describe(&call, &response)
+            );
+        }
+    }
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_custom_assignment_answers_and_audits_the_role_it_assigned() {
+    let fixture = licensed().await;
+    let organization_role = role(
+        fixture.pool(),
+        fixture.organization,
+        fixture.owner.id,
+        Scope::Organization,
+        &[Permission::AuditLogsRead],
+    )
+    .await;
+    let workspace_role = role(
+        fixture.pool(),
+        fixture.organization,
+        fixture.owner.id,
+        Scope::Workspace,
+        &[Permission::WorkspaceWrite],
+    )
+    .await;
+    let member = organization_member(&fixture).await;
+    let viewer = workspace_viewer(&fixture).await;
+    let assignments = [
+        (
+            format!("{}/{member}", organization_members_path(&fixture)),
+            member,
+            organization_role,
+            OrgRole::Member.as_str(),
+        ),
+        (
+            format!("{}/{viewer}", workspace_members_path(&fixture)),
+            viewer,
+            workspace_role,
+            WorkspaceRole::Member.as_str(),
+        ),
+    ];
+
+    for (path, _, role, rank) in &assignments {
+        let call = Call::patch(path.clone(), json!({ "custom_role_id": role }));
+        let response = call.send(&fixture, &fixture.owner.token).await;
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "{}",
+            describe(&call, &response)
+        );
+        let answered = response.json_value();
+        assert_eq!(
+            answered["custom_role"]["id"],
+            role.to_string(),
+            "{answered}"
+        );
+        assert_eq!(answered["role"], *rank, "{answered}");
+    }
+
+    let audits = fixture.audits(actions::MEMBER_ROLE_CHANGED).await;
+    for (_, member, role, rank) in &assignments {
+        let recorded = audits
+            .iter()
+            .find(|audit| audit.resource_id == Some(*member))
+            .and_then(|audit| audit.new_values.clone())
+            .unwrap_or_else(|| panic!("the change of {member} is audited"));
+        assert_eq!(
+            recorded["custom_role"]["id"],
+            role.to_string(),
+            "{recorded}"
+        );
+        assert!(
+            recorded["custom_role"]["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("Role ")),
+            "the audit names the role: {recorded}"
+        );
+        assert_eq!(recorded["role"], *rank, "{recorded}");
+    }
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_added_member_is_answered_and_audited_from_the_seat_the_add_wrote() {
+    let fixture = fixture().await;
+    let added = fixture.stranger().await;
+
+    let call = Call::post(
+        organization_members_path(&fixture),
+        json!({ "user_id": added.id, "role": OrgRole::Admin.as_str() }),
+    );
+    let response = call.send(&fixture, &fixture.owner.token).await;
+    assert_eq!(
+        response.status,
+        StatusCode::CREATED,
+        "{}",
+        describe(&call, &response)
+    );
+    let answered = response.json_value();
+    assert_eq!(answered["role"], OrgRole::Admin.as_str(), "{answered}");
+    assert_eq!(answered["custom_role"], Value::Null, "{answered}");
+    assert!(answered["email"].is_string(), "{answered}");
+
+    let audits = fixture.audits(actions::MEMBER_ADDED).await;
+    let recorded = audits
+        .iter()
+        .find(|audit| audit.resource_id == Some(added.id))
+        .and_then(|audit| audit.new_values.clone())
+        .expect("the add is audited");
+    assert_eq!(recorded["role"], OrgRole::Admin.as_str(), "{recorded}");
+    assert_eq!(recorded["custom_role"], Value::Null, "{recorded}");
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_custom_holder_who_does_not_cover_a_custom_target_is_refused_with_role_exceeds() {
+    let fixture = licensed().await;
+    let organization_manager = organization_holder(
+        &fixture,
+        &[Permission::MembersUpdate, Permission::MembersDelete],
+    )
+    .await;
+    let organization_target =
+        organization_holder(&fixture, &[Permission::OrganizationUpdate]).await;
+    let workspace_manager = workspace_holder(
+        &fixture,
+        &[
+            Permission::WorkspaceMembersUpdate,
+            Permission::WorkspaceMembersDelete,
+        ],
+    )
+    .await;
+    let workspace_target = workspace_holder(&fixture, &[Permission::WorkspaceUpdate]).await;
+
+    let organization_path = format!(
+        "{}/{}",
+        organization_members_path(&fixture),
+        organization_target.id
+    );
+    let workspace_path = format!(
+        "{}/{}",
+        workspace_members_path(&fixture),
+        workspace_target.id
+    );
+    for (call, manager) in [
+        (
+            Call::patch(
+                organization_path.clone(),
+                json!({ "role": OrgRole::Member.as_str() }),
+            ),
+            &organization_manager,
+        ),
+        (Call::delete(organization_path), &organization_manager),
+        (
+            Call::patch(
+                workspace_path.clone(),
+                json!({ "role": WorkspaceRole::Viewer.as_str() }),
+            ),
+            &workspace_manager,
+        ),
+        (Call::delete(workspace_path), &workspace_manager),
+    ] {
+        let response = call.send(&fixture, &manager.token).await;
+        assert!(
+            refused_with(&response, EXCEEDS),
+            "{}",
+            describe(&call, &response)
+        );
+    }
+
+    let membership = organization_members::membership(
+        fixture.pool(),
+        fixture.organization,
+        organization_target.id,
+    )
+    .await
+    .expect("the membership is read")
+    .expect("the target stays");
+    assert!(membership.custom_role.is_some(), "{membership:?}");
+    let membership =
+        workspace_members::membership(fixture.pool(), fixture.workspace, workspace_target.id)
+            .await
+            .expect("the membership is read")
+            .expect("the target stays");
+    assert!(membership.custom_role.is_some(), "{membership:?}");
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_inviter_never_invites_beyond_its_grant() {
+    let fixture = licensed().await;
+    let inviter = organization_holder(&fixture, &[Permission::InvitationsCreate]).await;
+    let path = format!("/api/organizations/{}/invitations", fixture.organization);
+    let refused_email = format!("{}@example.test", Uuid::new_v4());
+
+    let call = Call::post(
+        path.clone(),
+        json!({ "email": refused_email, "org_role": OrgRole::Admin.as_str() }),
+    );
+    let response = call.send(&fixture, &inviter.token).await;
+    assert!(
+        refused_with(&response, EXCEEDS),
+        "{}",
+        describe(&call, &response)
+    );
+
+    let call = Call::post(
+        path.clone(),
+        json!({
+            "email": refused_email,
+            "org_role": OrgRole::Member.as_str(),
+            "workspace_id": fixture.workspace,
+            "workspace_role": WorkspaceRole::Admin.as_str(),
+        }),
+    );
+    let response = call.send(&fixture, &inviter.token).await;
+    assert_eq!(
+        response.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        describe(&call, &response)
+    );
+    assert_eq!(
+        response.json_value()["error"],
+        "Only owners can invite owners or workspace admins",
+        "{}",
+        describe(&call, &response)
+    );
+
+    let invited: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invitations WHERE email = $1")
+        .bind(&refused_email)
+        .fetch_one(fixture.pool())
+        .await
+        .expect("the invitations are counted");
+    assert_eq!(invited, 0, "a refused invitation is never stored");
+
+    let call = Call::post(
+        path,
+        json!({
+            "email": format!("{}@example.test", Uuid::new_v4()),
+            "org_role": OrgRole::Member.as_str(),
+        }),
+    );
+    let response = call.send(&fixture, &inviter.token).await;
+    assert!(
+        response.status.is_success(),
+        "an invitation within the inviter's grant is sent: {}",
+        describe(&call, &response)
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_removed_member_is_told_the_membership_is_inactive() {
+    let fixture = fixture().await;
+    let removed = fixture
+        .member(OrgRole::Member, Some(WorkspaceRole::Viewer))
+        .await;
+    organization_members::remove_member(fixture.pool(), fixture.organization, removed.id)
+        .await
+        .expect("the organization member is removed");
+    workspace_members::remove_member(fixture.pool(), fixture.workspace, removed.id)
+        .await
+        .expect("the workspace member is removed");
+    let stranger = fixture.stranger().await;
+
+    for (call, inactive, absent) in [
+        (
+            Call::get(format!("/api/organizations/{}", fixture.organization)),
+            "Membership inactive",
+            Permission::OrganizationRead.refusal(),
+        ),
+        (
+            Call::get(format!("/api/workspaces/{}", fixture.workspace)),
+            "Workspace membership is inactive",
+            Permission::WorkspaceRead.refusal(),
+        ),
+    ] {
+        for (account, refusal) in [(&removed, inactive.to_string()), (&stranger, absent)] {
+            let response = call.send(&fixture, &account.token).await;
+            assert_eq!(
+                response.status,
+                StatusCode::FORBIDDEN,
+                "{}",
+                describe(&call, &response)
+            );
+            assert_eq!(
+                response.json_value()["error"],
+                refusal,
+                "{}",
+                describe(&call, &response)
+            );
+        }
     }
 
     fixture.cleanup().await;

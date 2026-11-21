@@ -10,10 +10,13 @@
 //! everything the target holds and everything it is given. For every caller
 //! the old routes admitted, that rule never decides anything; the matrix
 //! proves it before it compares the database with the oracle.
+//!
+//! Every caller is seated, beside the target or as the target, because the
+//! database judges the caller by the membership it reads under its own locks.
+//! A caller seated as an owner or admin counts toward the floors.
 
 use sqlx::PgPool;
 use uuid::Uuid;
-use zone_server::auth::Grant;
 use zone_server::db::custom_roles::Assignment;
 use zone_server::db::organization_members::{self, OrgRole};
 use zone_server::db::workspace_members::{self, WorkspaceRole};
@@ -33,6 +36,7 @@ const WORKSPACE_ROLES: [WorkspaceRole; 4] = [
 enum Outcome {
     Changed,
     Forbidden,
+    Uncovered,
     Missing,
     LastOwner,
     LastAdmin,
@@ -45,6 +49,7 @@ impl From<organization_members::RoleChange> for Outcome {
         match change {
             organization_members::RoleChange::Applied(_) => Self::Changed,
             organization_members::RoleChange::Forbidden => Self::Forbidden,
+            organization_members::RoleChange::Uncovered => Self::Uncovered,
             organization_members::RoleChange::Missing => Self::Missing,
             organization_members::RoleChange::LastOwner => Self::LastOwner,
             organization_members::RoleChange::Exceeds => Self::Exceeds,
@@ -58,6 +63,7 @@ impl From<workspace_members::RoleChange> for Outcome {
         match change {
             workspace_members::RoleChange::Applied(_) => Self::Changed,
             workspace_members::RoleChange::Forbidden => Self::Forbidden,
+            workspace_members::RoleChange::Uncovered => Self::Uncovered,
             workspace_members::RoleChange::Missing => Self::Missing,
             workspace_members::RoleChange::LastAdmin => Self::LastAdmin,
             workspace_members::RoleChange::LastOwner => Self::LastOwner,
@@ -72,6 +78,7 @@ impl From<organization_members::Removal> for Outcome {
         match removal {
             organization_members::Removal::Removed => Self::Changed,
             organization_members::Removal::Forbidden => Self::Forbidden,
+            organization_members::Removal::Uncovered => Self::Uncovered,
             organization_members::Removal::Missing => Self::Missing,
             organization_members::Removal::LastOwner => Self::LastOwner,
         }
@@ -83,6 +90,7 @@ impl From<workspace_members::Removal> for Outcome {
         match removal {
             workspace_members::Removal::Removed => Self::Changed,
             workspace_members::Removal::Forbidden => Self::Forbidden,
+            workspace_members::Removal::Uncovered => Self::Uncovered,
             workspace_members::Removal::Missing => Self::Missing,
             workspace_members::Removal::LastAdmin => Self::LastAdmin,
             workspace_members::Removal::LastOwner => Self::LastOwner,
@@ -101,17 +109,58 @@ enum Company {
 const ORGANIZATION_COMPANY: [Company; 2] = [Company::Alone, Company::Owner];
 const WORKSPACE_COMPANY: [Company; 3] = [Company::Alone, Company::Owner, Company::Admin];
 
-/// The organization's active owners once the target is seated among `company`.
-fn organization_owners(target: OrgRole, company: Company) -> usize {
-    usize::from(target == OrgRole::Owner) + usize::from(company == Company::Owner)
+/// Who asks: a member seated beside the target with a role of their own, or
+/// the target themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Caller<R> {
+    Beside(R),
+    Itself,
+}
+
+impl<R: Copy> Caller<R> {
+    fn role(self, target: R) -> R {
+        match self {
+            Self::Beside(role) => role,
+            Self::Itself => target,
+        }
+    }
+
+    fn beside(self) -> Option<R> {
+        match self {
+            Self::Beside(role) => Some(role),
+            Self::Itself => None,
+        }
+    }
+
+    fn every(roles: &[R]) -> impl Iterator<Item = Self> + '_ {
+        roles
+            .iter()
+            .map(|role| Self::Beside(*role))
+            .chain(std::iter::once(Self::Itself))
+    }
+}
+
+/// The organization's active owners once the target is seated among `company`
+/// and the caller beside them.
+fn organization_owners(caller: Caller<OrgRole>, target: OrgRole, company: Company) -> usize {
+    usize::from(target == OrgRole::Owner)
+        + usize::from(company == Company::Owner)
+        + usize::from(caller.beside() == Some(OrgRole::Owner))
 }
 
 /// The workspace's active owners, and its active admins and owners together.
-fn workspace_privileged(target: WorkspaceRole, company: Company) -> (usize, usize) {
-    let owners =
-        usize::from(target == WorkspaceRole::Owner) + usize::from(company == Company::Owner);
-    let privileged =
-        usize::from(target >= WorkspaceRole::Admin) + usize::from(company != Company::Alone);
+fn workspace_privileged(
+    caller: Caller<WorkspaceRole>,
+    target: WorkspaceRole,
+    company: Company,
+) -> (usize, usize) {
+    let beside = caller.beside();
+    let owners = usize::from(target == WorkspaceRole::Owner)
+        + usize::from(company == Company::Owner)
+        + usize::from(beside == Some(WorkspaceRole::Owner));
+    let privileged = usize::from(target >= WorkspaceRole::Admin)
+        + usize::from(company != Company::Alone)
+        + usize::from(beside.is_some_and(|role| role >= WorkspaceRole::Admin));
     (owners, privileged)
 }
 
@@ -198,8 +247,11 @@ fn expected_organization_change(
     granted: OrgRole,
     owners: usize,
 ) -> Outcome {
-    if !old_organization_outranks(caller, target) || target > caller {
+    if !old_organization_outranks(caller, target) {
         return Outcome::Forbidden;
+    }
+    if target > caller {
+        return Outcome::Uncovered;
     }
     if granted == OrgRole::Owner && caller != OrgRole::Owner {
         return Outcome::Forbidden;
@@ -211,8 +263,8 @@ fn expected_organization_change(
 }
 
 fn expected_organization_removal(caller: OrgRole, target: OrgRole, owners: usize) -> Outcome {
-    if target > caller {
-        return Outcome::Forbidden;
+    if old_organization_outranks(caller, target) && target > caller {
+        return Outcome::Uncovered;
     }
     old_organization_removal(caller, target, owners)
 }
@@ -223,8 +275,11 @@ fn expected_workspace_change(
     granted: WorkspaceRole,
     seats: (usize, usize),
 ) -> Outcome {
-    if !old_workspace_outranks(caller, target) || target > caller {
+    if !old_workspace_outranks(caller, target) {
         return Outcome::Forbidden;
+    }
+    if target > caller {
+        return Outcome::Uncovered;
     }
     if granted >= WorkspaceRole::Admin && caller != WorkspaceRole::Owner {
         return Outcome::Forbidden;
@@ -240,8 +295,8 @@ fn expected_workspace_removal(
     target: WorkspaceRole,
     seats: (usize, usize),
 ) -> Outcome {
-    if target > caller {
-        return Outcome::Forbidden;
+    if old_workspace_outranks(caller, target) && target > caller {
+        return Outcome::Uncovered;
     }
     old_workspace_removal(caller, target, seats)
 }
@@ -295,19 +350,52 @@ fn seat(role: &str, is_active: bool) -> Seat {
     }
 }
 
-/// A fresh organization holding the target with `role`, among `company`.
-async fn organization_with(pool: &PgPool, role: OrgRole, company: Company) -> (Uuid, Uuid) {
+/// The people a case seats: the organization or workspace, its target and the
+/// caller asking about them.
+#[derive(Debug, Clone, Copy)]
+struct Seated {
+    scope: Uuid,
+    target: Uuid,
+    caller: Uuid,
+}
+
+/// A fresh organization holding the target with `role`, among `company`, and
+/// the caller.
+async fn organization_with(
+    pool: &PgPool,
+    role: OrgRole,
+    company: Company,
+    caller: Caller<OrgRole>,
+) -> Seated {
     let organization = organization(pool).await;
     let target = user(pool).await;
     seat_organization(pool, organization, target, role).await;
     if company == Company::Owner {
         seat_organization(pool, organization, user(pool).await, OrgRole::Owner).await;
     }
-    (organization, target)
+    let caller = match caller.beside() {
+        Some(role) => {
+            let caller = user(pool).await;
+            seat_organization(pool, organization, caller, role).await;
+            caller
+        }
+        None => target,
+    };
+    Seated {
+        scope: organization,
+        target,
+        caller,
+    }
 }
 
-/// A fresh workspace holding the target with `role`, among `company`.
-async fn workspace_with(pool: &PgPool, role: WorkspaceRole, company: Company) -> (Uuid, Uuid) {
+/// A fresh workspace holding the target with `role`, among `company`, and the
+/// caller.
+async fn workspace_with(
+    pool: &PgPool,
+    role: WorkspaceRole,
+    company: Company,
+    caller: Caller<WorkspaceRole>,
+) -> Seated {
     let organization = organization(pool).await;
     let workspace = workspace(pool, organization).await;
     let target = user(pool).await;
@@ -321,7 +409,19 @@ async fn workspace_with(pool: &PgPool, role: WorkspaceRole, company: Company) ->
             seat_workspace(pool, workspace, user(pool).await, WorkspaceRole::Admin).await;
         }
     }
-    (workspace, target)
+    let caller = match caller.beside() {
+        Some(role) => {
+            let caller = user(pool).await;
+            seat_workspace(pool, workspace, caller, role).await;
+            caller
+        }
+        None => target,
+    };
+    Seated {
+        scope: workspace,
+        target,
+        caller,
+    }
 }
 
 #[test]
@@ -329,7 +429,7 @@ fn the_subset_rule_never_decides_for_a_caller_the_old_routes_admitted() {
     for caller in [OrgRole::Admin, OrgRole::Owner] {
         for target in ORGANIZATION_ROLES {
             for company in ORGANIZATION_COMPANY {
-                let owners = organization_owners(target, company);
+                let owners = organization_owners(Caller::Itself, target, company);
                 assert_eq!(
                     expected_organization_removal(caller, target, owners),
                     old_organization_removal(caller, target, owners),
@@ -348,7 +448,7 @@ fn the_subset_rule_never_decides_for_a_caller_the_old_routes_admitted() {
     for caller in [WorkspaceRole::Admin, WorkspaceRole::Owner] {
         for target in WORKSPACE_ROLES {
             for company in WORKSPACE_COMPANY {
-                let seats = workspace_privileged(target, company);
+                let seats = workspace_privileged(Caller::Itself, target, company);
                 assert_eq!(
                     expected_workspace_removal(caller, target, seats),
                     old_workspace_removal(caller, target, seats),
@@ -371,24 +471,24 @@ async fn organization_role_changes_follow_the_old_rules_for_every_built_in_role(
     let fixture = fixture().await;
     let pool = fixture.pool();
 
-    for caller in ORGANIZATION_ROLES {
+    for caller in Caller::every(&ORGANIZATION_ROLES) {
         for target in ORGANIZATION_ROLES {
             for granted in ORGANIZATION_ROLES {
                 for company in ORGANIZATION_COMPANY {
-                    let (organization, member) = organization_with(pool, target, company).await;
+                    let seated = organization_with(pool, target, company, caller).await;
                     let expected = expected_organization_change(
-                        caller,
+                        caller.role(target),
                         target,
                         granted,
-                        organization_owners(target, company),
+                        organization_owners(caller, target, company),
                     );
 
                     let outcome: Outcome = organization_members::change_role(
                         pool,
-                        organization,
-                        member,
+                        seated.scope,
+                        seated.target,
                         Assignment::BuiltIn(granted),
-                        &Grant::organization(caller),
+                        seated.caller,
                     )
                     .await
                     .expect("the change is answered")
@@ -403,7 +503,7 @@ async fn organization_role_changes_follow_the_old_rules_for_every_built_in_role(
                         target
                     };
                     assert_eq!(
-                        organization_seat(pool, organization, member).await,
+                        organization_seat(pool, seated.scope, seated.target).await,
                         seat(held.as_str(), true),
                         "{case}"
                     );
@@ -420,21 +520,21 @@ async fn organization_removals_follow_the_old_rules_for_every_built_in_role() {
     let fixture = fixture().await;
     let pool = fixture.pool();
 
-    for caller in ORGANIZATION_ROLES {
+    for caller in Caller::every(&ORGANIZATION_ROLES) {
         for target in ORGANIZATION_ROLES {
             for company in ORGANIZATION_COMPANY {
-                let (organization, member) = organization_with(pool, target, company).await;
+                let seated = organization_with(pool, target, company, caller).await;
                 let expected = expected_organization_removal(
-                    caller,
+                    caller.role(target),
                     target,
-                    organization_owners(target, company),
+                    organization_owners(caller, target, company),
                 );
 
                 let outcome: Outcome = organization_members::remove_guarded(
                     pool,
-                    organization,
-                    member,
-                    &Grant::organization(caller),
+                    seated.scope,
+                    seated.target,
+                    seated.caller,
                 )
                 .await
                 .expect("the removal is answered")
@@ -443,7 +543,7 @@ async fn organization_removals_follow_the_old_rules_for_every_built_in_role() {
                 let case = format!("{caller:?} removing {target:?} beside {company:?}");
                 assert_eq!(outcome, expected, "{case}");
                 assert_eq!(
-                    organization_seat(pool, organization, member).await,
+                    organization_seat(pool, seated.scope, seated.target).await,
                     seat(target.as_str(), outcome != Outcome::Changed),
                     "{case}"
                 );
@@ -452,15 +552,13 @@ async fn organization_removals_follow_the_old_rules_for_every_built_in_role() {
     }
 
     let organization = organization(pool).await;
-    let outcome: Outcome = organization_members::remove_guarded(
-        pool,
-        organization,
-        user(pool).await,
-        &Grant::organization(OrgRole::Owner),
-    )
-    .await
-    .expect("the removal is answered")
-    .into();
+    let owner = user(pool).await;
+    seat_organization(pool, organization, owner, OrgRole::Owner).await;
+    let outcome: Outcome =
+        organization_members::remove_guarded(pool, organization, user(pool).await, owner)
+            .await
+            .expect("the removal is answered")
+            .into();
     assert_eq!(outcome, Outcome::Missing);
 
     fixture.cleanup().await;
@@ -471,24 +569,24 @@ async fn workspace_role_changes_follow_the_old_rules_for_every_built_in_role() {
     let fixture = fixture().await;
     let pool = fixture.pool();
 
-    for caller in WORKSPACE_ROLES {
+    for caller in Caller::every(&WORKSPACE_ROLES) {
         for target in WORKSPACE_ROLES {
             for granted in WORKSPACE_ROLES {
                 for company in WORKSPACE_COMPANY {
-                    let (workspace, member) = workspace_with(pool, target, company).await;
+                    let seated = workspace_with(pool, target, company, caller).await;
                     let expected = expected_workspace_change(
-                        caller,
+                        caller.role(target),
                         target,
                         granted,
-                        workspace_privileged(target, company),
+                        workspace_privileged(caller, target, company),
                     );
 
                     let outcome: Outcome = workspace_members::change_role(
                         pool,
-                        workspace,
-                        member,
+                        seated.scope,
+                        seated.target,
                         Assignment::BuiltIn(granted),
-                        &Grant::workspace(caller),
+                        seated.caller,
                     )
                     .await
                     .expect("the change is answered")
@@ -503,7 +601,7 @@ async fn workspace_role_changes_follow_the_old_rules_for_every_built_in_role() {
                         target
                     };
                     assert_eq!(
-                        workspace_seat(pool, workspace, member).await,
+                        workspace_seat(pool, seated.scope, seated.target).await,
                         seat(held.as_str(), true),
                         "{case}"
                     );
@@ -513,12 +611,14 @@ async fn workspace_role_changes_follow_the_old_rules_for_every_built_in_role() {
     }
 
     let workspace = workspace(pool, organization(pool).await).await;
+    let owner = user(pool).await;
+    seat_workspace(pool, workspace, owner, WorkspaceRole::Owner).await;
     let outcome: Outcome = workspace_members::change_role(
         pool,
         workspace,
         user(pool).await,
         Assignment::BuiltIn(WorkspaceRole::Member),
-        &Grant::workspace(WorkspaceRole::Owner),
+        owner,
     )
     .await
     .expect("the change is answered")
@@ -533,21 +633,21 @@ async fn workspace_removals_follow_the_old_rules_for_every_built_in_role() {
     let fixture = fixture().await;
     let pool = fixture.pool();
 
-    for caller in WORKSPACE_ROLES {
+    for caller in Caller::every(&WORKSPACE_ROLES) {
         for target in WORKSPACE_ROLES {
             for company in WORKSPACE_COMPANY {
-                let (workspace, member) = workspace_with(pool, target, company).await;
+                let seated = workspace_with(pool, target, company, caller).await;
                 let expected = expected_workspace_removal(
-                    caller,
+                    caller.role(target),
                     target,
-                    workspace_privileged(target, company),
+                    workspace_privileged(caller, target, company),
                 );
 
                 let outcome: Outcome = workspace_members::remove_guarded(
                     pool,
-                    workspace,
-                    member,
-                    &Grant::workspace(caller),
+                    seated.scope,
+                    seated.target,
+                    seated.caller,
                 )
                 .await
                 .expect("the removal is answered")
@@ -556,7 +656,7 @@ async fn workspace_removals_follow_the_old_rules_for_every_built_in_role() {
                 let case = format!("{caller:?} removing {target:?} beside {company:?}");
                 assert_eq!(outcome, expected, "{case}");
                 assert_eq!(
-                    workspace_seat(pool, workspace, member).await,
+                    workspace_seat(pool, seated.scope, seated.target).await,
                     seat(target.as_str(), outcome != Outcome::Changed),
                     "{case}"
                 );
