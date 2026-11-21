@@ -54,6 +54,7 @@ mock.module('../../enterprise', () => ({
   LicenseSection: marker('license-section'),
   OrganizationPolicySection: marker('organization-policy-section'),
   organizationScope: (id: string) => ({ kind: 'organization', organizationId: id }),
+  RolesSection: marker('roles-section'),
   SERVER_SCOPE: { kind: 'server' },
   SsoSection: marker('sso-section'),
   WorkspacePolicySection: marker('workspace-policy-section'),
@@ -345,6 +346,36 @@ describe('SettingsContent', () => {
           group={SettingsGroup.Organization}
           section={SettingsSection.Mcp}
           access={access('admin', 'admin')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+  });
+
+  describe('organization roles', () => {
+    it('renders the roles of the current organization for an organization admin', () => {
+      renderSection(SettingsGroup.Organization, SettingsSection.Roles, access('member', 'admin'));
+      expect(propsOf('roles-section')).toEqual({ organizationId });
+    });
+
+    it('renders no roles for an organization member', () => {
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.Roles}
+          access={access('member', 'member')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('renders no roles without a current organization', () => {
+      workspaceContext.currentOrganization = null;
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.Roles}
+          access={access('admin', 'owner')}
         />
       );
       expect(container.innerHTML).toBe('');
