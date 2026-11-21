@@ -9,8 +9,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::auth::{OrgMember, WorkspaceAdmin, WorkspaceMember, WorkspaceOwner};
+use crate::auth::{Grant, OrgMember, WorkspaceAdmin, WorkspaceMember, WorkspaceOwner};
 use crate::db::audit::{actions, resources};
+use crate::db::custom_roles::{self, Assignment};
 use crate::db::{workspace_members, workspaces};
 use crate::state::AppState;
 use crate::sync::hook::Removal;
@@ -581,8 +582,8 @@ pub async fn update_member_role(
         state.db(),
         admin.workspace_id,
         path.user_id,
-        role,
-        admin.role,
+        Assignment::BuiltIn(role),
+        &Grant::workspace(admin.role),
     )
     .await
     {
@@ -623,6 +624,19 @@ pub async fn update_member_role(
             )),
         )
             .into_response(),
+        Ok(workspace_members::RoleChange::Exceeds) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::with_code(
+                "This role grants permissions you do not hold",
+                custom_roles::EXCEEDS,
+            )),
+        )
+            .into_response(),
+        Ok(workspace_members::RoleChange::RoleMissing) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new("Role not found")),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (
@@ -644,7 +658,7 @@ pub async fn remove_member(
         state.db(),
         admin.workspace_id,
         path.user_id,
-        admin.role,
+        &Grant::workspace(admin.role),
     )
     .await
     {
