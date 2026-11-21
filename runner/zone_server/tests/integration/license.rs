@@ -6,12 +6,13 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use zone_enterprise::{
     Edition, GRACE_DAYS, Keyring, MALFORMED, PAYLOAD_INVALID, Payload, SEPARATOR,
-    SIGNATURE_INVALID, SigningKey, Tier, TrustedKey, UNKNOWN_KEY, sign,
+    SIGNATURE_INVALID, SigningKey, TrustedKey, UNKNOWN_KEY, sign,
 };
 use zone_server::auth::admin_guard::REQUIRED;
 use zone_server::db::audit::{actions, resources};
-use zone_server::db::{licenses, migrations};
+use zone_server::db::{license_renewal, licenses, migrations};
 use zone_server::services::license::LAPSED;
+use zone_server::services::license::renewal::Outcome;
 
 use crate::common::{self, Database, TestClient, TestResponse};
 
@@ -23,6 +24,7 @@ const TRUSTED_SEED: [u8; 32] = [0x11; 32];
 const UNTRUSTED_SEED: [u8; 32] = [0x22; 32];
 const LINE_WIDTH: usize = 64;
 const SEATS: u32 = 25;
+const SUBSCRIPTION: &str = "4f6c1a2e-8b3d-4c5e-9f70-1a2b3c4d5e6f";
 /// Seats are counted from `sessions`; renaming it once the license changes
 /// fails the count after the change has committed, and only in this test's
 /// own database. The upsert fires both the INSERT and UPDATE statement
@@ -165,7 +167,7 @@ impl Fixture {
                     .method(method)
                     .uri(ROUTE)
                     .header("Content-Type", "application/json")
-                    .body(Body::from(json!({ "key": active(Tier::Team) }).to_string()))
+                    .body(Body::from(json!({ "key": active() }).to_string()))
                     .unwrap(),
             )
             .await
@@ -232,47 +234,54 @@ fn keyring() -> Keyring {
     Keyring::new([TrustedKey::new(TRUSTED, trusted().verifying_key().to_bytes()).unwrap()]).unwrap()
 }
 
-fn expiring(tier: Tier, expires_in: TimeDelta) -> Payload {
+fn expiring(expires_in: TimeDelta) -> Payload {
     let expires_at = Utc::now().trunc_subsecs(0) + expires_in;
     Payload {
         id: Uuid::new_v4(),
         customer: "Acme Ltd".into(),
-        tier,
         seats: SEATS,
         issued_at: expires_at - TimeDelta::days(365),
         expires_at,
         key_id: TRUSTED.into(),
+        subscription: None,
     }
 }
 
-fn current(tier: Tier) -> Payload {
-    expiring(tier, TimeDelta::days(365))
+fn current() -> Payload {
+    expiring(TimeDelta::days(365))
 }
 
 fn issue(payload: &Payload) -> String {
     sign(payload, &trusted())
 }
 
-fn active(tier: Tier) -> String {
-    issue(&current(tier))
+fn active() -> String {
+    issue(&current())
 }
 
-fn lapsed(tier: Tier) -> String {
-    issue(&expiring(tier, -TimeDelta::days(GRACE_DAYS + 1)))
+fn subscribed() -> Payload {
+    Payload {
+        subscription: Some(SUBSCRIPTION.into()),
+        ..current()
+    }
+}
+
+fn lapsed() -> String {
+    issue(&expiring(-TimeDelta::days(GRACE_DAYS + 1)))
 }
 
 fn retired() -> String {
     sign(
         &Payload {
             key_id: UNTRUSTED.into(),
-            ..current(Tier::Enterprise)
+            ..current()
         },
         &untrusted(),
     )
 }
 
 fn forged() -> String {
-    sign(&current(Tier::Enterprise), &untrusted())
+    sign(&current(), &untrusted())
 }
 
 fn wrap(text: &str) -> String {
@@ -291,7 +300,6 @@ fn details(payload: &Payload) -> Value {
     json!({
         "id": payload.id,
         "customer": payload.customer,
-        "tier": payload.tier,
         "seats": payload.seats,
         "issued_at": payload.issued_at,
         "expires_at": payload.expires_at,
@@ -320,6 +328,12 @@ fn assert_runs_as_community(body: &Value) {
         body["seats"].get("licensed").is_some(),
         "seats.licensed is omitted: {body}"
     );
+    assert_eq!(body["renewal"], Value::Null, "{body}");
+    assert!(body.get("renewal").is_some(), "renewal is omitted: {body}");
+}
+
+fn unattempted(mode: &str) -> Value {
+    json!({ "mode": mode, "attempted_at": null, "outcome": null })
 }
 
 fn assert_forbidden(response: &TestResponse) {
@@ -341,7 +355,7 @@ fn assert_refused(response: &TestResponse, code: &str) {
 
 async fn assert_all_forbidden(fixture: &Fixture, token: &str) {
     assert_forbidden(&fixture.get(token).await);
-    assert_forbidden(&fixture.put(token, &active(Tier::Team)).await);
+    assert_forbidden(&fixture.put(token, &active()).await);
     assert_forbidden(&fixture.delete(token).await);
 }
 
@@ -442,17 +456,17 @@ async fn an_empty_server_reads_as_community() {
 }
 
 #[tokio::test]
-async fn a_team_key_is_stored_shown_and_audited_without_its_text() {
+async fn a_key_is_stored_shown_and_audited_without_its_text() {
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
-    let payload = current(Tier::Team);
+    let payload = current();
     let key = issue(&payload);
 
     let response = fixture.put(&admin.token, &key).await;
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert_eq!(body["edition"], "team", "{body}");
+    assert_eq!(body["edition"], "enterprise", "{body}");
     assert_eq!(body["status"], "active", "{body}");
     assert_eq!(body["license"], details(&payload));
     assert_eq!(
@@ -473,7 +487,7 @@ async fn a_team_key_is_stored_shown_and_audited_without_its_text() {
     assert_eq!(audit.old_values, None);
     let new_values = audit.new_values.as_ref().unwrap();
     assert_eq!(new_values["id"], json!(payload.id));
-    assert_eq!(new_values["tier"], "team");
+    assert!(new_values.get("tier").is_none(), "{new_values}");
     assert!(!audit.row.contains(&key), "the audit row holds the key");
     let (encoded_payload, signature) = key.split_once(SEPARATOR).unwrap();
     assert!(!audit.row.contains(encoded_payload));
@@ -482,34 +496,34 @@ async fn a_team_key_is_stored_shown_and_audited_without_its_text() {
 }
 
 #[tokio::test]
-async fn an_enterprise_key_replaces_the_team_key() {
+async fn a_renewed_key_replaces_the_stored_key() {
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
-    let team = current(Tier::Team);
-    let enterprise = current(Tier::Enterprise);
+    let first = current();
+    let renewed = current();
     fixture
-        .put(&admin.token, &issue(&team))
+        .put(&admin.token, &issue(&first))
         .await
         .assert_status(StatusCode::OK);
 
-    let response = fixture.put(&admin.token, &issue(&enterprise)).await;
+    let response = fixture.put(&admin.token, &issue(&renewed)).await;
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
     assert_eq!(body["edition"], "enterprise", "{body}");
-    assert_eq!(body["license"], details(&enterprise));
+    assert_eq!(body["license"], details(&renewed));
     assert_eq!(fixture.rows().await, 1);
     let audits = fixture.audits(actions::LICENSE_SET).await;
     assert_eq!(audits.len(), 2);
     let replacement = &audits[1];
-    assert_eq!(replacement.resource_id, Some(enterprise.id));
+    assert_eq!(replacement.resource_id, Some(renewed.id));
     assert_eq!(
         replacement.old_values.as_ref().unwrap()["id"],
-        json!(team.id)
+        json!(first.id)
     );
     assert_eq!(
         replacement.new_values.as_ref().unwrap()["id"],
-        json!(enterprise.id)
+        json!(renewed.id)
     );
     fixture.cleanup().await;
 }
@@ -518,7 +532,7 @@ async fn an_enterprise_key_replaces_the_team_key() {
 async fn a_key_wrapped_across_lines_is_accepted() {
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
-    let payload = current(Tier::Team);
+    let payload = current();
     let key = issue(&payload);
     let wrapped = wrap(&key);
     assert!(wrapped.contains('\n'));
@@ -535,28 +549,28 @@ async fn a_key_wrapped_across_lines_is_accepted() {
 async fn each_refused_key_names_its_reason_and_leaves_the_license_alone() {
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
-    let original = issue(&current(Tier::Team));
+    let original = issue(&current());
     fixture
         .put(&admin.token, &original)
         .await
         .assert_status(StatusCode::OK);
     let before = fixture.get(&admin.token).await.json_value();
     let (_, signature) = original.split_once(SEPARATOR).unwrap();
-    let upgraded = issue(&current(Tier::Enterprise));
-    let (upgraded_payload, _) = upgraded.split_once(SEPARATOR).unwrap();
-    let tampered = format!("{upgraded_payload}{SEPARATOR}{signature}");
+    let other = issue(&current());
+    let (other_payload, _) = other.split_once(SEPARATOR).unwrap();
+    let tampered = format!("{other_payload}{SEPARATOR}{signature}");
     let unknown = sign(
         &Payload {
             key_id: UNTRUSTED.into(),
-            ..current(Tier::Enterprise)
+            ..current()
         },
         &untrusted(),
     );
     let seatless = issue(&Payload {
         seats: 0,
-        ..current(Tier::Team)
+        ..current()
     });
-    let expired = lapsed(Tier::Enterprise);
+    let expired = lapsed();
 
     let cases = [
         (tampered.as_str(), SIGNATURE_INVALID),
@@ -604,10 +618,10 @@ async fn a_body_without_a_readable_key_is_a_bad_request() {
 }
 
 #[tokio::test]
-async fn a_key_in_grace_is_accepted_with_its_tier() {
+async fn a_key_in_grace_is_accepted_as_enterprise() {
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
-    let payload = expiring(Tier::Enterprise, -TimeDelta::days(1));
+    let payload = expiring(-TimeDelta::days(1));
 
     let response = fixture.put(&admin.token, &issue(&payload)).await;
 
@@ -620,10 +634,10 @@ async fn a_key_in_grace_is_accepted_with_its_tier() {
 }
 
 #[tokio::test]
-async fn a_stored_lapsed_key_is_shown_as_lapsed_with_its_tier() {
+async fn a_stored_lapsed_key_is_shown_as_lapsed_enterprise() {
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
-    let payload = expiring(Tier::Team, -TimeDelta::days(GRACE_DAYS + 1));
+    let payload = expiring(-TimeDelta::days(GRACE_DAYS + 1));
     licenses::replace(fixture.pool(), &issue(&payload))
         .await
         .unwrap();
@@ -633,7 +647,7 @@ async fn a_stored_lapsed_key_is_shown_as_lapsed_with_its_tier() {
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
     assert_eq!(body["status"], "lapsed", "{body}");
-    assert_eq!(body["edition"], "team", "{body}");
+    assert_eq!(body["edition"], "enterprise", "{body}");
     assert_eq!(body["license"], details(&payload));
     fixture.cleanup().await;
 }
@@ -643,9 +657,7 @@ async fn a_lapsed_license_locks_nobody_out() {
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
     let member = fixture.register().await;
-    licenses::replace(fixture.pool(), &lapsed(Tier::Enterprise))
-        .await
-        .unwrap();
+    licenses::replace(fixture.pool(), &lapsed()).await.unwrap();
     assert_eq!(
         fixture.get(&admin.token).await.json_value()["status"],
         "lapsed"
@@ -663,7 +675,7 @@ async fn a_lapsed_license_locks_nobody_out() {
         .await
         .assert_status(StatusCode::OK);
 
-    let renewed = fixture.put(&admin.token, &active(Tier::Enterprise)).await;
+    let renewed = fixture.put(&admin.token, &active()).await;
     renewed.assert_status(StatusCode::OK);
     assert_eq!(renewed.json_value()["status"], "active");
 
@@ -720,7 +732,7 @@ async fn replacing_a_key_that_no_longer_verifies_is_audited() {
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
     licenses::replace(fixture.pool(), &forged()).await.unwrap();
-    let payload = current(Tier::Team);
+    let payload = current();
 
     let response = fixture.put(&admin.token, &issue(&payload)).await;
 
@@ -739,7 +751,7 @@ async fn replacing_a_key_that_no_longer_verifies_is_audited() {
 async fn removing_the_license_returns_community_and_audits_once() {
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
-    let payload = current(Tier::Team);
+    let payload = current();
     let key = issue(&payload);
     fixture
         .put(&admin.token, &key)
@@ -780,7 +792,7 @@ async fn seats_over_the_license_are_reported_but_never_block_sign_in() {
             &admin.token,
             &issue(&Payload {
                 seats: 1,
-                ..current(Tier::Team)
+                ..current()
             }),
         )
         .await;
@@ -814,7 +826,7 @@ async fn setting_a_key_whose_seats_cannot_be_counted_reports_usage_as_unknown() 
     let admin = fixture.register().await;
     let payload = Payload {
         seats: 1,
-        ..current(Tier::Team)
+        ..current()
     };
     let key = issue(&payload);
     fixture.register().await;
@@ -824,7 +836,7 @@ async fn setting_a_key_whose_seats_cannot_be_counted_reports_usage_as_unknown() 
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert_eq!(body["edition"], "team", "{body}");
+    assert_eq!(body["edition"], "enterprise", "{body}");
     assert_eq!(body["license"], details(&payload));
     assert_uncounted(&body, json!(1));
     assert_eq!(fixture.stored().await.as_deref(), Some(key.as_str()));
@@ -837,7 +849,7 @@ async fn removing_a_key_whose_seats_cannot_be_counted_reports_usage_as_unknown()
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
     fixture
-        .put(&admin.token, &active(Tier::Team))
+        .put(&admin.token, &active())
         .await
         .assert_status(StatusCode::OK);
     fixture.withhold(WITHHOLD_SESSIONS_ON_CHANGE).await;
@@ -857,7 +869,7 @@ async fn removing_a_key_whose_seats_cannot_be_counted_reports_usage_as_unknown()
 async fn reading_a_license_whose_seats_cannot_be_counted_reports_usage_as_unknown() {
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
-    let payload = current(Tier::Team);
+    let payload = current();
     fixture
         .put(&admin.token, &issue(&payload))
         .await
@@ -868,7 +880,7 @@ async fn reading_a_license_whose_seats_cannot_be_counted_reports_usage_as_unknow
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert_eq!(body["edition"], "team", "{body}");
+    assert_eq!(body["edition"], "enterprise", "{body}");
     assert_eq!(body["status"], "active", "{body}");
     assert_eq!(body["license"], details(&payload));
     assert_uncounted(&body, json!(SEATS));
@@ -880,7 +892,7 @@ async fn a_license_that_cannot_be_loaded_is_a_server_error() {
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
     fixture
-        .put(&admin.token, &active(Tier::Team))
+        .put(&admin.token, &active())
         .await
         .assert_status(StatusCode::OK);
     fixture.withhold(WITHHOLD_LICENSES).await;
@@ -900,13 +912,7 @@ async fn the_edition_accessor_follows_set_and_remove() {
     assert_eq!(state.edition().await, Edition::Community);
 
     fixture
-        .put(&admin.token, &active(Tier::Team))
-        .await
-        .assert_status(StatusCode::OK);
-    assert_eq!(state.edition().await, Edition::Team);
-
-    fixture
-        .put(&admin.token, &active(Tier::Enterprise))
+        .put(&admin.token, &active())
         .await
         .assert_status(StatusCode::OK);
     assert_eq!(state.edition().await, Edition::Enterprise);
@@ -916,5 +922,114 @@ async fn the_edition_accessor_follows_set_and_remove() {
         .await
         .assert_status(StatusCode::OK);
     assert_eq!(state.edition().await, Edition::Community);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_key_without_a_subscription_is_renewed_by_hand() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+
+    let response = fixture.put(&admin.token, &active()).await;
+
+    response.assert_status(StatusCode::OK);
+    assert_eq!(response.json_value()["renewal"], unattempted("manual"));
+    assert_eq!(
+        fixture.get(&admin.token).await.json_value()["renewal"],
+        unattempted("manual")
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_key_with_a_subscription_renews_automatically() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+
+    let response = fixture.put(&admin.token, &issue(&subscribed())).await;
+
+    response.assert_status(StatusCode::OK);
+    assert_eq!(response.json_value()["renewal"], unattempted("automatic"));
+    assert_eq!(
+        fixture.get(&admin.token).await.json_value()["renewal"],
+        unattempted("automatic")
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_last_renewal_attempt_is_reported_until_another_key_is_set() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    let key = issue(&subscribed());
+    fixture
+        .put(&admin.token, &key)
+        .await
+        .assert_status(StatusCode::OK);
+    let attempted_at = Utc::now().trunc_subsecs(0) - TimeDelta::hours(2);
+    assert!(
+        license_renewal::record(fixture.pool(), &key, Outcome::Unreachable, attempted_at)
+            .await
+            .unwrap()
+    );
+
+    let read = fixture.get(&admin.token).await;
+
+    read.assert_status(StatusCode::OK);
+    assert_eq!(
+        read.json_value()["renewal"],
+        json!({
+            "mode": "automatic",
+            "attempted_at": attempted_at,
+            "outcome": "unreachable",
+        })
+    );
+
+    let replaced = fixture.put(&admin.token, &issue(&subscribed())).await;
+
+    replaced.assert_status(StatusCode::OK);
+    assert_eq!(replaced.json_value()["renewal"], unattempted("automatic"));
+    assert_eq!(
+        fixture.get(&admin.token).await.json_value()["renewal"],
+        unattempted("automatic")
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn removing_a_key_with_a_recorded_attempt_reports_no_renewal() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    let key = issue(&subscribed());
+    fixture
+        .put(&admin.token, &key)
+        .await
+        .assert_status(StatusCode::OK);
+    license_renewal::record(fixture.pool(), &key, Outcome::Ended, Utc::now())
+        .await
+        .unwrap();
+
+    let response = fixture.delete(&admin.token).await;
+
+    response.assert_status(StatusCode::OK);
+    assert_community(&response.json_value());
+    assert_community(&fixture.get(&admin.token).await.json_value());
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_stored_key_that_no_longer_verifies_reports_no_renewal_whatever_was_recorded() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    let key = retired();
+    licenses::replace(fixture.pool(), &key).await.unwrap();
+    license_renewal::record(fixture.pool(), &key, Outcome::Refused, Utc::now())
+        .await
+        .unwrap();
+
+    let body = fixture.get(&admin.token).await.json_value();
+
+    assert_runs_as_community(&body);
+    assert_eq!(body["unverified"], json!({ "code": UNKNOWN_KEY }));
     fixture.cleanup().await;
 }

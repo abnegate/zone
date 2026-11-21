@@ -42,8 +42,8 @@ const READING: &str = "Read only the part of a file you need when you already kn
              Prefer plain-text formats over ones that inflate the context.";
 
 const GIT: &str = "Git: interactive flags such as rebase -i are not supported here. Start work in a fresh \
-             worktree on a new branch off the latest main: git worktree add .worktrees/<branch> \
-             -b <branch> origin/main. Commit work you were asked \
+             worktree on a new branch off the latest main: git fetch origin; git worktree \
+             add .worktrees/<branch> -b <branch> origin/main. Commit work you were asked \
              to do once it is done, and push only when the user asks. Do not \
              force-push, hard reset, or rewrite history unless the user asked for it. When gh opens a \
              pull request, write its body to a file and pass it by path so its newlines survive.";
@@ -131,8 +131,12 @@ mod tests {
              handed: {rendered}"
         );
         assert!(
-            rendered.contains("git worktree add .worktrees/<branch> -b <branch> origin/main"),
-            "{rendered}"
+            rendered.contains(
+                "git fetch origin; git worktree add .worktrees/<branch> -b <branch> \
+                 origin/main"
+            ),
+            "main is fetched first, and a fetch the shell holds no credential for does not stop \
+             the worktree: {rendered}"
         );
         assert!(
             rendered.contains(

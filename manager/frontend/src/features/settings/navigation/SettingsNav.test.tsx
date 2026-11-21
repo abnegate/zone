@@ -113,35 +113,40 @@ describe('SettingsNav', () => {
     expect(links).toEqual([
       ['General', '/settings/workspace/general'],
       ['AI', '/settings/workspace/ai'],
+      ['Agent policy', '/settings/workspace/agent-policy'],
       ['Folders', '/settings/workspace/folders'],
       ['Sources', '/settings/workspace/sources'],
       ['Members', '/settings/workspace/members'],
       ['MCP servers', '/settings/workspace/mcp'],
       ['AI defaults', '/settings/organization/ai'],
+      ['Agent policy', '/settings/organization/agent-policy'],
       ['Members', '/settings/organization/members'],
       ['Devices', '/settings/organization/devices'],
       ['Audit log', '/settings/organization/audit'],
+      ['Audit export', '/settings/organization/audit-export'],
       ['GitHub', '/settings/organization/github'],
       ['MCP servers', '/settings/organization/mcp'],
       ['Features', '/settings/server/features'],
       ['Connect a device', '/settings/server/connect'],
       ['License', '/settings/server/license'],
       ['Single sign-on', '/settings/server/sso'],
+      ['Audit export', '/settings/server/audit-export'],
       ['Sessions', '/settings/you/sessions'],
     ]);
   });
 
-  it('lists License and Single sign-on under This server only for a server admin', () => {
+  it('lists License, Single sign-on and Audit export under This server only for a server admin', () => {
     renderNav(ownerAccess);
     expect(linkLabels('This server')).toEqual([
       'Features',
       'Connect a device',
       'License',
       'Single sign-on',
+      'Audit export',
     ]);
   });
 
-  it('leaves License and Single sign-on out of This server for anyone who does not administer the server', () => {
+  it('leaves License, Single sign-on and Audit export out of This server for anyone who does not administer the server', () => {
     renderNav({ ...ownerAccess, administersServer: false });
     expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
   });
@@ -174,9 +179,11 @@ describe('SettingsNav', () => {
     expect(screen.queryByRole('group', { name: 'Workspace' })).not.toBeInTheDocument();
     expect(linkLabels('Organization')).toEqual([
       'AI defaults',
+      'Agent policy',
       'Members',
       'Devices',
       'Audit log',
+      'Audit export',
       'GitHub',
       'MCP servers',
     ]);

@@ -18,20 +18,36 @@ import {
 const ALL_SECTIONS = [
   { group: SettingsGroup.Workspace, section: SettingsSection.General, label: 'General' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Ai, label: 'AI' },
+  {
+    group: SettingsGroup.Workspace,
+    section: SettingsSection.AgentPolicy,
+    label: 'Agent policy',
+  },
   { group: SettingsGroup.Workspace, section: SettingsSection.Folders, label: 'Folders' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Sources, label: 'Sources' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Members, label: 'Members' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Mcp, label: 'MCP servers' },
   { group: SettingsGroup.Organization, section: SettingsSection.Ai, label: 'AI defaults' },
+  {
+    group: SettingsGroup.Organization,
+    section: SettingsSection.AgentPolicy,
+    label: 'Agent policy',
+  },
   { group: SettingsGroup.Organization, section: SettingsSection.Members, label: 'Members' },
   { group: SettingsGroup.Organization, section: SettingsSection.Devices, label: 'Devices' },
   { group: SettingsGroup.Organization, section: SettingsSection.Audit, label: 'Audit log' },
+  {
+    group: SettingsGroup.Organization,
+    section: SettingsSection.AuditExport,
+    label: 'Audit export',
+  },
   { group: SettingsGroup.Organization, section: SettingsSection.GitHub, label: 'GitHub' },
   { group: SettingsGroup.Organization, section: SettingsSection.Mcp, label: 'MCP servers' },
   { group: SettingsGroup.Server, section: SettingsSection.Features, label: 'Features' },
   { group: SettingsGroup.Server, section: SettingsSection.Connect, label: 'Connect a device' },
   { group: SettingsGroup.Server, section: SettingsSection.License, label: 'License' },
   { group: SettingsGroup.Server, section: SettingsSection.Sso, label: 'Single sign-on' },
+  { group: SettingsGroup.Server, section: SettingsSection.AuditExport, label: 'Audit export' },
   { group: SettingsGroup.You, section: SettingsSection.Sessions, label: 'Sessions' },
 ] as const;
 
@@ -43,6 +59,11 @@ const pathsOf = (...groups: SettingsGroup[]): string[] =>
     settingsPath(group, section)
   );
 
+const WORKSPACE_AGENT_POLICY = settingsPath(SettingsGroup.Workspace, SettingsSection.AgentPolicy);
+const ORGANIZATION_AGENT_POLICY = settingsPath(
+  SettingsGroup.Organization,
+  SettingsSection.AgentPolicy
+);
 const ORGANIZATION_MEMBERS = settingsPath(SettingsGroup.Organization, SettingsSection.Members);
 const ORGANIZATION_GITHUB = settingsPath(SettingsGroup.Organization, SettingsSection.GitHub);
 const ORGANIZATION_MCP = settingsPath(SettingsGroup.Organization, SettingsSection.Mcp);
@@ -50,6 +71,11 @@ const FEATURES = settingsPath(SettingsGroup.Server, SettingsSection.Features);
 const CONNECT = settingsPath(SettingsGroup.Server, SettingsSection.Connect);
 const LICENSE = settingsPath(SettingsGroup.Server, SettingsSection.License);
 const SSO = settingsPath(SettingsGroup.Server, SettingsSection.Sso);
+const SERVER_AUDIT_EXPORT = settingsPath(SettingsGroup.Server, SettingsSection.AuditExport);
+const ORGANIZATION_AUDIT_EXPORT = settingsPath(
+  SettingsGroup.Organization,
+  SettingsSection.AuditExport
+);
 const SESSIONS = settingsPath(SettingsGroup.You, SettingsSection.Sessions);
 const SOURCES = settingsPath(SettingsGroup.Workspace, SettingsSection.Sources);
 
@@ -69,11 +95,13 @@ describe('settings constants', () => {
     expect(SettingsSection).toEqual({
       General: 'general',
       Ai: 'ai',
+      AgentPolicy: 'agent-policy',
       Folders: 'folders',
       Sources: 'sources',
       Members: 'members',
       Devices: 'devices',
       Audit: 'audit',
+      AuditExport: 'audit-export',
       GitHub: 'github',
       Mcp: 'mcp',
       Features: 'features',
@@ -169,7 +197,7 @@ describe('findSection', () => {
 });
 
 describe('visibleSections', () => {
-  it('shows an organization member in a workspace as a viewer only the organization members list, GitHub and MCP servers', () => {
+  it('shows an organization member in a workspace as a viewer only the organization agent policy, members list, GitHub and MCP servers', () => {
     expect(
       paths({
         organization: true,
@@ -182,6 +210,7 @@ describe('visibleSections', () => {
       })
     ).toEqual([
       ...pathsOf(SettingsGroup.Workspace),
+      ORGANIZATION_AGENT_POLICY,
       ORGANIZATION_MEMBERS,
       ORGANIZATION_GITHUB,
       ORGANIZATION_MCP,
@@ -204,7 +233,7 @@ describe('visibleSections', () => {
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
 
-  it('shows all seventeen sections to a server admin who owns the organization and administers the workspace', () => {
+  it('shows all twenty-one sections to a server admin who owns the organization and administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -215,7 +244,7 @@ describe('visibleSections', () => {
       administersServer: true,
     });
 
-    expect(visible).toHaveLength(17);
+    expect(visible).toHaveLength(21);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 
@@ -396,7 +425,7 @@ describe('visibleSections', () => {
     expect(sso(false)).toBe(false);
   });
 
-  it('shows License and Single sign-on to a server admin outside any organization, after Connect a device', () => {
+  it('shows License, Single sign-on and Audit export to a server admin outside any organization, after Connect a device', () => {
     expect(
       paths({
         organization: false,
@@ -407,7 +436,58 @@ describe('visibleSections', () => {
         readsSources: false,
         administersServer: true,
       })
-    ).toEqual([CONNECT, LICENSE, SSO, SESSIONS]);
+    ).toEqual([CONNECT, LICENSE, SSO, SERVER_AUDIT_EXPORT, SESSIONS]);
+  });
+
+  it('shows the organization Audit export only to organization owners and admins', () => {
+    for (const [organizationRole, shown] of [
+      ['owner', true],
+      ['admin', true],
+      ['member', false],
+      [undefined, true],
+    ] as const) {
+      expect(
+        paths({
+          organization: true,
+          organizationRole,
+          workspace: true,
+          workspaceRole: 'viewer',
+          installsModels: false,
+          readsSources: false,
+          administersServer: false,
+        }).includes(ORGANIZATION_AUDIT_EXPORT),
+        String(organizationRole)
+      ).toBe(shown);
+    }
+  });
+
+  it('shows the server Audit export only to a server admin', () => {
+    const shown = (administersServer: boolean) =>
+      paths({
+        organization: true,
+        organizationRole: 'owner',
+        workspace: true,
+        workspaceRole: 'admin',
+        installsModels: true,
+        readsSources: true,
+        administersServer,
+      }).includes(SERVER_AUDIT_EXPORT);
+
+    expect(shown(true)).toBe(true);
+    expect(shown(false)).toBe(false);
+  });
+
+  it('finds Audit export in the organization and server groups at a kebab-case path', () => {
+    for (const group of [SettingsGroup.Organization, SettingsGroup.Server]) {
+      expect(findSection(group, 'audit-export'), group).toMatchObject({
+        group,
+        section: SettingsSection.AuditExport,
+        label: 'Audit export',
+      });
+    }
+    expect(findSection(SettingsGroup.Workspace, 'audit-export')).toBeUndefined();
+    expect(ORGANIZATION_AUDIT_EXPORT).toBe('/settings/organization/audit-export');
+    expect(SERVER_AUDIT_EXPORT).toBe('/settings/server/audit-export');
   });
 
   it('finds the License section in the server group', () => {
@@ -428,6 +508,53 @@ describe('visibleSections', () => {
       label: 'Single sign-on',
     });
     expect(settingsPath(SettingsGroup.Server, SettingsSection.Sso)).toBe('/settings/server/sso');
+  });
+
+  it('shows Agent policy to every organization member and in every workspace', () => {
+    for (const organizationRole of ['owner', 'admin', 'member', undefined] as const) {
+      for (const workspaceRole of ['viewer', 'member', 'admin', 'owner', undefined] as const) {
+        const visible = paths({
+          organization: true,
+          organizationRole,
+          workspace: true,
+          workspaceRole,
+          installsModels: false,
+          readsSources: false,
+          administersServer: false,
+        });
+        expect(visible, `${organizationRole}/${workspaceRole}`).toContain(
+          ORGANIZATION_AGENT_POLICY
+        );
+        expect(visible, `${organizationRole}/${workspaceRole}`).toContain(WORKSPACE_AGENT_POLICY);
+      }
+    }
+  });
+
+  it('hides Agent policy outside an organization and outside a workspace', () => {
+    const visible = paths({
+      organization: false,
+      organizationRole: undefined,
+      workspace: false,
+      workspaceRole: undefined,
+      installsModels: true,
+      readsSources: true,
+      administersServer: true,
+    });
+
+    expect(visible).not.toContain(ORGANIZATION_AGENT_POLICY);
+    expect(visible).not.toContain(WORKSPACE_AGENT_POLICY);
+  });
+
+  it('finds Agent policy in the organization and workspace groups at a kebab-case path', () => {
+    for (const group of [SettingsGroup.Organization, SettingsGroup.Workspace]) {
+      expect(findSection(group, 'agent-policy'), group).toMatchObject({
+        group,
+        section: SettingsSection.AgentPolicy,
+        label: 'Agent policy',
+      });
+    }
+    expect(ORGANIZATION_AGENT_POLICY).toBe('/settings/organization/agent-policy');
+    expect(WORKSPACE_AGENT_POLICY).toBe('/settings/workspace/agent-policy');
   });
 
   it('finds the Sources section in the workspace group', () => {

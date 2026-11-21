@@ -1,7 +1,15 @@
 import type { ReactNode } from 'react';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { SessionsSection } from '../../auth/components';
-import { LicenseSection, SsoSection } from '../../enterprise';
+import {
+  AuditExportSection,
+  LicenseSection,
+  OrganizationPolicySection,
+  organizationScope,
+  SERVER_SCOPE,
+  SsoSection,
+  WorkspacePolicySection,
+} from '../../enterprise';
 import { SourcesSection } from '../../sources/components';
 import { McpServersSection, WorkspaceMcpServersSection } from '../mcp';
 import {
@@ -62,6 +70,18 @@ function workspaceContent(
           }
         />
       );
+    case SettingsSection.AgentPolicy:
+      return workspaceId !== null && organizationId !== null ? (
+        <WorkspacePolicySection
+          organizationId={organizationId}
+          workspaceId={workspaceId}
+          organizationPolicyPath={
+            allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE)
+              ? settingsPath(SettingsGroup.Organization, SettingsSection.AgentPolicy)
+              : undefined
+          }
+        />
+      ) : null;
     case SettingsSection.Folders:
       return (
         <HostFoldersPanel
@@ -101,6 +121,8 @@ function organizationContent(
   switch (section) {
     case SettingsSection.Ai:
       return <OrganizationAiSection />;
+    case SettingsSection.AgentPolicy:
+      return <OrganizationPolicySection organizationId={organizationId} />;
     case SettingsSection.Members:
       return (
         <OrganizationMembersSection
@@ -125,6 +147,8 @@ function organizationContent(
       return <DevicesSection orgId={organizationId} />;
     case SettingsSection.Audit:
       return <AuditLogsSection orgId={organizationId} />;
+    case SettingsSection.AuditExport:
+      return <AuditExportSection scope={organizationScope(organizationId)} />;
     default:
       return null;
   }
@@ -140,6 +164,8 @@ function serverContent(section: SettingsSection): ReactNode {
       return <LicenseSection />;
     case SettingsSection.Sso:
       return <SsoSection />;
+    case SettingsSection.AuditExport:
+      return <AuditExportSection scope={SERVER_SCOPE} />;
     default:
       return null;
   }

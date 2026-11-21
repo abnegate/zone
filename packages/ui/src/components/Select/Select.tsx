@@ -1,4 +1,4 @@
-import React, { forwardRef, useCallback, useRef } from 'react';
+import React, { forwardRef, useCallback, useId, useRef } from 'react';
 import * as SelectPrimitive from '@radix-ui/react-select';
 import { cn } from '../../lib/utils';
 import { Label } from '../Label';
@@ -89,33 +89,46 @@ const SelectLabel = forwardRef<
 ));
 SelectLabel.displayName = SelectPrimitive.Label.displayName;
 
-const SelectItem = forwardRef<
-  React.ElementRef<typeof SelectPrimitive.Item>,
-  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item>
->(({ className, children, ...props }, ref) => (
-  <SelectPrimitive.Item
-    ref={ref}
-    className={cn('ui-select-item', className)}
-    {...props}
-  >
-    <span className="ui-select-item-indicator">
-      <SelectPrimitive.ItemIndicator>
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="3"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="ui-select-item-icon"
-        >
-          <polyline points="20 6 9 17 4 12" />
-        </svg>
-      </SelectPrimitive.ItemIndicator>
-    </span>
-    <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
-  </SelectPrimitive.Item>
-));
+interface SelectItemProps extends React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item> {
+  description?: React.ReactNode;
+}
+
+const SelectItem = forwardRef<React.ElementRef<typeof SelectPrimitive.Item>, SelectItemProps>(
+  ({ className, children, description, ...props }, ref) => {
+    const descriptionId = useId();
+    const described = description !== undefined && description !== null && description !== '';
+    return (
+      <SelectPrimitive.Item
+        ref={ref}
+        className={cn('ui-select-item', described && 'ui-select-item-described', className)}
+        aria-describedby={described ? descriptionId : undefined}
+        {...props}
+      >
+        <span className="ui-select-item-indicator">
+          <SelectPrimitive.ItemIndicator>
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="ui-select-item-icon"
+            >
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          </SelectPrimitive.ItemIndicator>
+        </span>
+        <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+        {described && (
+          <span id={descriptionId} className="ui-select-item-description">
+            {description}
+          </span>
+        )}
+      </SelectPrimitive.Item>
+    );
+  }
+);
 SelectItem.displayName = SelectPrimitive.Item.displayName;
 
 const SelectSeparator = forwardRef<
@@ -137,9 +150,35 @@ export interface SelectOption {
   value: string;
   label: string;
   disabled?: boolean;
+  description?: string;
 }
 
 const SELECT_EMPTY_VALUE = '__empty__';
+
+function unavailableText(options: readonly SelectOption[]): string {
+  return options
+    .filter((option) => option.disabled && option.description)
+    .map((option) => `${option.label} is unavailable. ${option.description}`)
+    .join(' ');
+}
+
+interface SelectUnavailableProps {
+  id: string;
+  options: readonly SelectOption[];
+}
+
+function SelectUnavailable({ id, options }: SelectUnavailableProps) {
+  const text = unavailableText(options);
+  return text === '' ? null : (
+    <span id={id} className="sr-only">
+      {text}
+    </span>
+  );
+}
+
+function unavailableId(options: readonly SelectOption[], id: string): string | undefined {
+  return unavailableText(options) === '' ? undefined : id;
+}
 
 function encodeOptionValue(value: string): string {
   return value === '' ? SELECT_EMPTY_VALUE : value;
@@ -203,6 +242,7 @@ const Select = forwardRef<HTMLButtonElement, SelectProps>(
     const hasEmptyOption = options.some((option) => option.value === '');
     const valueRef = useRef(value);
     valueRef.current = value;
+    const reasonsId = useId();
 
     const handleValueChange = useCallback(
       (nextValue: string) => {
@@ -246,16 +286,19 @@ const Select = forwardRef<HTMLButtonElement, SelectProps>(
             ref={ref}
             className={cn(error && 'ui-select-trigger-error', className)}
             aria-label={ariaLabel}
+            aria-describedby={unavailableId(options, reasonsId)}
             title={title}
           >
             <SelectValue placeholder={placeholderText} />
           </SelectTrigger>
+          <SelectUnavailable id={reasonsId} options={options} />
           <SelectContent>
             {options.map((option) => (
               <SelectItem
                 key={option.value === '' ? SELECT_EMPTY_VALUE : option.value}
                 value={encodeOptionValue(option.value)}
                 disabled={option.disabled}
+                description={option.description}
                 data-value={option.value}
               >
                 {option.label}
@@ -291,5 +334,7 @@ export {
   SelectRoot,
   SelectSeparator,
   SelectTrigger,
+  SelectUnavailable,
   SelectValue,
+  unavailableId,
 };

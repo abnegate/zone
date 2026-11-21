@@ -8,12 +8,18 @@ import {
   ENFORCEMENT_CLAIM,
   GRACE,
   LAPSED,
+  MANUAL_RENEWAL,
   OVER_SEATS,
+  RENEWAL_DISABLED,
+  RENEWAL_ENDED,
+  RENEWAL_UNREACHABLE,
+  RENEWED,
   UNCOUNTED,
   UNCOUNTED_COMMUNITY,
   UNVERIFIED,
 } from '../fixtures';
 import { LicenseRefusal } from '../LicenseRefusal';
+import { PRICING_URL } from '../pricing';
 import { LICENSE_REFUSAL_CODES, UNVERIFIED_CODES } from '../schemas';
 import { refusalMessage, unverifiedReason } from '../status';
 import type { LicenseResponse } from '../types';
@@ -74,6 +80,31 @@ function confirmRemoval(): HTMLElement {
   const dialog = screen.getByRole('dialog', { name: REMOVE_DIALOG });
   fireEvent.click(within(dialog).getByRole('button', { name: 'Remove license' }));
   return dialog;
+}
+
+const RENEWAL = 'Renewal';
+
+const RENEWAL_CHECK = 'Last renewal check';
+
+function renewalRows(): HTMLElement[] {
+  return screen
+    .getAllByRole('term')
+    .filter((term) => [RENEWAL, RENEWAL_CHECK].includes(term.textContent ?? ''))
+    .map((term) => term.parentElement as HTMLElement);
+}
+
+function renewalCopy(): string[] {
+  return renewalRows().flatMap((row) => [
+    row.textContent ?? '',
+    ...[row, ...row.querySelectorAll('*')].flatMap((element) =>
+      ['title', 'aria-label'].map((name) => element.getAttribute(name) ?? '')
+    ),
+  ]);
+}
+
+function renewalOutcome(): HTMLElement {
+  const row = renewalRows().find((element) => element.textContent?.startsWith(RENEWAL_CHECK));
+  return row?.querySelector('.ui-badge') as HTMLElement;
 }
 
 function details(): Record<string, string> {
@@ -143,17 +174,18 @@ describe('LicenseSection', () => {
       });
     }
 
-    it('shows an active license with its customer, tier, seats and expiry', async () => {
+    it('shows an active license with its customer, seats and expiry', async () => {
       await loaded(ACTIVE);
 
       expect(screen.getByText('Enterprise', { selector: '.license-edition-name' })).toBeTruthy();
       expect(screen.getByText('Active')).toBeInTheDocument();
       expect(details()).toEqual({
         Customer: 'Acme Ltd',
-        Tier: 'Enterprise',
         Seats: '12 of 25 seats used this month',
         Expires: 'Nov 1, 2027',
         'Grace ends': 'Dec 1, 2027',
+        Renewal: 'Renews automatically',
+        'Last renewal check': 'No check recorded yet',
       });
       expect(screen.getByRole('button', { name: 'Replace license' })).toBeInTheDocument();
       expect(removeButton()).toBeInTheDocument();
@@ -180,9 +212,8 @@ describe('LicenseSection', () => {
       expect(warning).toHaveTextContent('lapsed on Dec 1, 2027');
       expect(warning).toHaveTextContent('Paste a renewed license key');
       expect(warning).not.toHaveTextContent(ENFORCEMENT_CLAIM);
-      expect(screen.getByText('Team', { selector: '.license-edition-name' })).toBeTruthy();
+      expect(screen.getByText('Enterprise', { selector: '.license-edition-name' })).toBeTruthy();
       expect(details().Customer).toBe('Acme Ltd');
-      expect(details().Tier).toBe('Team');
     });
 
     it('notes extra seats softly without blocking anyone', async () => {
@@ -223,6 +254,77 @@ describe('LicenseSection', () => {
       await screen.findByRole('textbox', { name: 'License key' });
       expect(get).toHaveBeenCalledTimes(2);
     });
+  });
+
+  describe('renewal', () => {
+    it('shows the date and outcome of the last automatic renewal', async () => {
+      await loaded(RENEWED);
+
+      expect(details()[RENEWAL]).toBe('Renews automatically');
+      expect(details()[RENEWAL_CHECK]).toBe('Oct 20, 2027 Renewed');
+      expect(renewalOutcome()).toHaveClass('ui-badge-success');
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('marks a renewal that could not reach the license server as a warning', async () => {
+      await loaded(RENEWAL_UNREACHABLE);
+
+      expect(details()[RENEWAL_CHECK]).toBe('Oct 25, 2027 License server unreachable');
+      expect(renewalOutcome()).toHaveClass('ui-badge-warning');
+    });
+
+    it('says a subscription the license server will not renew is not renewable, without claiming it ended', async () => {
+      await loaded(RENEWAL_ENDED);
+
+      expect(details()[RENEWAL_CHECK]).toBe('Oct 27, 2027 Subscription not renewable');
+      expect(renewalOutcome()).toHaveClass('ui-badge-warning');
+      expect(screen.queryByText(/ended/i)).not.toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('says automatic renewal is off on this server without a check row', async () => {
+      await loaded(RENEWAL_DISABLED);
+
+      expect(details()[RENEWAL]).toBe('Automatic renewal is off on this server');
+      expect(details()).not.toHaveProperty(RENEWAL_CHECK);
+      expect(screen.queryByText(/Disabled/)).not.toBeInTheDocument();
+    });
+
+    it('asks for a pasted key when the license does not renew by itself', async () => {
+      await loaded(MANUAL_RENEWAL);
+
+      expect(details()[RENEWAL]).toBe('Renew by pasting a new key before it expires');
+      expect(details()).not.toHaveProperty(RENEWAL_CHECK);
+    });
+
+    it('shows no renewal for Community or a stored key that does not verify', async () => {
+      for (const response of [COMMUNITY, UNVERIFIED]) {
+        const { unmount } = renderSection(response);
+        await screen.findByRole('heading', { name: 'License' });
+
+        expect(details()).not.toHaveProperty(RENEWAL);
+        expect(details()).not.toHaveProperty(RENEWAL_CHECK);
+        unmount();
+      }
+    });
+
+    for (const [name, response] of [
+      ['an unchecked automatic renewal', ACTIVE],
+      ['a renewed license', RENEWED],
+      ['an unreachable license server', RENEWAL_UNREACHABLE],
+      ['automatic renewal turned off', RENEWAL_DISABLED],
+      ['manual renewal', MANUAL_RENEWAL],
+    ] as const) {
+      it(`claims no enforcement for ${name}`, async () => {
+        await loaded(response);
+
+        const copy = renewalCopy();
+        expect(copy.length).toBeGreaterThan(0);
+        for (const text of copy) {
+          expect(text).not.toMatch(ENFORCEMENT_CLAIM);
+        }
+      });
+    }
   });
 
   describe('adding a key', () => {
@@ -498,5 +600,60 @@ describe('LicenseSection', () => {
       );
       expect(details().Customer).toBe('Acme Ltd');
     });
+  });
+});
+
+describe('LicenseSection buy link', () => {
+  const BUY = /Buy a license/;
+  const BUY_NAME = 'Buy a license (opens in a new tab)';
+
+  beforeEach(() => {
+    get.mockReset();
+  });
+
+  const unlicensed: readonly (readonly [string, LicenseResponse])[] = [
+    ['a Community install', COMMUNITY],
+    ['a stored key that does not verify', UNVERIFIED],
+    ['a lapsed license', LAPSED],
+  ];
+
+  for (const [name, response] of unlicensed) {
+    it(`links ${name} to pricing in a new tab`, async () => {
+      await loaded(response);
+
+      const link = screen.getByRole('link', { name: BUY });
+      expect(screen.getByRole('link', { name: BUY_NAME })).toBe(link);
+      expect(link).toHaveAttribute('href', PRICING_URL);
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link.getAttribute('rel')?.split(' ')).toContain('noopener');
+    });
+  }
+
+  const licensed: readonly (readonly [string, LicenseResponse])[] = [
+    ['an active license', ACTIVE],
+    ['a license in its grace period', GRACE],
+  ];
+
+  for (const [name, response] of licensed) {
+    it(`does not offer a purchase for ${name}`, async () => {
+      await loaded(response);
+
+      expect(screen.queryByRole('link', { name: BUY })).not.toBeInTheDocument();
+    });
+  }
+
+  it('does not offer a purchase while the license fails to load', async () => {
+    get.mockRejectedValue(
+      new ApiError('Failed to load the license: This needs a server admin.', 403)
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LicenseSection />
+      </QueryClientProvider>
+    );
+
+    await screen.findByRole('alert');
+    expect(screen.queryByRole('link', { name: BUY })).not.toBeInTheDocument();
   });
 });

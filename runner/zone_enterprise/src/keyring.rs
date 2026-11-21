@@ -89,7 +89,6 @@ mod tests {
     use crate::encoding::SEPARATOR;
     use crate::fixtures;
     use crate::signing::{sign, sign_bytes};
-    use crate::tier::Tier;
 
     fn signed() -> String {
         sign(&fixtures::payload(), &fixtures::first())
@@ -120,7 +119,6 @@ mod tests {
     fn records_the_key_that_verified() {
         let payload = Payload {
             key_id: fixtures::SECOND.into(),
-            tier: Tier::Enterprise,
             ..fixtures::payload()
         };
         let license = fixtures::keyring()
@@ -457,6 +455,65 @@ mod tests {
             fixtures::keyring().verify(&text).unwrap().payload(),
             &fixtures::payload()
         );
+    }
+
+    #[test]
+    fn verifies_a_legacy_license_that_names_a_tier() {
+        let mut value = payload_value();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("tier".into(), json!("team"));
+        let text = sign_bytes(&serde_json::to_vec(&value).unwrap(), &fixtures::first());
+        assert_eq!(
+            fixtures::keyring().verify(&text).unwrap().payload(),
+            &fixtures::payload()
+        );
+    }
+
+    #[test]
+    fn verifies_a_legacy_six_key_license_without_a_subscription() {
+        let bytes = br#"{"id":"0193a8e2-7c4b-7d10-8f00-4d2c5a9b1e01","customer":"Acme Ltd","seats":25,"issued_at":"2026-11-01T00:00:00Z","expires_at":"2027-11-01T00:00:00Z","key_id":"test-1"}"#;
+        let text = sign_bytes(bytes, &fixtures::first());
+        let license = fixtures::keyring().verify(&text).unwrap();
+        assert_eq!(license.subscription(), None);
+        assert_eq!(license.payload(), &fixtures::payload());
+        assert_eq!(
+            text,
+            signed(),
+            "a legacy key no longer re-signs identically"
+        );
+    }
+
+    #[test]
+    fn verifies_a_license_with_a_subscription_and_exposes_it() {
+        let payload = Payload {
+            subscription: Some("b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c".into()),
+            ..fixtures::payload()
+        };
+        let license = fixtures::keyring()
+            .verify(&sign(&payload, &fixtures::first()))
+            .unwrap();
+        assert_eq!(
+            license.subscription(),
+            Some("b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c")
+        );
+        assert_eq!(license.payload(), &payload);
+    }
+
+    #[test]
+    fn refuses_a_signed_blank_subscription() {
+        let text = sign(
+            &Payload {
+                subscription: Some(" ".into()),
+                ..fixtures::payload()
+            },
+            &fixtures::first(),
+        );
+        assert!(matches!(
+            fixtures::keyring().verify(&text),
+            Err(Error::Payload(_))
+        ));
     }
 
     #[test]

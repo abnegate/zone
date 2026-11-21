@@ -15,7 +15,7 @@ use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED}
 use zone_core::llm::{self, LlmBackend, LlmClient};
 
 use crate::config::Config;
-use crate::db::ai_settings::{EffectiveAiSettings, PROVIDER_ANTHROPIC};
+use crate::db::ai_settings::{EffectiveAiSettings, Layer, PROVIDER_ANTHROPIC};
 use crate::services::hosts::Hosts;
 use crate::services::stages::{self, Catalog};
 
@@ -97,7 +97,9 @@ pub fn validate_url(raw: &str, hosts: &Hosts) -> Result<Url, UrlError> {
 pub struct Endpoint {
     url: String,
     key: SecretValue,
+    credential: SecretValue,
     origin: Origin,
+    layer: Option<Layer>,
     dialect: Dialect,
 }
 
@@ -107,7 +109,9 @@ impl fmt::Debug for Endpoint {
             .debug_struct("Endpoint")
             .field("url", &self.url)
             .field("key", &REDACTED)
+            .field("credential", &REDACTED)
             .field("origin", &self.origin)
+            .field("layer", &self.layer)
             .field("dialect", &self.dialect)
             .finish()
     }
@@ -116,10 +120,13 @@ impl fmt::Debug for Endpoint {
 impl Endpoint {
     /// The instance's `LITELLM_HOST` and `LITELLM_KEY`.
     pub fn instance(config: &Config) -> Self {
+        let key = SecretValue::new(config.litellm_key.clone());
         Self {
             url: config.litellm_host.clone(),
-            key: SecretValue::new(config.litellm_key.clone()),
+            credential: key.clone(),
+            key,
             origin: Origin::Instance,
+            layer: None,
             dialect: Dialect::Compatible,
         }
     }
@@ -136,11 +143,7 @@ impl Endpoint {
     /// endpoint.
     pub fn try_resolve(config: &Config, settings: &EffectiveAiSettings) -> Result<Self, UrlError> {
         let resolved = match settings.provider.as_str() {
-            PROVIDER_SELF_HOSTED => Self::self_hosted(
-                config,
-                settings.litellm_host.as_deref(),
-                settings.litellm_key.as_ref(),
-            ),
+            PROVIDER_SELF_HOSTED => Self::self_hosted(config, settings),
             PROVIDER_OPENAI => Self::provider(
                 config,
                 settings.openai_base_url.as_deref(),
@@ -168,8 +171,21 @@ impl Endpoint {
         &self.key
     }
 
+    /// The key this endpoint's own deployment metadata is read with: on the instance's
+    /// LiteLLM, which publishes the same routes to every tenant, the instance's key, whatever
+    /// key a workspace saved beside its host; elsewhere, [`Self::key`].
+    pub fn credential(&self) -> &SecretValue {
+        &self.credential
+    }
+
     pub fn origin(&self) -> Origin {
         self.origin
+    }
+
+    /// The settings that saved this endpoint's URL, none for the instance's or a provider's
+    /// own.
+    pub fn layer(&self) -> Option<Layer> {
+        self.layer
     }
 
     pub fn dialect(&self) -> Dialect {
@@ -246,22 +262,23 @@ impl Endpoint {
 
     fn self_hosted(
         config: &Config,
-        host: Option<&str>,
-        key: Option<&SecretValue>,
+        settings: &EffectiveAiSettings,
     ) -> Result<Option<Self>, UrlError> {
-        let Some(url) = saved_url(host, &config.endpoint_hosts)? else {
+        let Some(url) = saved_url(settings.litellm_host.as_deref(), &config.endpoint_hosts)? else {
             return Ok(None);
         };
-        let key = saved_key(key);
+        let key = saved_key(settings.litellm_key.as_ref());
         if same_origin(&url.parsed, &config.litellm_host) {
+            let instance = Self::instance(config);
             return Ok(Some(Self {
-                url: config.litellm_host.clone(),
-                key: key.unwrap_or_else(|| SecretValue::new(config.litellm_key.clone())),
-                origin: Origin::Instance,
-                dialect: Dialect::Compatible,
+                key: key.unwrap_or_else(|| instance.key.clone()),
+                ..instance
             }));
         }
-        Ok(Some(Self::settings(url, key, Dialect::Compatible)))
+        Ok(Some(Self {
+            layer: settings.litellm_layer,
+            ..Self::settings(url, key, Dialect::Compatible)
+        }))
     }
 
     fn provider(
@@ -278,8 +295,10 @@ impl Endpoint {
                 validate_url(default, &config.endpoint_hosts)?;
                 Ok(Some(Self {
                     url: default.to_string(),
+                    credential: key.clone(),
                     key,
                     origin: Origin::Settings,
+                    layer: None,
                     dialect,
                 }))
             }
@@ -289,10 +308,13 @@ impl Endpoint {
     }
 
     fn settings(url: SavedUrl<'_>, key: Option<SecretValue>, dialect: Dialect) -> Self {
+        let key = key.unwrap_or_else(|| SecretValue::new(String::new()));
         Self {
             url: normalized(url),
-            key: key.unwrap_or_else(|| SecretValue::new(String::new())),
+            credential: key.clone(),
+            key,
             origin: Origin::Settings,
+            layer: None,
             dialect,
         }
     }
@@ -349,7 +371,7 @@ fn or_undisclosed(built: Result<Resolver, ChatError>, configured: Option<u64>) -
 #[cfg(test)]
 pub(crate) mod testing {
     use super::{Endpoint, Origin};
-    use crate::db::ai_settings::EffectiveAiSettings;
+    use crate::db::ai_settings::{EffectiveAiSettings, Layer};
     use abnegate_llm::Dialect;
     use abnegate_secret::SecretValue;
 
@@ -358,8 +380,19 @@ pub(crate) mod testing {
         Endpoint {
             url: url.to_string(),
             key: SecretValue::new(key),
+            credential: SecretValue::new(key),
             origin: Origin::Instance,
+            layer: None,
             dialect: Dialect::Compatible,
+        }
+    }
+
+    /// A LiteLLM endpoint at `url` under `key`, saved in `layer`'s AI settings.
+    pub fn saved(url: &str, key: &str, layer: Layer) -> Endpoint {
+        Endpoint {
+            origin: Origin::Settings,
+            layer: Some(layer),
+            ..endpoint(url, key)
         }
     }
 
@@ -368,6 +401,7 @@ pub(crate) mod testing {
         EffectiveAiSettings {
             provider: provider.to_string(),
             litellm_host: None,
+            litellm_layer: None,
             litellm_key: None,
             openai_api_key: None,
             openai_base_url: None,
@@ -824,7 +858,27 @@ mod tests {
             }
             if endpoint.origin() == Origin::Settings {
                 assert_ne!(endpoint.key().expose(), INSTANCE_KEY, "{}", case.name);
+                assert_ne!(
+                    endpoint.credential().expose(),
+                    INSTANCE_KEY,
+                    "{}",
+                    case.name
+                );
             }
+        }
+    }
+
+    #[test]
+    fn the_instance_reads_its_own_routes_under_the_instance_key() {
+        let config = config();
+        for case in cases() {
+            let endpoint = Endpoint::resolve(&config, &saved(case.provider, case.saved));
+
+            let credential = match endpoint.origin() {
+                Origin::Instance => INSTANCE_KEY,
+                Origin::Settings => case.key,
+            };
+            assert_eq!(endpoint.credential().expose(), credential, "{}", case.name);
         }
     }
 
@@ -840,6 +894,39 @@ mod tests {
         assert_eq!(endpoint.url(), "http://litellm:4000/");
         assert_eq!(endpoint.key().expose(), INSTANCE_KEY);
         assert_eq!(endpoint.origin(), Origin::Instance);
+    }
+
+    #[test]
+    fn a_saved_litellm_endpoint_keeps_the_layer_that_saved_it() {
+        let gateway = Saved {
+            url: Some("http://gateway.example"),
+            key: None,
+        };
+        for layer in [Layer::Organization, Layer::Workspace] {
+            let settings = EffectiveAiSettings {
+                litellm_layer: Some(layer),
+                ..saved(PROVIDER_SELF_HOSTED, gateway)
+            };
+
+            assert_eq!(Endpoint::resolve(&config(), &settings).layer(), Some(layer));
+        }
+        let instance = EffectiveAiSettings {
+            litellm_layer: Some(Layer::Workspace),
+            ..saved(
+                PROVIDER_SELF_HOSTED,
+                Saved {
+                    url: Some(INSTANCE_HOST),
+                    key: None,
+                },
+            )
+        };
+        let openai = EffectiveAiSettings {
+            litellm_layer: Some(Layer::Workspace),
+            ..saved(PROVIDER_OPENAI, gateway)
+        };
+
+        assert_eq!(Endpoint::resolve(&config(), &instance).layer(), None);
+        assert_eq!(Endpoint::resolve(&config(), &openai).layer(), None);
     }
 
     #[test]
@@ -1396,10 +1483,8 @@ mod tests {
     fn scrub_removes_the_key_whole_masked_or_recognised() {
         let key = "sk-proj-AbCdEfGh1234567890wxyz";
         let endpoint = Endpoint {
-            url: OPENAI_URL.to_string(),
-            key: SecretValue::new(key),
             origin: Origin::Settings,
-            dialect: Dialect::Compatible,
+            ..super::testing::endpoint(OPENAI_URL, key)
         };
         for (reported, echo) in [
             (format!("API error (401): bad key {key}"), key.to_string()),
@@ -1436,10 +1521,8 @@ mod tests {
     #[test]
     fn scrub_leaves_a_failure_without_the_key_alone() {
         let endpoint = Endpoint {
-            url: OPENAI_URL.to_string(),
-            key: SecretValue::new("plainkey-9999"),
             origin: Origin::Settings,
-            dialect: Dialect::Compatible,
+            ..super::testing::endpoint(OPENAI_URL, "plainkey-9999")
         };
         let failure =
             "API error (404): The model `gpt-9` does not exist ** or you do not have access.";
@@ -1450,10 +1533,8 @@ mod tests {
     #[test]
     fn scrub_with_no_key_still_redacts_what_looks_like_a_credential() {
         let endpoint = Endpoint {
-            url: "http://gateway.example/v1".to_string(),
-            key: SecretValue::new(""),
             origin: Origin::Settings,
-            dialect: Dialect::Compatible,
+            ..super::testing::endpoint("http://gateway.example/v1", "")
         };
 
         let scrubbed = endpoint.scrub("rejected sk-live0123456789abcdef");

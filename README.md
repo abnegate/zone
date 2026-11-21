@@ -44,6 +44,8 @@ Zone is one platform with three parts: a shared core, and Zone Code and Zone Stu
 - **Private Web Search** (optional): VPN-protected metasearch engine; when the VPN is on, all stack internet traffic uses the same tunnel
 - **Multi-Tenant Architecture**: Organizations and workspaces for team collaboration, with email invitations
 - **Role-Based Access Control**: Fine-grained permissions with users, roles, policies and an audit log
+- **Enterprise controls**: With a Zone Enterprise license, single sign-on ([docs/SSO.md](docs/SSO.md)), agent and model policy ([docs/POLICY.md](docs/POLICY.md)), and audit log download, streaming to a SIEM and retention ([docs/AUDIT.md](docs/AUDIT.md))
+- **Licensing**: How Zone Enterprise licenses are sold through Polar, signed and emailed, and how to run the signer ([docs/LICENSING.md](docs/LICENSING.md))
 - **Theme Customization**: Workspace-specific theming
 
 ### Zone Code
@@ -455,7 +457,9 @@ zone/
 │   ├── zone_context/        # Source adapters, embeddings and context gathering
 │   ├── zone_cli/            # CLI tool
 │   ├── zone_desktop/        # Tauri desktop, Android and iOS client
+│   ├── zone_enterprise/     # Enterprise features and license verification (Zone Enterprise License)
 │   ├── zone_installer/      # Client shell that serves the console and proxies the API
+│   ├── zone_license/        # License signer and Polar webhook (MIT)
 │   ├── zone_routing/        # Proxy routing for tool, MCP and command runs
 │   └── zone_runner/         # Daemon binary (command execution via abnegate-exec)
 ├── manager/                 # Manager frontend
@@ -590,7 +594,10 @@ keep them private. See [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 MIT, except `runner/zone_enterprise/` and
 `manager/frontend/src/features/enterprise/`, which are under the Zone Enterprise
-License in each directory's `LICENSE`. See [LICENSE](LICENSE) for details.
+License in each directory's `LICENSE`. The license signer, `runner/zone_license/`,
+is MIT. See [LICENSE](LICENSE) for details, and
+[docs/LICENSING.md](docs/LICENSING.md) for how Zone Enterprise licenses are
+issued.
 
 ## Contributing
 

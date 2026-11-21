@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ApiError } from '../../../api/ApiError';
 import { modelsApi } from '../../../api/models';
 import { useAuth } from '../../../features/auth';
 import type { DiskUsage, InstalledModel, ProviderErrors } from '../types';
@@ -12,7 +11,7 @@ const UNLISTED: InstalledModel[] = [];
  * completions to an endpoint of their own.
  */
 export function useModels(workspaceId?: string) {
-  const { isAuthenticated, isLoading: authLoading, logout } = useAuth();
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   const [models, setModels] = useState<InstalledModel[]>([]);
   const [listed, setListed] = useState(workspaceId);
   const [disk, setDisk] = useState<DiskUsage | null>(null);
@@ -37,9 +36,6 @@ export function useModels(workspaceId?: string) {
       setProviderErrors(response.errors ?? {});
     } catch (err) {
       if (!current()) return;
-      if (err instanceof ApiError && err.status === 401) {
-        logout();
-      }
       setError(err instanceof Error ? err.message : 'Failed to fetch models');
     } finally {
       if (current()) {
@@ -53,7 +49,7 @@ export function useModels(workspaceId?: string) {
     } catch {
       if (current()) setDisk(null);
     }
-  }, [authLoading, isAuthenticated, logout, workspaceId]);
+  }, [authLoading, isAuthenticated, workspaceId]);
 
   useEffect(() => {
     fetchModels();

@@ -5,7 +5,11 @@ import {
   COMMUNITY,
   GRACE,
   LAPSED,
+  MANUAL_RENEWAL,
   OVER_SEATS,
+  RENEWAL_DISABLED,
+  RENEWAL_UNREACHABLE,
+  RENEWED,
   UNCOUNTED,
   UNCOUNTED_COMMUNITY,
   UNVERIFIED,
@@ -15,6 +19,9 @@ import {
   LicenseRefusalCode,
   LicenseRefusalSchema,
   LicenseResponseSchema,
+  RENEWAL_MODES,
+  RENEWAL_OUTCOMES,
+  RenewalMode,
   SetLicenseRequestSchema,
   UNVERIFIED_CODES,
 } from './schemas';
@@ -30,17 +37,25 @@ describe('LicenseResponseSchema', () => {
     ['over-seat', OVER_SEATS],
     ['uncounted', UNCOUNTED],
     ['uncounted Community', UNCOUNTED_COMMUNITY],
+    ['renewed', RENEWED],
+    ['renewal-unreachable', RENEWAL_UNREACHABLE],
+    ['renewal-off', RENEWAL_DISABLED],
+    ['manual-renewal', MANUAL_RENEWAL],
   ] as const) {
     it(`reads the ${name} response`, () => {
       expect(LicenseResponseSchema.parse(response)).toEqual(response);
     });
   }
 
-  it('reads a lapsed license that keeps its Team edition', () => {
+  it('reads a lapsed license that keeps its Enterprise edition', () => {
     const parsed = LicenseResponseSchema.parse(LAPSED);
-    expect(parsed.edition).toBe('team');
+    expect(parsed.edition).toBe('enterprise');
     expect(parsed.status).toBe('lapsed');
-    expect(parsed.license?.tier).toBe('team');
+    expect(parsed.license).toEqual(ACME_LICENSE);
+  });
+
+  it('rejects the Team edition, which Zone no longer sells', () => {
+    expect(LicenseResponseSchema.safeParse({ ...ACTIVE, edition: 'team' }).success).toBe(false);
   });
 
   for (const code of UNVERIFIED_CODES) {
@@ -95,12 +110,79 @@ describe('LicenseResponseSchema', () => {
       LicenseResponseSchema.safeParse({ ...COMMUNITY, seats: { used: 1, over: false } }).success
     ).toBe(false);
   });
+});
 
-  it('rejects a license whose tier is Community', () => {
+describe('RenewalSchema', () => {
+  it('names the three renewal modes the server sends', () => {
+    expect(RENEWAL_MODES).toEqual(['automatic', 'disabled', 'manual']);
+  });
+
+  it('names the six renewal outcomes the server records', () => {
+    expect(RENEWAL_OUTCOMES).toEqual([
+      'renewed',
+      'current',
+      'ended',
+      'refused',
+      'rejected',
+      'unreachable',
+    ]);
+  });
+
+  for (const outcome of RENEWAL_OUTCOMES) {
+    it(`reads a renewal attempt that ended ${outcome}`, () => {
+      const response = {
+        ...ACTIVE,
+        renewal: { mode: RenewalMode.Automatic, attempted_at: '2027-10-20T03:00:00Z', outcome },
+      };
+      expect(LicenseResponseSchema.parse(response)).toEqual(response);
+    });
+  }
+
+  it('reads an attempt whose stored outcome the server could not name as a null outcome', () => {
+    const renewal = {
+      mode: RenewalMode.Automatic,
+      attempted_at: '2027-10-20T03:00:00Z',
+      outcome: null,
+    };
+    expect(LicenseResponseSchema.parse({ ...ACTIVE, renewal }).renewal).toEqual(renewal);
+  });
+
+  it('reads Community with no renewal', () => {
+    expect(LicenseResponseSchema.parse(COMMUNITY).renewal).toBeNull();
+  });
+
+  it('rejects a response that leaves the renewal out instead of sending null', () => {
+    const { renewal: _renewal, ...missing } = ACTIVE;
+    expect(LicenseResponseSchema.safeParse(missing).success).toBe(false);
+  });
+
+  it('rejects a renewal that leaves the attempt out instead of sending null', () => {
     expect(
       LicenseResponseSchema.safeParse({
         ...ACTIVE,
-        license: { ...ACME_LICENSE, tier: 'community' },
+        renewal: { mode: RenewalMode.Automatic, outcome: null },
+      }).success
+    ).toBe(false);
+  });
+
+  it('rejects a renewal mode the contract does not define', () => {
+    expect(
+      LicenseResponseSchema.safeParse({
+        ...ACTIVE,
+        renewal: { mode: 'scheduled', attempted_at: null, outcome: null },
+      }).success
+    ).toBe(false);
+  });
+
+  it('rejects a renewal outcome the contract does not define', () => {
+    expect(
+      LicenseResponseSchema.safeParse({
+        ...ACTIVE,
+        renewal: {
+          mode: RenewalMode.Automatic,
+          attempted_at: '2027-10-20T03:00:00Z',
+          outcome: 'expired',
+        },
       }).success
     ).toBe(false);
   });

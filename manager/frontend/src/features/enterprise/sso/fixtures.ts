@@ -32,7 +32,7 @@ export const ENTRA: ProviderResponse = {
 
 export const ENTITLED: SettingsResponse = {
   entitled: true,
-  edition: Edition.Team,
+  edition: Edition.Enterprise,
   status: LicenseStatus.Active,
   required: false,
   redirect_uri: REDIRECT_URI,
@@ -62,7 +62,7 @@ export const COMMUNITY_EMPTY: SettingsResponse = {
 
 export const LAPSED_WITH_PROVIDER: SettingsResponse = {
   entitled: false,
-  edition: Edition.Team,
+  edition: Edition.Enterprise,
   status: LicenseStatus.Lapsed,
   required: true,
   redirect_uri: REDIRECT_URI,

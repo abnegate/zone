@@ -10,10 +10,16 @@ use axum::{
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
+use zone_enterprise::policy::{Denial, Effective};
 
 use crate::auth::AuthUser;
 use crate::db::ai_settings;
 use crate::db::audit::{actions, resources};
+use crate::db::organization_members::OrgRole;
+use crate::routes::policy::asked::{self, Asked};
+use crate::routes::policy::refusal;
+use crate::services::policy::{self, Subject};
+use crate::services::provider::Provider;
 use crate::state::AppState;
 
 use super::common::{AuditEvent, audit};
@@ -305,6 +311,32 @@ pub struct UpdateAiSettingsRequest {
 }
 
 impl UpdateAiSettingsRequest {
+    fn provider(&self) -> Option<&str> {
+        self.provider
+            .as_deref()
+            .filter(|provider| !provider.trim().is_empty())
+    }
+
+    fn models(&self) -> impl Iterator<Item = &str> {
+        [self.model_fast.as_deref(), self.model_reasoning.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|model| !model.trim().is_empty())
+    }
+
+    fn refusal(&self, effective: &Effective) -> Option<(Denial, &str)> {
+        let provider = self.provider().and_then(|provider| {
+            let named = Provider::named(provider)?;
+            policy::provider(effective, named)
+                .err()
+                .map(|denial| (denial, provider))
+        });
+        provider.or_else(|| {
+            self.models()
+                .find_map(|model| effective.model(model).err().map(|denial| (denial, model)))
+        })
+    }
+
     fn update(&self) -> ai_settings::Update<'_> {
         ai_settings::Update {
             provider: self.provider.as_deref(),
@@ -353,6 +385,61 @@ fn access_error(error: ai_settings::AccessError) -> Box<Response> {
     }
 }
 
+/// An organization's settings answer to its own policy and a workspace's to its effective policy.
+/// Only someone who may save them is told.
+async fn admit(
+    state: &AppState,
+    user: Uuid,
+    organization: Uuid,
+    workspace: Option<Uuid>,
+    request: &UpdateAiSettingsRequest,
+) -> Result<(), Box<Response>> {
+    let Some(named) = request.provider().or_else(|| request.models().next()) else {
+        return Ok(());
+    };
+    authorize_save(state, user, organization, workspace).await?;
+    let (denial, detail) = match policy::load(state, organization, workspace).await {
+        Ok(None) => return Ok(()),
+        Ok(Some(effective)) => match request.refusal(&effective) {
+            Some(refused) => refused,
+            None => return Ok(()),
+        },
+        Err(denial) => (denial, named),
+    };
+    match workspace {
+        Some(workspace) => {
+            let asked = Asked {
+                workspace,
+                actor: Some(user),
+                subject: Subject::Workspace(workspace),
+            };
+            asked.record(state, denial, Some(detail)).await;
+        }
+        None => asked::record_organization(state, organization, user, denial, Some(detail)).await,
+    }
+    Err(Box::new(refusal::denied(denial)))
+}
+
+async fn authorize_save(
+    state: &AppState,
+    user: Uuid,
+    organization: Uuid,
+    workspace: Option<Uuid>,
+) -> Result<(), Box<Response>> {
+    let mut connection = state.db().acquire().await.map_err(database_error)?;
+    let authorized = match workspace {
+        Some(workspace) => {
+            ai_settings::authorize_workspace(&mut connection, organization, workspace, user, true)
+                .await
+        }
+        None => {
+            ai_settings::authorize_organization(&mut connection, organization, user, OrgRole::Admin)
+                .await
+        }
+    };
+    authorized.map_err(access_error)
+}
+
 /// GET /api/organizations/{org_id}/settings/ai
 pub async fn get_org(
     State(state): State<AppState>,
@@ -383,6 +470,9 @@ pub async fn upsert_org(
         Ok(user_id) => user_id,
         Err(response) => return *response,
     };
+    if let Err(response) = admit(&state, user_id, org_id, None, &req).await {
+        return *response;
+    }
     match ai_settings::upsert_org_authorized(
         state.db(),
         &state.config().endpoint_hosts,
@@ -498,6 +588,9 @@ pub async fn upsert_workspace(
         Ok(user_id) => user_id,
         Err(response) => return *response,
     };
+    if let Err(response) = admit(&state, user_id, path.org_id, Some(path.ws_id), &req).await {
+        return *response;
+    }
     match ai_settings::upsert_workspace_authorized(
         state.db(),
         &state.config().endpoint_hosts,
@@ -631,6 +724,52 @@ mod tests {
 
     fn update_request(body: &str) -> UpdateAiSettingsRequest {
         serde_json::from_str(body).expect("the request deserialises")
+    }
+
+    #[test]
+    fn a_save_is_refused_for_the_provider_agent_or_chat_model_the_policy_denies() {
+        use zone_enterprise::policy::{self, Rules};
+
+        let effective = Effective::new(
+            Rules {
+                providers: Some(vec![policy::Provider::Anthropic]),
+                agents: Some(vec![policy::Agent::Codex]),
+                models: Some(vec!["claude-*".into(), "gpt-6-*".into()]),
+                ..Rules::default()
+            },
+            Rules::default(),
+        );
+        for (body, refused) in [
+            (
+                r#"{"provider":"openai"}"#,
+                Some((Denial::Provider(policy::Provider::OpenAI), "openai")),
+            ),
+            (
+                r#"{"provider":"claude_code","model_fast":"claude-sonnet-4-5"}"#,
+                Some((Denial::Agent(policy::Agent::Claude), "claude_code")),
+            ),
+            (
+                r#"{"provider":"anthropic","model_reasoning":"gpt-4o"}"#,
+                Some((Denial::Model, "gpt-4o")),
+            ),
+            (
+                r#"{"model_fast":"o3","model_reasoning":"claude-opus-4"}"#,
+                Some((Denial::Model, "o3")),
+            ),
+            (r#"{"provider":"codex","model_fast":"gpt-6-sol"}"#, None),
+            (
+                r#"{"provider":"self_hosted","model_embedding":"nomic"}"#,
+                None,
+            ),
+            (
+                r#"{"provider":"","model_fast":"  ","model_image":"flux"}"#,
+                None,
+            ),
+            (r#"{"provider":"gemini"}"#, None),
+        ] {
+            let request = update_request(body);
+            assert_eq!(request.refusal(&effective), refused, "{body}");
+        }
     }
 
     #[test]

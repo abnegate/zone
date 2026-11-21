@@ -1,6 +1,7 @@
 import type { Page } from '@playwright/test';
 import { pullRequestKey } from '../src/features/pull-requests/utils/identity';
 import { expect, test } from './fixtures';
+import { fontsLoaded } from './helpers/screenshots';
 import {
   githubNow,
   mockTasks,
@@ -48,19 +49,6 @@ async function chooseCardAction(page: Page, title: string, action: CardAction): 
   await trigger.hover();
   await trigger.click();
   await page.getByRole('menuitem', { name: action, exact: true }).click();
-}
-
-async function fontsLoaded(page: Page): Promise<void> {
-  await page.waitForFunction(() =>
-    Boolean(
-      document.querySelector<HTMLLinkElement>('link[rel="stylesheet"][data-font-stylesheet]')?.sheet
-    )
-  );
-  await page.evaluate(async () => {
-    await document.fonts.load('16px Nunito');
-    await new Promise(requestAnimationFrame);
-    await document.fonts.ready;
-  });
 }
 
 async function capturePage(page: Page, options: Parameters<Page['screenshot']>[0]): Promise<void> {

@@ -19,11 +19,13 @@ export type SettingsGroup = (typeof SettingsGroup)[keyof typeof SettingsGroup];
 export const SettingsSection = {
   General: 'general',
   Ai: 'ai',
+  AgentPolicy: 'agent-policy',
   Folders: 'folders',
   Sources: 'sources',
   Members: 'members',
   Devices: 'devices',
   Audit: 'audit',
+  AuditExport: 'audit-export',
   GitHub: 'github',
   Mcp: 'mcp',
   Features: 'features',
@@ -60,6 +62,10 @@ export const GROUP_LABELS: Record<SettingsGroup, string> = {
 };
 
 const SOURCES_LABEL = 'Sources';
+
+const AGENT_POLICY_LABEL = 'Agent policy';
+
+const AUDIT_EXPORT_LABEL = 'Audit export';
 
 const LOCATION_SEPARATOR = ' → ';
 
@@ -104,6 +110,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
   },
   {
     group: SettingsGroup.Workspace,
+    section: SettingsSection.AgentPolicy,
+    label: AGENT_POLICY_LABEL,
+    visible: inWorkspace,
+  },
+  {
+    group: SettingsGroup.Workspace,
     section: SettingsSection.Folders,
     label: 'Folders',
     visible: inWorkspace,
@@ -134,6 +146,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
   },
   {
     group: SettingsGroup.Organization,
+    section: SettingsSection.AgentPolicy,
+    label: AGENT_POLICY_LABEL,
+    visible: inOrganization,
+  },
+  {
+    group: SettingsGroup.Organization,
     section: SettingsSection.Members,
     label: 'Members',
     visible: inOrganization,
@@ -148,6 +166,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     group: SettingsGroup.Organization,
     section: SettingsSection.Audit,
     label: 'Audit log',
+    visible: administersOrganization,
+  },
+  {
+    group: SettingsGroup.Organization,
+    section: SettingsSection.AuditExport,
+    label: AUDIT_EXPORT_LABEL,
     visible: administersOrganization,
   },
   {
@@ -184,6 +208,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     group: SettingsGroup.Server,
     section: SettingsSection.Sso,
     label: 'Single sign-on',
+    visible: administersServer,
+  },
+  {
+    group: SettingsGroup.Server,
+    section: SettingsSection.AuditExport,
+    label: AUDIT_EXPORT_LABEL,
     visible: administersServer,
   },
   {

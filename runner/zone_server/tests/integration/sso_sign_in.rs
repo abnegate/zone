@@ -10,12 +10,12 @@ use chrono::{TimeDelta, Utc};
 use reqwest::Url;
 use serde_json::{Value, json};
 use uuid::Uuid;
+use zone_enterprise::period_start;
 use zone_enterprise::sso::{
     Audience, Claims, DISCOVERY_FAILED, DOMAIN_NOT_ALLOWED, EMAIL_CONFLICT, EMAIL_MISSING,
     EMAIL_UNVERIFIED, ID_TOKEN_INVALID, PROVIDER_NOT_FOUND, SSO_REQUIRED, STATE_INVALID,
     TOKEN_EXCHANGE_FAILED, challenge, testing,
 };
-use zone_enterprise::{Tier, period_start};
 use zone_server::auth::hash_password;
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::devices::{self, Mode};
@@ -72,7 +72,7 @@ struct Server {
 }
 
 impl Server {
-    /// A Team server with an admin and one enabled provider at the mock identity provider.
+    /// An Enterprise server with an admin and one enabled provider at the mock identity provider.
     async fn new() -> Self {
         Self::with(json!({})).await
     }
@@ -81,7 +81,7 @@ impl Server {
     async fn with(overrides: Value) -> Self {
         let fixture = Fixture::new(PREFIX).await;
         let admin = fixture.register().await;
-        fixture.license(&admin, Tier::Team).await;
+        fixture.license(&admin).await;
         let identity_provider = IdentityProvider::start().await;
         let mut body = identity_provider.provider();
         for (key, value) in overrides.as_object().unwrap() {
@@ -1320,7 +1320,7 @@ async fn sign_in_and_enforcement_outlive_the_license() {
     let member = server.fixture.register().await;
     server.enforce().await;
 
-    server.fixture.store_license(&lapsed(Tier::Team)).await;
+    server.fixture.store_license(&lapsed()).await;
     server.signed_in(unchanged).await;
     refused(
         &server.fixture.login(&member.email, &test_password()).await,

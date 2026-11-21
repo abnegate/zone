@@ -38,13 +38,14 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
-use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Observer};
+use zone_core::llm::{LlmBackend, LlmClient, Observer};
+use zone_enterprise::policy::Effective;
 
 use crate::agent::learned;
 use crate::agent::wait::{self, Outcome, WaitSettled, Waited, Waiting};
 use crate::agent::{
     self, ActionReceipt, AgentEvent, AgentRun, ChatTools, Citation, Question, Refusal, Spend,
-    ToolCallRecord, WorkspaceScope,
+    ToolCallRecord,
 };
 use crate::auth::validate_access_token;
 use crate::db::{
@@ -64,6 +65,7 @@ use crate::services::chat::tokens;
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
 use crate::services::endpoint::{Endpoint, Origin};
 use crate::services::login::router;
+use crate::services::policy::{self, Auditor, Subject};
 use crate::services::project_directory::{self, Start};
 use crate::services::route::Route;
 use crate::state::AppState;
@@ -71,6 +73,7 @@ use crate::workers::embeddings::spawn_message_embedding_task;
 use abnegate_search::{SearchContext, SearchHit, SearxngClient, sanitize_query};
 
 mod confinement;
+mod denial;
 mod ending;
 pub mod job;
 mod queue;
@@ -267,7 +270,8 @@ impl LiveTurn {
             }
             ServerMessage::MessageEnd { .. }
             | ServerMessage::Cancelled { .. }
-            | ServerMessage::Error { .. } => {
+            | ServerMessage::Error { .. }
+            | ServerMessage::Denied { .. } => {
                 self.status = None;
                 self.frames.clear();
             }
@@ -573,7 +577,7 @@ impl Drop for Generation {
 type ChatPreparation = session::Preparation;
 
 enum Routing {
-    Image(crate::config::ComfyUiConfig, LlmBackend, Endpoint),
+    Image(crate::config::ComfyUiConfig, Option<LlmBackend>, Endpoint),
     Video(crate::config::ComfyUiConfig),
     Audio(crate::config::ComfyUiConfig),
     Upscale(crate::config::ComfyUiConfig),
@@ -800,6 +804,9 @@ pub enum ServerMessage {
     },
     /// Error message
     Error { message: String },
+    /// The organization's or workspace's agent policy refused the turn. `code` is the refusal's
+    /// `policy_*` code, which the console words and links to the policy by.
+    Denied { message: String, code: String },
     /// Non-fatal progress (e.g. web search in progress)
     Status { message: String },
     /// The turn moved to another login and carries on in the same answer.
@@ -2149,7 +2156,7 @@ async fn handle_image_generation(
     prompt: &str,
     metadata: Option<&serde_json::Value>,
     mut image_config: crate::config::ComfyUiConfig,
-    backend: LlmBackend,
+    backend: Option<LlmBackend>,
     endpoint: Endpoint,
     generation: &mut Generation,
     session: &mut Session,
@@ -2206,13 +2213,18 @@ async fn handle_image_generation(
     let generation_prompt = if source.is_some()
         && client.prompt_mode() != abnegate_comfy::recipe::PromptMode::EditInstruction
     {
-        crate::services::image_intent::ImageIntentClassifier::new(
-            image_config.clone(),
-            endpoint,
-            backend,
-        )
-        .edit_prompt(prompt)
-        .await
+        match backend {
+            Some(backend) => {
+                crate::services::image_intent::ImageIntentClassifier::new(
+                    image_config.clone(),
+                    endpoint,
+                    backend,
+                )
+                .edit_prompt(prompt)
+                .await
+            }
+            None => crate::services::image_intent::heuristic_edit_prompt(prompt),
+        }
     } else {
         prompt.to_string()
     };
@@ -2787,7 +2799,7 @@ async fn handle_send_message(
                         request.cancelled(stream).await;
             return false;
         }
-        result = prepare_message(state, chat_id, workspace_id, content, metadata.as_ref()) => result,
+        result = prepare_message(state, chat_id, workspace_id, user_id, content, metadata.as_ref()) => result,
     };
     let mut saved = false;
     let result = async {
@@ -2878,7 +2890,20 @@ async fn handle_send_message(
                 if unattended {
                     chat.auto_approve = false;
                 }
-                let web_search_requested = !chat.offline
+                request
+                    .approvals
+                    .set_ceiling(route.policy().and_then(policy::ceiling));
+                let restricted = route.policy().is_some_and(Effective::restricts_network);
+                let auditor = route.policy().map(|_| {
+                    Auditor::new(
+                        state.clone(),
+                        workspace_id,
+                        route.organization(),
+                        Some(user_id),
+                        Subject::Chat(chat_id),
+                    )
+                });
+                let web_search_requested = !(chat.offline || restricted)
                     && state
                         .config()
                         .web_search
@@ -2893,6 +2918,9 @@ async fn handle_send_message(
                     _ = session.guard.lost() => { return Err(OWNERSHIP_LOST.into()); }
                     result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, *route, web_search_requested) => result?,
                 };
+                if let Some(auditor) = &auditor {
+                    preparation.tools.set_recorder(auditor.egress());
+                }
                 handle_chat_generation(state, stream, chat_id, workspace_id, user_id, preparation, &mut request, &mut session, &mut jobs).await
             }
         }
@@ -2918,13 +2946,12 @@ async fn handle_send_message(
     }
     if let Err(error) = result {
         tracing::error!("Error handling send message: {error}");
-        publish(
-            stream,
-            ServerMessage::Error {
-                message: error.to_string(),
-            },
-        )
-        .await;
+        let turn = denial::Turn {
+            chat: chat_id,
+            workspace: workspace_id,
+            actor: user_id,
+        };
+        publish(stream, turn.ended(state, error.as_ref()).await).await;
     }
     saved
 }
@@ -3031,6 +3058,7 @@ async fn prepare_message(
     state: &AppState,
     chat_id: Uuid,
     workspace_id: Uuid,
+    user_id: Uuid,
     content: &str,
     metadata: Option<&serde_json::Value>,
 ) -> Result<Routing, Box<dyn std::error::Error + Send + Sync>> {
@@ -3051,26 +3079,29 @@ async fn prepare_message(
     if let Some(settings) = route.settings() {
         settings.apply_to_comfyui(&mut image_config);
     }
+    let turn = denial::Turn {
+        chat: chat_id,
+        workspace: workspace_id,
+        actor: user_id,
+    };
     let mut backend = None;
     let intent = match crate::services::image_intent::reading(&image_config, content, metadata) {
         crate::services::image_intent::Reading::Settled(intent) => intent,
         crate::services::image_intent::Reading::Unsettled(lanes) => {
-            let resolved = classifying(
-                state,
-                workspace_id,
-                &chat,
-                &route,
-                &endpoint,
-                &mut image_config,
-            )
-            .await?;
-            let intent = crate::services::image_intent::ImageIntentClassifier::new(
-                image_config.clone(),
-                endpoint.clone(),
-                resolved.clone(),
-            )
-            .settle(content, lanes)
-            .await;
+            let resolved =
+                classifying(state, turn, &chat, &route, &endpoint, &mut image_config).await?;
+            let intent = match &resolved {
+                Some(classifier) => {
+                    crate::services::image_intent::ImageIntentClassifier::new(
+                        image_config.clone(),
+                        endpoint.clone(),
+                        classifier.clone(),
+                    )
+                    .settle(content, lanes)
+                    .await
+                }
+                None => crate::services::image_intent::GenerationIntent::Chat,
+            };
             backend = Some(resolved);
             intent
         }
@@ -3092,15 +3123,7 @@ async fn prepare_message(
             let backend = match backend {
                 Some(backend) => backend,
                 None => {
-                    classifying(
-                        state,
-                        workspace_id,
-                        &chat,
-                        &route,
-                        &endpoint,
-                        &mut image_config,
-                    )
-                    .await?
+                    classifying(state, turn, &chat, &route, &endpoint, &mut image_config).await?
                 }
             };
             Routing::Image(image_config, backend, endpoint)
@@ -3116,15 +3139,22 @@ async fn prepare_message(
 /// The backend a workspace's classifier runs on, with `config` naming the
 /// model it classifies with there: the login the chat runs on, while it can.
 /// A workspace's backend that can't be resolved leaves it the instance's; a
-/// chat's chosen provider is the one it runs on, or it fails.
+/// chat's chosen provider is the one it runs on, or it fails, and so does a
+/// backend the agent policy refuses.
+///
+/// The classifier runs only on a model the policy admits on that backend, the
+/// chat's own when the one chosen for it is refused. With neither admitted
+/// there is none, and the refusal is audited: an unclassified message is a
+/// chat message, and an image edit's prompt is worded without a model.
 async fn classifying(
     state: &AppState,
-    workspace_id: Uuid,
+    turn: denial::Turn,
     chat: &chats::ChatRow,
     route: &Route,
     endpoint: &Endpoint,
     config: &mut crate::config::ComfyUiConfig,
-) -> Result<LlmBackend, crate::services::backend::Error> {
+) -> Result<Option<LlmBackend>, crate::services::backend::Error> {
+    let workspace_id = turn.workspace;
     let sticky = match chats::session(state.db(), chat.id).await {
         Ok(session) => session.and_then(|session| session.login),
         Err(error) => {
@@ -3134,7 +3164,7 @@ async fn classifying(
     };
     let backend = match route.backend_for(state, sticky).await {
         Ok(backend) => backend,
-        Err(error) if route.chosen().is_some() => return Err(error),
+        Err(error) if route.chosen().is_some() || error.denial().is_some() => return Err(error),
         Err(error) => {
             tracing::warn!(
                 %workspace_id,
@@ -3148,9 +3178,30 @@ async fn classifying(
         .catalog(&state.config().ollama_host, &backend)
         .await;
     let preferences = route.preferences(&config.classifier_model);
-    config.classifier_model =
+    let chosen =
         crate::services::stages::classifier_model(&preferences, &catalog, &chat.model_name);
-    Ok(backend)
+    let own = Some(chat.model_name.as_str()).filter(|model| {
+        *model != chosen
+            && !crate::services::stages::is_auto(model)
+            && preferences.admits(model)
+            && catalog.accepts(model)
+    });
+    let refused = match route.admit(&backend, &chosen).await {
+        Ok(()) => {
+            config.classifier_model = chosen;
+            return Ok(Some(backend));
+        }
+        Err(denial) => denial,
+    };
+    if let Some(own) = own
+        && route.admit(&backend, own).await.is_ok()
+    {
+        config.classifier_model = own.to_string();
+        return Ok(Some(backend));
+    }
+    tracing::info!(chat_id = %chat.id, model = %chosen, %refused, "The agent policy admits no model to classify the message on; it is read as a chat message");
+    turn.record(state, refused, Some(&chosen)).await;
+    Ok(None)
 }
 
 async fn load_web_search(
@@ -3353,8 +3404,8 @@ async fn prepare_chat(
     }
     let current = resolved.login.clone();
     let chosen = route.chosen().is_some();
-    let endpoint = route.into_endpoint()?;
-    let catalog = endpoint
+    let catalog = route
+        .endpoint()?
         .catalog(&state.config().ollama_host, &resolved.backend)
         .await;
     chat.model_name = crate::services::stages::chat_model(
@@ -3365,6 +3416,16 @@ async fn prepare_chat(
         model.image,
         model.agentic,
     );
+    if let Err(denial) = route.admit(&resolved.backend, &chat.model_name).await {
+        return Err(denial::Refused {
+            denial,
+            model: chat.model_name,
+        }
+        .into());
+    }
+    let policy = route.policy().cloned();
+    let restricted = policy.as_ref().is_some_and(Effective::restricts_network);
+    let endpoint = route.into_endpoint()?;
     if web_search_requested && !sanitize_query(content).is_empty() {
         publish(
             stream,
@@ -3385,6 +3446,7 @@ async fn prepare_chat(
             session: previous.clone(),
             directory: directory.clone(),
             origin: db::tasks::Origin::of_turn(metadata),
+            policy: policy.clone().map(Arc::new),
         }),
         endpoint,
         driver,
@@ -3397,7 +3459,8 @@ async fn prepare_chat(
     preparation.handover = match (organization, current, &preparation.session) {
         (Some(organization), Some(current), Some(_)) => {
             let handover = Handover::new(organization, current, model, previous.as_ref(), opening)
-                .in_directory(directory);
+                .in_directory(directory)
+                .with_policy(policy);
             Some(match chosen {
                 true => handover.strict(),
                 false => handover,
@@ -3405,7 +3468,14 @@ async fn prepare_chat(
         }
         _ => None,
     };
-    let search = load_web_search(state, chat_id, content, web_search_requested, chat.offline).await;
+    let search = load_web_search(
+        state,
+        chat_id,
+        content,
+        web_search_requested,
+        chat.offline || restricted,
+    )
+    .await;
     let agentic = preparation.agentic;
     let character = chat.character.as_ref();
     let prompt = session::system_prompt(
@@ -3623,16 +3693,20 @@ async fn pin(
 }
 
 /// A turn's coding agent reaches the turn's tools only when it is served them,
-/// but is watched either way. Both belong to the backend they were attached
-/// to, so a turn that moves to another backend equips it again.
+/// but is watched either way. Both, and whether it keeps its own tools, belong
+/// to the backend they were attached to, so a turn that moves to another
+/// backend equips it again.
 fn equipped(
     client: LlmClient,
     served: Option<&AgentTools>,
     observer: &Arc<dyn Observer>,
-    builtin: BuiltinTools,
+    confinement: Confinement,
 ) -> LlmClient {
     let client = match served {
-        Some(served) => client.with_toolset(served.lease.toolset(), builtin),
+        Some(served) => {
+            let builtin = confinement.builtin_tools(client.backend());
+            client.with_toolset(served.lease.toolset(), builtin)
+        }
         None => client,
     };
     client.with_observer(observer.clone())
@@ -3687,9 +3761,12 @@ async fn handle_chat_generation(
         driver,
     } = preparation;
     let offline = tools.offline();
-    let builtin = Confinement { sandboxed, offline }.builtin_tools();
-    let origin = tools.origin();
-    let directory = tools.working_directory().to_path_buf();
+    let confinement = Confinement {
+        sandboxed,
+        offline,
+        ceiling: generation.approvals.ceiling(),
+    };
+    let renewal = tools.renewal();
     let mut replay = context.clone();
     let definitions = agentic.then(|| tools.definitions().to_vec());
     // Bound for the whole turn on purpose. The token is revoked when the lease
@@ -3706,7 +3783,7 @@ async fn handle_chat_generation(
                     user: Some(user_id),
                     approval: generation.approvals.clone(),
                     calls: budget.max_tool_calls,
-                    builtin,
+                    builtin: confinement.builtin_tools(llm_client.backend()),
                 },
                 &crate::mcp::local_endpoint(state.config()),
             )
@@ -3735,7 +3812,7 @@ async fn handle_chat_generation(
         offline,
         tracker,
     ));
-    let mut llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, builtin);
+    let mut llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, confinement);
 
     publish(
         stream,
@@ -3772,6 +3849,7 @@ async fn handle_chat_generation(
     let mut chunk_index = 0;
     let mut cancelled = false;
     let mut failure = None;
+    let mut denied = None;
     let mut blocked = None;
     let mut response_truncated = false;
     let mut asked = false;
@@ -4173,7 +4251,7 @@ async fn handle_chat_generation(
                 llm_client.with_backend(backend),
                 agent_tools.as_ref(),
                 &observer,
-                builtin,
+                confinement,
             );
             replay = whole.clone();
             context = match continuing {
@@ -4197,6 +4275,18 @@ async fn handle_chat_generation(
             let switch = match moved {
                 Ok(switch) => switch,
                 Err(ended) => {
+                    if let Some(denial) = ended
+                        .as_ref()
+                        .and_then(crate::services::backend::Error::denial)
+                    {
+                        let turn = denial::Turn {
+                            chat: chat_id,
+                            workspace: workspace_id,
+                            actor: user_id,
+                        };
+                        turn.record(state, denial, None).await;
+                        denied = Some(denial);
+                    }
                     failure = Some(match ended {
                         Some(error) => error.to_string(),
                         None => self::failure(&endpoint, llm_client.backend(), cause.message),
@@ -4276,7 +4366,7 @@ async fn handle_chat_generation(
                 switch.backend.clone(),
                 effort,
             ));
-            llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, builtin);
+            llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, confinement);
             tools = ChatTools::empty();
             continuing = wrote;
             context = match (wrote, switch.carried) {
@@ -4389,17 +4479,7 @@ async fn handle_chat_generation(
 
         // ChatTools is not Clone and the run took the set it was given by
         // value, so the run that resumes the turn needs one of its own.
-        tools = ChatTools::build(WorkspaceScope {
-            state: state.clone(),
-            workspace_id,
-            chat_id: Some(chat_id),
-            user_id,
-            offline,
-            origin,
-        })
-        .await
-        .starting_in(Some(directory.clone()))
-        .await;
+        tools = renewal.build().await;
         // A planner chat keeps its two closing calls across a rebuilt
         // catalog, as `session::build` gave them to the first turn.
         tools = match crate::db::chats::link(state.db(), chat_id).await {
@@ -4486,9 +4566,10 @@ async fn handle_chat_generation(
             },
         )
         .await;
-        let terminal = match failure {
-            Some(message) => ServerMessage::Error { message },
-            None => ServerMessage::Cancelled {
+        let terminal = match (denied, failure) {
+            (Some(denial), _) => denial::frame(denial),
+            (None, Some(message)) => ServerMessage::Error { message },
+            (None, None) => ServerMessage::Cancelled {
                 message_id: Some(assistant_message_id),
             },
         };
@@ -4613,6 +4694,9 @@ async fn handle_chat_generation(
                 }
             };
             publish(stream, end_msg).await;
+            if let Some(denial) = denied {
+                publish(stream, denial::frame(denial)).await;
+            }
 
             tracing::debug!(
                 "Assistant message completed: chat_id={}, message_id={}, db_id={}, length={}",
@@ -4798,6 +4882,7 @@ mod tests {
     use super::*;
     use crate::db::workspaces;
     use sqlx::PgPool;
+    use zone_core::llm::BuiltinTools;
 
     #[test]
     fn retrieved_context_helpers_normalize_bound_and_interleave_sources() {
@@ -5322,6 +5407,7 @@ mod tests {
                 &state,
                 organization.chat,
                 organization.workspace,
+                Uuid::nil(),
                 QUESTION,
                 None,
             )
@@ -5351,6 +5437,7 @@ mod tests {
                 state,
                 organization.chat,
                 organization.workspace,
+                Uuid::nil(),
                 QUESTION,
                 None,
             )
@@ -5592,6 +5679,7 @@ mod tests {
                 &state,
                 organization.chat,
                 organization.workspace,
+                Uuid::nil(),
                 QUESTION,
                 None,
             )
@@ -5653,6 +5741,7 @@ mod tests {
                 &state,
                 organization.chat,
                 organization.workspace,
+                Uuid::nil(),
                 "generate an image of a lighthouse at dusk",
                 None,
             )
@@ -5661,9 +5750,9 @@ mod tests {
 
             let Ok(Routing::Image(
                 config,
-                LlmBackend::Cli {
+                Some(LlmBackend::Cli {
                     agent, settings, ..
-                },
+                }),
                 _,
             )) = routing
             else {
@@ -5734,11 +5823,12 @@ mod tests {
                 state,
                 organization.chat,
                 organization.workspace,
+                Uuid::nil(),
                 "generate an image of a lighthouse at dusk",
                 None,
             )
             .await;
-            let Ok(Routing::Image(_, LlmBackend::Cli { settings, .. }, _)) = routing else {
+            let Ok(Routing::Image(_, Some(LlmBackend::Cli { settings, .. }), _)) = routing else {
                 panic!("expected an image route carrying the organization's agent");
             };
             settings.credential.expose().map(str::to_string)
@@ -5819,6 +5909,7 @@ mod tests {
                 &state,
                 organization.chat,
                 organization.workspace,
+                Uuid::nil(),
                 "generate an image of a lighthouse at dusk",
                 None,
             )
@@ -6963,13 +7054,14 @@ cat 'DIR/reply.jsonl'
                 &state,
                 organization.chat,
                 organization.workspace,
+                Uuid::nil(),
                 "generate ambient rain sounds",
                 None,
             )
             .await;
             organization.remove().await;
 
-            let Ok(Routing::Image(_, LlmBackend::Cli { settings, .. }, _)) = routing else {
+            let Ok(Routing::Image(_, Some(LlmBackend::Cli { settings, .. }), _)) = routing else {
                 panic!("expected the agent's IMAGE to route the turn to an image");
             };
             assert_eq!(settings.executable.as_ref(), Some(&claude.executable));
@@ -7631,18 +7723,25 @@ cat 'DIR/reply.jsonl'
     }
 
     fn cli() -> LlmBackend {
-        LlmBackend::cli(
-            abnegate_agent_cli::AgentKind::Claude,
-            abnegate_agent_cli::CliSettings::default(),
-        )
+        agent(abnegate_agent_cli::AgentKind::Claude)
     }
+
+    fn agent(kind: abnegate_agent_cli::AgentKind) -> LlmBackend {
+        LlmBackend::cli(kind, abnegate_agent_cli::CliSettings::default())
+    }
+
+    const CONFINED: Confinement = Confinement {
+        sandboxed: true,
+        offline: false,
+        ceiling: None,
+    };
 
     #[test]
     fn a_coding_agent_is_watched_whether_or_not_it_is_served_tools() {
         let observer: Arc<dyn Observer> = Arc::new(Watching);
         let client = LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(cli());
 
-        let client = equipped(client, None, &observer, BuiltinTools::Withheld);
+        let client = equipped(client, None, &observer, CONFINED);
         assert!(
             observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
             "a turn the agent tools are off for is still watched"
@@ -7653,7 +7752,7 @@ cat 'DIR/reply.jsonl'
             observed(&client).is_none(),
             "a new backend starts unwatched"
         );
-        let client = equipped(client, None, &observer, BuiltinTools::Withheld);
+        let client = equipped(client, None, &observer, CONFINED);
         assert!(
             observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
             "a turn handed over to another login is watched again"
@@ -7663,7 +7762,7 @@ cat 'DIR/reply.jsonl'
             LlmClient::new(abnegate_llm::LlmConfig::default()),
             None,
             &observer,
-            BuiltinTools::Withheld,
+            CONFINED,
         );
         assert!(matches!(endpoint.backend(), LlmBackend::Http));
     }
@@ -7680,12 +7779,18 @@ cat 'DIR/reply.jsonl'
         )
         .expect("a coding agent is served the turn's tools");
 
-        for builtin in [BuiltinTools::Withheld, BuiltinTools::Granted] {
+        for (sandboxed, builtin) in [
+            (true, BuiltinTools::Withheld),
+            (false, BuiltinTools::Granted),
+        ] {
             let client = equipped(
                 LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(cli()),
                 Some(&served),
                 &observer,
-                builtin,
+                Confinement {
+                    sandboxed,
+                    ..CONFINED
+                },
             );
 
             assert!(
@@ -7698,6 +7803,48 @@ cat 'DIR/reply.jsonl'
                 "{builtin:?}: serving tools does not unwatch the agent"
             );
         }
+    }
+
+    #[test]
+    fn a_handover_under_a_ceiling_withholds_the_tools_of_an_agent_that_never_asks() {
+        let observer: Arc<dyn Observer> = Arc::new(Watching);
+        let mut tools = ChatTools::empty();
+        let served = AgentTools::serve(
+            &cli(),
+            &mut tools,
+            crate::mcp::testing::scope(Uuid::new_v4()),
+            "http://127.0.0.1:1/mcp",
+        )
+        .expect("a coding agent is served the turn's tools");
+        let confinement = Confinement {
+            sandboxed: false,
+            offline: false,
+            ceiling: Some(abnegate_agent::tool::Tier::Write),
+        };
+
+        let claude = equipped(
+            LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(cli()),
+            Some(&served),
+            &observer,
+            confinement,
+        );
+        assert_eq!(
+            claude.builtin_tools(),
+            BuiltinTools::Granted,
+            "Claude asks zone before each of its own calls"
+        );
+
+        let codex = equipped(
+            claude.with_backend(agent(abnegate_agent_cli::AgentKind::Codex)),
+            Some(&served),
+            &observer,
+            confinement,
+        );
+        assert_eq!(
+            codex.builtin_tools(),
+            BuiltinTools::Withheld,
+            "Codex asks zone about none of its own calls, so the ceiling withholds them"
+        );
     }
 
     #[tokio::test]

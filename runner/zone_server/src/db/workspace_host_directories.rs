@@ -20,6 +20,20 @@ pub async fn list(pool: &PgPool, workspace_id: Uuid) -> DbResult<Vec<String>> {
     Ok(directories.unwrap_or_default())
 }
 
+/// Every folder any workspace mounted, each spelling once.
+pub async fn all(pool: &PgPool) -> DbResult<Vec<String>> {
+    let directories: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT unnest(directories)
+        FROM workspace_host_directories
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(directories)
+}
+
 pub async fn upsert(
     pool: &PgPool,
     workspace_id: Uuid,

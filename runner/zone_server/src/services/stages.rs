@@ -11,6 +11,7 @@ use serde::Deserialize;
 use std::sync::LazyLock;
 use std::time::Duration;
 use zone_core::llm::LlmBackend;
+use zone_enterprise::policy::Effective;
 
 use crate::db::ai_settings::EffectiveAiSettings;
 use crate::services::endpoint::{Endpoint, Origin};
@@ -36,6 +37,9 @@ pub struct Preferences {
     pub vision: Option<String>,
     pub classifier: Option<String>,
     pub scope: Scope,
+    /// The agent policy a model left to these preferences is chosen under: one named for the
+    /// turn is kept, for the policy to refuse.
+    pub policy: Option<Effective>,
 }
 
 /// Which model names a completion may be sent under.
@@ -104,7 +108,21 @@ impl Preferences {
             vision: fallbacks.vision,
             classifier: nonempty(settings.model_fast.as_deref()).or(fallbacks.classifier),
             scope: Scope::Open,
+            policy: None,
         }
+    }
+
+    pub fn under(self, policy: Option<&Effective>) -> Self {
+        Self {
+            policy: policy.cloned(),
+            ..self
+        }
+    }
+
+    fn permits(&self, name: &str) -> bool {
+        self.policy
+            .as_ref()
+            .is_none_or(|policy| policy.model(name.trim()).is_ok())
     }
 
     /// The Fast and Reasoning models, each named once.
@@ -297,7 +315,11 @@ pub fn chat_model(
         } else {
             &preferences.fast
         };
-        return known(kind, [Some(requested), preferred.as_deref()]);
+        let preferred = preferred
+            .as_deref()
+            .filter(|name| preferences.permits(name));
+        return known(kind, [Some(requested), preferred])
+            .unwrap_or_else(|| automatic(preferences, catalog));
     }
     let requested = if preferences.admits(requested) {
         requested
@@ -313,13 +335,19 @@ pub fn chat_model(
         Tools::Optional
     };
     if has_image
-        && let Some(model) =
-            pick_installed(preferences.vision.as_deref(), catalog, Stage::Vision, tools)
+        && let Some(model) = pick_installed(
+            preferences,
+            preferences.vision.as_deref(),
+            catalog,
+            Stage::Vision,
+            tools,
+        )
     {
         return model;
     }
     if wants_reason(message)
         && let Some(model) = pick_installed(
+            preferences,
             preferences.reasoning.as_deref(),
             catalog,
             Stage::Reason,
@@ -328,24 +356,31 @@ pub fn chat_model(
     {
         return model;
     }
-    pick_installed(preferences.fast.as_deref(), catalog, Stage::Fast, tools)
-        .or_else(|| {
-            pick_installed(
-                preferences.reasoning.as_deref(),
-                catalog,
-                Stage::Reason,
-                tools,
-            )
-        })
-        .unwrap_or_else(|| {
-            fallback_name(
-                requested,
-                preferences
-                    .fast
-                    .as_deref()
-                    .filter(|name| tools.allows(catalog, name)),
-            )
-        })
+    pick_installed(
+        preferences,
+        preferences.fast.as_deref(),
+        catalog,
+        Stage::Fast,
+        tools,
+    )
+    .or_else(|| {
+        pick_installed(
+            preferences,
+            preferences.reasoning.as_deref(),
+            catalog,
+            Stage::Reason,
+            tools,
+        )
+    })
+    .unwrap_or_else(|| {
+        fallback_name(
+            requested,
+            preferences
+                .fast
+                .as_deref()
+                .filter(|name| tools.allows(catalog, name) && preferences.permits(name)),
+        )
+    })
 }
 
 /// The model that classifies image intent, and that [`summary_model`] runs.
@@ -353,28 +388,31 @@ pub fn chat_model(
 /// On an agent's catalog, only a classifier or fast model the agent knows;
 /// otherwise [`AUTO`].
 pub fn classifier_model(preferences: &Preferences, catalog: &Catalog, chat_model: &str) -> String {
-    if let Some(kind) = catalog.agent {
-        return known(
-            kind,
-            [
-                preferences.classifier.as_deref(),
-                preferences.fast.as_deref(),
-            ],
-        );
-    }
-    if let Some(name) = preferences
+    let classifier = preferences
         .classifier
         .as_deref()
-        .filter(|name| !is_auto(name))
+        .filter(|name| preferences.permits(name));
+    if let Some(kind) = catalog.agent {
+        let fast = preferences
+            .fast
+            .as_deref()
+            .filter(|name| preferences.permits(name));
+        return known(kind, [classifier, fast]).unwrap_or_else(|| automatic(preferences, catalog));
+    }
+    if let Some(name) = classifier.filter(|name| !is_auto(name))
         && catalog_allows(catalog, name)
     {
         return name.to_string();
     }
-    if !is_auto(chat_model) && preferences.admits(chat_model) && catalog_allows(catalog, chat_model)
+    if !is_auto(chat_model)
+        && preferences.admits(chat_model)
+        && preferences.permits(chat_model)
+        && catalog_allows(catalog, chat_model)
     {
         return chat_model.to_string();
     }
     pick_installed(
+        preferences,
         preferences.fast.as_deref(),
         catalog,
         Stage::Fast,
@@ -383,10 +421,11 @@ pub fn classifier_model(preferences: &Preferences, catalog: &Catalog, chat_model
     .or_else(|| {
         catalog
             .completions()
+            .filter(|model| preferences.permits(&model.name))
             .min_by_key(|model| (model.million_params.unwrap_or(u32::MAX), model.bytes))
             .map(|model| model.name.clone())
     })
-    .unwrap_or_else(|| fallback_name(AUTO, preferences.classifier.as_deref()))
+    .unwrap_or_else(|| fallback_name(AUTO, classifier))
 }
 
 /// The model a chat title, a pull request subject or a merge summary runs on,
@@ -401,13 +440,25 @@ pub fn summary_model(
     (catalog.chooses() || !is_auto(&model)).then_some(model)
 }
 
-/// The first of `names` the agent knows, or [`AUTO`] for it to choose.
-fn known<'a>(kind: AgentKind, names: impl IntoIterator<Item = Option<&'a str>>) -> String {
+fn known<'a>(kind: AgentKind, names: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {
     names
         .into_iter()
         .flatten()
         .map(str::trim)
         .find(|name| kind.knows(name))
+        .map(str::to_string)
+}
+
+/// [`AUTO`] for the agent to choose, unless the policy restricts the models it may run: then the
+/// first of the agent's it lets run, or [`AUTO`] for the policy to refuse when it lets none.
+fn automatic(preferences: &Preferences, catalog: &Catalog) -> String {
+    if preferences.permits(AUTO) {
+        return AUTO.to_string();
+    }
+    catalog
+        .unattended()
+        .map(|model| model.name.as_str())
+        .find(|name| preferences.permits(name))
         .unwrap_or(AUTO)
         .to_string()
 }
@@ -441,23 +492,25 @@ impl Tools {
 }
 
 fn pick_installed(
+    preferences: &Preferences,
     preferred: Option<&str>,
     catalog: &Catalog,
     stage: Stage,
     tools: Tools,
 ) -> Option<String> {
-    if let Some(name) = preferred.filter(|name| !is_auto(name))
+    let preferred = preferred.filter(|name| !is_auto(name) && preferences.permits(name));
+    if let Some(name) = preferred
         && catalog_allows(catalog, name)
         && tools.allows(catalog, name)
     {
         return Some(name.to_string());
     }
     if catalog.models.is_empty() {
-        return preferred.filter(|name| !is_auto(name)).map(str::to_string);
+        return preferred.map(str::to_string);
     }
     let mut candidates: Vec<&Installed> = catalog
         .completions()
-        .filter(|model| tools.admits(model))
+        .filter(|model| tools.admits(model) && preferences.permits(&model.name))
         .filter(|model| match stage {
             Stage::Vision => model.vision,
             Stage::Fast | Stage::Reason => true,
@@ -682,6 +735,7 @@ mod tests {
             vision: Some("llava:7b".to_string()),
             classifier: fast.map(str::to_string),
             scope: Scope::Open,
+            policy: None,
         }
     }
 
@@ -798,6 +852,7 @@ mod tests {
             vision: None,
             classifier: Some("llama3.1:8b".to_string()),
             scope: Scope::Open,
+            policy: None,
         };
         assert_eq!(
             classifier_model(&preferences, &catalog, AUTO),
@@ -1500,6 +1555,93 @@ mod tests {
             summary_model(&Preferences::default(), &Catalog::default(), "llama3.2:3b").as_deref(),
             Some("llama3.2:3b"),
             "an instance whose catalog cannot be read still summarizes on the chat's model"
+        );
+    }
+
+    fn restricted(models: &[&str]) -> Effective {
+        Effective::new(
+            zone_enterprise::policy::Rules {
+                models: Some(models.iter().map(|model| (*model).to_string()).collect()),
+                ..zone_enterprise::policy::Rules::default()
+            },
+            zone_enterprise::policy::Rules::default(),
+        )
+    }
+
+    #[test]
+    fn auto_chooses_only_among_the_models_the_policy_lets_run() {
+        let catalog = catalog(&[
+            installed("llama3.2:3b", 2_000, 3_000),
+            installed("qwen3.8:27b", 17_000, 27_000),
+        ]);
+        let policy = restricted(&["qwen*"]);
+        let preferences = preferences(Some("llama3.2:3b"), None).under(Some(&policy));
+
+        assert_eq!(
+            chat_model(AUTO, &preferences, &catalog, "hello", false, false),
+            "qwen3.8:27b",
+            "the pinned Fast model and the smallest installed one are both denied"
+        );
+        assert_eq!(
+            classifier_model(&preferences, &catalog, AUTO),
+            "qwen3.8:27b"
+        );
+        assert_eq!(
+            chat_model("llama3.2:3b", &preferences, &catalog, "hello", false, false),
+            "llama3.2:3b",
+            "a model the chat names is kept for the policy to refuse, never swapped"
+        );
+    }
+
+    #[test]
+    fn auto_with_nothing_the_policy_lets_run_is_left_for_it_to_refuse() {
+        let catalog = catalog(&[installed("llama3.2:3b", 2_000, 3_000)]);
+        let policy = restricted(&["gpt-*"]);
+        let preferences = preferences(Some("llama3.2:3b"), None).under(Some(&policy));
+
+        assert_eq!(
+            chat_model(AUTO, &preferences, &catalog, "hello", false, false),
+            AUTO
+        );
+        assert_eq!(
+            chat_model(
+                AUTO,
+                &preferences,
+                &Catalog::default(),
+                "hello",
+                false,
+                false
+            ),
+            AUTO,
+            "a pin on an endpoint that lists nothing is denied too"
+        );
+    }
+
+    #[test]
+    fn an_agent_left_to_choose_runs_the_first_of_its_models_the_policy_lets_run() {
+        let claude = Catalog::agent(AgentKind::Claude);
+        let policy = restricted(&["opus", "fable"]);
+        let preferences = preferences(Some("haiku"), Some("sonnet")).under(Some(&policy));
+
+        assert_eq!(
+            chat_model(AUTO, &preferences, &claude, "hello", false, true),
+            "opus",
+            "the denied Fast pin is passed over, and so is fable, which runs only when named"
+        );
+        assert_eq!(classifier_model(&preferences, &claude, AUTO), "opus");
+        assert_eq!(
+            chat_model("haiku", &preferences, &claude, "hello", false, true),
+            "haiku",
+            "a model the chat names is kept for the policy to refuse"
+        );
+        let unrestricted = preferences.clone().under(Some(&restricted(&["*"])));
+        assert_eq!(
+            chat_model(AUTO, &unrestricted, &claude, "hello", false, true),
+            "haiku"
+        );
+        assert_eq!(
+            chat_model(AUTO, &preferences.under(None), &claude, "hi", false, true),
+            "haiku"
         );
     }
 }

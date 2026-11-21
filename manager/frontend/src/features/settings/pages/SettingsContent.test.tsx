@@ -6,6 +6,7 @@ import { type SettingsAccess, SettingsGroup, SettingsSection } from '../navigati
 const organizationId = 'org-1';
 const workspaceId = 'ws-1';
 const organizationDefaultsPath = '/settings/organization/ai';
+const organizationPolicyPath = '/settings/organization/agent-policy';
 
 const workspaceContext: {
   currentOrganization: { id: string } | null;
@@ -49,8 +50,13 @@ mock.module('../server/components', () => ({
 }));
 
 mock.module('../../enterprise', () => ({
+  AuditExportSection: marker('audit-export-section'),
   LicenseSection: marker('license-section'),
+  OrganizationPolicySection: marker('organization-policy-section'),
+  organizationScope: (id: string) => ({ kind: 'organization', organizationId: id }),
+  SERVER_SCOPE: { kind: 'server' },
   SsoSection: marker('sso-section'),
+  WorkspacePolicySection: marker('workspace-policy-section'),
 }));
 
 mock.module('../../auth/components', () => ({
@@ -214,6 +220,60 @@ describe('SettingsContent', () => {
     }
   });
 
+  describe('agent policy', () => {
+    const cases: { role: OrgRole; path: string | undefined }[] = [
+      { role: 'member', path: undefined },
+      { role: 'admin', path: organizationPolicyPath },
+      { role: 'owner', path: organizationPolicyPath },
+    ];
+
+    for (const { role, path } of cases) {
+      it(`${path ? 'links' : 'does not link'} an organization ${role} from the workspace policy to the organization policy`, () => {
+        renderSection(SettingsGroup.Workspace, SettingsSection.AgentPolicy, access('viewer', role));
+        expect(propsOf('workspace-policy-section')).toEqual(
+          path === undefined
+            ? { organizationId, workspaceId }
+            : { organizationId, workspaceId, organizationPolicyPath: path }
+        );
+      });
+    }
+
+    for (const role of ['member', 'admin', 'owner'] as const) {
+      it(`shows the organization policy to an organization ${role} and leaves editing to the server`, () => {
+        renderSection(
+          SettingsGroup.Organization,
+          SettingsSection.AgentPolicy,
+          access('viewer', role)
+        );
+        expect(propsOf('organization-policy-section')).toEqual({ organizationId });
+      });
+    }
+
+    it('renders no workspace policy without a current workspace', () => {
+      workspaceContext.currentWorkspace = null;
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Workspace}
+          section={SettingsSection.AgentPolicy}
+          access={access('admin', 'admin')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('renders no organization policy without a current organization', () => {
+      workspaceContext.currentOrganization = null;
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.AgentPolicy}
+          access={access('admin', 'admin')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+  });
+
   describe('organization invitations', () => {
     const cases: { role: OrgRole; invitations: boolean }[] = [
       { role: 'member', invitations: false },
@@ -350,6 +410,63 @@ describe('SettingsContent', () => {
     it('lets an organization member connect a device', () => {
       renderSection(SettingsGroup.Server, SettingsSection.Connect, access('viewer', 'member'));
       expect(propsOf('connect-devices-section')).toEqual({});
+    });
+  });
+
+  describe('audit export', () => {
+    for (const role of ['admin', 'owner'] as const) {
+      it(`shows an organization ${role} the organization audit export`, () => {
+        renderSection(
+          SettingsGroup.Organization,
+          SettingsSection.AuditExport,
+          access('viewer', role)
+        );
+        expect(propsOf('audit-export-section')).toEqual({
+          scope: { kind: 'organization', organizationId },
+        });
+      });
+    }
+
+    it('renders no organization audit export for an organization member', () => {
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.AuditExport}
+          access={access('admin', 'member')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('renders no organization audit export without a current organization', () => {
+      workspaceContext.currentOrganization = null;
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.AuditExport}
+          access={access('admin', 'admin')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('shows a server admin the server-wide audit export', () => {
+      renderSection(SettingsGroup.Server, SettingsSection.AuditExport, {
+        ...access('viewer', 'member'),
+        administersServer: true,
+      });
+      expect(propsOf('audit-export-section')).toEqual({ scope: { kind: 'server' } });
+    });
+
+    it('renders no server-wide audit export for anyone who does not administer the server', () => {
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Server}
+          section={SettingsSection.AuditExport}
+          access={access('admin', 'owner')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
     });
   });
 

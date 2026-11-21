@@ -6,4 +6,3 @@ export { SsoProviderForm } from './SsoProviderForm';
 export { SsoProviderList } from './SsoProviderList';
 export { SsoSection } from './SsoSection';
 export { SsoUpgradeNotice } from './SsoUpgradeNotice';
-export { Switch } from './Switch';

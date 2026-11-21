@@ -1,6 +1,28 @@
+export {
+  AUDIT_LOG_LINK,
+  AuditExportSection,
+  type AuditScope,
+  organizationScope,
+  SERVER_SCOPE,
+} from './audit';
 export { LicenseSection } from './components';
 export * from './hooks';
 export { LicenseRefusal } from './LicenseRefusal';
+export {
+  AGENT_POLICY_LINK,
+  denialMessage,
+  denialReason,
+  isDenialCode,
+  OrganizationPolicySection,
+  type PolicyDenialCode,
+  type PolicyRules,
+  providerDenial,
+  providerDenialMessage,
+  providerSubject,
+  useOrganizationPolicy,
+  useWorkspacePolicy,
+  WorkspacePolicySection,
+} from './policy';
 export { licenseMutationKeys, licenseQueryKeys } from './queryKeys';
 export {
   EDITIONS,
@@ -16,8 +38,6 @@ export {
   LicenseStatusSchema,
   SeatsSchema,
   SetLicenseRequestSchema,
-  TIERS,
-  TierSchema,
   UNVERIFIED_CODES,
   UnverifiedSchema,
 } from './schemas';
@@ -28,7 +48,6 @@ export type {
   LicenseResponse,
   Seats,
   SetLicenseRequest,
-  Tier,
   Unverified,
   UnverifiedCode,
 } from './types';

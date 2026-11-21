@@ -3,6 +3,7 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom';
 import { client } from '../../../../api/client';
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
+import { useWorkspacePolicy } from '../../../enterprise';
 import { useModels } from '../../../models';
 import {
   AgentSignIn,
@@ -115,6 +116,7 @@ export default function WorkspaceAiSection({
   const { models: installedModels } = useModels();
   const organizationId = currentOrganization?.id ?? null;
   const workspaceId = currentWorkspace?.id ?? null;
+  const { policy } = useWorkspacePolicy(organizationId, workspaceId);
   const scope = `${organizationId}/${workspaceId}`;
   const currentScope = useRef(scope);
   currentScope.current = scope;
@@ -380,6 +382,7 @@ export default function WorkspaceAiSection({
           onChange={(key, value) => setCredentials((previous) => ({ ...previous, [key]: value }))}
           saved={settings}
           organizationKeys={settings.organization_keys}
+          policy={policy?.enforced ? policy.effective : null}
         />
         {providerAgent && (
           <AgentSignIn

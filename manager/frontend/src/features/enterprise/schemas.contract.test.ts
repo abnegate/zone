@@ -11,9 +11,11 @@ import {
   LicenseDetailsSchema,
   LicenseRefusalSchema,
   LicenseResponseSchema,
+  RENEWAL_MODES,
+  RENEWAL_OUTCOMES,
+  RenewalSchema,
   SeatsSchema,
   SetLicenseRequestSchema,
-  TIERS,
   UNVERIFIED_CODES,
   UnverifiedSchema,
 } from './schemas';
@@ -24,6 +26,7 @@ const ENTERPRISE = join(RUNNER, 'zone_enterprise/src');
 const ROUTE = join(SERVER, 'routes/license.rs');
 const COMMON = join(SERVER, 'routes/common.rs');
 const SERVICE = join(SERVER, 'services/license/error.rs');
+const RENEWAL = join(SERVER, 'services/license/renewal');
 const ERRORS = join(ENTERPRISE, 'error.rs');
 
 const CODE = /pub const [A-Z_]+: &str = "([^"]+)";/g;
@@ -76,6 +79,7 @@ describe('the license reads as the server serialises it', () => {
     ['LicenseDetails', LicenseDetailsSchema],
     ['SeatsResponse', SeatsSchema],
     ['UnverifiedResponse', UnverifiedSchema],
+    ['RenewalResponse', RenewalSchema],
   ])('%s carries the same fields on both sides, none of them omitted', (structName, schema) => {
     expect(zodShape(schema)).toEqual(rustShape(ROUTE, structName));
   });
@@ -85,6 +89,7 @@ describe('the license reads as the server serialises it', () => {
     ['LicenseDetails', LicenseDetailsSchema],
     ['SeatsResponse', SeatsSchema],
     ['UnverifiedResponse', UnverifiedSchema],
+    ['RenewalResponse', RenewalSchema],
   ])('%s is null in exactly the fields the server may send as null', (structName, schema) => {
     expect(zodNullable(schema)).toEqual(rustNullable(ROUTE, structName));
   });
@@ -118,8 +123,16 @@ describe('the license vocabularies match the server', () => {
     );
   });
 
-  test('tiers', () => {
-    expect(sorted(TIERS)).toEqual(sorted(rustVariants(read(join(ENTERPRISE, 'tier.rs')), 'Tier')));
+  test('renewal modes', () => {
+    expect(sorted(RENEWAL_MODES)).toEqual(
+      sorted(rustVariants(read(join(RENEWAL, 'mode.rs')), 'Mode'))
+    );
+  });
+
+  test('renewal outcomes', () => {
+    expect(sorted(RENEWAL_OUTCOMES)).toEqual(
+      sorted(rustVariants(read(join(RENEWAL, 'outcome.rs')), 'Outcome'))
+    );
   });
 
   test('the console models every refusal code the server sends, and no other', () => {

@@ -1,0 +1,154 @@
+use crate::audit::destination::SecretName;
+use crate::audit::url_reason::UrlReason;
+
+pub const DESTINATION_NOT_FOUND: &str = "audit_destination_not_found";
+pub const DESTINATION_DUPLICATE: &str = "audit_destination_duplicate";
+pub const NAME_INVALID: &str = "audit_destination_name_invalid";
+pub const KIND_INVALID: &str = "audit_destination_kind_invalid";
+pub const URL_INVALID: &str = "audit_destination_url_invalid";
+pub const BUCKET_INVALID: &str = "audit_destination_bucket_invalid";
+pub const REGION_INVALID: &str = "audit_destination_region_invalid";
+pub const PREFIX_INVALID: &str = "audit_destination_prefix_invalid";
+pub const HOST_INVALID: &str = "audit_destination_host_invalid";
+pub const PORT_INVALID: &str = "audit_destination_port_invalid";
+pub const FACILITY_INVALID: &str = "audit_destination_facility_invalid";
+pub const HOSTNAME_INVALID: &str = "audit_destination_hostname_invalid";
+pub const SECRET_INVALID: &str = "audit_destination_secret_invalid";
+pub const CERTIFICATE_INVALID: &str = "audit_destination_certificate_invalid";
+pub const RETENTION_INVALID: &str = "audit_retention_invalid";
+pub const EXPORT_RANGE_INVALID: &str = "audit_export_range_invalid";
+pub const EXPORT_FORMAT_INVALID: &str = "audit_export_format_invalid";
+pub const REBASING: &str = "audit_rebasing";
+
+const NOT_FOUND: u16 = 404;
+const CONFLICT: u16 = 409;
+const BAD_REQUEST: u16 = 400;
+const SERVICE_UNAVAILABLE: u16 = 503;
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Error {
+    #[error("This audit destination doesn't exist.")]
+    DestinationNotFound,
+    #[error("An audit destination with this name already exists.")]
+    DestinationDuplicate,
+    #[error("Enter a destination name without control characters.")]
+    NameInvalid,
+    #[error(
+        "Choose webhook, s3 or syslog as the destination kind, with settings for that kind. A destination's kind can't change."
+    )]
+    KindInvalid,
+    #[error("{0}")]
+    UrlInvalid(UrlReason),
+    #[error(
+        "Virtual-host addressing puts the bucket in front of the endpoint's host name, so it needs an endpoint named by host, not by IP address. Use path addressing for this endpoint."
+    )]
+    VirtualHostUnaddressable,
+    #[error(
+        "\"{0}\" is not a valid bucket name. Use 3 to 63 lowercase letters, digits, dots or hyphens, starting and ending with a letter or digit."
+    )]
+    BucketInvalid(String),
+    #[error(
+        "\"{0}\" is not a valid region. Use lowercase letters, digits and hyphens, such as us-east-1."
+    )]
+    RegionInvalid(String),
+    #[error(
+        "\"{0}\" is not a valid key prefix. Use path segments separated by single slashes, without . or .. segments or control characters, short enough to leave room for the object name."
+    )]
+    PrefixInvalid(String),
+    #[error(
+        "\"{0}\" is not a valid syslog host. Use a hostname or IP address, with no scheme, port or path."
+    )]
+    HostInvalid(String),
+    #[error("{}", host_refusal(.0))]
+    HostRefused(UrlReason),
+    #[error("The port must be between 1 and 65535.")]
+    PortInvalid,
+    #[error("{0} is not a syslog facility. Use a number from 0 to 23.")]
+    FacilityInvalid(u8),
+    #[error(
+        "\"{0}\" is not a valid syslog hostname. Use 1 to 255 printable ASCII characters with no spaces."
+    )]
+    HostnameInvalid(String),
+    #[error("Secrets must be an object of named text values.")]
+    SecretsMalformed,
+    #[error("\"{0}\" is not a secret this destination takes.")]
+    SecretUnknown(String),
+    #[error("Enter the {}.", .0.label())]
+    SecretInvalid(SecretName),
+    #[error("The {} must be in PEM form.", .0.label())]
+    CertificateInvalid(SecretName),
+    #[error("The client key doesn't belong to the client certificate.")]
+    CertificateMismatched,
+    #[error("A client certificate and a client key go together: set both or neither.")]
+    CertificateUnpaired,
+    #[error("Certificates need the tls protocol: UDP syslog is unencrypted.")]
+    CertificateWithoutTls,
+    #[error(
+        "The retention period must be a whole number of days, at least one, or empty to keep audit events forever."
+    )]
+    RetentionInvalid,
+    #[error(
+        "The export range is invalid. Use ISO 8601 dates, with the start on or before the end."
+    )]
+    ExportRangeInvalid,
+    #[error("Choose ndjson or csv as the export format.")]
+    ExportFormatInvalid,
+    #[error(
+        "Zone is rebasing audit positions after a database restore. Try again once it finishes."
+    )]
+    Rebasing,
+}
+
+impl Error {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::DestinationNotFound => DESTINATION_NOT_FOUND,
+            Self::DestinationDuplicate => DESTINATION_DUPLICATE,
+            Self::NameInvalid => NAME_INVALID,
+            Self::KindInvalid => KIND_INVALID,
+            Self::UrlInvalid(_) | Self::VirtualHostUnaddressable => URL_INVALID,
+            Self::BucketInvalid(_) => BUCKET_INVALID,
+            Self::RegionInvalid(_) => REGION_INVALID,
+            Self::PrefixInvalid(_) => PREFIX_INVALID,
+            Self::HostInvalid(_) | Self::HostRefused(_) => HOST_INVALID,
+            Self::PortInvalid => PORT_INVALID,
+            Self::FacilityInvalid(_) => FACILITY_INVALID,
+            Self::HostnameInvalid(_) => HOSTNAME_INVALID,
+            Self::SecretsMalformed | Self::SecretUnknown(_) | Self::SecretInvalid(_) => {
+                SECRET_INVALID
+            }
+            Self::CertificateInvalid(_)
+            | Self::CertificateMismatched
+            | Self::CertificateUnpaired
+            | Self::CertificateWithoutTls => CERTIFICATE_INVALID,
+            Self::RetentionInvalid => RETENTION_INVALID,
+            Self::ExportRangeInvalid => EXPORT_RANGE_INVALID,
+            Self::ExportFormatInvalid => EXPORT_FORMAT_INVALID,
+            Self::Rebasing => REBASING,
+        }
+    }
+
+    pub fn status(&self) -> u16 {
+        match self {
+            Self::DestinationNotFound => NOT_FOUND,
+            Self::DestinationDuplicate => CONFLICT,
+            Self::Rebasing => SERVICE_UNAVAILABLE,
+            _ => BAD_REQUEST,
+        }
+    }
+}
+
+fn host_refusal(reason: &UrlReason) -> &'static str {
+    match reason {
+        UrlReason::Metadata => {
+            "The syslog host must not be a link-local or cloud metadata address."
+        }
+        UrlReason::Unlisted => {
+            "The syslog host is not one this instance allows endpoints on: ZONE_ENDPOINT_HOSTS doesn't list it."
+        }
+        _ => "The syslog host is not one audit delivery can send to.",
+    }
+}
+
+#[cfg(test)]
+mod tests;

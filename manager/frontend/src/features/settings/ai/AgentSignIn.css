@@ -36,6 +36,19 @@
   margin: 0;
 }
 
+.agent-sign-in-state .agent-sign-in-denial {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-normal);
+  color: color-mix(in srgb, var(--ui-warning-600) 45%, var(--ui-text-primary));
+  overflow-wrap: anywhere;
+}
+
+:root[data-theme='dark'] .agent-sign-in-state .agent-sign-in-denial {
+  color: var(--ui-warning-400);
+}
+
 .agent-sign-in-state:focus-visible,
 .agent-sign-in-code:focus-visible {
   outline: none;
@@ -107,10 +120,6 @@
 
 .agent-sign-in-loopback .form-hint {
   margin: 0;
-}
-
-.agent-sign-in a.ui-btn:hover {
-  text-decoration: none;
 }
 
 .agent-sign-in-link {

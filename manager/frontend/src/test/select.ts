@@ -25,3 +25,17 @@ export function selectOptionValues(label: string | RegExp): string[] {
   fireEvent.keyDown(trigger, { key: 'Escape' });
   return values;
 }
+
+export function optionDescription(option: HTMLElement): string | null {
+  const described = option.getAttribute('aria-describedby');
+  return described === null ? null : (document.getElementById(described)?.textContent ?? null);
+}
+
+export function describedText(element: HTMLElement): string | null {
+  const described = element.getAttribute('aria-describedby');
+  if (described === null) return null;
+  return described
+    .split(' ')
+    .map((id) => document.getElementById(id)?.textContent ?? '')
+    .join(' ');
+}

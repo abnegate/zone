@@ -15,6 +15,7 @@ use abnegate_llm::{Credential, ReasoningEffort};
 use chrono::{DateTime, SecondsFormat, Utc};
 use uuid::Uuid;
 use zone_core::llm::{LlmBackend, SignIn, cli};
+use zone_enterprise::policy::{Denial, Effective};
 
 use crate::config::Config;
 use crate::db::agent_logins;
@@ -25,7 +26,9 @@ use crate::services::endpoint::Origin;
 use crate::services::login::credential::{self, Login};
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router::{self, Chosen};
+use crate::services::policy;
 use crate::services::route::Unusable;
+use crate::services::scratch::Scratch;
 use crate::state::AppState;
 
 pub const REMEDY: &str = "Sign in again under Organization Settings > AI Settings.";
@@ -84,9 +87,20 @@ pub enum Error {
     },
     #[error(transparent)]
     Unusable(#[from] Unusable),
+    #[error(transparent)]
+    Denied(#[from] Denial),
 }
 
 impl Error {
+    /// The agent policy denial this failure is, directly or as the reason a route is unusable.
+    pub fn denial(&self) -> Option<Denial> {
+        match self {
+            Self::Denied(denial) => Some(*denial),
+            Self::Unusable(unusable) => unusable.denial(),
+            _ => None,
+        }
+    }
+
     /// Why one of `agent`'s logins could not be made ready for a turn.
     pub fn resolving(agent: AgentKind, error: credential::Error) -> Self {
         match error {
@@ -152,6 +166,9 @@ pub fn agent(config: &Config, settings: &EffectiveAiSettings, origin: Origin) ->
 /// and never when every login is exhausted. A provider whose settings resolved to an endpoint
 /// of `origin` [`Origin::Settings`] runs over HTTP to it, and every other provider runs on the
 /// instance default.
+///
+/// Under `routing.policy`, an agent the policy denies never runs: not as the one `settings`
+/// choose, which is then refused, not as another agent's login, and not under the host's sign-in.
 pub async fn for_settings(
     state: &AppState,
     organization: Uuid,
@@ -161,11 +178,16 @@ pub async fn for_settings(
 ) -> Result<Resolved, Error> {
     let config = state.config();
     let Some(agent) = settings.agent() else {
-        return Ok(Resolved::unrouted(match origin {
+        let backend = match origin {
             Origin::Settings => LlmBackend::Http,
             Origin::Instance => instance(config),
-        }));
+        };
+        if let LlmBackend::Cli { agent, .. } = &backend {
+            admitted(routing.policy, *agent)?;
+        }
+        return Ok(Resolved::unrouted(backend));
     };
+    admitted(routing.policy, agent)?;
     let chosen = match router::pick(
         state,
         organization,
@@ -174,6 +196,7 @@ pub async fn for_settings(
         routing.sticky,
         routing.model,
         routing.strict,
+        routing.policy,
     )
     .await
     {
@@ -193,6 +216,10 @@ pub async fn for_settings(
         touch(state, chosen.login.id).await;
     }
     Ok(resolved)
+}
+
+fn admitted(policy: Option<&Effective>, agent: AgentKind) -> Result<(), Denial> {
+    policy.map_or(Ok(()), |policy| policy::admits(policy, agent))
 }
 
 /// The backend `chosen`, one of `organization`'s logins, runs its turns on: its agent in the
@@ -354,6 +381,20 @@ pub fn remedied(backend: &LlmBackend, message: String) -> Remedied {
 /// directory it was resolved with. An endpoint runs nowhere.
 pub fn in_directory(backend: LlmBackend, directory: &Path) -> LlmBackend {
     backend.configured(|settings| settings.with_working_directory(directory))
+}
+
+/// `backend` with a coding agent whose temporary files and build output land
+/// in a run's `scratch` rather than in the host's temporary directory. An
+/// endpoint runs nothing.
+pub fn in_scratch(backend: LlmBackend, scratch: &Scratch) -> LlmBackend {
+    backend.configured(|settings| {
+        scratch
+            .variables()
+            .into_iter()
+            .fold(settings, |settings, (name, value)| {
+                settings.with_variable(name, value.display().to_string())
+            })
+    })
 }
 
 /// `backend` with a coding agent that commits as `author`.
@@ -653,6 +694,33 @@ mod tests {
             variable(&settings, "GIT_COMMITTER_EMAIL"),
             Some("ada@example.test")
         );
+    }
+
+    /// A run's agent writes its temporary files and builds into the run's
+    /// scratch, which goes with the run, rather than into the host's `/tmp`.
+    #[test]
+    fn an_agent_in_a_run_s_scratch_builds_and_writes_temporary_files_there() {
+        let holder = tempfile::tempdir().unwrap();
+        let root = holder.path().join("root");
+        crate::services::checkout::Checkout::directory(&root).unwrap();
+        let scratch = Scratch::create(&root, Uuid::new_v4(), Uuid::new_v4()).unwrap();
+
+        let (_, settings, _) = cli(Ok(in_scratch(
+            LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
+            &scratch,
+        )));
+
+        for (name, value) in scratch.variables() {
+            assert_eq!(
+                variable(&settings, name),
+                Some(value.display().to_string().as_str())
+            );
+        }
+        assert!(matches!(
+            in_scratch(LlmBackend::Http, &scratch),
+            LlmBackend::Http
+        ));
+        scratch.remove().unwrap();
     }
 
     /// An endpoint runs no git, so there is no identity to hand it.

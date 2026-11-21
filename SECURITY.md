@@ -212,6 +212,61 @@ tools in an offline chat, even when the chat turns Zone tools only off: those
 tools reach the network without Zone seeing them, so offline overrides
 unsandboxed and the agent gets Zone's tools alone.
 
+An agent policy's `domains` rule (see [docs/POLICY.md](docs/POLICY.md#network))
+builds on the same gates. While either the organization's or the workspace's
+policy sets it, every chat and task run in the workspace is held to everything
+above, as if its Offline switch were on, and Zone then lets back in only
+`fetch_url` to the hosts the policy allows, checked before the request and
+after every redirect, and HTTP MCP servers whose host it allows. Web search,
+GitHub tools, stdio MCP servers and the agents' own built-in tools stay
+withheld, and shell commands keep the operating-system network deny. A chat
+that is offline in its own right gets nothing back. Zone's own traffic is not
+agent egress and does not follow the rule: the chat's model provider, Zone's
+model infrastructure, its project clones and pull request calls to GitHub,
+and knowledge source sync.
+
+A policy's `providers` rule judges a LiteLLM endpoint by the routes it
+publishes at `/v2/model/info`. That answer is the endpoint's own, so Zone
+believes it only from the instance's `LITELLM_HOST` or an endpoint saved in the
+organization's AI settings. An endpoint saved in a workspace's AI settings
+counts as an unidentified provider, which a restricted policy denies, so a
+workspace admin cannot satisfy the organization's rule with a proxy that
+misreports its routes (see
+[docs/POLICY.md](docs/POLICY.md#how-zone-tells-where-a-litellm-model-runs)).
+
+## Audit Destinations
+
+Audit destinations ([docs/AUDIT.md](docs/AUDIT.md)) send an organization's or
+the server's audit log to a webhook, an S3-compatible store or a syslog
+server. Their secrets, a webhook signing secret, S3 access keys and syslog
+certificates and keys, are sealed in `audit_destinations.secrets` under the
+master key derived from `ENCRYPTION_KEY`, in the same `ENC[v1:…]` envelopes as
+other credentials, and `zone-server --seal-secrets` covers that column (see
+[docs/DEPLOY.md](docs/DEPLOY.md#sealing-stored-credentials)). They are never
+returned by the API, which lists only the names of the secrets set, never
+logged and never recorded in the audit log. Secrets that don't open under the
+key fail delivery with `unsealable` rather than being sent without them.
+
+Private, loopback and LAN hosts are allowed on purpose, over `http` or
+`https`, so a self-hosted SIEM or object store can receive the log. Link-local
+and cloud metadata addresses are refused when a destination is saved, again
+before every delivery, and among the addresses a host name resolves to when
+sending. `ZONE_ENDPOINT_HOSTS` limits destinations to the hosts it lists and
+is re-checked before every delivery, so narrowing it stops existing
+destinations too. Delivery uses no proxy and follows no redirect. A failed
+delivery records a failure code and a sentence of Zone's own; the HTTP status
+code is the only part of an answer it keeps, never a response body or header,
+so a destination pointed at an internal host doesn't read that host's answer
+back to an organization admin.
+
+Plain `http` and UDP syslog send events unencrypted, and the console warns
+when a destination uses them.
+
+Every audit log download writes an `audit_export.downloaded` row before the
+first byte is sent, and is refused with `500` when that row can't be written,
+so no export goes unrecorded. Downloads are sent with `Cache-Control:
+no-store`.
+
 ## Privacy Considerations
 
 ### Prompt Logging

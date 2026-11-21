@@ -145,19 +145,13 @@ export function AuthProvider({
     apiClient.setAccessToken(state.accessToken);
   }, [apiClient, state.accessToken]);
 
-  const handleLogout = useCallback(() => {
+  const forgetSession = useCallback(() => {
     if (refreshTimeoutRef.current) {
       clearTimeout(refreshTimeoutRef.current);
     }
 
     apiClient.setAccessToken(null);
     clearChatCaches();
-
-    storage.removeItem(ACCESS_TOKEN_KEY);
-    storage.removeItem(REFRESH_TOKEN_KEY);
-    storage.removeItem(USER_KEY);
-    sessionStorage.removeItem(ACTIVE_PULLS_KEY);
-    sessionStorage.removeItem(LEGACY_ACTIVE_PULL_KEY);
 
     setState({
       user: null,
@@ -168,7 +162,17 @@ export function AuthProvider({
       isAuthenticated: false,
       isLoading: false,
     });
-  }, [apiClient, storage]);
+  }, [apiClient]);
+
+  const handleLogout = useCallback(() => {
+    storage.removeItem(ACCESS_TOKEN_KEY);
+    storage.removeItem(REFRESH_TOKEN_KEY);
+    storage.removeItem(USER_KEY);
+    sessionStorage.removeItem(ACTIVE_PULLS_KEY);
+    sessionStorage.removeItem(LEGACY_ACTIVE_PULL_KEY);
+
+    forgetSession();
+  }, [forgetSession, storage]);
 
   const handleAuthResponse = useCallback(
     (response: AuthResponse) => {
@@ -264,6 +268,13 @@ export function AuthProvider({
         return response.access_token;
       } catch (err) {
         if (err instanceof RefreshError && !err.credentialRejected) {
+          // Another tab may have signed out meanwhile; clearing storage here
+          // could erase a session it has written since.
+          if (!storage.getItem(REFRESH_TOKEN_KEY)) {
+            forgetSession();
+            return null;
+          }
+          setState((s) => ({ ...s, isAuthenticated: true }));
           scheduleRefreshRef.current?.(RETRY_REFRESH_SECONDS);
           return null;
         }
@@ -275,7 +286,7 @@ export function AuthProvider({
     })();
     refreshInFlight.current = pending;
     return pending;
-  }, [apiClient, auth, handleAuthResponse, handleLogout, scheduleRefresh, storage]);
+  }, [apiClient, auth, forgetSession, handleAuthResponse, handleLogout, scheduleRefresh, storage]);
 
   useLayoutEffect(() => {
     session.setEnsureAccessToken(() => ensureFresh());

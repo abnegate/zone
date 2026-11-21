@@ -1,9 +1,12 @@
-import { Edition, LicenseRefusalCode, LicenseStatus } from './schemas';
+import { Edition, LicenseRefusalCode, LicenseStatus, RenewalMode, RenewalOutcome } from './schemas';
 import type {
   Edition as EditionValue,
   LicenseRefusalCode as LicenseRefusalCodeValue,
   LicenseResponse,
   LicenseStatus as LicenseStatusValue,
+  Renewal,
+  RenewalMode as RenewalModeValue,
+  RenewalOutcome as RenewalOutcomeValue,
   Seats,
   UnverifiedCode,
 } from './types';
@@ -19,7 +22,6 @@ export type Tone = (typeof Tone)[keyof typeof Tone];
 
 const EDITION_LABELS: Readonly<Record<EditionValue, string>> = {
   [Edition.Community]: 'Community',
-  [Edition.Team]: 'Team',
   [Edition.Enterprise]: 'Enterprise',
 };
 
@@ -60,6 +62,32 @@ const UNVERIFIED_REASONS: Readonly<Record<UnverifiedCode, string>> = {
   [LicenseRefusalCode.PayloadInvalid]:
     "It is signed, but this release can't read its details. Ask for a new license key.",
 };
+
+const RENEWAL_MODE_LABELS: Readonly<Record<RenewalModeValue, string>> = {
+  [RenewalMode.Automatic]: 'Renews automatically',
+  [RenewalMode.Disabled]: 'Automatic renewal is off on this server',
+  [RenewalMode.Manual]: 'Renew by pasting a new key before it expires',
+};
+
+const RENEWAL_OUTCOME_LABELS: Readonly<Record<RenewalOutcomeValue, string>> = {
+  [RenewalOutcome.Renewed]: 'Renewed',
+  [RenewalOutcome.Current]: 'Up to date',
+  [RenewalOutcome.Ended]: 'Subscription not renewable',
+  [RenewalOutcome.Refused]: 'Refused by the license server',
+  [RenewalOutcome.Rejected]: 'Renewed key not accepted',
+  [RenewalOutcome.Unreachable]: 'License server unreachable',
+};
+
+const RENEWAL_OUTCOME_TONES: Readonly<Record<RenewalOutcomeValue, Tone>> = {
+  [RenewalOutcome.Renewed]: Tone.Success,
+  [RenewalOutcome.Current]: Tone.Success,
+  [RenewalOutcome.Ended]: Tone.Warning,
+  [RenewalOutcome.Refused]: Tone.Warning,
+  [RenewalOutcome.Rejected]: Tone.Warning,
+  [RenewalOutcome.Unreachable]: Tone.Warning,
+};
+
+const RENEWAL_UNRECORDED = 'No check recorded yet';
 
 const SEATS_UNCOUNTED = 'Seat usage unavailable';
 
@@ -111,6 +139,26 @@ export function statusNotice(response: LicenseResponse): string | null {
     default:
       return null;
   }
+}
+
+export function renewalModeLabel(mode: RenewalModeValue): string {
+  return RENEWAL_MODE_LABELS[mode];
+}
+
+export function renewalOutcomeLabel(outcome: RenewalOutcomeValue): string {
+  return RENEWAL_OUTCOME_LABELS[outcome];
+}
+
+export function renewalOutcomeTone(outcome: RenewalOutcomeValue): Tone {
+  return RENEWAL_OUTCOME_TONES[outcome];
+}
+
+export function showsRenewalAttempt({ mode, attempted_at }: Renewal): boolean {
+  return mode === RenewalMode.Automatic || attempted_at !== null;
+}
+
+export function renewalAttemptDate({ attempted_at }: Renewal): string {
+  return attempted_at === null ? RENEWAL_UNRECORDED : licenseDate(attempted_at);
 }
 
 function seatsNoun(count: number): string {

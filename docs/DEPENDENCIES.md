@@ -35,7 +35,7 @@ policy again. In cargo-deny 0.20.2, `crate@version` selects an exact version.
 | quoted_printable 0.5.2                                 | 0BSD                         | lettre                                                              | Cargo.toml and LICENSE                                                                      |
 | webpki-root-certs 1.0.11, webpki-roots 0.26.11, 1.0.11 | CDLA-Permissive-2.0          | rustls-platform-verifier/reqwest, ureq/hf-hub and tokio-tungstenite | Cargo.toml and LICENSE                                                                      |
 | xxhash-rust 0.8.18                                     | BSL-1.0                      | redis                                                               | Cargo.toml and LICENSE                                                                      |
-| zone_enterprise (workspace member)                     | LicenseRef-Zone-Enterprise   | first-party; zone_server                                            | runner/zone_enterprise/Cargo.toml and LICENSE                                               |
+| zone_enterprise (workspace member)                     | LicenseRef-Zone-Enterprise   | first-party; zone_server, zone_license                              | runner/zone_enterprise/Cargo.toml and LICENSE                                               |
 
 The first-party `zone_enterprise` exception is selected by name, not
 `crate@version`, because its version follows the workspace.
@@ -166,6 +166,29 @@ Drop either pin once a release outside the advisory's range satisfies every
 dependent: `nyc` and `workbox-build` on glob 14.0.2 or later, and
 `chromium-bidi` on zod 4. Revisit both if Lighthouse starts using WebDriver
 BiDi or if chrome-launcher is called with a user-supplied profile path.
+
+## Syslog TLS
+
+`zone_server` depends directly on `rustls` 0.23.46 (no default features;
+`aws-lc-rs`, `std` and `tls12`), `tokio-rustls` 0.26.4 (no default features)
+and `rustls-platform-verifier` 0.7.0, each pinned exactly, to deliver audit
+events to syslog over TLS (see [AUDIT.md](AUDIT.md#syslog)). All three were
+already in `runner/Cargo.lock` at those versions through reqwest, and they use
+the aws-lc-rs provider reqwest and jsonwebtoken already link, so no package,
+version or license changes. The `audit` feature of `zone_enterprise` adds
+`hex` 0.4.3 and `hmac` 0.13.0 for webhook signatures and SigV4, also already
+locked at those versions.
+
+## License signer
+
+`zone_license` links `zone_enterprise` with its `signing` feature, the reason
+`zone_enterprise`'s exception above names it. It depends directly on `lettre`
+0.11.23 with the same features `abnegate-notify` enables (`builder`,
+`hostname`, `smtp-transport` and `tokio1-native-tls`, no defaults), to send a
+license email with both text and HTML parts, and on `hmac` 0.13.0 and `sha2`
+0.11.0 to verify Polar's webhook signatures. All three were already locked at
+those versions, so no package, version or license changes. See
+[LICENSING.md](LICENSING.md).
 
 ## aiusg
 

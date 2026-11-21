@@ -19,10 +19,12 @@ use abnegate_llm::{Limit, Window};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::future::join_all;
 use uuid::Uuid;
+use zone_enterprise::policy::Effective;
 
 use super::credential;
 use super::usage::{self, Availability, Snapshot};
 use crate::db::agent_logins;
+use crate::services::policy;
 use crate::state::AppState;
 use failure::Failure;
 use standing::Standing;
@@ -47,7 +49,7 @@ const REST: TimeDelta = TimeDelta::minutes(5);
 /// login, and is picked only when no other can be, even as `sticky`.
 ///
 /// When `strict`, only `preferred`'s logins are candidates: with none of them, there is no login
-/// at all.
+/// at all. Under `policy`, no login of an agent it denies is ever a candidate.
 pub async fn pick(
     state: &AppState,
     organization: Uuid,
@@ -56,11 +58,17 @@ pub async fn pick(
     sticky: Option<Uuid>,
     model: Option<&str>,
     strict: bool,
+    policy: Option<&Effective>,
 ) -> Result<Chosen, Error> {
     let now = Utc::now();
     let mut logins = agent_logins::list(state.db(), organization).await?;
     if strict {
         logins.retain(|login| AgentKind::named(&login.agent) == Some(preferred));
+    }
+    if let Some(policy) = policy {
+        logins.retain(|login| {
+            AgentKind::named(&login.agent).is_none_or(|agent| policy::admits(policy, agent).is_ok())
+        });
     }
     if logins.is_empty() {
         return Err(Error::None);
@@ -519,6 +527,7 @@ mod tests {
                 sticky,
                 None,
                 false,
+                None,
             )
             .await
         }
@@ -551,6 +560,7 @@ mod tests {
                 sticky,
                 Some(model),
                 false,
+                None,
             )
             .await
             {
@@ -668,6 +678,7 @@ mod tests {
             None,
             Some("fable"),
             false,
+            None,
         )
         .await;
         scene.remove().await;
@@ -799,6 +810,7 @@ mod tests {
                 sticky,
                 None,
                 true,
+                None,
             )
         };
 

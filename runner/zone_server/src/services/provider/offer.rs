@@ -3,6 +3,7 @@ use abnegate_llm::ReasoningEffort;
 use futures::future::try_join_all;
 use serde::Serialize;
 use uuid::Uuid;
+use zone_enterprise::policy::{Denial, Effective};
 
 use super::{Availability, Offered, Provider, Refusal};
 use crate::config::Config;
@@ -10,6 +11,7 @@ use crate::db::ai_settings::EffectiveAiSettings;
 use crate::db::chats::provider::Choice;
 use crate::services::endpoint::{Endpoint, Origin};
 use crate::services::model::Model;
+use crate::services::policy;
 use crate::services::stages::{self, Catalog, Preferences};
 use crate::state::AppState;
 
@@ -25,6 +27,10 @@ pub struct Offer {
     pub models: Vec<Offered>,
     pub efforts: &'static [ReasoningEffort],
     pub requires_model: bool,
+    /// The code of the agent policy's denial when it refuses the provider, which leaves it
+    /// unusable with the denial as its reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denial: Option<String>,
 }
 
 impl Offer {
@@ -63,17 +69,65 @@ impl Offer {
             models,
             efforts,
             requires_model,
+            denial: None,
         }
+    }
+
+    /// An offer whose every model is refused is denied as its first model was.
+    async fn govern(&mut self, effective: &Effective, endpoint: Option<&Endpoint>) {
+        if let Err(denial) = policy::provider(effective, self.provider) {
+            self.deny(denial);
+            return;
+        }
+        let listed = std::mem::take(&mut self.models);
+        let mut refused = None;
+        for model in listed {
+            match admitted(effective, self.provider, endpoint, &model.name).await {
+                Ok(()) => self.models.push(model),
+                Err(denial) => {
+                    refused.get_or_insert(denial);
+                }
+            }
+        }
+        if let (true, Some(denial)) = (self.models.is_empty(), refused) {
+            self.deny(denial);
+        }
+    }
+
+    fn deny(&mut self, denial: Denial) {
+        self.usable = false;
+        self.reason = Some(denial.to_string());
+        self.models.clear();
+        self.denial = Some(denial.code().to_owned());
+    }
+}
+
+/// An agent is judged by the model's name alone; an endpoint by where it routes the model too.
+async fn admitted(
+    effective: &Effective,
+    provider: Provider,
+    endpoint: Option<&Endpoint>,
+    model: &str,
+) -> Result<(), Denial> {
+    effective.model(model)?;
+    match endpoint {
+        Some(endpoint) if provider.agent().is_none() => {
+            policy::over_http(effective, endpoint, Some(provider), model).await
+        }
+        _ => Ok(()),
     }
 }
 
 /// Every provider, in [`Provider::ALL`] order, as a chat of `organization`
-/// whose workspace has `settings` may choose it. Each agent's sign-in and the
-/// instance's installed models are read once.
+/// whose workspace has `settings` may choose it under `policy`, the agent policy
+/// it runs under, or the denial of one that could not be read, which denies
+/// every provider. Each agent's sign-in and the instance's installed models are
+/// read once.
 pub async fn offers(
     state: &AppState,
     organization: Uuid,
     settings: &EffectiveAiSettings,
+    policy: Result<Option<&Effective>, Denial>,
 ) -> Result<Vec<Offer>, sqlx::Error> {
     let availabilities = try_join_all(
         Provider::ALL.map(|provider| Availability::of(state, organization, settings, provider)),
@@ -93,14 +147,25 @@ pub async fn offers(
     } else {
         Catalog::default()
     };
-    Ok(Provider::ALL
+    let mut offered: Vec<Offer> = Provider::ALL
         .into_iter()
         .zip(availabilities)
         .zip(&reached)
         .map(|((provider, availability), reached)| {
             Offer::new(provider, availability, reached.as_ref(), &catalog)
         })
-        .collect())
+        .collect();
+    match policy {
+        Ok(None) => {}
+        Ok(Some(effective)) => {
+            for (offer, reached) in offered.iter_mut().zip(&reached) {
+                let endpoint = reached.as_ref().map(|(_, endpoint)| endpoint);
+                offer.govern(effective, endpoint).await;
+            }
+        }
+        Err(denial) => offered.iter_mut().for_each(|offer| offer.deny(denial)),
+    }
+    Ok(offered)
 }
 
 /// `provider` and `model` checked as one chat's choice, in order: the
@@ -252,7 +317,15 @@ mod tests {
     const CODEX: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
     async fn listed(fixture: &Fixture, settings: &EffectiveAiSettings) -> Vec<Offer> {
-        offers(&fixture.state, fixture.organization, settings)
+        governed(fixture, settings, Ok(None)).await
+    }
+
+    async fn governed(
+        fixture: &Fixture,
+        settings: &EffectiveAiSettings,
+        policy: Result<Option<&Effective>, Denial>,
+    ) -> Vec<Offer> {
+        offers(&fixture.state, fixture.organization, settings, policy)
             .await
             .expect("the offers are read")
     }
@@ -632,6 +705,98 @@ mod tests {
                     "{agent} offers {model}"
                 );
             }
+        }
+        fixture.cleanup().await;
+    }
+
+    fn ruled(rules: zone_enterprise::policy::Rules) -> Effective {
+        Effective::new(rules, zone_enterprise::policy::Rules::default())
+    }
+
+    fn saved_openai() -> EffectiveAiSettings {
+        let mut saved = openai_key(PROVIDER_OPENAI);
+        saved.model_fast = Some("gpt-4o-mini".to_string());
+        saved.model_reasoning = Some("gpt-4o".to_string());
+        saved
+    }
+
+    #[tokio::test]
+    async fn a_provider_the_policy_denies_is_unusable_with_its_denial_and_no_models() {
+        let fixture = Fixture::new().await;
+        let effective = ruled(zone_enterprise::policy::Rules {
+            providers: Some(vec![zone_enterprise::policy::Provider::Anthropic]),
+            agents: Some(vec![zone_enterprise::policy::Agent::Codex]),
+            ..Default::default()
+        });
+        let offers = governed(&fixture, &saved_openai(), Ok(Some(&effective))).await;
+
+        let openai = serde_json::to_value(of(&offers, Provider::OpenAI)).expect("serialise");
+        let denial = Denial::Provider(zone_enterprise::policy::Provider::OpenAI);
+        assert_eq!(openai["usable"], json!(false));
+        assert_eq!(openai["reason"], json!(denial.to_string()));
+        assert_eq!(openai["denial"], json!("policy_provider_denied"));
+        assert_eq!(openai["models"], json!([]));
+        let claude = of(&offers, Provider::ClaudeCode);
+        assert_eq!(claude.denial.as_deref(), Some("policy_agent_denied"));
+        assert!(!claude.usable);
+        let codex = of(&offers, Provider::Codex);
+        assert_eq!(codex.denial, None, "the policy allows codex");
+        assert_eq!(names(codex), AgentKind::Codex.models());
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn only_the_models_the_policy_admits_are_offered() {
+        let fixture = Fixture::new().await;
+        let effective = ruled(zone_enterprise::policy::Rules {
+            models: Some(vec!["gpt-4o-mini".into(), "sonnet".into(), "opus".into()]),
+            ..Default::default()
+        });
+        let offers = governed(&fixture, &saved_openai(), Ok(Some(&effective))).await;
+
+        let openai = of(&offers, Provider::OpenAI);
+        assert!(openai.usable);
+        assert_eq!(openai.denial, None);
+        assert_eq!(names(openai), ["gpt-4o-mini"]);
+        let serialised = serde_json::to_value(openai).expect("serialise");
+        assert!(
+            serialised.get("denial").is_none(),
+            "an offer the policy allows carries no denial: {serialised}"
+        );
+        assert_eq!(names(of(&offers, Provider::ClaudeCode)), ["sonnet", "opus"]);
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn an_offer_whose_every_model_is_refused_is_denied() {
+        let fixture = Fixture::new().await;
+        let effective = ruled(zone_enterprise::policy::Rules {
+            models: Some(vec!["claude-*".into()]),
+            ..Default::default()
+        });
+        let offers = governed(&fixture, &saved_openai(), Ok(Some(&effective))).await;
+
+        let openai = of(&offers, Provider::OpenAI);
+        assert!(!openai.usable);
+        assert_eq!(openai.denial.as_deref(), Some("policy_model_denied"));
+        assert_eq!(openai.reason, Some(Denial::Model.to_string()));
+        let self_hosted = of(&offers, Provider::SelfHosted);
+        assert_eq!(
+            self_hosted.denial, None,
+            "a provider that lists no model has none refused"
+        );
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_policy_that_cannot_be_read_denies_every_offer() {
+        let fixture = Fixture::new().await;
+        let offers = governed(&fixture, &saved_openai(), Err(Denial::Unreadable)).await;
+
+        for offer in &offers {
+            assert!(!offer.usable, "{offer:?}");
+            assert_eq!(offer.denial.as_deref(), Some("policy_unreadable"));
+            assert!(offer.models.is_empty());
         }
         fixture.cleanup().await;
     }

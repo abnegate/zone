@@ -294,7 +294,10 @@ CREATE TABLE licenses (
     id smallint DEFAULT 1 NOT NULL PRIMARY KEY,
     key text NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT licenses_singleton_check CHECK (id = 1)
+    renewal_attempted_at timestamp with time zone,
+    renewal_outcome text,
+    CONSTRAINT licenses_singleton_check CHECK (id = 1),
+    CONSTRAINT licenses_renewal_outcome_check CHECK ((renewal_outcome = ANY (ARRAY['renewed'::text, 'current'::text, 'ended'::text, 'refused'::text, 'rejected'::text, 'unreachable'::text])))
 );
 
 CREATE TABLE organizations (
@@ -410,6 +413,37 @@ CREATE TABLE agent_logins (
 CREATE UNIQUE INDEX agent_logins_organization_agent_account_key ON agent_logins (organization_id, agent, account) WHERE (account IS NOT NULL);
 CREATE INDEX idx_agent_logins_organization_agent ON agent_logins (organization_id, agent);
 
+CREATE TABLE audit_destinations (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    organization_id uuid REFERENCES organizations(id) ON DELETE CASCADE,
+    kind text NOT NULL,
+    name text NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    settings jsonb NOT NULL,
+    secrets text NOT NULL,
+    created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT audit_destinations_kind_check CHECK ((kind = ANY (ARRAY['webhook'::text, 's3'::text, 'syslog'::text]))),
+    CONSTRAINT audit_destinations_settings_check CHECK ((jsonb_typeof(settings) = 'object'::text))
+);
+CREATE UNIQUE INDEX audit_destinations_name_idx ON audit_destinations ((COALESCE(organization_id, '00000000-0000-0000-0000-000000000000'::uuid)), name);
+CREATE INDEX audit_destinations_organization_idx ON audit_destinations (organization_id);
+
+CREATE TABLE audit_retentions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    organization_id uuid REFERENCES organizations(id) ON DELETE CASCADE,
+    days integer NOT NULL,
+    updated_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    swept_at timestamp with time zone,
+    deleted_count bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT audit_retentions_days_check CHECK ((days > 0))
+);
+CREATE UNIQUE INDEX audit_retentions_scope_idx ON audit_retentions ((COALESCE(organization_id, '00000000-0000-0000-0000-000000000000'::uuid)));
+CREATE INDEX audit_retentions_organization_idx ON audit_retentions (organization_id);
+
 CREATE TABLE devices (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -505,6 +539,15 @@ CREATE INDEX idx_org_members_active ON organization_members (organization_id, is
 CREATE INDEX idx_org_members_org ON organization_members (organization_id);
 CREATE INDEX idx_org_members_user_active ON organization_members (user_id) WHERE (is_active = true);
 
+CREATE TABLE organization_policies (
+    organization_id uuid NOT NULL PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+    rules jsonb DEFAULT '{}'::jsonb NOT NULL,
+    updated_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT organization_policies_rules_check CHECK ((jsonb_typeof(rules) = 'object'::text))
+);
+
 CREATE TABLE password_reset_tokens (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -596,6 +639,24 @@ CREATE INDEX idx_workspaces_active ON workspaces (is_active) WHERE (is_active = 
 CREATE INDEX idx_workspaces_org_id ON workspaces (organization_id);
 CREATE INDEX idx_workspaces_slug ON workspaces (slug);
 
+CREATE TABLE audit_deliveries (
+    destination_id uuid NOT NULL PRIMARY KEY REFERENCES audit_destinations(id) ON DELETE CASCADE,
+    transaction_id bigint NOT NULL,
+    sequence bigint NOT NULL,
+    batch_transaction_id bigint,
+    batch_sequence bigint,
+    attempts integer DEFAULT 0 NOT NULL,
+    next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
+    lease_owner uuid,
+    lease_expires_at timestamp with time zone,
+    last_success_at timestamp with time zone,
+    last_failure_at timestamp with time zone,
+    last_error_code text,
+    last_error text,
+    delivered_count bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT audit_deliveries_batch_check CHECK (((batch_transaction_id IS NULL) = (batch_sequence IS NULL)))
+);
+
 CREATE TABLE audit_logs (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     organization_id uuid REFERENCES organizations(id) ON DELETE SET NULL,
@@ -609,8 +670,13 @@ CREATE TABLE audit_logs (
     new_values jsonb,
     ip_address inet,
     user_agent text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    transaction_id bigint DEFAULT ((pg_current_xact_id())::text)::bigint NOT NULL,
+    sequence bigint GENERATED ALWAYS AS IDENTITY
 );
+CREATE INDEX audit_logs_organization_position_idx ON audit_logs (organization_id, transaction_id, sequence);
+CREATE INDEX audit_logs_server_position_idx ON audit_logs (transaction_id, sequence) WHERE (organization_id IS NULL);
+CREATE INDEX audit_logs_transaction_idx ON audit_logs (transaction_id);
 CREATE INDEX idx_audit_logs_action ON audit_logs (action);
 CREATE INDEX idx_audit_logs_actor ON audit_logs (actor_id);
 CREATE INDEX idx_audit_logs_created ON audit_logs (created_at DESC);
@@ -829,6 +895,15 @@ CREATE TABLE workspace_members (
 CREATE INDEX idx_workspace_members_active ON workspace_members (workspace_id, is_active) WHERE (is_active = true);
 CREATE INDEX idx_workspace_members_user_active ON workspace_members (user_id) WHERE (is_active = true);
 CREATE INDEX idx_workspace_members_workspace ON workspace_members (workspace_id);
+
+CREATE TABLE workspace_policies (
+    workspace_id uuid NOT NULL PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+    rules jsonb DEFAULT '{}'::jsonb NOT NULL,
+    updated_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT workspace_policies_rules_check CHECK ((jsonb_typeof(rules) = 'object'::text))
+);
 
 CREATE TABLE workspace_themes (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,

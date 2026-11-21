@@ -39,6 +39,7 @@ import {
   AWAITING_APPROVAL_DETAIL,
   CHAT_ACTIVITIES,
   DENIED_DETAIL,
+  POLICY_DETAIL,
   PULL_REQUEST_CHECKS,
   PULL_REQUEST_MERGEABILITY,
   PULL_REQUEST_STATES,
@@ -235,6 +236,10 @@ describe('a refused call keeps why it did not run after the server settles it', 
     expect(APPROVAL_CANCELLED_DETAIL).toBe(
       rustStringConstant(readFileSync(REFUSAL_RS, 'utf8'), 'APPROVAL_CANCELLED')
     );
+  });
+
+  test('the console reads the words the server tells a call its policy withheld', () => {
+    expect(POLICY_DETAIL).toBe(rustStringConstant(readFileSync(REFUSAL_RS, 'utf8'), 'POLICY'));
   });
 
   test('the console reads the prefix the server puts in front of a failed call', () => {

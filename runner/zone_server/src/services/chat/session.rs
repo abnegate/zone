@@ -394,10 +394,14 @@ pub async fn build(
         },
     };
     let catalog = async {
-        let tools = if matches!(mode, Mode::Generation(_)) && chat.agent_enabled {
-            ChatTools::build(scope).await
-        } else {
-            ChatTools::preview(scope).await
+        let tools = match &mode {
+            Mode::Generation(generation) if chat.agent_enabled => {
+                ChatTools::build_with(scope, generation.policy.clone()).await
+            }
+            Mode::Generation(generation) => {
+                ChatTools::preview_with(scope, generation.policy.clone()).await
+            }
+            Mode::Preview => ChatTools::preview(scope).await,
         };
         tools.starting_in(directory).await
     };

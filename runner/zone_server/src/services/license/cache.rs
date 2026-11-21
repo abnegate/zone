@@ -27,16 +27,48 @@ impl Cache {
             .map(|loaded| &loaded.stored)
     }
 
+    pub(super) fn settled(&self) -> Option<&Stored> {
+        self.loaded
+            .as_ref()
+            .filter(|loaded| loaded.is_settled())
+            .map(|loaded| &loaded.stored)
+    }
+
+    pub(super) fn fresh_settled(&self, within: Duration) -> Option<&Stored> {
+        self.loaded
+            .as_ref()
+            .filter(|loaded| loaded.is_settled() && loaded.is_fresh(within))
+            .map(|loaded| &loaded.stored)
+    }
+
+    pub(super) fn unsettled_within(&self, within: Duration) -> bool {
+        self.loaded
+            .as_ref()
+            .is_some_and(|loaded| !loaded.is_settled() && loaded.is_fresh(within))
+    }
+
     pub(super) fn swap(&mut self, stored: Stored) {
-        self.loaded = Some(Loaded::new(stored));
-        self.generation += 1;
+        self.replace(Loaded::new(stored));
     }
 
     pub(super) fn swap_since(&mut self, generation: u64, stored: Stored) -> bool {
+        self.replace_since(generation, Loaded::new(stored))
+    }
+
+    pub(super) fn unsettle_since(&mut self, generation: u64) -> bool {
+        self.replace_since(generation, Loaded::unsettled())
+    }
+
+    fn replace(&mut self, loaded: Loaded) {
+        self.loaded = Some(loaded);
+        self.generation += 1;
+    }
+
+    fn replace_since(&mut self, generation: u64, loaded: Loaded) -> bool {
         if self.generation != generation {
             return false;
         }
-        self.swap(stored);
+        self.replace(loaded);
         true
     }
 }
@@ -76,6 +108,39 @@ mod tests {
         assert_eq!(cache.generation(), start + 1);
         assert!(cache.swap_since(start + 1, Stored::Empty));
         assert_eq!(cache.generation(), start + 2);
+    }
+
+    #[test]
+    fn an_unsettled_load_answers_as_community_but_is_never_settled() {
+        let mut cache = Cache::default();
+        assert!(cache.unsettle_since(cache.generation()));
+
+        assert_eq!(cache.stored(), Some(&Stored::Empty));
+        assert_eq!(cache.fresh(INTERVAL), Some(&Stored::Empty));
+        assert_eq!(cache.settled(), None);
+        assert_eq!(cache.fresh_settled(INTERVAL), None);
+        assert!(cache.unsettled_within(INTERVAL));
+        assert!(!cache.unsettled_within(Duration::ZERO));
+    }
+
+    #[test]
+    fn a_settled_load_is_never_unsettled() {
+        let mut cache = Cache::default();
+        assert!(!cache.unsettled_within(INTERVAL));
+        cache.swap(Stored::Empty);
+        assert!(!cache.unsettled_within(INTERVAL));
+    }
+
+    #[test]
+    fn a_swap_is_settled_while_fresh() {
+        let mut cache = Cache::default();
+        cache.swap(Stored::Unverified(Error::Signature));
+        assert_eq!(
+            cache.fresh_settled(INTERVAL),
+            Some(&Stored::Unverified(Error::Signature))
+        );
+        assert_eq!(cache.fresh_settled(Duration::ZERO), None);
+        assert_eq!(cache.settled(), Some(&Stored::Unverified(Error::Signature)));
     }
 
     #[test]

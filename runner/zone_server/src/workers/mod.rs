@@ -10,7 +10,8 @@
 //! this module's other files hold only the work itself.
 //!
 //! **On a queue.** [`reminders`] drains persisted reminders as they come due,
-//! coordinating across server instances through database locks.
+//! and [`audit`] streams audit events to their destinations, both coordinating
+//! across server instances through database locks.
 //!
 //! **On an event.** Task execution, pull request creation and repair, embedding
 //! generation, context gathering, source indexing, title generation, conflict
@@ -18,6 +19,7 @@
 //! not because a clock struck.
 
 pub mod analytics;
+pub mod audit;
 pub mod auto_project;
 pub mod conflict;
 pub mod embeddings;

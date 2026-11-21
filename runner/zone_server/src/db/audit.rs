@@ -4,6 +4,15 @@
 //! across the system. Audit logs track important actions like user logins,
 //! permission changes, and resource modifications.
 
+pub mod deliveries;
+pub mod destinations;
+pub mod events;
+pub mod lock;
+pub mod position;
+mod predicate;
+pub mod retentions;
+pub mod scope;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -91,6 +100,7 @@ pub mod actions {
 
     pub const LICENSE_SET: &str = "license.set";
     pub const LICENSE_REMOVED: &str = "license.removed";
+    pub const LICENSE_RENEWED: &str = "license.renewed";
 
     pub const AGENT_SIGNED_IN: &str = "agent.signed_in";
     pub const AGENT_SIGNED_OUT: &str = "agent.signed_out";
@@ -119,6 +129,18 @@ pub mod actions {
     pub const SSO_PROVIDER_UPDATED: &str = "sso_provider.updated";
     pub const SSO_PROVIDER_DELETED: &str = "sso_provider.deleted";
     pub const SSO_ENFORCEMENT_UPDATED: &str = "sso_enforcement.updated";
+
+    pub const AGENT_POLICY_UPDATED: &str = "agent_policy.updated";
+    pub const AGENT_POLICY_TURN_DENIED: &str = "agent_policy.turn_denied";
+    pub const AGENT_POLICY_TOOL_DENIED: &str = "agent_policy.tool_denied";
+
+    pub const AUDIT_DESTINATION_CREATED: &str = "audit_destination.created";
+    pub const AUDIT_DESTINATION_UPDATED: &str = "audit_destination.updated";
+    pub const AUDIT_DESTINATION_DELETED: &str = "audit_destination.deleted";
+    pub const AUDIT_DESTINATION_TESTED: &str = "audit_destination.tested";
+    pub const AUDIT_RETENTION_UPDATED: &str = "audit_retention.updated";
+    pub const AUDIT_RETENTION_APPLIED: &str = "audit_retention.applied";
+    pub const AUDIT_EXPORT_DOWNLOADED: &str = "audit_export.downloaded";
 }
 
 pub mod resources {
@@ -141,6 +163,13 @@ pub mod resources {
     pub const SSO_PROVIDER: &str = "sso_provider";
     pub const SSO_SETTINGS: &str = "sso_settings";
     pub const USER: &str = "user";
+    pub const ORGANIZATION_AGENT_POLICY: &str = "organization_agent_policy";
+    pub const WORKSPACE_AGENT_POLICY: &str = "workspace_agent_policy";
+    pub const CHAT: &str = "chat";
+    pub const TASK: &str = "task";
+    pub const AUDIT_DESTINATION: &str = "audit_destination";
+    pub const AUDIT_RETENTION: &str = "audit_retention";
+    pub const AUDIT_EXPORT: &str = "audit_export";
 }
 
 /// Log an action to the audit trail

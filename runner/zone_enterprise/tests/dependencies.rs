@@ -8,9 +8,13 @@ const ALLOWED: [&str; 7] = [
     "uuid",
 ];
 
-const SSO: [&str; 6] = ["dashmap", "jsonwebtoken", "rand", "reqwest", "sha2", "url"];
-
-const SSO_FEATURE: &str = "sso";
+const FEATURES: [(&str, &[&str]); 2] = [
+    ("audit", &["hex", "hmac", "md-5", "sha2", "url"]),
+    (
+        "sso",
+        &["dashmap", "jsonwebtoken", "rand", "reqwest", "sha2", "url"],
+    ),
+];
 
 const DEPENDENCY_PREFIX: &str = "dep:";
 
@@ -49,6 +53,23 @@ fn entries(feature: &toml::Value) -> Vec<String> {
         .collect()
 }
 
+fn dependency(entry: &str) -> String {
+    entry
+        .strip_prefix(DEPENDENCY_PREFIX)
+        .unwrap_or(entry)
+        .split(['/', '?'])
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+fn listed(feature: &str) -> Option<&'static [&'static str]> {
+    FEATURES
+        .iter()
+        .find(|(name, _)| *name == feature)
+        .map(|(_, dependencies)| *dependencies)
+}
+
 #[test]
 fn depends_only_on_the_allowlist() {
     for name in dependencies(false) {
@@ -60,43 +81,50 @@ fn depends_only_on_the_allowlist() {
 }
 
 #[test]
-fn every_optional_dependency_is_for_single_sign_on() {
+fn every_optional_dependency_is_listed_by_a_feature() {
     let mut optional = dependencies(true);
     optional.sort();
+    let mut listed: Vec<String> = FEATURES
+        .iter()
+        .flat_map(|(_, dependencies)| dependencies.iter().map(|name| (*name).to_owned()))
+        .collect();
+    listed.sort();
+    listed.dedup();
     assert_eq!(
-        optional, SSO,
-        "optional dependencies must match the sso allowlist"
+        optional, listed,
+        "optional dependencies must match the feature allowlists"
     );
 }
 
 #[test]
-fn only_the_sso_feature_enables_optional_dependencies() {
-    let optional = dependencies(true);
-    for (name, feature) in features() {
-        for entry in entries(&feature) {
-            let dependency = entry
-                .strip_prefix(DEPENDENCY_PREFIX)
-                .unwrap_or(&entry)
-                .split(['/', '?'])
-                .next()
-                .unwrap()
-                .to_owned();
-            if optional.contains(&dependency) {
-                assert_eq!(name, SSO_FEATURE, "{name} enables {dependency}");
-            }
-        }
+fn each_feature_enables_exactly_its_dependencies() {
+    let features = features();
+    for (name, dependencies) in FEATURES {
+        let mut enabled = entries(&features[name]);
+        enabled.sort();
+        let expected: Vec<String> = dependencies
+            .iter()
+            .map(|dependency| format!("{DEPENDENCY_PREFIX}{dependency}"))
+            .collect();
+        assert_eq!(enabled, expected, "the {name} feature");
     }
 }
 
 #[test]
-fn the_sso_feature_enables_exactly_its_dependencies() {
-    let mut enabled = entries(&features()[SSO_FEATURE]);
-    enabled.sort();
-    let expected: Vec<String> = SSO
-        .iter()
-        .map(|name| format!("{DEPENDENCY_PREFIX}{name}"))
-        .collect();
-    assert_eq!(enabled, expected);
+fn no_other_feature_enables_an_optional_dependency() {
+    let optional = dependencies(true);
+    for (name, feature) in features() {
+        if listed(&name).is_some() {
+            continue;
+        }
+        for entry in entries(&feature) {
+            let dependency = dependency(&entry);
+            assert!(
+                !optional.contains(&dependency),
+                "{name} enables {dependency}"
+            );
+        }
+    }
 }
 
 #[test]

@@ -480,6 +480,40 @@ describe('AuthContext', () => {
       expect(storage.getItem('manager_refresh_token')).toBe('refresh-token');
     });
 
+    it('stays signed in while a restarting server cannot answer the refresh', async () => {
+      storage.setItem('manager_access_token', makeExpiredToken());
+      storage.setItem('manager_refresh_token', 'refresh-token');
+      refreshTokenImpl = async () => {
+        throw new RefreshError('Token refresh failed: 503', 503);
+      };
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false);
+      });
+
+      expect(result.current.isAuthenticated).toBe(true);
+    });
+
+    it('signs this tab out when another tab signed out during the refresh', async () => {
+      storage.setItem('manager_access_token', makeExpiredToken());
+      storage.setItem('manager_refresh_token', 'refresh-token');
+      refreshTokenImpl = async () => {
+        storage.removeItem('manager_refresh_token');
+        throw new RefreshError('Token refresh failed: 503', 503);
+      };
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false);
+      });
+
+      expect(result.current.isAuthenticated).toBe(false);
+      expect(result.current.refreshToken).toBeNull();
+    });
+
     it('signs out when the server rejects the refresh token', async () => {
       storage.setItem('manager_access_token', makeExpiredToken());
       storage.setItem('manager_refresh_token', 'refresh-token');

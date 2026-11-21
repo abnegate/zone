@@ -1,4 +1,4 @@
-import { Badge, type BadgeProps, Button } from '@zone/ui';
+import { Button } from '@zone/ui';
 import {
   editionLabel,
   expiryLabel,
@@ -7,17 +7,11 @@ import {
   statusLabel,
   statusTone,
   storesLicense,
-  Tone,
   unverifiedReason,
 } from '../status';
 import type { LicenseResponse } from '../types';
-
-const BADGE_VARIANTS: Readonly<Record<Tone, BadgeProps['variant']>> = {
-  [Tone.Neutral]: 'neutral',
-  [Tone.Success]: 'success',
-  [Tone.Warning]: 'warning',
-  [Tone.Error]: 'destructive',
-};
+import { LicenseRenewal } from './LicenseRenewal';
+import { ToneBadge } from './ToneBadge';
 
 interface LicenseSummaryProps {
   response: LicenseResponse;
@@ -26,7 +20,7 @@ interface LicenseSummaryProps {
 }
 
 export function LicenseSummary({ response, changing, onRemove }: LicenseSummaryProps) {
-  const { edition, status, license, seats, unverified } = response;
+  const { edition, status, license, seats, unverified, renewal } = response;
 
   return (
     <div className="settings-card license-summary">
@@ -35,9 +29,7 @@ export function LicenseSummary({ response, changing, onRemove }: LicenseSummaryP
           <span className="license-edition-label">Edition</span>
           <span className="license-edition-name">{editionLabel(edition)}</span>
         </div>
-        {license && (
-          <Badge variant={BADGE_VARIANTS[statusTone(status)]}>{statusLabel(status)}</Badge>
-        )}
+        {license && <ToneBadge tone={statusTone(status)}>{statusLabel(status)}</ToneBadge>}
         {storesLicense(response) && (
           <div className="license-summary-actions">
             <Button type="button" variant="ghost" size="sm" disabled={changing} onClick={onRemove}>
@@ -62,16 +54,10 @@ export function LicenseSummary({ response, changing, onRemove }: LicenseSummaryP
       )}
       <dl className="license-details">
         {license && (
-          <>
-            <div className="license-detail">
-              <dt>Customer</dt>
-              <dd>{license.customer}</dd>
-            </div>
-            <div className="license-detail">
-              <dt>Tier</dt>
-              <dd>{editionLabel(license.tier)}</dd>
-            </div>
-          </>
+          <div className="license-detail">
+            <dt>Customer</dt>
+            <dd>{license.customer}</dd>
+          </div>
         )}
         <div className="license-detail">
           <dt>Seats</dt>
@@ -89,6 +75,7 @@ export function LicenseSummary({ response, changing, onRemove }: LicenseSummaryP
             </div>
           </>
         )}
+        {renewal && <LicenseRenewal renewal={renewal} />}
       </dl>
     </div>
   );

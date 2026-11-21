@@ -1,3 +1,5 @@
+use zone_enterprise::policy::Denial;
+
 use super::{Availability, Provider};
 
 const PROVIDER_UNKNOWN: &str = "provider_unknown";
@@ -22,6 +24,8 @@ pub enum Refusal {
     Unset(Provider),
     #[error("The workspace's AI settings couldn't be read.")]
     Unreadable,
+    #[error("{0}")]
+    Denied(Denial),
 }
 
 impl Refusal {
@@ -34,6 +38,7 @@ impl Refusal {
             Self::Unset(_) => Some(PROVIDER_MODEL_REQUIRED),
             Self::Unavailable(..) => Some(PROVIDER_UNAVAILABLE),
             Self::Unreadable => None,
+            Self::Denied(denial) => Some(denial.code()),
         }
     }
 }
@@ -65,6 +70,11 @@ mod tests {
                 Some("provider_unavailable"),
             ),
             (Refusal::Unreadable, None),
+            (Refusal::Denied(Denial::Model), Some("policy_model_denied")),
+            (
+                Refusal::Denied(Denial::Agent(zone_enterprise::policy::Agent::Claude)),
+                Some("policy_agent_denied"),
+            ),
         ] {
             assert_eq!(refusal.code(), code, "{refusal:?}");
             let message = refusal.to_string();

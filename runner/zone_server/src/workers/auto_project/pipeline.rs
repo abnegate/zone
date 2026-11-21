@@ -43,6 +43,8 @@ use crate::services::endpoint::Origin;
 use crate::services::github::pull_requests::Status;
 use crate::services::github::readiness::SignalKind;
 use crate::services::github_app::Error as GitHubError;
+use crate::services::policy::Background;
+use crate::services::policy::Subject;
 use crate::workers::conflict::RepairOutcome;
 use crate::workers::pr::access_token;
 use crate::workers::pr::repair_conflicts_for_task;
@@ -732,10 +734,22 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 .map_or(Author::Unrecorded, |mode| Author::recorded(mode.model)),
             None => Author::Unrecorded,
         };
+        let background = Background {
+            workspace: Some(step.drive.workspace_id),
+            subject: Subject::Task(step.task.task_id),
+            actor: Some(step.drive.actor),
+        };
         let resolved = Venue::for_workspace(step.drive.state, step.drive.workspace_id).await;
         let venue = match resolved {
             Ok(venue) => venue,
-            Err(error) => return step.pause(&error.to_string()).await,
+            Err(error) => {
+                if let Some(denial) = error.denial() {
+                    background
+                        .refused(step.drive.state, denial, author.model())
+                        .await;
+                }
+                return step.pause(&error.to_string()).await;
+            }
         };
         let round = auto_projects::latest_round(pool, step.task.task_id)
             .await
@@ -748,6 +762,15 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
         ) {
             Ok(lineup) => lineup,
             Err(unavailable) => return step.pause(&unavailable.to_string()).await,
+        };
+        let lineup = match venue.admitted(lineup).await {
+            Ok(lineup) => lineup,
+            Err(denial) => {
+                background
+                    .refused(step.drive.state, denial, author.model())
+                    .await;
+                return step.pause(&denial.to_string()).await;
+            }
         };
         let names: Vec<String> = lineup
             .iter()

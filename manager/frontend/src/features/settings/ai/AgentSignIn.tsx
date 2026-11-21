@@ -2,6 +2,7 @@ import { Badge, type BadgeProps, Button } from '@zone/ui';
 import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { AgentRequestError } from '../../../api/AgentRequestError';
 import { agentsApi, type StartRequest } from '../../../api/agents';
+import { denialReason } from '../../enterprise';
 import { formatDate } from '../../projects/utils/formatters';
 import { AccountList } from './AccountList';
 import { ClaudeSteps } from './ClaudeSteps';
@@ -357,6 +358,7 @@ export function AgentSignIn({
   const error = failure ?? (status ? (quiet ? null : status.error) : loadError);
   const state = signingIn ? 'pending' : (status?.state ?? 'signed_out');
   const badge = states[state === 'pending' && !manage ? 'signed_out' : state];
+  const denial = status?.denial ? denialReason(status.denial, name) : null;
 
   let detail: string | null = null;
   if (manage && returning) {
@@ -392,7 +394,7 @@ export function AgentSignIn({
           variant={another ? 'secondary' : 'default'}
           onClick={() => void start('start')}
           loading={busy === 'start'}
-          disabled={busy !== null}
+          disabled={busy !== null || denial !== null}
         >
           {another ? `Add another ${account} account` : `Sign in with ${account}`}
         </Button>
@@ -415,6 +417,11 @@ export function AgentSignIn({
             <p className="agent-sign-in-detail">{detail}</p>
             {status.state === 'signed_in' && unsaved && (
               <p className="form-hint agent-sign-in-note">{saveLabel} to use this provider.</p>
+            )}
+            {denial !== null && (
+              <p className="agent-sign-in-denial" data-testid="agent-sign-in-denial">
+                {denial}
+              </p>
             )}
           </div>
           {actions}

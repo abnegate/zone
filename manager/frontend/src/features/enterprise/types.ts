@@ -5,15 +5,14 @@ import type {
   LicenseRefusalSchema,
   LicenseResponseSchema,
   LicenseStatusSchema,
+  RenewalSchema,
   SeatsSchema,
   SetLicenseRequestSchema,
-  TierSchema,
   UnverifiedSchema,
 } from './schemas';
 
 export type Edition = z.infer<typeof EditionSchema>;
 export type LicenseStatus = z.infer<typeof LicenseStatusSchema>;
-export type Tier = z.infer<typeof TierSchema>;
 export type LicenseDetails = z.infer<typeof LicenseDetailsSchema>;
 export type Seats = z.infer<typeof SeatsSchema>;
 export type LicenseResponse = z.infer<typeof LicenseResponseSchema>;
@@ -22,3 +21,6 @@ export type LicenseRefusalBody = z.infer<typeof LicenseRefusalSchema>;
 export type LicenseRefusalCode = LicenseRefusalBody['code'];
 export type Unverified = z.infer<typeof UnverifiedSchema>;
 export type UnverifiedCode = Unverified['code'];
+export type Renewal = z.infer<typeof RenewalSchema>;
+export type RenewalMode = Renewal['mode'];
+export type RenewalOutcome = NonNullable<Renewal['outcome']>;

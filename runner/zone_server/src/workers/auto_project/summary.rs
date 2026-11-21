@@ -8,6 +8,7 @@ use abnegate_llm::{Message, finish_reason};
 use abnegate_vcs::PullRequestDetail;
 
 use crate::db::tasks::TaskRow;
+use crate::services::policy::{Background, Subject, background};
 use crate::services::stages;
 use crate::state::AppState;
 
@@ -45,18 +46,28 @@ async fn generate(
     pull: &PullRequestDetail,
     review_summary: &str,
 ) -> Option<String> {
+    let requested = task.model_name.as_deref().unwrap_or(stages::AUTO);
+    let background = Background {
+        workspace: Some(task.workspace_id),
+        subject: Subject::Task(task.id),
+        actor: task.created_by,
+    };
     let venue = match Venue::for_workspace(state, task.workspace_id).await {
         Ok(venue) => venue,
         Err(error) => {
             tracing::warn!(task_id = %task.id, %error, "Summarising the merge without a model");
+            if let Some(denial) = error.denial() {
+                background.refused(state, denial, Some(requested)).await;
+            }
             return None;
         }
     };
-    let model = stages::summary_model(
-        &venue.preferences,
-        &venue.catalog,
-        task.model_name.as_deref().unwrap_or(stages::AUTO),
-    )?;
+    let configured = background::configured(&venue.preferences, &venue.catalog, requested)?;
+    let candidates =
+        background::candidates(&configured, &venue.preferences, &venue.catalog, requested);
+    let model = background
+        .model(state, &venue.route, &venue.backend, &candidates)
+        .await?;
     let client = venue
         .endpoint
         .llm(model, SUMMARY_TEMPERATURE, SUMMARY_TOKENS, venue.backend);

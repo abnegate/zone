@@ -3,7 +3,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
-use zone_enterprise::{Keyring, Payload, Seats, SigningKey, Tier, TrustedKey, period_start, sign};
+use zone_enterprise::{Keyring, Payload, Seats, SigningKey, TrustedKey, period_start, sign};
 use zone_server::db::{migrations, seats, sessions};
 
 use crate::common::{self, Database, TestClient};
@@ -341,11 +341,11 @@ async fn the_service_reports_licensed_seats_beside_the_used_ones() {
             &Payload {
                 id: Uuid::new_v4(),
                 customer: "Acme Ltd".into(),
-                tier: Tier::Team,
                 seats: LICENSED,
                 issued_at: now - TimeDelta::days(1),
                 expires_at: now + TimeDelta::days(365),
                 key_id: KEY_ID.into(),
+                subscription: None,
             },
             &signing,
         ))

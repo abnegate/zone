@@ -206,7 +206,7 @@ export const AWAITING_ANSWER_DETAIL = 'Waiting for your answer…';
 export const AWAITING_APPROVAL_DETAIL = 'Waiting for approval…';
 
 /// Why a call put to the reader did not run, as the server names it.
-export const REFUSALS = ['denied', 'timed_out', 'cancelled'] as const;
+export const REFUSALS = ['denied', 'timed_out', 'cancelled', 'policy'] as const;
 export type Refusal = (typeof REFUSALS)[number];
 
 /// What a denied call is told. A record stored before refusals were kept says
@@ -223,6 +223,9 @@ export const APPROVAL_TIMED_OUT_DETAIL =
 /// server's `APPROVAL_CANCELLED` by `schemas.contract.test.ts`.
 export const APPROVAL_CANCELLED_DETAIL =
   'The turn stopped before this tool call was approved, so it did not run.';
+
+export const POLICY_DETAIL =
+  "Your organization's policy requires a person to approve this tool call, and nobody can approve it in this run.";
 
 /// Held to the server's `ERROR_PREFIX` by `schemas.contract.test.ts`.
 export const TOOL_ERROR_PREFIX = 'Error: ';

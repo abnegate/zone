@@ -1,0 +1,43 @@
+import { useUpdateWorkspacePolicy } from '../hooks';
+import { community } from '../license';
+import { PolicyScope } from '../source';
+import type { WorkspacePolicyResponse } from '../types';
+import { PolicyEditor } from './PolicyEditor';
+import { PolicyStatus } from './PolicyStatus';
+import { PolicyUpgradeNotice } from './PolicyUpgradeNotice';
+
+export const WORKSPACE_READ_ONLY =
+  "Only workspace admins and organization admins can change this workspace's agent policy.";
+
+interface WorkspacePolicyProps {
+  organizationId: string;
+  workspaceId: string;
+  policy: WorkspacePolicyResponse;
+}
+
+export function WorkspacePolicy({ organizationId, workspaceId, policy }: WorkspacePolicyProps) {
+  const update = useUpdateWorkspacePolicy(organizationId, workspaceId);
+
+  if (community(policy)) {
+    return <PolicyUpgradeNotice />;
+  }
+
+  return (
+    <>
+      <PolicyStatus policy={policy} readOnlyHint={WORKSPACE_READ_ONLY} />
+      <PolicyEditor
+        key={`${organizationId}/${workspaceId}`}
+        scope={PolicyScope.Workspace}
+        saved={policy.workspace}
+        organization={policy.organization}
+        effective={policy.effective}
+        editable={policy.editable}
+        pending={update.pending}
+        refusal={update.refusal}
+        error={update.error}
+        onSave={(request, onSaved) => update.update(request, onSaved)}
+        onReset={update.reset}
+      />
+    </>
+  );
+}

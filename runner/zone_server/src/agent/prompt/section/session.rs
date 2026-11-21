@@ -42,6 +42,10 @@ const STANDARD: &str = "standard: enough that whoever reads this run afterwards 
 
 const DEFAULT: &str = "That is a default, and what the user asks for overrides it.";
 
+const SCRATCH: &str = "TMPDIR and CARGO_TARGET_DIR point inside it, and it is removed when the \
+     run ends. Put temporary files and build output there rather than in /tmp or the working \
+     directory, and do not set CARGO_TARGET_DIR to anywhere else.";
+
 const NOISE: &str = "This block arrives with every turn and has no bearing on most requests.";
 
 pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> {
@@ -70,6 +74,12 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
         lines.push(format!(
             "- Version control: branch {} at {}. {SNAPSHOT}",
             vcs.branch, vcs.head
+        ));
+    }
+    if let Some(scratch) = &environment.scratch {
+        lines.push(format!(
+            "- Scratch directory {}. {SCRATCH}",
+            scratch.path().display()
         ));
     }
     if let Some(user) = &environment.user {
@@ -119,6 +129,32 @@ mod tests {
             "Pacific/Auckland",
             PathBuf::from("/srv/zone"),
         )
+    }
+
+    #[test]
+    fn a_run_is_told_where_its_scratch_is_and_a_chat_is_not() {
+        let holder = tempfile::tempdir().unwrap();
+        let root = holder.path().join("root");
+        crate::services::checkout::Checkout::directory(&root).unwrap();
+        let scratch = crate::services::scratch::Scratch::create(
+            &root,
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        )
+        .unwrap();
+
+        let rendered = task(&environment().with_scratch(scratch.clone()));
+
+        assert!(
+            rendered.contains(&format!(
+                "- Scratch directory {}.",
+                scratch.path().display()
+            )),
+            "{rendered}"
+        );
+        assert!(rendered.contains("rather than in /tmp"), "{rendered}");
+        assert!(!chat(&environment()).contains("Scratch directory"));
+        scratch.remove().unwrap();
     }
 
     #[test]

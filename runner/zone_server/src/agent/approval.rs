@@ -4,12 +4,16 @@
 //! [`abnegate_agent::tool::CONFIRMED_FROM`] up, which is host writes and commands
 //! and everything that leaves the workspace. Tasks auto-approve: they run
 //! unattended in a sandboxed cwd, so nobody is there to answer.
+//!
+//! An organization's ceiling caps what auto-approve may release: a call above
+//! it is put to the reader even when the chat auto-approves, and withheld
+//! outright from a run nobody attends.
 
 use abnegate_agent::tool::Tier;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -29,6 +33,7 @@ pub enum Decision {
     Denied,
     Cancelled,
     TimedOut,
+    Withheld,
 }
 
 impl Decision {
@@ -47,39 +52,85 @@ impl Decision {
             Self::Denied => Some(Refusal::Denied),
             Self::Cancelled => Some(Refusal::Cancelled),
             Self::TimedOut => Some(Refusal::TimedOut),
+            Self::Withheld => Some(Refusal::Policy),
         }
     }
 }
 
 static LIVE: Lazy<DashMap<Uuid, ApprovalPolicy>> = Lazy::new(DashMap::new);
 
+/// Told the name of each call a policy withholds.
+pub type Withholding = dyn Fn(&str) + Send + Sync;
+
 /// How a loop should treat mutating file and shell tools.
 ///
 /// Auto is a live flag so turning auto-approve on mid-turn can release waiters
-/// and skip later confirmations in the same generation.
+/// and skip later confirmations in the same generation. The ceiling and the
+/// withholding hook are shared the same way, so every clone answers to the one
+/// set last.
 #[derive(Clone)]
 pub struct ApprovalPolicy {
     auto: Arc<AtomicBool>,
+    ceiling: Arc<RwLock<Option<Tier>>>,
+    withholding: Arc<RwLock<Option<Arc<Withholding>>>>,
+    unattended: bool,
     gate: ApprovalGate,
 }
 
 impl ApprovalPolicy {
-    pub fn auto() -> Self {
+    fn new(auto: bool, unattended: bool, gate: ApprovalGate) -> Self {
         Self {
-            auto: Arc::new(AtomicBool::new(true)),
-            gate: ApprovalGate::new(),
-        }
-    }
-
-    pub fn required(gate: ApprovalGate) -> Self {
-        Self {
-            auto: Arc::new(AtomicBool::new(false)),
+            auto: Arc::new(AtomicBool::new(auto)),
+            ceiling: Arc::new(RwLock::new(None)),
+            withholding: Arc::new(RwLock::new(None)),
+            unattended,
             gate,
         }
     }
 
+    pub fn auto() -> Self {
+        Self::new(true, false, ApprovalGate::new())
+    }
+
+    /// A run nobody attends: everything is approved at once, except a call
+    /// above the ceiling, which is withheld because nobody can approve it.
+    pub fn unattended() -> Self {
+        Self::new(true, true, ApprovalGate::new())
+    }
+
+    pub fn required(gate: ApprovalGate) -> Self {
+        Self::new(false, false, gate)
+    }
+
     pub fn is_auto(&self) -> bool {
         self.auto.load(Ordering::Acquire)
+    }
+
+    pub fn ceiling(&self) -> Option<Tier> {
+        *self.ceiling.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub fn set_ceiling(&self, ceiling: Option<Tier>) {
+        *self.ceiling.write().unwrap_or_else(PoisonError::into_inner) = ceiling;
+        if self.is_auto() {
+            self.gate.approve_within(ceiling);
+        }
+    }
+
+    pub fn with_ceiling(self, ceiling: Option<Tier>) -> Self {
+        self.set_ceiling(ceiling);
+        self
+    }
+
+    pub fn set_recorder(&self, withholding: Arc<Withholding>) {
+        *self
+            .withholding
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(withholding);
+    }
+
+    fn releases(&self, tier: Tier) -> bool {
+        self.is_auto() && within(tier, self.ceiling())
     }
 
     /// Whether a call at this tier is put to the user before it runs.
@@ -87,13 +138,36 @@ impl ApprovalPolicy {
     /// The tool declares its own tier, so a tool added later is gated by what
     /// it does rather than by whether somebody remembered to name it here.
     pub fn confirms(&self, tier: Tier) -> bool {
-        !self.is_auto() && tier.confirmed()
+        tier.confirmed() && !self.releases(tier)
     }
 
+    /// Whether the call is refused without being asked, because it needs an
+    /// approval nobody attending this run can give.
+    pub fn withheld(&self, name: &str, tier: Tier) -> bool {
+        let withheld = self.withholds(tier);
+        if withheld {
+            let withholding = self
+                .withholding
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if let Some(withholding) = withholding {
+                withholding(name);
+            }
+        }
+        withheld
+    }
+
+    fn withholds(&self, tier: Tier) -> bool {
+        self.unattended && self.confirms(tier)
+    }
+
+    /// Turning auto on releases only the waiters at or below the ceiling; a
+    /// call above it still needs the reader.
     pub fn set_auto(&self, auto: bool) {
         self.auto.store(auto, Ordering::Release);
         if auto {
-            self.gate.approve_all();
+            self.gate.approve_within(self.ceiling());
         }
     }
 
@@ -106,34 +180,43 @@ impl ApprovalPolicy {
     /// The decision can come back before the caller has even finished emitting
     /// the request, and a decision with nothing to resolve is refused to the
     /// client as a closed approval, so the waiter has to exist first.
-    pub fn expect_decision(&self, id: &str) -> Option<oneshot::Receiver<Decision>> {
-        if self.is_auto() {
+    ///
+    /// A run nobody attends registers nothing, since nobody would answer.
+    pub fn expect_decision(&self, id: &str, tier: Tier) -> Option<oneshot::Receiver<Decision>> {
+        if self.unattended || !self.confirms(tier) {
             return None;
         }
-        Some(self.gate.begin(id))
+        Some(self.gate.begin(id, tier))
     }
 
     /// Await a decision registered earlier by [`Self::expect_decision`].
+    ///
+    /// With nothing registered, a call this policy withholds is refused, so a
+    /// caller that skipped [`Self::withheld`] still never runs it.
     pub async fn awaited_decision(
         &self,
         id: &str,
+        tier: Tier,
         pending: Option<oneshot::Receiver<Decision>>,
     ) -> Decision {
         let Some(receiver) = pending else {
-            return Decision::Approved;
+            return match self.withholds(tier) {
+                true => Decision::Withheld,
+                false => Decision::Approved,
+            };
         };
-        if self.is_auto() && self.decide(id, true) {
+        if self.releases(tier) && self.decide(id, true) {
             return Decision::Approved;
         }
         match self.gate.settle(id, APPROVAL_TIMEOUT, receiver).await {
-            Decision::TimedOut if self.is_auto() => Decision::Approved,
+            Decision::TimedOut if self.releases(tier) => Decision::Approved,
             decision => decision,
         }
     }
 
-    pub async fn await_decision(&self, id: &str) -> Decision {
-        let pending = self.expect_decision(id);
-        self.awaited_decision(id, pending).await
+    pub async fn await_decision(&self, id: &str, tier: Tier) -> Decision {
+        let pending = self.expect_decision(id, tier);
+        self.awaited_decision(id, tier, pending).await
     }
 
     pub fn decide(&self, id: &str, approved: bool) -> bool {
@@ -194,10 +277,19 @@ impl ApprovalPolicy {
     }
 }
 
+fn within(tier: Tier, ceiling: Option<Tier>) -> bool {
+    ceiling.is_none_or(|ceiling| tier <= ceiling)
+}
+
+struct Waiter {
+    sender: oneshot::Sender<Decision>,
+    tier: Tier,
+}
+
 /// In-flight approval waiters for one generation.
 #[derive(Clone, Default)]
 pub struct ApprovalGate {
-    pending: Arc<DashMap<String, oneshot::Sender<Decision>>>,
+    pending: Arc<DashMap<String, Waiter>>,
 }
 
 impl ApprovalGate {
@@ -210,8 +302,9 @@ impl ApprovalGate {
     }
 
     /// Block until the user decides, the turn stops, or the wait runs out.
-    pub async fn await_decision(&self, id: &str) -> Decision {
-        self.await_decision_with_timeout(id, APPROVAL_TIMEOUT).await
+    pub async fn await_decision(&self, id: &str, tier: Tier) -> Decision {
+        self.await_decision_with_timeout(id, tier, APPROVAL_TIMEOUT)
+            .await
     }
 
     /// Whether anything is still parked here.
@@ -219,14 +312,19 @@ impl ApprovalGate {
         !self.pending.is_empty()
     }
 
-    fn begin(&self, id: &str) -> oneshot::Receiver<Decision> {
+    fn begin(&self, id: &str, tier: Tier) -> oneshot::Receiver<Decision> {
         let (sender, receiver) = oneshot::channel();
-        self.pending.insert(id.to_string(), sender);
+        self.pending.insert(id.to_string(), Waiter { sender, tier });
         receiver
     }
 
-    async fn await_decision_with_timeout(&self, id: &str, timeout: Duration) -> Decision {
-        let receiver = self.begin(id);
+    async fn await_decision_with_timeout(
+        &self,
+        id: &str,
+        tier: Tier,
+        timeout: Duration,
+    ) -> Decision {
+        let receiver = self.begin(id, tier);
         self.settle(id, timeout, receiver).await
     }
 
@@ -244,7 +342,8 @@ impl ApprovalGate {
             Ok(Ok(decision)) => decision,
             Ok(Err(_)) => Decision::Cancelled,
             Err(_) => {
-                self.pending.remove_if(id, |_, sender| sender.is_closed());
+                self.pending
+                    .remove_if(id, |_, waiter| waiter.sender.is_closed());
                 Decision::TimedOut
             }
         }
@@ -259,22 +358,23 @@ impl ApprovalGate {
     fn resolve(&self, id: &str, decision: Decision) -> bool {
         self.pending
             .remove(id)
-            .map(|(_, sender)| sender.send(decision).is_ok())
+            .map(|(_, waiter)| waiter.sender.send(decision).is_ok())
             .unwrap_or(false)
     }
 
     pub fn cancel_all(&self) {
-        self.resolve_all(Decision::Cancelled);
+        self.resolve_where(Decision::Cancelled, |_| true);
     }
 
-    pub fn approve_all(&self) {
-        self.resolve_all(Decision::Approved);
+    pub fn approve_within(&self, ceiling: Option<Tier>) {
+        self.resolve_where(Decision::Approved, |tier| within(tier, ceiling));
     }
 
-    fn resolve_all(&self, decision: Decision) {
+    fn resolve_where(&self, decision: Decision, admits: impl Fn(Tier) -> bool) {
         for id in self
             .pending
             .iter()
+            .filter(|entry| admits(entry.value().tier))
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>()
         {
@@ -291,7 +391,7 @@ mod tests {
     async fn decide_unblocks_the_waiter() {
         let gate = ApprovalGate::new();
         let clone = gate.clone();
-        let wait = tokio::spawn(async move { clone.await_decision("call_1").await });
+        let wait = tokio::spawn(async move { clone.await_decision("call_1", Tier::Host).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(gate.decide("call_1", true));
         assert_eq!(wait.await.unwrap(), Decision::Approved);
@@ -307,7 +407,7 @@ mod tests {
         let policy = ApprovalPolicy::required(ApprovalGate::new());
         assert!(!policy.waiting(), "nothing was asked yet");
 
-        let _pending = policy.expect_decision("call_1");
+        let _pending = policy.expect_decision("call_1", Tier::Host);
         assert!(policy.waiting());
 
         policy.decide("call_1", true);
@@ -318,7 +418,7 @@ mod tests {
     #[test]
     fn auto_approve_never_waits() {
         let policy = ApprovalPolicy::auto();
-        let _pending = policy.expect_decision("call_1");
+        let _pending = policy.expect_decision("call_1", Tier::Host);
         assert!(!policy.waiting());
     }
 
@@ -334,7 +434,7 @@ mod tests {
         ApprovalPolicy::register(chat, policy.clone());
         assert!(!ApprovalPolicy::chat_waiting(chat));
 
-        let _pending = policy.expect_decision("call_1");
+        let _pending = policy.expect_decision("call_1", Tier::Host);
         assert!(ApprovalPolicy::chat_waiting(chat));
 
         ApprovalPolicy::unregister(chat, &policy);
@@ -386,7 +486,8 @@ mod tests {
     async fn enabling_auto_releases_waiters_as_approved() {
         let policy = ApprovalPolicy::required(ApprovalGate::new());
         let waiting = policy.clone();
-        let wait = tokio::spawn(async move { waiting.await_decision("call_live").await });
+        let wait =
+            tokio::spawn(async move { waiting.await_decision("call_live", Tier::Host).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         policy.set_auto(true);
         assert_eq!(wait.await.unwrap(), Decision::Approved);
@@ -398,7 +499,7 @@ mod tests {
         let policy = ApprovalPolicy::required(ApprovalGate::new());
         policy.set_auto(true);
         assert_eq!(
-            policy.await_decision("already_on").await,
+            policy.await_decision("already_on", Tier::Host).await,
             Decision::Approved
         );
     }
@@ -425,7 +526,7 @@ mod tests {
     async fn deny_unblocks_the_waiter() {
         let gate = ApprovalGate::new();
         let clone = gate.clone();
-        let wait = tokio::spawn(async move { clone.await_decision("call_deny").await });
+        let wait = tokio::spawn(async move { clone.await_decision("call_deny", Tier::Host).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(gate.decide("call_deny", false));
         assert_eq!(wait.await.unwrap(), Decision::Denied);
@@ -435,7 +536,8 @@ mod tests {
     async fn turning_auto_on_does_not_overturn_a_denial_already_given() {
         let policy = ApprovalPolicy::required(ApprovalGate::new());
         let waiting = policy.clone();
-        let wait = tokio::spawn(async move { waiting.await_decision("call_denied").await });
+        let wait =
+            tokio::spawn(async move { waiting.await_decision("call_denied", Tier::Host).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(policy.decide("call_denied", false));
         policy.set_auto(true);
@@ -446,7 +548,8 @@ mod tests {
     async fn turning_auto_on_does_not_run_a_call_whose_turn_stopped() {
         let policy = ApprovalPolicy::required(ApprovalGate::new());
         let waiting = policy.clone();
-        let wait = tokio::spawn(async move { waiting.await_decision("call_stopped").await });
+        let wait =
+            tokio::spawn(async move { waiting.await_decision("call_stopped", Tier::Host).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         policy.deny_all();
         policy.set_auto(true);
@@ -457,18 +560,22 @@ mod tests {
     async fn a_decision_delivered_before_the_wait_starts_survives_auto_turning_on() {
         let policy = ApprovalPolicy::required(ApprovalGate::new());
 
-        let cancelled = policy.expect_decision("call_cancelled");
+        let cancelled = policy.expect_decision("call_cancelled", Tier::Host);
         policy.deny_all();
-        let denied = policy.expect_decision("call_denied");
+        let denied = policy.expect_decision("call_denied", Tier::Host);
         assert!(policy.decide("call_denied", false));
         policy.set_auto(true);
 
         assert_eq!(
-            policy.awaited_decision("call_cancelled", cancelled).await,
+            policy
+                .awaited_decision("call_cancelled", Tier::Host, cancelled)
+                .await,
             Decision::Cancelled
         );
         assert_eq!(
-            policy.awaited_decision("call_denied", denied).await,
+            policy
+                .awaited_decision("call_denied", Tier::Host, denied)
+                .await,
             Decision::Denied
         );
     }
@@ -477,7 +584,7 @@ mod tests {
     async fn decide_twice_is_only_a_decision_once() {
         let gate = ApprovalGate::new();
         let clone = gate.clone();
-        let wait = tokio::spawn(async move { clone.await_decision("call_1").await });
+        let wait = tokio::spawn(async move { clone.await_decision("call_1", Tier::Host).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(gate.decide("call_1", true));
         assert!(!gate.decide("call_1", false));
@@ -489,8 +596,8 @@ mod tests {
         let gate = ApprovalGate::new();
         let first = gate.clone();
         let second = gate.clone();
-        let wait_a = tokio::spawn(async move { first.await_decision("a").await });
-        let wait_b = tokio::spawn(async move { second.await_decision("b").await });
+        let wait_a = tokio::spawn(async move { first.await_decision("a", Tier::Host).await });
+        let wait_b = tokio::spawn(async move { second.await_decision("b", Tier::Host).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         gate.cancel_all();
         assert_eq!(wait_a.await.unwrap(), Decision::Cancelled);
@@ -502,7 +609,7 @@ mod tests {
     async fn a_waiter_nobody_answers_times_out_rather_than_being_denied() {
         let gate = ApprovalGate::new();
         let decision = gate
-            .await_decision_with_timeout("late", Duration::from_millis(15))
+            .await_decision_with_timeout("late", Tier::Host, Duration::from_millis(15))
             .await;
         assert_eq!(decision, Decision::TimedOut);
         assert!(!gate.decide("late", true));
@@ -511,8 +618,8 @@ mod tests {
     #[tokio::test]
     async fn a_waiter_replaced_under_the_same_id_is_cancelled_and_leaves_the_new_one_waiting() {
         let gate = ApprovalGate::new();
-        let replaced = gate.begin("call_again");
-        let current = gate.begin("call_again");
+        let replaced = gate.begin("call_again", Tier::Host);
+        let current = gate.begin("call_again", Tier::Host);
 
         let decision = gate
             .settle("call_again", Duration::from_secs(5), replaced)
@@ -524,5 +631,174 @@ mod tests {
             "the newer waiter is still decidable"
         );
         assert_eq!(current.await.unwrap(), Decision::Approved);
+    }
+
+    const TIERS: [Tier; 4] = [Tier::Read, Tier::Write, Tier::Host, Tier::Outward];
+
+    fn policy(auto: bool, ceiling: Option<Tier>) -> ApprovalPolicy {
+        let policy = ApprovalPolicy::required(ApprovalGate::new()).with_ceiling(ceiling);
+        policy.set_auto(auto);
+        policy
+    }
+
+    #[test]
+    fn a_ceiling_caps_what_auto_approve_releases_and_nothing_else() {
+        for (auto, ceiling, confirmed) in [
+            (false, None, [false, false, true, true]),
+            (false, Some(Tier::Write), [false, false, true, true]),
+            (false, Some(Tier::Host), [false, false, true, true]),
+            (true, None, [false, false, false, false]),
+            (true, Some(Tier::Write), [false, false, true, true]),
+            (true, Some(Tier::Host), [false, false, false, true]),
+        ] {
+            let policy = policy(auto, ceiling);
+            for (tier, confirmed) in TIERS.into_iter().zip(confirmed) {
+                assert_eq!(
+                    policy.confirms(tier),
+                    confirmed,
+                    "auto {auto}, ceiling {ceiling:?}, tier {tier:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn turning_auto_on_releases_only_the_waiters_within_the_ceiling() {
+        let policy = ApprovalPolicy::required(ApprovalGate::new()).with_ceiling(Some(Tier::Host));
+        let host = policy.expect_decision("host", Tier::Host);
+        let outward = policy.expect_decision("outward", Tier::Outward);
+
+        policy.set_auto(true);
+
+        assert_eq!(
+            policy.awaited_decision("host", Tier::Host, host).await,
+            Decision::Approved
+        );
+        assert!(policy.waiting(), "the outward call still needs the reader");
+        assert!(policy.decide("outward", false));
+        assert_eq!(
+            policy
+                .awaited_decision("outward", Tier::Outward, outward)
+                .await,
+            Decision::Denied
+        );
+    }
+
+    #[tokio::test]
+    async fn turning_auto_on_releases_every_waiter_without_a_ceiling() {
+        let policy = ApprovalPolicy::required(ApprovalGate::new());
+        let outward = policy.expect_decision("outward", Tier::Outward);
+
+        policy.set_auto(true);
+
+        assert_eq!(
+            policy
+                .awaited_decision("outward", Tier::Outward, outward)
+                .await,
+            Decision::Approved
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_above_the_ceiling_times_out_under_auto_rather_than_running() {
+        let policy = policy(true, Some(Tier::Write));
+        assert_eq!(
+            policy.await_decision("host", Tier::Host).await,
+            Decision::TimedOut
+        );
+
+        let late = ApprovalPolicy::required(ApprovalGate::new()).with_ceiling(Some(Tier::Host));
+        let pending = late.expect_decision("outward", Tier::Outward);
+        late.set_auto(true);
+        assert_eq!(
+            late.awaited_decision("outward", Tier::Outward, pending)
+                .await,
+            Decision::TimedOut
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_approve_within_the_ceiling_still_waits_for_nothing() {
+        let policy = policy(true, Some(Tier::Host));
+        assert_eq!(
+            policy.await_decision("host", Tier::Host).await,
+            Decision::Approved
+        );
+        assert!(!policy.waiting());
+    }
+
+    #[test]
+    fn a_ceiling_set_on_a_clone_is_the_originals() {
+        let policy = ApprovalPolicy::auto();
+        policy.clone().set_ceiling(Some(Tier::Write));
+        assert_eq!(policy.ceiling(), Some(Tier::Write));
+        assert!(policy.confirms(Tier::Host));
+
+        policy.clone().set_ceiling(None);
+        assert_eq!(policy.ceiling(), None);
+        assert!(!policy.confirms(Tier::Host));
+    }
+
+    fn recorded(policy: &ApprovalPolicy) -> Arc<std::sync::Mutex<Vec<String>>> {
+        let names = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&names);
+        policy.set_recorder(Arc::new(move |name: &str| {
+            recorder.lock().expect("the record").push(name.to_string());
+        }));
+        names
+    }
+
+    #[tokio::test]
+    async fn an_unattended_call_above_the_ceiling_is_withheld_at_once_and_recorded() {
+        let policy = ApprovalPolicy::unattended().with_ceiling(Some(Tier::Write));
+        let names = recorded(&policy.clone());
+
+        assert!(policy.withheld("run_command", Tier::Host));
+        let pending = policy.expect_decision("call", Tier::Host);
+        assert!(pending.is_none(), "nobody is there to answer");
+        assert!(!policy.waiting());
+        let decision = policy.awaited_decision("call", Tier::Host, pending).await;
+
+        assert_eq!(decision, Decision::Withheld);
+        assert_eq!(decision.refusal(), Some(Refusal::Policy));
+        assert_eq!(*names.lock().expect("the record"), ["run_command"]);
+    }
+
+    #[tokio::test]
+    async fn an_unattended_call_within_the_ceiling_runs_unrecorded() {
+        let policy = ApprovalPolicy::unattended().with_ceiling(Some(Tier::Host));
+        let names = recorded(&policy);
+
+        for tier in [Tier::Read, Tier::Write, Tier::Host] {
+            assert!(!policy.withheld("write_file", tier), "{tier:?}");
+            assert_eq!(
+                policy.await_decision("call", tier).await,
+                Decision::Approved,
+                "{tier:?}"
+            );
+        }
+        assert!(names.lock().expect("the record").is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unattended_run_without_a_ceiling_approves_everything() {
+        let policy = ApprovalPolicy::unattended();
+        assert!(policy.is_auto());
+        for tier in TIERS {
+            assert!(!policy.confirms(tier), "{tier:?}");
+            assert!(!policy.withheld("send_message", tier), "{tier:?}");
+            assert_eq!(
+                policy.await_decision("call", tier).await,
+                Decision::Approved,
+                "{tier:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_attended_chat_above_the_ceiling_asks_rather_than_withholds() {
+        let policy = policy(true, Some(Tier::Write));
+        assert!(!policy.withheld("run_command", Tier::Host));
+        assert!(policy.expect_decision("call", Tier::Host).is_some());
     }
 }

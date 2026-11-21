@@ -1,3 +1,4 @@
+use std::io;
 use std::sync::{OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
@@ -13,6 +14,8 @@ use super::stored::Stored;
 use crate::db::{DbResult, licenses, seats};
 
 const RELOAD_AFTER: Duration = Duration::from_secs(60);
+const RETRY_AFTER: Duration = Duration::from_secs(5);
+const UNREAD: &str = "The license could not be read moments ago";
 
 /// Caches the stored key as it last verified, never a status: a status depends
 /// on the moment it is read.
@@ -88,15 +91,54 @@ impl Licenses {
             return stored.into_license();
         }
         let generation = self.read().generation();
-        let stored = match self.fetch(pool).await {
-            Ok(stored) => stored,
+        match self.fetch(pool).await {
+            Ok(stored) => {
+                self.write().swap_since(generation, stored);
+            }
             Err(error) => {
                 tracing::warn!(%error, "Could not reload the license; the last one that loaded stays in force");
-                self.cached().unwrap_or(Stored::Empty)
+                self.hold(generation);
             }
-        };
-        self.write().swap_since(generation, stored);
+        }
         self.cached().and_then(Stored::into_license)
+    }
+
+    /// The license as last read from the database, for a decision that must not be made on a
+    /// license that has not loaded: see [`Self::stored`].
+    pub async fn settled(&self, pool: &PgPool) -> DbResult<Option<License>> {
+        self.stored(pool).await.map(Stored::into_license)
+    }
+
+    /// The key as last read from the database, for a decision that must not be made on a key
+    /// that has not loaded.
+    ///
+    /// Unlike [`Self::current`], a caller waits for a reload another caller is running rather
+    /// than be answered as Community, and Community stood in for a database that could not be
+    /// read is never taken for a key. When the database cannot be read, the last key that loaded
+    /// stays in force; with none, the read fails, and so does every read for a few seconds after
+    /// it without asking the database again.
+    pub async fn stored(&self, pool: &PgPool) -> DbResult<Stored> {
+        if let Some(stored) = self.fresh_settled() {
+            return Ok(stored);
+        }
+        self.unread()?;
+        let _refresh = self.refresh.lock().await;
+        if let Some(stored) = self.fresh_settled() {
+            return Ok(stored);
+        }
+        self.unread()?;
+        let generation = self.read().generation();
+        match self.fetch(pool).await {
+            Ok(stored) => {
+                self.write().swap_since(generation, stored.clone());
+                Ok(stored)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Could not reload the license; the last one that loaded stays in force");
+                self.hold(generation);
+                self.read().settled().cloned().ok_or(error)
+            }
+        }
     }
 
     pub async fn set(
@@ -113,6 +155,27 @@ impl Licenses {
         let previous = self.verify(licenses::replace(pool, current.text()).await?);
         self.write().swap(Stored::Verified(current.clone()));
         Ok(Change { previous, current })
+    }
+
+    /// Installs `renewed`, already verified and in force, in place of `expected` only while
+    /// `expected` is still the stored key, so a key an admin installs meanwhile is never
+    /// overwritten. `None` when it no longer is.
+    pub async fn renew(
+        &self,
+        pool: &PgPool,
+        expected: &str,
+        renewed: License,
+    ) -> DbResult<Option<Change>> {
+        let _refresh = self.refresh.lock().await;
+        if !licenses::replace_if(pool, expected, renewed.text()).await? {
+            return Ok(None);
+        }
+        let previous = self.verify(Some(expected.to_owned()));
+        self.write().swap(Stored::Verified(renewed.clone()));
+        Ok(Some(Change {
+            previous,
+            current: renewed,
+        }))
     }
 
     pub async fn remove(&self, pool: &PgPool) -> DbResult<Stored> {
@@ -139,7 +202,7 @@ impl Licenses {
         if let Some(error) = stored.refusal() {
             tracing::warn!(
                 code = error.code(),
-                "The stored license key does not verify, so this server runs as Community until an admin replaces or removes it"
+                "The stored license key does not verify, so this server runs as Community, its saved agent policies still enforced, until an admin replaces or removes it"
             );
         }
         Ok(stored)
@@ -153,8 +216,30 @@ impl Licenses {
         }
     }
 
+    /// Keeps the last license that loaded in force for another interval after a failed reload,
+    /// or Community when none has loaded, so the database is not asked on every read.
+    fn hold(&self, generation: u64) {
+        let mut cache = self.write();
+        match cache.settled().cloned() {
+            Some(stored) => cache.swap_since(generation, stored),
+            None => cache.unsettle_since(generation),
+        };
+    }
+
+    /// Fails while a read that found nothing loaded failed within the last few seconds.
+    fn unread(&self) -> DbResult<()> {
+        match self.read().unsettled_within(RETRY_AFTER) {
+            true => Err(sqlx::Error::Io(io::Error::other(UNREAD))),
+            false => Ok(()),
+        }
+    }
+
     fn fresh(&self) -> Option<Stored> {
         self.read().fresh(self.reload_after).cloned()
+    }
+
+    fn fresh_settled(&self) -> Option<Stored> {
+        self.read().fresh_settled(self.reload_after).cloned()
     }
 
     fn cached(&self) -> Option<Stored> {
@@ -178,7 +263,7 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use tokio::time::timeout;
     use uuid::Uuid;
-    use zone_enterprise::{Payload, SigningKey, Tier, TrustedKey, sign};
+    use zone_enterprise::{Payload, SigningKey, TrustedKey, sign};
 
     use super::*;
     use crate::state::unreachable_pool;
@@ -211,11 +296,11 @@ mod tests {
             &Payload {
                 id: Uuid::new_v4(),
                 customer: "Acme Ltd".into(),
-                tier: Tier::Team,
                 seats: 5,
                 issued_at: now - TimeDelta::days(400),
                 expires_at: now + expires_in,
                 key_id: KEY_ID.into(),
+                subscription: None,
             },
             &signing(),
         )
@@ -304,6 +389,42 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SetError::Database(_)), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_renewal_leaves_the_cache_as_it_was() {
+        let license = keyring().verify(&key(TimeDelta::days(3))).unwrap();
+        let licenses = licenses();
+        licenses.write().swap(Stored::Verified(license.clone()));
+        let renewed = keyring().verify(&key(TimeDelta::days(365))).unwrap();
+
+        assert!(
+            licenses
+                .renew(&unreachable_pool(), license.text(), renewed)
+                .await
+                .is_err()
+        );
+        assert_eq!(licenses.cached(), Some(Stored::Verified(license)));
+    }
+
+    #[tokio::test]
+    async fn a_renewal_waits_for_a_reload_in_flight() {
+        let licenses = licenses();
+        let reloading = licenses.refresh.lock().await;
+
+        assert!(
+            timeout(
+                BRIEFLY,
+                licenses.renew(
+                    &unreachable_pool(),
+                    &key(TimeDelta::days(3)),
+                    keyring().verify(&key(TimeDelta::days(365))).unwrap(),
+                )
+            )
+            .await
+            .is_err()
+        );
+        drop(reloading);
     }
 
     #[tokio::test]
@@ -407,6 +528,121 @@ mod tests {
             Some(license.clone())
         );
         assert_eq!(licenses.cached(), Some(Stored::Verified(license)));
+    }
+
+    #[tokio::test]
+    async fn a_settled_reader_waits_for_a_reload_in_flight_and_takes_its_license() {
+        let license = keyring().verify(&key(TimeDelta::days(30))).unwrap();
+        let licenses = Arc::new(licenses());
+        let reloading = licenses.refresh.lock().await;
+        let mut reader = tokio::spawn({
+            let licenses = Arc::clone(&licenses);
+            async move { licenses.settled(&unreachable_pool()).await }
+        });
+
+        assert!(
+            timeout(BRIEFLY, &mut reader).await.is_err(),
+            "the reader did not wait for the reload"
+        );
+        licenses.write().swap(Stored::Verified(license.clone()));
+        drop(reloading);
+
+        let settled = timeout(PROMPTLY, reader)
+            .await
+            .expect("the reader never finished")
+            .expect("the reader panicked")
+            .expect("the reload's license");
+        assert_eq!(settled, Some(license));
+    }
+
+    #[tokio::test]
+    async fn nothing_loaded_and_an_unreachable_database_is_unsettled() {
+        assert!(licenses().settled(&unreachable_pool()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_failed_settled_read_is_answered_again_without_the_database() {
+        let licenses = licenses();
+        assert!(licenses.settled(&unreachable_pool()).await.is_err());
+
+        let again = timeout(PROMPTLY, licenses.settled(&stalled_pool()))
+            .await
+            .expect("the reader asked the database again");
+
+        assert!(again.is_err());
+    }
+
+    #[tokio::test]
+    async fn readers_waiting_on_a_failed_reload_do_not_read_again() {
+        let licenses = Arc::new(licenses());
+        let reloading = licenses.refresh.lock().await;
+        let readers: Vec<_> = (0..3)
+            .map(|_| {
+                let licenses = Arc::clone(&licenses);
+                tokio::spawn(async move { licenses.settled(&stalled_pool()).await })
+            })
+            .collect();
+        tokio::time::sleep(BRIEFLY).await;
+        let generation = licenses.read().generation();
+        licenses.hold(generation);
+        drop(reloading);
+
+        for reader in readers {
+            let settled = timeout(PROMPTLY, reader)
+                .await
+                .expect("a waiting reader asked the database again")
+                .expect("the reader panicked");
+            assert!(settled.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stored_key_that_fails_verification_is_settled_as_stored() {
+        let licenses = licenses();
+        licenses
+            .write()
+            .swap(Stored::Unverified(zone_enterprise::Error::Signature));
+
+        assert_eq!(
+            licenses.stored(&unreachable_pool()).await.unwrap(),
+            Stored::Unverified(zone_enterprise::Error::Signature)
+        );
+        assert_eq!(licenses.settled(&unreachable_pool()).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn community_answered_for_an_unreachable_database_never_settles() {
+        let licenses = licenses();
+        let pool = unreachable_pool();
+
+        assert_eq!(licenses.current(&pool).await, None);
+
+        assert!(licenses.settled(&pool).await.is_err());
+        assert_eq!(licenses.current(&pool).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_settled_reload_keeps_the_last_license_that_loaded() {
+        let license = keyring().verify(&key(TimeDelta::days(30))).unwrap();
+        let licenses = stale(&license);
+
+        assert_eq!(
+            licenses.settled(&unreachable_pool()).await.unwrap(),
+            Some(license.clone())
+        );
+        assert_eq!(licenses.cached(), Some(Stored::Verified(license)));
+    }
+
+    #[tokio::test]
+    async fn a_fresh_license_is_settled_without_the_database() {
+        let license = keyring().verify(&key(TimeDelta::days(30))).unwrap();
+        let licenses = licenses();
+        licenses.write().swap(Stored::Verified(license.clone()));
+
+        assert_eq!(
+            licenses.settled(&unreachable_pool()).await.unwrap(),
+            Some(license)
+        );
     }
 
     #[tokio::test]

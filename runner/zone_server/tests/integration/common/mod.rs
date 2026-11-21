@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+pub mod audit;
 pub mod comfy;
 pub mod context;
 pub mod database;
@@ -14,6 +15,7 @@ pub mod identity_provider;
 pub mod logs;
 pub mod mail;
 pub mod mcp;
+pub mod policy;
 pub mod sso;
 pub mod stand_in;
 pub mod transcript;
@@ -106,6 +108,7 @@ pub fn test_config() -> Config {
         comfyui: zone_server::services::comfy::settings::development(),
         source_index: Default::default(),
         evaluation: Default::default(),
+        license_renewal: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
         train_upload_limit_mb: 512,
@@ -575,6 +578,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         comfyui: zone_server::services::comfy::settings::development(),
         source_index: Default::default(),
         evaluation: Default::default(),
+        license_renewal: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
         train_upload_limit_mb: 512,

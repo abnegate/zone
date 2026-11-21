@@ -24,6 +24,7 @@ use abnegate_llm::Message;
 use chrono::Utc;
 use uuid::Uuid;
 use zone_core::llm::LlmBackend;
+use zone_enterprise::policy::Effective;
 
 use super::session::RunContext;
 use crate::config::Config;
@@ -37,6 +38,7 @@ use crate::services::backend::Resolved;
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router;
 use crate::services::login::usage::Availability;
+use crate::services::policy;
 use crate::state::AppState;
 
 /// What a turn that moved to another login is told once it gets there, after what was written.
@@ -61,6 +63,7 @@ pub struct Handover {
     strict: bool,
     /// The directory the chat's project starts it in, on whichever login it runs.
     directory: Option<PathBuf>,
+    policy: Option<Effective>,
 }
 
 impl Handover {
@@ -91,7 +94,14 @@ impl Handover {
             opening,
             strict: false,
             directory: None,
+            policy: None,
         }
+    }
+
+    /// This handover moving the turn only onto agents `policy` lets run, and only onto an agent
+    /// whose model for the turn it allows.
+    pub fn with_policy(self, policy: Option<Effective>) -> Self {
+        Self { policy, ..self }
     }
 
     /// This handover keeping the turn in `directory`, the one its project starts it in.
@@ -120,7 +130,8 @@ impl Handover {
 
     /// Moves the turn off the login it runs on for `cause`, onto the login the router picks next
     /// among those the turn has not run on, the current agent's first, or only the current
-    /// agent's when [`Self::strict`]. Session `session` is
+    /// agent's when [`Self::strict`], and never one [`Self::with_policy`] denies, or that would
+    /// run the turn on a model it denies. Session `session` is
     /// carried along when the new login runs the same agent and that agent resumes a session
     /// carried in from another home; otherwise the turn starts a fresh session there.
     ///
@@ -149,7 +160,8 @@ impl Handover {
             &self.tried,
             None,
             Some(&running),
-            self.strict,
+            self.strict || self.confined(from.agent),
+            self.policy.as_ref(),
         )
         .await
         {
@@ -206,6 +218,18 @@ impl Handover {
             resets_at: cause.limit.as_ref().and_then(|limit| limit.resets_at),
             carried,
             model,
+        })
+    }
+
+    /// Whether the policy denies the model the turn would run on another agent than `from`, so
+    /// it moves only onto `from`'s logins.
+    fn confined(&self, from: AgentKind) -> bool {
+        self.policy.as_ref().is_some_and(|policy| {
+            AgentKind::ALL.iter().any(|&agent| {
+                agent != from
+                    && policy::admits(policy, agent).is_ok()
+                    && policy.model(&self.model.on(agent)).is_err()
+            })
         })
     }
 }
@@ -635,6 +659,7 @@ mod tests {
             }),
             directory: None,
             origin: crate::db::tasks::Origin::Member,
+            policy: None,
         };
         let mut pinned = Pinned::of(&generation).expect("a session on a login");
         pinned.sees("b".repeat(64), 6);
@@ -698,6 +723,7 @@ mod tests {
             session: None,
             directory: None,
             origin: crate::db::tasks::Origin::Member,
+            policy: None,
         };
         let mut pinned = Pinned::of(&generation).expect("a session on a login");
         pinned.keep(whole());
@@ -1087,6 +1113,7 @@ mod tests {
             Some(login.id),
             None,
             false,
+            None,
         )
         .await
         .expect("the login");
@@ -1422,6 +1449,7 @@ mod tests {
             Some(from.id),
             None,
             false,
+            None,
         )
         .await
         .expect("the other login");
@@ -1515,6 +1543,7 @@ mod tests {
             Some(from.id),
             None,
             false,
+            None,
         )
         .await
         .expect("the configured agent's login");
@@ -1577,6 +1606,7 @@ mod tests {
             Some(fallback.id),
             None,
             false,
+            None,
         )
         .await
         .expect("the configured agent's login");
@@ -1650,6 +1680,7 @@ mod tests {
             Some(refused.id),
             Some(&model),
             false,
+            None,
         )
         .await
         .expect("the other login");

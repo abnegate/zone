@@ -1,3 +1,5 @@
+#[cfg(feature = "audit")]
+pub mod audit;
 mod duplicate_key;
 mod edition;
 mod encoding;
@@ -10,6 +12,7 @@ mod key_error;
 mod keyring;
 mod license;
 mod payload;
+pub mod policy;
 mod production;
 mod seats;
 #[cfg(any(test, feature = "signing"))]
@@ -17,7 +20,6 @@ mod signing;
 #[cfg(feature = "sso")]
 pub mod sso;
 mod status;
-mod tier;
 mod trusted_key;
 
 pub use duplicate_key::DuplicateKey;
@@ -33,5 +35,4 @@ pub use seats::{Seats, period_start};
 #[cfg(any(test, feature = "signing"))]
 pub use signing::{SigningKey, sign, sign_bytes};
 pub use status::{GRACE_DAYS, Status, status};
-pub use tier::Tier;
 pub use trusted_key::TrustedKey;

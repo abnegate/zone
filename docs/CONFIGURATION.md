@@ -198,6 +198,11 @@ account with usage credits turned on keeps every turn going past its plan's
 limits, on those credits: read *Usage credits* before choosing it for an
 organization whose tasks run unattended.
 
+With a Zone Enterprise license, an organization's agent policy can
+restrict which providers, coding agents and models its organization and
+workspaces may use, how far Auto-approve goes, and which MCP servers and
+domains agents reach. See [POLICY.md](POLICY.md).
+
 ### Saved endpoints
 
 Self-Hosted, OpenAI and Anthropic send completions over HTTP to the endpoint
@@ -333,7 +338,8 @@ as an attachment of unknown size.
 ### `ZONE_ENDPOINT_HOSTS`
 
 - **Purpose**: Limits the hosts organizations and workspaces may save endpoints
-  on in AI Settings
+  on in AI Settings, and the hosts audit destinations may send to (see
+  [AUDIT.md](AUDIT.md#where-a-destination-may-send))
 - **Format**: Comma-separated hosts or suffixes. A host (`api.openai.com`,
   `192.168.1.20`) matches only itself; a suffix (`.corp.example` or
   `*.corp.example`) matches `corp.example` and every name under it. Case and a
@@ -344,6 +350,9 @@ as an attachment of unknown size.
   match that provider's default host. A row saved before the list was set that
   it does not match can no longer be used: its completions fail with the reason
   rather than going to the instance endpoint (see *Saved endpoints*).
+  An audit destination is checked again before every delivery, and one whose
+  host the list no longer matches fails with `configuration` until it does.
+  S3 without an endpoint needs `s3.{region}.amazonaws.com` listed.
   Link-local and metadata addresses stay refused even when listed.
 
 ### Usage credits
@@ -788,6 +797,42 @@ their absolute paths as before.
 - **Codex's sandbox**: under `ZONE_CODEX_SANDBOX=workspace-write`, Codex can write
   only inside the directory it starts in, so other mounted folders are read-only to
   it. The compose default, `danger-full-access`, has no such limit.
+
+### Agent worktrees
+
+A chat agent starts work with `git fetch origin; git worktree add
+.worktrees/<branch> -b <branch> origin/main`, so a fetch its shell has no
+credential for still leaves it a worktree, in whichever of the workspace's
+**Folders** it is working in. The `worktree-cleanup` housekeeping sweep removes
+them again. Once an hour, for every folder any workspace mounted that is in a git
+repository and has a `.worktrees/` directory, it runs `git worktree remove`,
+without `--force`, on each worktree under `.worktrees/` that is:
+
+- **Unlocked**: `git worktree lock` keeps a worktree for as long as it is locked.
+- **Idle**: neither its `HEAD` nor its `HEAD` reflog has changed for 24 hours,
+  so a worktree just added off main, which is trivially merged, survives.
+- **Clean**: no staged or unstaged changes and no untracked files. Ignored files,
+  such as build output, don't count and go with the worktree. An excludes file
+  named in git's global configuration doesn't apply, so a file only it ignores
+  keeps the worktree.
+- **Merged**: its `HEAD` is on the remote's default branch, which is what
+  `origin/HEAD` names, else `origin/main`, else `origin/master`; a repository
+  with none of them keeps every worktree. A commit counts as merged when it is an
+  ancestor of that branch, or when its whole change since the two diverged
+  landed there as one commit, matched by `git patch-id --verbatim`, which is
+  what a squash merge leaves. That match needs Git 2.39 or later; with an
+  older git the check fails and the worktree is kept. Zone doesn't fetch: the
+  prompt's `git fetch` updates `origin/main` only when it succeeds, so where it
+  fails the worktree starts from the `origin/main` already there, and a worktree
+  merged since is removed only once a later fetch brings the merge in.
+
+The branch is kept, any directory a branch name's prefix made under
+`.worktrees/` goes once it is empty, and a worktree anywhere else, such as
+`.claude/worktrees/`, is never touched. The sweep also adds `/.worktrees/` to the
+repository's `info/exclude` once, under a lock on the file, so the host's own `git status` doesn't list
+agent worktrees. Each removal and each failure is logged, and a repository that
+fails doesn't stop the sweep. Git runs with `GIT_OPTIONAL_LOCKS=0`, so reading a
+status doesn't rewrite the index under an open editor.
 
 ### `ZONE_PROJECT_CLONE_DIR`
 - **Default**: `clones` beside `ZONE_AGENT_STATE_DIR`, so
@@ -1680,8 +1725,9 @@ once approved, and its file tools read whatever else the server's user can.
 - **Compose.** The manager service mounts the `zone_manager_agent_state` volume
   at `/app/agent-state` and passes `ZONE_AGENT_STATE_DIR`,
   `ZONE_AGENT_HOST_LOGIN` (default `false`), `ZONE_LLM_BACKEND` (default
-  `litellm`), `ZONE_CHAT_AGENT_CWD` (default `/app/workspace`),
-  `ZONE_HOST_ROOT` (empty by default, mounted at `/host`),
+  `litellm`), `ZONE_CHAT_AGENT_CWD` (default `/app/workspace`, on the
+  `zone_manager_workspace` volume), `ZONE_HOST_ROOT` (empty by default,
+  mounted at `/host`),
   `ZONE_IN_CONTAINER` (`1`), `ZONE_PROJECT_CLONE_DIR` (`/tmp/repos`, on the
   `zone_manager_repos` volume),
   `ZONE_AGENT_ENV_PASSTHROUGH`, `ZONE_CODEX_SANDBOX` (default
@@ -2510,6 +2556,20 @@ Digests are sent through the [notification](#-notifications) channels — Slack,
 
 ---
 
+## 🔑 License renewal
+
+On by default. Once a day, the server looks at its Zone Enterprise license, and when the license carries a Polar subscription and expires within 14 days, or has already expired, it posts the license key to the license server and installs the renewed key it gets back. Nothing is sent for a license without a subscription, a license that isn't due yet, or a server with no license. The request carries only the key, as `{"license":"<key>"}` with `User-Agent: Zone`; it goes through the system proxy (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`), follows no redirects, and gives up after 30 seconds. The last attempt and its outcome — `renewed`, `current`, `ended`, `refused`, `rejected` or `unreachable` — show under **Settings → This server → License**. Both settings are read at startup, and a blank value counts as unset. See [LICENSING.md](LICENSING.md#automatic-renewal) for the whole flow.
+
+### `ZONE_LICENSE_RENEWAL`
+- **Default**: `true`
+- **Description**: `true`, `1`, `yes` or `on`, in any case, renews the license automatically; `false`, `0`, `no` or `off` does not, and the license is renewed by pasting a new key. A blank value counts as unset, and any other value logs a warning and keeps the default, on. Turn it off on an air-gapped server, which would otherwise try every day from 14 days before expiry and record `unreachable`.
+
+### `ZONE_LICENSE_RENEWAL_URL`
+- **Default**: `https://licenses.bitecode.ltd/licenses/renew`
+- **Description**: Where the license key is posted for renewal. It must be an `http` or `https` URL with no user name or password in it, and it must not name a link-local or cloud metadata address. The key works like a password, so plain `http` is accepted only for a loopback or private network host: `localhost`, `127.0.0.0/8`, `::1`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`, the IPv4-mapped IPv6 forms of those addresses, a single-label name such as a compose service (`http://signer:8080/...`), or a name under `.localhost`, `.local`, `.internal` or `.home.arpa`. Any other host needs `https`. A URL that breaks a rule stops the server at startup with a message naming the variable but not the URL. Point it elsewhere only for a license server you were told to use.
+
+---
+
 ## 🔒 VPN Configuration - Optional
 
 **VPN is completely optional!** Enable it to send all stack internet traffic through Gluetun, including private web search.
@@ -2663,6 +2723,7 @@ Regenerate secrets for production:
 | MCP / magents | No | ✅ Yes (auto if `magents` is on PATH) |
 | Task evaluation | No | ✅ Yes (off) |
 | Workspace digests | No | ✅ Yes (off) |
+| License renewal | No | ✅ Yes (on) |
 
 *Security variables have insecure defaults. Change for production.
 
@@ -2727,6 +2788,7 @@ Need to find a specific config? Quick lookup:
 - **Notifications**: ZONE_NOTIFY_SLACK_WEBHOOK, ZONE_NOTIFY_DISCORD_WEBHOOK, ZONE_NOTIFY_EMAIL_TO, SMTP_*
 - **Task evaluation**: ZONE_TASK_EVALUATION, ZONE_TASK_EVALUATION_CATEGORIES, ZONE_TASK_EVALUATION_TOOL_TIMEOUT_SECONDS, ZONE_TASK_EVALUATION_BUDGET_SECONDS
 - **Workspace digests**: ZONE_REPORT_ENABLED, ZONE_REPORT_CADENCE, ZONE_REPORT_HOUR, ZONE_REPORT_WEEKDAY, ZONE_REPORT_DAY_OF_MONTH
+- **License renewal**: ZONE_LICENSE_RENEWAL, ZONE_LICENSE_RENEWAL_URL
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
 - **Timezone**: TZ
 - **VPN**: VPN_*, OPENVPN_*

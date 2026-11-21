@@ -1,11 +1,21 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import { ApiError } from '../../../../api/ApiError';
 import { clientModule } from '../../../../test/client';
-import { chooseSelect, selectOptionValues } from '../../../../test/select';
+import {
+  chooseSelect,
+  openSelect,
+  optionDescription,
+  selectOptionValues,
+} from '../../../../test/select';
+import {
+  ACTIVE_WORKSPACE_OVERRIDDEN,
+  COMMUNITY_WORKSPACE,
+} from '../../../enterprise/policy/fixtures';
 import type { OrgRole } from '../../organization/types';
 import type { AiSettings, WorkspaceAiSettings } from '../types';
 
@@ -28,6 +38,21 @@ const agentsApi = {
 };
 
 mock.module('../../../../api/agents', () => ({ agentsApi }));
+
+const policyApi = {
+  organization: mock(),
+  updateOrganization: mock(),
+  workspace: mock(),
+  updateWorkspace: mock(),
+};
+
+mock.module('../../../enterprise/policy/api', () => ({ policyApi }));
+
+const queries = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+
+function Providers({ children }: { children: ReactNode }) {
+  return <QueryClientProvider client={queries}>{children}</QueryClientProvider>;
+}
 
 mock.module('../../../models', () => ({
   useModels: () => ({
@@ -177,7 +202,8 @@ async function renderSection(
     <WorkspaceAiSection
       editable={props.editable ?? true}
       organizationDefaultsPath={props.organizationDefaultsPath}
-    />
+    />,
+    { wrapper: Providers }
   );
   await screen.findByRole('group', { name: 'Provider' });
   return user;
@@ -193,6 +219,49 @@ describe('WorkspaceAiSection', () => {
     mockClient.getEffectiveAiSettings.mockResolvedValue(organizationSettings);
     mockClient.updateWorkspaceAiSettings.mockResolvedValue(overridden);
     mockClient.resetWorkspaceAiSettings.mockResolvedValue(inherited);
+    queries.clear();
+    policyApi.workspace.mockResolvedValue(COMMUNITY_WORKSPACE);
+  });
+
+  describe('agent policy', () => {
+    function option(name: string): HTMLElement {
+      return screen.getByRole('option', { name });
+    }
+
+    it('disables the providers and agents the effective policy denies, with the reason', async () => {
+      policyApi.workspace.mockResolvedValue(ACTIVE_WORKSPACE_OVERRIDDEN);
+      const user = await renderSection();
+      await waitFor(() =>
+        expect(policyApi.workspace).toHaveBeenCalledWith(ORGANIZATION_ID, WORKSPACE_ID)
+      );
+      await user.click(screen.getByRole('button', { name: 'Edit Provider' }));
+      await screen.findByLabelText('AI Provider');
+
+      await waitFor(() => {
+        openSelect('AI Provider');
+        expect(option('Anthropic')).toHaveAttribute('data-disabled');
+      });
+      expect(optionDescription(option('Anthropic'))).toBe(
+        "Your organization's policy doesn't allow Anthropic API in this workspace."
+      );
+      expect(option('OpenAI')).toHaveAttribute('data-disabled');
+      expect(option('Codex (ChatGPT subscription)')).toHaveAttribute('data-disabled');
+      expect(option('Claude Code (Claude subscription)')).not.toHaveAttribute('data-disabled');
+      expect(option('Self-Hosted (Ollama via LiteLLM)')).not.toHaveAttribute('data-disabled');
+      expect(option('AWS Bedrock')).not.toHaveAttribute('data-disabled');
+    });
+
+    it('leaves every provider open when the policy is not enforced', async () => {
+      const user = await renderSection();
+      await waitFor(() => expect(policyApi.workspace).toHaveBeenCalled());
+      await user.click(screen.getByRole('button', { name: 'Edit Provider' }));
+      await screen.findByLabelText('AI Provider');
+
+      openSelect('AI Provider');
+      for (const element of screen.getAllByRole('option')) {
+        expect(element).not.toHaveAttribute('data-disabled');
+      }
+    });
   });
 
   it('heads the section and says each field follows the organization', async () => {
@@ -742,7 +811,7 @@ describe('WorkspaceAiSection', () => {
   });
 
   it('links to the organization defaults only when given the path', async () => {
-    const { unmount } = render(<WorkspaceAiSection editable />);
+    const { unmount } = render(<WorkspaceAiSection editable />, { wrapper: Providers });
     await screen.findByRole('group', { name: 'Provider' });
     expect(screen.queryByRole('link', { name: 'Edit organization defaults' })).toBeNull();
     unmount();
@@ -911,7 +980,7 @@ describe('WorkspaceAiSection', () => {
         fixture.agents[1],
       ]);
       const user = userEvent.setup();
-      const { rerender } = render(<WorkspaceAiSection editable />);
+      const { rerender } = render(<WorkspaceAiSection editable />, { wrapper: Providers });
       await user.click(await screen.findByRole('button', { name: 'Edit Provider' }));
 
       const panel = await screen.findByRole('region', { name: 'Claude Code sign-in' });

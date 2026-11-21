@@ -1,9 +1,17 @@
-import { Button, EmptyState, Select } from '@zone/ui';
+import { Button, buttonVariants, EmptyState, Select } from '@zone/ui';
 import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { client } from '../../../../api/client';
+import { AUDIT_LOG_LINK } from '../../../enterprise';
+import { SettingsGroup, SettingsSection, settingsPath } from '../../navigation/sections';
 import { AUDIT_ACTIONS, AUDIT_RESOURCE_TYPES } from '../schemas';
 import type { AuditAction, AuditLog, AuditLogFilters, AuditResourceType } from '../types';
 import './AuditLogsSection.css';
+
+export const AUDIT_EXPORT_PATH = settingsPath(
+  SettingsGroup.Organization,
+  SettingsSection.AuditExport
+);
 
 interface AuditLogsSectionProps {
   orgId: string;
@@ -20,7 +28,6 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
   const [total, setTotal] = useState(0);
   const [expandedLog, setExpandedLog] = useState<string | null>(null);
 
-  // Filters
   const [action, setAction] = useState<AuditAction | ''>('');
   const [resourceType, setResourceType] = useState<AuditResourceType | ''>('');
   const [actorFilter, setActorFilter] = useState('');
@@ -28,7 +35,6 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
   const [endDate, setEndDate] = useState('');
   const [showFilters, setShowFilters] = useState(false);
 
-  // Pagination
   const [offset, setOffset] = useState(0);
   const limit = 50;
 
@@ -64,7 +70,7 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
   }, [loadLogs]);
 
   const handleApplyFilters = () => {
-    setOffset(0); // Reset to first page
+    setOffset(0);
     loadLogs();
   };
 
@@ -91,7 +97,6 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
 
       const blob = await client.exportAuditLogs(orgId, filters);
 
-      // Create download link
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -197,6 +202,9 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
           </p>
         </div>
         <div className="section-row-actions">
+          <Link to={AUDIT_EXPORT_PATH} className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
+            {AUDIT_LOG_LINK}
+          </Link>
           <Button onClick={() => setShowFilters(!showFilters)} variant="ghost" size="sm">
             {showFilters ? 'Hide Filters' : 'Show Filters'}
           </Button>

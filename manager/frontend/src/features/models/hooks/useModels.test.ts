@@ -249,14 +249,15 @@ describe('useModels', () => {
     });
   });
 
-  it('calls logout on 401 error', async () => {
+  it('leaves the session to the auth context when the list is refused', async () => {
     mockGetModels.mockRejectedValueOnce(new ApiError('Failed to fetch models: Unauthorized', 401));
 
-    renderHook(() => useModels());
+    const { result } = renderHook(() => useModels());
 
     await waitFor(() => {
-      expect(mockLogout).toHaveBeenCalled();
+      expect(result.current.error).toBe('Failed to fetch models: Unauthorized');
     });
+    expect(mockLogout).not.toHaveBeenCalled();
   });
 
   it('exposes the provider errors a partial inventory carries', async () => {

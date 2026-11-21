@@ -5,6 +5,7 @@ use abnegate_agent::McpHub;
 use abnegate_exec::Niceness;
 use abnegate_http::{RateLimitConfig, RateLimiter};
 use abnegate_secret::MasterKey;
+use chrono::Utc;
 use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::{Arc, OnceLock};
@@ -22,17 +23,19 @@ use zone_core::llm::{LlmBackend, cli};
 #[cfg(any(test, feature = "testing"))]
 use zone_enterprise::Keyring;
 use zone_enterprise::sso::Oidc;
-use zone_enterprise::{Edition, License};
+use zone_enterprise::{Edition, License, status};
 
 use crate::cache::Cache;
 #[cfg(test)]
 use crate::config::AgentConfig;
 use crate::config::{Config, ModelBackend};
+use crate::db::DbResult;
 use crate::pull::PullRegistry;
 use crate::services::chat::pull_request::StatusCache;
 use crate::services::github::snapshots::Snapshots;
 use crate::services::github_app::Provider;
-use crate::services::license::Licenses;
+use crate::services::license::renewal;
+use crate::services::license::{Licenses, Stored};
 use crate::services::mail::AccountMail;
 use crate::services::mcp_servers::hubs::Hubs;
 use crate::services::mcp_servers::status::Policy;
@@ -131,6 +134,7 @@ struct AppStateInner {
     pub github: OnceLock<Provider>,
     pub network_denial: OnceCell<NetworkDenial>,
     pub licenses: Licenses,
+    pub renewal: OnceLock<Option<renewal::Client>>,
     pub oidc: Oidc,
     /// Terminal frames for task runs, for sockets and waits to subscribe to.
     /// The process's one instance, which the writers that finish a run also
@@ -263,6 +267,7 @@ impl AppState {
                 github: OnceLock::new(),
                 network_denial: OnceCell::new(),
                 licenses: Licenses::new(),
+                renewal: OnceLock::new(),
                 oidc: Oidc::new(),
                 task_progress: task_progress::progress(),
                 device_connections: DashMap::new(),
@@ -468,12 +473,43 @@ impl AppState {
         &self.inner.licenses
     }
 
+    /// The client the renewal sweep asks the license server with, decided once so the sweep and
+    /// the renewal mode the license API reports agree. `None` when renewal is off or its client
+    /// did not build, and nothing renews.
+    pub fn renewal(&self) -> Option<&renewal::Client> {
+        self.inner
+            .renewal
+            .get_or_init(|| renewal::Client::configured(&self.inner.config.license_renewal))
+            .as_ref()
+    }
+
+    /// Stands in for a renewal client that did not build. Panics if [`Self::renewal`] already
+    /// decided.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn without_renewal(&self) {
+        assert!(
+            self.inner.renewal.set(None).is_ok(),
+            "without_renewal must run before the first renewal() call"
+        );
+    }
+
     pub fn oidc(&self) -> &Oidc {
         &self.inner.oidc
     }
 
     pub async fn license(&self) -> Option<License> {
         self.inner.licenses.current(&self.inner.db).await
+    }
+
+    /// The license as last read from the database, for enforcement that must fail closed: see
+    /// [`Licenses::settled`].
+    pub async fn settled_license(&self) -> DbResult<Option<License>> {
+        self.inner.licenses.settled(&self.inner.db).await
+    }
+
+    /// [`Self::settled_license`] as the key stored, verified or not.
+    pub async fn stored_license(&self) -> DbResult<Stored> {
+        self.inner.licenses.stored(&self.inner.db).await
     }
 
     pub async fn edition(&self) -> Edition {
@@ -484,6 +520,24 @@ impl AppState {
     #[cfg(any(test, feature = "testing"))]
     pub fn install_keyring(&self, keyring: Keyring) {
         self.inner.licenses.install_keyring(keyring);
+    }
+
+    /// Loads what the server reads before it takes requests. Work that scales with stored data,
+    /// such as rebasing audit positions after a restore, belongs to a background worker: a boot
+    /// that waits on it outlasts the liveness probe and is killed before it finishes.
+    pub async fn prepare(&self) {
+        match self.licenses().load(self.db()).await {
+            Ok(stored) => tracing::info!(
+                edition = %Edition::from(stored.license()),
+                status = %status(stored.license(), Utc::now()),
+                "License loaded"
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "Could not load the license; running as Community until it loads")
+            }
+        }
+        self.mcp().configured().await;
+        self.network_denial().await.announce();
     }
 }
 
@@ -590,6 +644,7 @@ pub(crate) fn test_config() -> Config {
         comfyui: crate::services::comfy::settings::development(),
         source_index: Default::default(),
         evaluation: Default::default(),
+        license_renewal: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
         train_upload_limit_mb: 512,
@@ -693,6 +748,15 @@ mod tests {
 
         assert_eq!(state.license().await, None);
         assert_eq!(state.edition().await, Edition::Community);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_database_with_no_license_loaded_is_unsettled() {
+        let state = AppState::new(test_config(), unreachable_pool(), None);
+        state.disable_mcp();
+
+        assert_eq!(state.license().await, None);
+        assert!(state.settled_license().await.is_err());
     }
 
     #[tokio::test]
@@ -816,6 +880,7 @@ mod tests {
             comfyui: crate::services::comfy::settings::development(),
             source_index: Default::default(),
             evaluation: Default::default(),
+            license_renewal: Default::default(),
             monitoring: Default::default(),
             chat: Default::default(),
             train_upload_limit_mb: 512,

@@ -22,7 +22,10 @@ use super::schedule::Schedule;
 use super::sweep::Sweep;
 use super::warmup::Warmup;
 use crate::config::SourceIndexConfig;
+use crate::services::audit::retention;
+use crate::services::license::renewal::{self, Client};
 use crate::services::mcp_servers::load;
+use crate::services::worktree;
 use crate::state::AppState;
 use crate::workers::analytics::AnalyticsPolicy;
 use crate::workers::promotion::PromotionPolicy;
@@ -47,11 +50,14 @@ pub enum Periodic {
     SubagentRecovery,
     McpConvergence,
     PullRequestWatch,
+    AuditRetention,
+    WorktreeCleanup,
+    LicenseRenewal,
 }
 
 impl Periodic {
     /// Every sweep, in the order the server used to spawn them, then those added since.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 14] = [
         Self::KnowledgeRefresh,
         Self::SourceResync,
         Self::AnswerPromotion,
@@ -63,6 +69,9 @@ impl Periodic {
         Self::SubagentRecovery,
         Self::McpConvergence,
         Self::PullRequestWatch,
+        Self::AuditRetention,
+        Self::WorktreeCleanup,
+        Self::LicenseRenewal,
     ];
 
     pub fn name(self) -> &'static str {
@@ -78,6 +87,9 @@ impl Periodic {
             Self::SubagentRecovery => "subagent-recovery",
             Self::McpConvergence => "mcp-convergence",
             Self::PullRequestWatch => "pull-request-watch",
+            Self::AuditRetention => "audit-retention",
+            Self::WorktreeCleanup => "worktree-cleanup",
+            Self::LicenseRenewal => "license-renewal",
         }
     }
 
@@ -96,6 +108,9 @@ impl Periodic {
             Self::SubagentRecovery => subagents::SWEEP_INTERVAL_SECONDS,
             Self::McpConvergence => load::CONVERGENCE_INTERVAL_SECONDS,
             Self::PullRequestWatch => pull_requests::WATCH_INTERVAL_SECONDS,
+            Self::AuditRetention => retention::SWEEP_INTERVAL_SECONDS,
+            Self::WorktreeCleanup => worktree::SWEEP_INTERVAL_SECONDS,
+            Self::LicenseRenewal => renewal::INTERVAL_SECONDS,
         };
         Duration::from_secs(seconds)
     }
@@ -119,9 +134,16 @@ impl Periodic {
             // pull request is the last thing a starting server needs, and the
             // run a pass starts outlasts the wait for it many times over.
             Self::PullRequestWatch => Warmup::Period,
+            // Rows a period past their deadline are deleted an hour after start-up just the same.
+            Self::AuditRetention => Warmup::Period,
+            // A worktree has to sit idle for a day before it can go, so an hour's wait costs nothing.
+            Self::WorktreeCleanup => Warmup::Period,
             // Long enough to be out of the way of start-up, short enough that a
             // server coming back up picks up files whose embeddings failed.
             Self::SourceResync => Warmup::After(source_resync::FIRST_POLL_DELAY),
+            // A server that was down across a renewal asks soon after it is back, without
+            // adding a request to the busiest moment of start-up.
+            Self::LicenseRenewal => Warmup::After(renewal::FIRST_ATTEMPT_DELAY),
             // The tick decides when to look, not what is owed. A digest whose
             // slot passed while the process was down has to be delivered on the
             // way back up, and it cannot be delivered before it is looked for.
@@ -154,7 +176,13 @@ impl Periodic {
             | Self::McpConvergence
             // A pass that was skipped would have read what the next pass
             // reads: the status GitHub reports now.
-            | Self::PullRequestWatch => Catchup::Skip,
+            | Self::PullRequestWatch
+            // The next pass deletes whatever expired since, in the same batches.
+            | Self::AuditRetention
+            // The next pass reads the same worktrees and removes whatever this one would have.
+            | Self::WorktreeCleanup
+            // The next pass asks about the license as it is stored then.
+            | Self::LicenseRenewal => Catchup::Skip,
             // These two never ticked on a grid at all. Both were `sleep` loops,
             // so the wait has always been measured from the end of the previous
             // pass rather than from a fixed alignment, and both queue work
@@ -209,6 +237,12 @@ pub fn periodic(state: AppState) -> Registry {
             Periodic::SubagentRecovery => recover_subagents(schedule, state.clone()),
             Periodic::McpConvergence => converge_mcp_servers(schedule, state.clone()),
             Periodic::PullRequestWatch => watch_pull_requests(schedule, state.clone()),
+            Periodic::AuditRetention => apply_audit_retention(schedule, state.clone()),
+            Periodic::WorktreeCleanup => clean_worktrees(schedule, state.clone()),
+            Periodic::LicenseRenewal => match state.renewal() {
+                Some(client) => renew_license(schedule, state.clone(), client.clone()),
+                None => continue,
+            },
         };
         registry.register(Arc::new(sweep));
     }
@@ -391,11 +425,59 @@ fn watch_pull_requests(schedule: Schedule, state: AppState) -> Sweep {
     })
 }
 
+fn apply_audit_retention(schedule: Schedule, state: AppState) -> Sweep {
+    Sweep::new(Periodic::AuditRetention.name(), schedule, move || {
+        let state = state.clone();
+        async move {
+            match retention::sweep(&state).await {
+                Ok(0) => Ok(()),
+                Ok(deleted) => {
+                    tracing::info!(deleted, "Deleted audit rows past their retention period");
+                    Ok(())
+                }
+                Err(error) => Err(Failure::new(error)),
+            }
+        }
+    })
+}
+
+fn clean_worktrees(schedule: Schedule, state: AppState) -> Sweep {
+    Sweep::new(Periodic::WorktreeCleanup.name(), schedule, move || {
+        let state = state.clone();
+        async move {
+            let tally = worktree::sweep(&state).await.map_err(Failure::new)?;
+            if tally.removed > 0 || tally.failed > 0 {
+                tracing::info!(
+                    removed = tally.removed,
+                    kept = tally.kept,
+                    failed = tally.failed,
+                    "Swept agent worktrees"
+                );
+            }
+            Ok(())
+        }
+    })
+}
+
+fn renew_license(schedule: Schedule, state: AppState, client: Client) -> Sweep {
+    Sweep::new(Periodic::LicenseRenewal.name(), schedule, move || {
+        let state = state.clone();
+        let client = client.clone();
+        async move {
+            renewal::run(&state, &client)
+                .await
+                .map(|_| ())
+                .map_err(Failure::new)
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::state::{lazy_pool, test_config};
 
     fn sources() -> SourceIndexConfig {
         SourceIndexConfig::default()
@@ -417,11 +499,14 @@ mod tests {
                 "subagent-recovery",
                 "mcp-convergence",
                 "pull-request-watch",
+                "audit-retention",
+                "worktree-cleanup",
+                "license-renewal",
             ],
             "main.rs spawned nine workers; eight of them are periodic sweeps and the ninth, \
-             reminders, is a dispatch loop that stayed where it was. MCP convergence and the \
-             pull request watch joined them later. Dropping one here would silently stop that \
-             background work."
+             reminders, is a dispatch loop that stayed where it was. MCP convergence, the pull \
+             request watch, the audit retention sweep, the worktree cleanup and the license \
+             renewal joined them later. Dropping one here would silently stop that background work."
         );
     }
 
@@ -447,6 +532,9 @@ mod tests {
             (Periodic::ReceptionSync, 30 * 60),
             (Periodic::SubagentRecovery, 60),
             (Periodic::McpConvergence, 60),
+            (Periodic::AuditRetention, 60 * 60),
+            (Periodic::WorktreeCleanup, 60 * 60),
+            (Periodic::LicenseRenewal, 24 * 60 * 60),
         ] {
             assert_eq!(
                 periodic.period(&sources),
@@ -497,6 +585,48 @@ mod tests {
             Periodic::SourceResync.warmup(),
             Warmup::After(Duration::from_secs(15))
         );
+    }
+
+    #[test]
+    fn license_renewal_first_asks_a_minute_after_start() {
+        assert_eq!(
+            Periodic::LicenseRenewal.warmup(),
+            Warmup::After(Duration::from_secs(60))
+        );
+    }
+
+    #[tokio::test]
+    async fn license_renewal_is_registered_while_it_is_on() {
+        let state = AppState::for_tests();
+
+        assert!(
+            periodic(state).names().contains(&"license-renewal"),
+            "renewal is on by default"
+        );
+    }
+
+    #[tokio::test]
+    async fn license_renewal_is_left_out_when_it_is_off() {
+        let mut config = test_config();
+        config.license_renewal.enabled = false;
+        let state = AppState::new(config, lazy_pool(), None);
+        state.disable_mcp();
+
+        let names = periodic(state).names();
+
+        assert!(!names.contains(&"license-renewal"), "{names:?}");
+        assert!(names.contains(&"audit-retention"), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn license_renewal_is_left_out_when_its_client_did_not_build() {
+        let state = AppState::for_tests();
+        state.without_renewal();
+
+        let names = periodic(state).names();
+
+        assert!(!names.contains(&"license-renewal"), "{names:?}");
+        assert!(names.contains(&"audit-retention"), "{names:?}");
     }
 
     #[test]

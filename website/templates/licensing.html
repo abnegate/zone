@@ -1,0 +1,72 @@
+<section class="hero hero-compact">
+  <div class="container hero-inner narrow">
+    <p class="eyebrow">Licensing</p>
+    <h1>Open source, with a commercial license for Enterprise.</h1>
+    <p class="lead">
+      All of Zone&rsquo;s code is public in one repository. Almost all of it is MIT. The Enterprise
+      features are source-available under the Zone Enterprise License, so you can read the code
+      that enforces your policies.
+    </p>
+  </div>
+</section>
+
+<section class="section section-tight" aria-labelledby="files-heading">
+  <div class="container narrow">
+    <h2 id="files-heading">What each license covers</h2>
+    <ul class="license-list">
+      <li>
+        <h3><code>runner/zone_enterprise</code></h3>
+        <p>Enterprise features, the license payload and its offline verifier.</p>
+        <a href="{{ repository }}/blob/main/runner/zone_enterprise/LICENSE">Zone Enterprise License</a>
+      </li>
+      <li>
+        <h3><code>manager/frontend/src/features/enterprise</code></h3>
+        <p>Enterprise console pages, including Settings &rarr; License.</p>
+        <a href="{{ repository }}/blob/main/manager/frontend/src/features/enterprise/LICENSE">Zone Enterprise License</a>
+      </li>
+      <li>
+        <h3>Everything else</h3>
+        <p>Zone Community: chat, agents, models, Studio, the server, the console and the apps.</p>
+        <a href="{{ repository }}/blob/main/LICENSE">MIT License</a>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<section class="section section-sunken" aria-labelledby="community-license-heading">
+  <div class="container split">
+    <div>
+      <h2 id="community-license-heading">Zone Community</h2>
+      <p>
+        You can use, modify and redistribute Zone Community under the
+        <a href="{{ repository }}/blob/main/LICENSE">MIT License</a>, commercially or not. Without a
+        license key, Zone runs as Community, with no seat, workspace or usage caps and no expiry.
+      </p>
+    </div>
+    <div>
+      <h2 id="enterprise-license-heading">Zone Enterprise</h2>
+      <p>In short, while a license is in force, a customer may:</p>
+      <ul class="list">
+        <li>run the Enterprise features on infrastructure it controls, for its licensed seats and its own internal use;</li>
+        <li>read, modify and patch the Enterprise source for its own use.</li>
+      </ul>
+      <p>It may not redistribute or sell that source, offer it as a hosted service, or remove or bypass the license check.</p>
+      <p>
+        The <a href="{{ repository }}/blob/main/runner/zone_enterprise/LICENSE">full Zone Enterprise License</a>
+        is the authoritative text.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="section" aria-labelledby="fonts-heading">
+  <div class="container narrow">
+    <h2 id="fonts-heading">This website</h2>
+    <p>
+      This site uses the Nunito and IBM Plex Mono typefaces, served from this site under the SIL Open
+      Font License: <a href="{{ root }}static/fonts/Nunito-OFL.txt">Nunito license</a> and
+      <a href="{{ root }}static/fonts/IBMPlexMono-OFL.txt">IBM Plex Mono license</a>.
+    </p>
+    <p>Questions about licensing? <a href="{{ contactHref }}">Email {{ contactEmail }}</a>.</p>
+  </div>
+</section>

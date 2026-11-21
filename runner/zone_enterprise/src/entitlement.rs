@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 
-use crate::edition::Edition;
 use crate::license::License;
 use crate::status::{Status, status};
 
@@ -9,18 +8,27 @@ pub const LICENSE_REQUIRED: &str = "license_required";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Feature {
     Sso,
+    Policy,
+    AuditExport,
+    AuditStreaming,
+    AuditRetention,
 }
 
 impl Feature {
-    pub fn editions(self) -> &'static [Edition] {
-        match self {
-            Self::Sso => &[Edition::Team, Edition::Enterprise],
-        }
+    pub const ALL: [Self; 5] = [
+        Self::Sso,
+        Self::Policy,
+        Self::AuditExport,
+        Self::AuditStreaming,
+        Self::AuditRetention,
+    ];
+
+    pub fn enforced(license: Option<&License>) -> bool {
+        license.is_some()
     }
 
     pub fn entitled(self, license: Option<&License>, now: DateTime<Utc>) -> bool {
-        self.editions().contains(&Edition::from(license))
-            && matches!(status(license, now), Status::Active | Status::Grace)
+        Self::enforced(license) && matches!(status(license, now), Status::Active | Status::Grace)
     }
 }
 
@@ -30,14 +38,9 @@ mod tests {
 
     use super::*;
     use crate::fixtures;
-    use crate::payload::Payload;
-    use crate::tier::Tier;
 
-    fn license(tier: Tier) -> License {
-        fixtures::license(&Payload {
-            tier,
-            ..fixtures::payload()
-        })
+    fn license() -> License {
+        fixtures::license(&fixtures::payload())
     }
 
     fn moments(license: &License) -> [(DateTime<Utc>, Status); 3] {
@@ -50,33 +53,36 @@ mod tests {
 
     #[test]
     fn community_is_never_entitled() {
-        let reference = license(Tier::Team);
-        for (now, _) in moments(&reference) {
-            assert!(!Feature::Sso.entitled(None, now), "community at {now}");
+        for feature in Feature::ALL {
+            for (now, _) in moments(&license()) {
+                assert!(!feature.entitled(None, now), "{feature:?} at {now}");
+            }
         }
     }
 
     #[test]
-    fn team_and_enterprise_are_entitled_while_active_or_in_grace() {
-        for tier in [Tier::Team, Tier::Enterprise] {
-            let license = license(tier);
-            for (now, expected) in moments(&license) {
-                assert_eq!(license.status(now), expected);
+    fn community_enforces_nothing() {
+        assert!(!Feature::enforced(None));
+    }
+
+    #[test]
+    fn a_license_is_entitled_to_every_feature_while_active_or_in_grace() {
+        let license = license();
+        for feature in Feature::ALL {
+            for (now, status) in moments(&license) {
+                assert_eq!(license.status(now), status);
                 assert_eq!(
-                    Feature::Sso.entitled(Some(&license), now),
-                    expected != Status::Lapsed,
-                    "{tier:?} while {expected:?}"
+                    feature.entitled(Some(&license), now),
+                    matches!(status, Status::Active | Status::Grace),
+                    "{feature:?} while {status:?}"
                 );
             }
         }
     }
 
     #[test]
-    fn single_sign_on_needs_team_or_enterprise() {
-        assert_eq!(
-            Feature::Sso.editions(),
-            [Edition::Team, Edition::Enterprise]
-        );
+    fn a_license_enforces_every_feature_whatever_its_status() {
+        assert!(Feature::enforced(Some(&license())));
     }
 
     #[test]

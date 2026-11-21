@@ -24,6 +24,7 @@ export const InstalledModelSchema = z.object({
   ready: z.boolean().nullable().optional(),
   recipe_id: z.string().nullable().optional(),
   required_files: z.array(z.string()).nullable().optional(),
+  denial: z.string().nullish(),
 });
 
 export const ModelSizeOptionSchema = z.object({

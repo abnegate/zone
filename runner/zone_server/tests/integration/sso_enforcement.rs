@@ -4,8 +4,8 @@
 use axum::http::StatusCode;
 use serde_json::json;
 use uuid::Uuid;
+use zone_enterprise::LICENSE_REQUIRED;
 use zone_enterprise::sso::{Error, PROVIDER_REQUIRED, SSO_REQUIRED};
-use zone_enterprise::{LICENSE_REQUIRED, Tier};
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::password_reset;
 
@@ -26,12 +26,12 @@ struct Server {
 }
 
 impl Server {
-    /// A Team server with an admin, a member and one enabled provider; enforcement is off.
+    /// An Enterprise server with an admin, a member and one enabled provider; enforcement is off.
     async fn new() -> Self {
         let fixture = Fixture::new(PREFIX).await;
         let admin = fixture.register().await;
         let member = fixture.register().await;
-        fixture.license(&admin, Tier::Team).await;
+        fixture.license(&admin).await;
         let identity_provider = IdentityProvider::start().await;
         let provider = fixture
             .created(&admin.token, &identity_provider.provider())
@@ -129,7 +129,7 @@ fn assert_provider_required(response: &TestResponse) {
 async fn enforcement_needs_an_enabled_provider() {
     let fixture = Fixture::new(PREFIX).await;
     let admin = fixture.register().await;
-    fixture.license(&admin, Tier::Team).await;
+    fixture.license(&admin).await;
 
     assert_provider_required(&fixture.enforce(&admin.token, true).await);
 
@@ -556,7 +556,7 @@ async fn enforcement_outlives_a_lapsed_license() {
 
     server
         .fixture
-        .store_license(&crate::common::sso::lapsed(Tier::Team))
+        .store_license(&crate::common::sso::lapsed())
         .await;
 
     assert_sso_required(&server.login(&server.member).await);

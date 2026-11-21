@@ -29,7 +29,11 @@ export interface NewChatSettings {
   context: string;
 }
 
-type ListedModel = LocalContextModel & { name: string; completion?: boolean };
+type ListedModel = LocalContextModel & {
+  name: string;
+  completion?: boolean;
+  denial?: string | null;
+};
 
 interface Resolved {
   provider: string;
@@ -56,7 +60,7 @@ function offersModel(offer: ChatProviderOffer, model: string): boolean {
 function installedName(installed: ListedModel[], model: string): string | null {
   if (model === AUTO_MODEL) return AUTO_MODEL;
   const found = findInstalledModel(installed, model);
-  return found && found.completion !== false ? found.name : null;
+  return found && found.completion !== false && !found.denial ? found.name : null;
 }
 
 function resolve(
@@ -73,7 +77,7 @@ function resolve(
   if (recent.provider) {
     const offer = providers.providers.find((candidate) => candidate.provider === recent.provider);
     const model = recent.provider_model ?? AUTO_MODEL;
-    return offer && offersModel(offer, model)
+    return offer && !offer.denial && offersModel(offer, model)
       ? { provider: offer.provider, model, offer }
       : automatic;
   }

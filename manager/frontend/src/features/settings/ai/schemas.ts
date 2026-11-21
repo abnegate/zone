@@ -61,6 +61,7 @@ export const AgentStatusSchema = z.object({
   pending: DevicePromptSchema.nullable(),
   error: z.string().nullable(),
   logins: z.array(AgentAccountSchema).default([]),
+  denial: z.string().nullish(),
 });
 
 export const AgentStatusesSchema = z.object({

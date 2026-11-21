@@ -244,6 +244,7 @@ test.describe('Navigation', () => {
     await expect(workspace.getByRole('link')).toHaveText([
       'General',
       'AI',
+      'Agent policy',
       'Folders',
       'Sources',
       'Members',
