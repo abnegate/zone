@@ -14,7 +14,9 @@ use super::common::{AuditEvent, ErrorResponse, audit};
 use crate::auth::ServerAdmin;
 use crate::db::DbResult;
 use crate::db::audit::{actions, resources};
+use crate::db::license_renewal::{self, LicenseRenewal};
 use crate::error::ServerError;
+use crate::services::license::renewal::{Mode, Outcome};
 use crate::services::license::{SetError, Stored};
 use crate::state::AppState;
 
@@ -28,10 +30,16 @@ pub struct LicenseResponse {
     pub license: Option<LicenseDetails>,
     pub seats: SeatsResponse,
     pub unverified: Option<UnverifiedResponse>,
+    pub renewal: Option<RenewalResponse>,
 }
 
 impl LicenseResponse {
-    pub fn new(stored: &Stored, seats: SeatsResponse, now: DateTime<Utc>) -> Self {
+    pub fn new(
+        stored: &Stored,
+        seats: SeatsResponse,
+        renewal: Option<RenewalResponse>,
+        now: DateTime<Utc>,
+    ) -> Self {
         let license = stored.license();
         Self {
             edition: Edition::from(license),
@@ -39,6 +47,7 @@ impl LicenseResponse {
             license: license.map(LicenseDetails::from),
             seats,
             unverified: stored.refusal().map(UnverifiedResponse::from),
+            renewal: license.and(renewal),
         }
     }
 }
@@ -106,6 +115,38 @@ impl From<&zone_enterprise::Error> for UnverifiedResponse {
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct RenewalResponse {
+    pub mode: Mode,
+    pub attempted_at: Option<DateTime<Utc>>,
+    pub outcome: Option<Outcome>,
+}
+
+impl RenewalResponse {
+    pub fn new(license: &License, enabled: bool, attempt: Option<LicenseRenewal>) -> Self {
+        let mode = Mode::of(license, enabled);
+        let Some(attempt) = attempt else {
+            return Self {
+                mode,
+                attempted_at: None,
+                outcome: None,
+            };
+        };
+        let outcome = Outcome::parse(&attempt.outcome);
+        if outcome.is_none() {
+            tracing::warn!(
+                outcome = %attempt.outcome,
+                "Unknown renewal outcome stored; reporting it as unknown"
+            );
+        }
+        Self {
+            mode,
+            attempted_at: Some(attempt.attempted_at),
+            outcome,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SetLicenseRequest {
     pub key: String,
@@ -162,17 +203,40 @@ fn counted(seats: DbResult<Seats>, license: Option<&License>) -> SeatsResponse {
     }
 }
 
-fn answer(stored: &Stored, seats: DbResult<Seats>, now: DateTime<Utc>) -> LicenseResponse {
-    LicenseResponse::new(stored, counted(seats, stored.license()), now)
+fn attempted(renewal: DbResult<Option<LicenseRenewal>>) -> Option<LicenseRenewal> {
+    renewal.unwrap_or_else(|error| {
+        tracing::error!(%error, "Could not read the renewal status; reporting it as unknown");
+        None
+    })
+}
+
+fn answer(
+    stored: &Stored,
+    seats: DbResult<Seats>,
+    renewal: Option<RenewalResponse>,
+    now: DateTime<Utc>,
+) -> LicenseResponse {
+    LicenseResponse::new(stored, counted(seats, stored.license()), renewal, now)
+}
+
+async fn renewal(state: &AppState, license: Option<&License>) -> Option<RenewalResponse> {
+    let license = license?;
+    let attempt = attempted(license_renewal::get(state.db()).await);
+    Some(RenewalResponse::new(
+        license,
+        state.config().license_renewal.enabled,
+        attempt,
+    ))
 }
 
 async fn respond(state: &AppState, stored: Stored) -> Json<LicenseResponse> {
     let now = Utc::now();
-    let seats = state
-        .licenses()
-        .seats(state.db(), stored.license(), now)
-        .await;
-    Json(answer(&stored, seats, now))
+    let license = stored.license();
+    let (seats, renewal) = tokio::join!(
+        state.licenses().seats(state.db(), license, now),
+        renewal(state, license),
+    );
+    Json(answer(&stored, seats, renewal, now))
 }
 
 pub async fn get(
@@ -259,8 +323,17 @@ mod tests {
     const KEY_ID: &str = "test-1";
     const SEED: [u8; 32] = [0x11; 32];
     const SEATS: u32 = 3;
+    const SUBSCRIPTION: &str = "4f6c1a2e-8b3d-4c5e-9f70-1a2b3c4d5e6f";
 
     fn license() -> License {
+        issued(None)
+    }
+
+    fn subscribed() -> License {
+        issued(Some(SUBSCRIPTION))
+    }
+
+    fn issued(subscription: Option<&str>) -> License {
         let signing = SigningKey::from_bytes(&SEED);
         let keyring =
             Keyring::new([TrustedKey::new(KEY_ID, signing.verifying_key().to_bytes()).unwrap()])
@@ -274,7 +347,7 @@ mod tests {
                 issued_at: "2026-11-01T00:00:00Z".parse().unwrap(),
                 expires_at,
                 key_id: KEY_ID.into(),
-                subscription: None,
+                subscription: subscription.map(str::to_owned),
             },
             &signing,
         );
@@ -283,6 +356,17 @@ mod tests {
 
     fn seats(used: u32, licensed: Option<u32>) -> Seats {
         Seats { used, licensed }
+    }
+
+    fn attempt(outcome: &str) -> LicenseRenewal {
+        LicenseRenewal {
+            attempted_at: "2027-10-20T03:00:00Z".parse().unwrap(),
+            outcome: outcome.into(),
+        }
+    }
+
+    fn unattempted(license: &License) -> Option<RenewalResponse> {
+        Some(RenewalResponse::new(license, true, None))
     }
 
     fn serialized(response: &LicenseResponse) -> Value {
@@ -295,7 +379,8 @@ mod tests {
 
     #[test]
     fn community_sends_null_license_and_licensed_seats_rather_than_omitting_them() {
-        let response = LicenseResponse::new(&Stored::Empty, seats(4, None).into(), Utc::now());
+        let response =
+            LicenseResponse::new(&Stored::Empty, seats(4, None).into(), None, Utc::now());
 
         assert_eq!(
             serialized(&response),
@@ -305,6 +390,7 @@ mod tests {
                 "license": null,
                 "seats": { "used": 4, "licensed": null, "over": false },
                 "unverified": null,
+                "renewal": null,
             })
         );
     }
@@ -315,6 +401,7 @@ mod tests {
         let response = LicenseResponse::new(
             &Stored::Verified(license.clone()),
             seats(2, Some(SEATS)).into(),
+            unattempted(&license),
             license.issued_at(),
         );
 
@@ -334,6 +421,7 @@ mod tests {
                 },
                 "seats": { "used": 2, "licensed": SEATS, "over": false },
                 "unverified": null,
+                "renewal": { "mode": "manual", "attempted_at": null, "outcome": null },
             })
         );
     }
@@ -352,6 +440,7 @@ mod tests {
             let response = LicenseResponse::new(
                 &Stored::Verified(license.clone()),
                 seats(1, Some(SEATS)).into(),
+                unattempted(&license),
                 now,
             );
             assert_eq!(response.status, expected);
@@ -366,6 +455,7 @@ mod tests {
                 id: "2031-4".into(),
             }),
             seats(4, None).into(),
+            None,
             Utc::now(),
         );
 
@@ -377,6 +467,7 @@ mod tests {
                 "license": null,
                 "seats": { "used": 4, "licensed": null, "over": false },
                 "unverified": { "code": UNKNOWN_KEY },
+                "renewal": null,
             })
         );
     }
@@ -453,7 +544,12 @@ mod tests {
         let license = license();
         let stored = Stored::Verified(license.clone());
 
-        let response = answer(&stored, Err(sqlx::Error::PoolClosed), license.issued_at());
+        let response = answer(
+            &stored,
+            Err(sqlx::Error::PoolClosed),
+            unattempted(&license),
+            license.issued_at(),
+        );
 
         let body = serialized(&response);
         assert_eq!(body["edition"], "enterprise", "{body}");
@@ -469,7 +565,12 @@ mod tests {
     fn a_stored_key_that_no_longer_verifies_keeps_its_refusal_when_seats_cannot_be_counted() {
         let stored = Stored::Unverified(zone_enterprise::Error::Signature);
 
-        let body = serialized(&answer(&stored, Err(sqlx::Error::PoolClosed), Utc::now()));
+        let body = serialized(&answer(
+            &stored,
+            Err(sqlx::Error::PoolClosed),
+            None,
+            Utc::now(),
+        ));
 
         assert_eq!(
             body["unverified"],
@@ -489,12 +590,115 @@ mod tests {
         let body = serialized(&answer(
             &stored,
             Ok(seats(SEATS + 1, Some(SEATS))),
+            unattempted(&license),
             license.issued_at(),
         ));
 
         assert_eq!(
             body["seats"],
             json!({ "used": SEATS + 1, "licensed": SEATS, "over": true })
+        );
+    }
+
+    #[test]
+    fn each_renewal_mode_is_sent_by_its_wire_name() {
+        let cases = [
+            (subscribed(), true, "automatic"),
+            (subscribed(), false, "disabled"),
+            (license(), true, "manual"),
+            (license(), false, "manual"),
+        ];
+        for (license, enabled, mode) in cases {
+            assert_eq!(
+                serde_json::to_value(RenewalResponse::new(&license, enabled, None)).unwrap(),
+                json!({ "mode": mode, "attempted_at": null, "outcome": null }),
+                "enabled: {enabled}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_last_attempt_is_sent_with_its_time_and_outcome() {
+        for outcome in Outcome::ALL {
+            let renewal =
+                RenewalResponse::new(&subscribed(), true, Some(attempt(outcome.as_str())));
+
+            assert_eq!(
+                serde_json::to_value(renewal).unwrap(),
+                json!({
+                    "mode": "automatic",
+                    "attempted_at": "2027-10-20T03:00:00Z",
+                    "outcome": outcome.as_str(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_stored_outcome_is_sent_as_null_and_keeps_its_time() {
+        let renewal = RenewalResponse::new(&subscribed(), true, Some(attempt("expired")));
+
+        assert_eq!(
+            serde_json::to_value(renewal).unwrap(),
+            json!({
+                "mode": "automatic",
+                "attempted_at": "2027-10-20T03:00:00Z",
+                "outcome": null,
+            })
+        );
+    }
+
+    #[test]
+    fn a_renewal_status_that_cannot_be_read_is_reported_as_never_attempted() {
+        assert_eq!(attempted(Err(sqlx::Error::PoolClosed)), None);
+        assert_eq!(attempted(Ok(None)), None);
+        assert_eq!(
+            attempted(Ok(Some(attempt("current")))),
+            Some(attempt("current"))
+        );
+    }
+
+    #[test]
+    fn renewal_is_null_unless_a_license_is_verified() {
+        let license = subscribed();
+        let unverified = Stored::Unverified(zone_enterprise::Error::Signature);
+        for stored in [Stored::Empty, unverified] {
+            let response = LicenseResponse::new(
+                &stored,
+                seats(1, None).into(),
+                unattempted(&license),
+                Utc::now(),
+            );
+
+            let body = serialized(&response);
+            assert_eq!(body["renewal"], Value::Null, "{body}");
+            assert!(body.get("renewal").is_some(), "renewal is omitted: {body}");
+        }
+    }
+
+    #[test]
+    fn a_verified_license_is_answered_with_its_renewal() {
+        let license = subscribed();
+        let stored = Stored::Verified(license.clone());
+
+        let body = serialized(&answer(
+            &stored,
+            Ok(seats(1, Some(SEATS))),
+            Some(RenewalResponse::new(
+                &license,
+                true,
+                Some(attempt("unreachable")),
+            )),
+            license.issued_at(),
+        ));
+
+        assert_eq!(
+            body["renewal"],
+            json!({
+                "mode": "automatic",
+                "attempted_at": "2027-10-20T03:00:00Z",
+                "outcome": "unreachable",
+            })
         );
     }
 

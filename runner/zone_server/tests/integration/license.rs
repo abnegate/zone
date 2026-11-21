@@ -10,8 +10,9 @@ use zone_enterprise::{
 };
 use zone_server::auth::admin_guard::REQUIRED;
 use zone_server::db::audit::{actions, resources};
-use zone_server::db::{licenses, migrations};
+use zone_server::db::{license_renewal, licenses, migrations};
 use zone_server::services::license::LAPSED;
+use zone_server::services::license::renewal::Outcome;
 
 use crate::common::{self, Database, TestClient, TestResponse};
 
@@ -23,6 +24,7 @@ const TRUSTED_SEED: [u8; 32] = [0x11; 32];
 const UNTRUSTED_SEED: [u8; 32] = [0x22; 32];
 const LINE_WIDTH: usize = 64;
 const SEATS: u32 = 25;
+const SUBSCRIPTION: &str = "4f6c1a2e-8b3d-4c5e-9f70-1a2b3c4d5e6f";
 /// Seats are counted from `sessions`; renaming it once the license changes
 /// fails the count after the change has committed, and only in this test's
 /// own database. The upsert fires both the INSERT and UPDATE statement
@@ -257,6 +259,13 @@ fn active() -> String {
     issue(&current())
 }
 
+fn subscribed() -> Payload {
+    Payload {
+        subscription: Some(SUBSCRIPTION.into()),
+        ..current()
+    }
+}
+
 fn lapsed() -> String {
     issue(&expiring(-TimeDelta::days(GRACE_DAYS + 1)))
 }
@@ -319,6 +328,12 @@ fn assert_runs_as_community(body: &Value) {
         body["seats"].get("licensed").is_some(),
         "seats.licensed is omitted: {body}"
     );
+    assert_eq!(body["renewal"], Value::Null, "{body}");
+    assert!(body.get("renewal").is_some(), "renewal is omitted: {body}");
+}
+
+fn unattempted(mode: &str) -> Value {
+    json!({ "mode": mode, "attempted_at": null, "outcome": null })
 }
 
 fn assert_forbidden(response: &TestResponse) {
@@ -907,5 +922,119 @@ async fn the_edition_accessor_follows_set_and_remove() {
         .await
         .assert_status(StatusCode::OK);
     assert_eq!(state.edition().await, Edition::Community);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_key_without_a_subscription_is_renewed_by_hand() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+
+    let response = fixture.put(&admin.token, &active()).await;
+
+    response.assert_status(StatusCode::OK);
+    assert_eq!(response.json_value()["renewal"], unattempted("manual"));
+    assert_eq!(
+        fixture.get(&admin.token).await.json_value()["renewal"],
+        unattempted("manual")
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_key_with_a_subscription_renews_automatically() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+
+    let response = fixture.put(&admin.token, &issue(&subscribed())).await;
+
+    response.assert_status(StatusCode::OK);
+    assert_eq!(response.json_value()["renewal"], unattempted("automatic"));
+    assert_eq!(
+        fixture.get(&admin.token).await.json_value()["renewal"],
+        unattempted("automatic")
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_last_renewal_attempt_is_reported_until_another_key_is_set() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    let key = issue(&subscribed());
+    fixture
+        .put(&admin.token, &key)
+        .await
+        .assert_status(StatusCode::OK);
+    let attempted_at = Utc::now().trunc_subsecs(0) - TimeDelta::hours(2);
+    assert!(
+        license_renewal::record(
+            fixture.pool(),
+            &key,
+            Outcome::Unreachable.as_str(),
+            attempted_at
+        )
+        .await
+        .unwrap()
+    );
+
+    let read = fixture.get(&admin.token).await;
+
+    read.assert_status(StatusCode::OK);
+    assert_eq!(
+        read.json_value()["renewal"],
+        json!({
+            "mode": "automatic",
+            "attempted_at": attempted_at,
+            "outcome": "unreachable",
+        })
+    );
+
+    let replaced = fixture.put(&admin.token, &issue(&subscribed())).await;
+
+    replaced.assert_status(StatusCode::OK);
+    assert_eq!(replaced.json_value()["renewal"], unattempted("automatic"));
+    assert_eq!(
+        fixture.get(&admin.token).await.json_value()["renewal"],
+        unattempted("automatic")
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn removing_a_key_with_a_recorded_attempt_reports_no_renewal() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    let key = issue(&subscribed());
+    fixture
+        .put(&admin.token, &key)
+        .await
+        .assert_status(StatusCode::OK);
+    license_renewal::record(fixture.pool(), &key, Outcome::Ended.as_str(), Utc::now())
+        .await
+        .unwrap();
+
+    let response = fixture.delete(&admin.token).await;
+
+    response.assert_status(StatusCode::OK);
+    assert_community(&response.json_value());
+    assert_community(&fixture.get(&admin.token).await.json_value());
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_stored_key_that_no_longer_verifies_reports_no_renewal_whatever_was_recorded() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    let key = retired();
+    licenses::replace(fixture.pool(), &key).await.unwrap();
+    license_renewal::record(fixture.pool(), &key, Outcome::Refused.as_str(), Utc::now())
+        .await
+        .unwrap();
+
+    let body = fixture.get(&admin.token).await.json_value();
+
+    assert_runs_as_community(&body);
+    assert_eq!(body["unverified"], json!({ "code": UNKNOWN_KEY }));
     fixture.cleanup().await;
 }
