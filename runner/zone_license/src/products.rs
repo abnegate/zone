@@ -39,6 +39,10 @@ impl Products {
             .map(|product| product.plan)
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &Product> {
+        self.0.iter()
+    }
+
     pub fn len(&self) -> usize {
         self.0.len()
     }

@@ -2,7 +2,6 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::entitlement::Feature;
 use crate::license::License;
 use crate::plan::Plan;
 
@@ -20,14 +19,6 @@ impl Edition {
             Self::Community => "community",
             Self::Team => "team",
             Self::Enterprise => "enterprise",
-        }
-    }
-
-    pub fn includes(self, feature: Feature) -> bool {
-        match self {
-            Self::Community => false,
-            Self::Team => Plan::Team.includes(feature),
-            Self::Enterprise => Plan::Enterprise.includes(feature),
         }
     }
 }
@@ -106,31 +97,6 @@ mod tests {
                     "{plan:?} while {status:?}"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn community_includes_nothing() {
-        for feature in Feature::ALL {
-            assert!(!Edition::Community.includes(feature), "{feature:?}");
-        }
-    }
-
-    #[test]
-    fn team_includes_spend_and_members_only() {
-        for feature in Feature::ALL {
-            assert_eq!(
-                Edition::Team.includes(feature),
-                matches!(feature, Feature::Spend | Feature::Members),
-                "{feature:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn enterprise_includes_every_feature() {
-        for feature in Feature::ALL {
-            assert!(Edition::Enterprise.includes(feature), "{feature:?}");
         }
     }
 
