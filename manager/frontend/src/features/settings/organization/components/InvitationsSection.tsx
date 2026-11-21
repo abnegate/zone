@@ -1,6 +1,9 @@
 import { Button, EmptyState, Modal, Select } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
+import { Permission } from '../../../enterprise';
+import { ORGANIZATION_ROLES, type RoleOption, WORKSPACE_ROLES } from '../../assignment';
+import { allowsOrganization, grantsOrganization } from '../../navigation/access';
 import type { Workspace, WorkspaceRole } from '../../workspace/types';
 import type { CreateInvitationRequest, Invitation, InvitationAccess, OrgRole } from '../types';
 import './InvitationsSection.css';
@@ -8,7 +11,34 @@ import './InvitationsSection.css';
 interface InvitationsSectionProps {
   orgId: string;
   workspaces: Workspace[];
-  access: Pick<InvitationAccess, 'create' | 'revoke'>;
+  access: Omit<InvitationAccess, 'read'>;
+}
+
+const PRIVILEGED_WORKSPACE_ROLES: readonly WorkspaceRole[] = ['admin', 'owner'];
+
+function organizationRoles(access: Omit<InvitationAccess, 'read'>): RoleOption<OrgRole>[] {
+  const administers = grantsOrganization(
+    access.permissions,
+    access.role,
+    Permission.AdministratorsUpdate
+  );
+  const offered: Readonly<Record<OrgRole, boolean>> = {
+    member: true,
+    admin: allowsOrganization(access.role, 'admin'),
+    owner: administers,
+  };
+  return ORGANIZATION_ROLES.filter(({ value }) => offered[value]);
+}
+
+function workspaceRoles(access: Omit<InvitationAccess, 'read'>): RoleOption<WorkspaceRole>[] {
+  const administers = grantsOrganization(
+    access.permissions,
+    access.role,
+    Permission.AdministratorsUpdate
+  );
+  return WORKSPACE_ROLES.filter(
+    ({ value }) => administers || !PRIVILEGED_WORKSPACE_ROLES.includes(value)
+  );
 }
 
 export function InvitationsSection({ orgId, workspaces, access }: InvitationsSectionProps) {
@@ -29,8 +59,8 @@ export function InvitationsSection({ orgId, workspaces, access }: InvitationsSec
     try {
       const response = await client.getInvitations(orgId);
       setInvitations(response.invitations);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load invitations';
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load invitations';
       setError(message.startsWith('Validation failed') ? 'Couldn’t load invitations' : message);
     } finally {
       setLoading(false);
@@ -41,8 +71,8 @@ export function InvitationsSection({ orgId, workspaces, access }: InvitationsSec
     loadInvitations();
   }, [loadInvitations]);
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault();
     setSubmitting(true);
     setError(null);
 
@@ -64,8 +94,8 @@ export function InvitationsSection({ orgId, workspaces, access }: InvitationsSec
       setWorkspaceId('');
       setWorkspaceRole('member');
       loadInvitations();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create invitation');
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Failed to create invitation');
     } finally {
       setSubmitting(false);
     }
@@ -79,8 +109,8 @@ export function InvitationsSection({ orgId, workspaces, access }: InvitationsSec
     try {
       await client.revokeInvitation(orgId, invitationId);
       loadInvitations();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to revoke invitation');
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Failed to revoke invitation');
     }
   };
 
@@ -115,7 +145,11 @@ export function InvitationsSection({ orgId, workspaces, access }: InvitationsSec
           </div>
         )}
       </div>
-      {error && <div className="alert alert-error">{error}</div>}
+      {error && (
+        <div className="alert alert-error" role="alert">
+          {error}
+        </div>
+      )}
       {invitations.length === 0 ? (
         <EmptyState
           icon={
@@ -206,7 +240,7 @@ export function InvitationsSection({ orgId, workspaces, access }: InvitationsSec
               type="email"
               id="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(event) => setEmail(event.target.value)}
               required
               placeholder="member@example.com"
               className="form-input"
@@ -219,11 +253,7 @@ export function InvitationsSection({ orgId, workspaces, access }: InvitationsSec
             value={orgRole}
             onValueChange={(next) => setOrgRole(next as OrgRole)}
             wrapperClassName="form-group"
-            options={[
-              { value: 'member', label: 'Member' },
-              { value: 'admin', label: 'Admin' },
-              { value: 'owner', label: 'Owner' },
-            ]}
+            options={organizationRoles(access)}
           />
 
           <div className="form-group">
@@ -252,12 +282,7 @@ export function InvitationsSection({ orgId, workspaces, access }: InvitationsSec
               value={workspaceRole}
               onValueChange={(next) => setWorkspaceRole(next as WorkspaceRole)}
               wrapperClassName="form-group"
-              options={[
-                { value: 'viewer', label: 'Viewer' },
-                { value: 'member', label: 'Member' },
-                { value: 'admin', label: 'Admin' },
-                { value: 'owner', label: 'Owner' },
-              ]}
+              options={workspaceRoles(access)}
             />
           )}
 

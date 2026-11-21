@@ -135,6 +135,8 @@ function organizationContent(
             read: inOrganization(access, Permission.InvitationsRead),
             create: inOrganization(access, Permission.InvitationsCreate),
             revoke: inOrganization(access, Permission.InvitationsDelete),
+            role: access.organizationRole,
+            permissions: access.organizationPermissions,
           }}
         />
       );

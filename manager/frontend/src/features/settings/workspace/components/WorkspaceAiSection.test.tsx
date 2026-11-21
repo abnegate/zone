@@ -16,6 +16,7 @@ import {
   ACTIVE_WORKSPACE_OVERRIDDEN,
   COMMUNITY_WORKSPACE,
 } from '../../../enterprise/policy/fixtures';
+import { Permission } from '../../../enterprise/roles/schemas';
 import type { OrgRole } from '../../organization/types';
 import type { AiSettings, WorkspaceAiSettings } from '../types';
 
@@ -88,11 +89,16 @@ const organization = {
   updated_at: '2024-01-01T00:00:00Z',
 };
 let organizationRole: OrgRole | undefined;
+let organizationPermissions: readonly string[] | undefined;
 let resolvingRole = false;
 
 mock.module('../../../../shared/context/WorkspaceContext', () => ({
   useWorkspace: () => ({
-    currentOrganization: { ...organization, role: organizationRole },
+    currentOrganization: {
+      ...organization,
+      role: organizationRole,
+      permissions: organizationPermissions,
+    },
     resolvingRole,
     currentWorkspace: {
       id: WORKSPACE_ID,
@@ -213,6 +219,7 @@ describe('WorkspaceAiSection', () => {
   beforeEach(() => {
     mock.clearAllMocks();
     organizationRole = undefined;
+    organizationPermissions = undefined;
     resolvingRole = false;
     agentsApi.list.mockResolvedValue(fixture.agents);
     mockClient.getWorkspaceAiSettings.mockResolvedValue(overridden);
@@ -875,6 +882,21 @@ describe('WorkspaceAiSection', () => {
       expect(await screen.findByText('Ask an organization admin to sign in.')).toBeInTheDocument();
       expect(panel?.querySelectorAll('button')).toHaveLength(0);
       expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
+    });
+
+    it('lets a holder of agent_logins:update sign in whatever their rank', async () => {
+      organizationRole = 'member';
+      organizationPermissions = [Permission.OrganizationRead, Permission.AgentLoginsUpdate];
+      agentsApi.list.mockResolvedValue([
+        fixture.agents[0],
+        { ...fixture.agents[1], state: 'signed_out', pending: null },
+      ]);
+      mockClient.getWorkspaceAiSettings.mockResolvedValue(codexOnly);
+      const user = await renderSection();
+
+      await user.click(screen.getByRole('button', { name: 'Edit Provider' }));
+
+      expect(await screen.findByRole('button', { name: 'Sign in with ChatGPT' })).toBeEnabled();
     });
 
     describe('after the provider changes', () => {
