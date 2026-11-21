@@ -28,6 +28,8 @@ pub enum Refusal {
     Encrypted,
     #[error("it isn't a SAML 2.0 message")]
     Version,
+    #[error("it's missing a valid ID, IssueInstant or Status")]
+    Incomplete,
     #[error("it was issued by a different identity provider")]
     Issuer,
     #[error("it was sent to a different destination")]

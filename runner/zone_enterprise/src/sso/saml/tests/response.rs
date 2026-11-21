@@ -801,7 +801,7 @@ fn fractional_second_timestamps_are_accepted() {
 #[test]
 fn timestamps_with_an_offset_are_refused() {
     let xml = sign_assertion(&unsigned(&options()).replace(INSTANT, "2026-11-21T10:00:00+00:00"));
-    assert_eq!(refusal(consume_xml(&xml)), Refusal::Version);
+    assert_eq!(refusal(consume_xml(&xml)), Refusal::Incomplete);
     let window = CONDITIONS_WINDOW.replace("Z\"", "+00:00\"");
     let xml = spliced(CONDITIONS_WINDOW, &window);
     assert_eq!(refusal(consume_xml(&xml)), Refusal::Condition);
@@ -973,6 +973,40 @@ fn name_id_formats_parse() {
 }
 
 #[test]
+fn an_assertion_without_an_issue_instant_is_refused() {
+    let xml = spliced(
+        &format!("ID=\"{ASSERTION_ID}\" Version=\"2.0\" IssueInstant=\"{INSTANT}\""),
+        &format!("ID=\"{ASSERTION_ID}\" Version=\"2.0\""),
+    );
+    assert_eq!(refusal(consume_xml(&xml)), Refusal::Incomplete);
+}
+
+#[test]
+fn a_response_without_an_issue_instant_is_refused() {
+    let xml = spliced(
+        &format!("Version=\"2.0\" IssueInstant=\"{INSTANT}\" Destination="),
+        "Version=\"2.0\" Destination=",
+    );
+    assert_eq!(refusal(consume_xml(&xml)), Refusal::Incomplete);
+}
+
+#[test]
+fn an_assertion_without_an_id_is_refused() {
+    let identified = format!("{ASSERTION_START}ID=\"{ASSERTION_ID}\" ");
+    for anonymous in [
+        ASSERTION_START.to_owned(),
+        format!("{ASSERTION_START}ID=\"\" "),
+    ] {
+        let xml = sign_response(&replaced(&unsigned(&options()), &identified, &anonymous));
+        assert_eq!(
+            refusal(consume_xml(&xml)),
+            Refusal::Incomplete,
+            "{anonymous}"
+        );
+    }
+}
+
+#[test]
 fn an_assertion_without_an_authentication_statement_is_refused() {
     let xml = unsigned(&options());
     let statement = between(&xml, STATEMENT_START, STATEMENT_END).to_owned();
@@ -1021,7 +1055,17 @@ fn a_response_without_a_status_is_refused() {
     let xml = unsigned(&options());
     let status = between(&xml, "<saml2p:Status>", "</saml2p:Status>").to_owned();
     let without = sign_assertion(&replaced(&xml, &status, ""));
-    assert_eq!(refusal(consume_xml(&without)), Refusal::Version);
+    assert_eq!(refusal(consume_xml(&without)), Refusal::Incomplete);
+}
+
+#[test]
+fn a_status_code_without_a_value_is_refused() {
+    let xml = replaced(
+        &error_response(REQUEST_ID),
+        &format!("<saml2p:StatusCode Value=\"{RESPONDER}\">"),
+        "<saml2p:StatusCode>",
+    );
+    assert_eq!(refusal(consume_xml(&xml)), Refusal::Incomplete);
 }
 
 #[test]

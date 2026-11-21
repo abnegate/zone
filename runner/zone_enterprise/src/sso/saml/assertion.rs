@@ -49,7 +49,7 @@ impl Assertion {
         let id = element
             .attribute(identifiers::ATTRIBUTE)
             .filter(|id| !id.is_empty())
-            .ok_or(Refusal::Version)?
+            .ok_or(Refusal::Incomplete)?
             .to_owned();
         message::issued(element, expected.now)?;
         if message::issuer(document, assertion)?.as_deref() != Some(expected.entity_id) {

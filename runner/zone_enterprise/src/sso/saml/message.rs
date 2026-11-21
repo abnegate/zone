@@ -26,7 +26,7 @@ pub(super) fn issued(element: &Element, now: DateTime<Utc>) -> Result<(), Refusa
     let issued = element
         .attribute(ISSUE_INSTANT)
         .and_then(instant::parse)
-        .ok_or(Refusal::Version)?;
+        .ok_or(Refusal::Incomplete)?;
     if issued > now + LEEWAY {
         return Err(Refusal::IssuedInFuture);
     }

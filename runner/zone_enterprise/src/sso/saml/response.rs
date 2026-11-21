@@ -98,8 +98,14 @@ fn addressed(document: &Document, expected: &Expected<'_>) -> Result<NodeId, Ref
 }
 
 fn succeeded(document: &Document, response: NodeId) -> Result<(), Error> {
-    let status = message::single(document, response, uri::PROTOCOL, STATUS, Refusal::Version)
-        .map_err(Error::AssertionInvalid)?;
+    let status = message::single(
+        document,
+        response,
+        uri::PROTOCOL,
+        STATUS,
+        Refusal::Incomplete,
+    )
+    .map_err(Error::AssertionInvalid)?;
     let code = status
         .and_then(|status| {
             document
@@ -108,7 +114,7 @@ fn succeeded(document: &Document, response: NodeId) -> Result<(), Error> {
         })
         .and_then(|code| document.element(code))
         .and_then(|code| code.attribute(VALUE))
-        .ok_or(Error::AssertionInvalid(Refusal::Version))?;
+        .ok_or(Error::AssertionInvalid(Refusal::Incomplete))?;
     if code != uri::SUCCESS {
         return Err(Error::SignInRefused(code.to_owned()));
     }
