@@ -1409,7 +1409,7 @@ mod tests {
             })
             .mount(&litellm)
             .await;
-        let database = crate::db::disposable::Database::create("repair").await;
+        let database = crate::db::testing::Database::create("repair").await;
         let pool = database.pool.clone();
         let state = AppState::new(instance_config(&litellm.uri()), pool.clone(), None);
         state.disable_mcp();

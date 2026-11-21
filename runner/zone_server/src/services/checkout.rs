@@ -2357,7 +2357,7 @@ mod tests {
             PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
                 .await
                 .unwrap();
-        let other = crate::db::disposable::Database::create("checkout").await;
+        let other = crate::db::testing::Database::create("checkout").await;
         let organization = Uuid::new_v4();
         let workspace = Uuid::new_v4();
         sqlx::query("INSERT INTO organizations(id,name,slug) VALUES($1,'Checkout database isolation',$1::text)").bind(organization).execute(&pool).await.unwrap();
