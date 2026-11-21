@@ -57,7 +57,7 @@ describe('MemberCapBanner', () => {
     const banner = await screen.findByRole('status');
     expect(banner).toHaveClass('member-cap-banner');
     expect(banner).toHaveTextContent(
-      '5 people were active this month, 2 more than the 3 members Zone Community allows'
+      '5 people were active this month, 2 more than the 3 members this server allows without an active Zone Team or Enterprise license'
     );
     expect(banner).toHaveTextContent('Everyone keeps access');
     expect(banner).not.toHaveTextContent(/block|lock|suspend|disable|lose|remov/i);

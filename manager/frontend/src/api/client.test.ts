@@ -3610,7 +3610,7 @@ describe('Client', () => {
       });
 
       const CAP_MESSAGE =
-        'This server runs Zone Community, which allows 3 active members. Add a Zone Team or Enterprise license to add more people.';
+        'This server allows 3 active members without an active Zone Team or Enterprise license. Add a license to add more people.';
 
       const capRefusal = () => ({
         ok: false,

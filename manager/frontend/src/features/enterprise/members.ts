@@ -9,6 +9,8 @@ const MEMBERS_UNCOUNTED = 'Member usage unavailable';
 
 const ADD_LICENSE = 'new members are refused until a Team or Enterprise license is added';
 
+const WITHOUT_LICENSE = 'without an active Zone Team or Enterprise license';
+
 function membersNoun(count: number): string {
   return count === 1 ? 'member' : 'members';
 }
@@ -22,7 +24,7 @@ export function isMemberCapRefusal(error: unknown): error is AuthRequestError {
 }
 
 export function memberCapMessage(): string {
-  return `This server runs Zone Community, which allows ${COMMUNITY_MEMBERS} active members, and it has reached that limit. A server admin can add a Zone Team or Enterprise license to make room for more people.`;
+  return `This server allows ${COMMUNITY_MEMBERS} active ${membersNoun(COMMUNITY_MEMBERS)} ${WITHOUT_LICENSE}, and it has reached that limit. A server admin can add a license to make room for more people.`;
 }
 
 export function memberText({ active, cap }: Members): string | null {
@@ -39,7 +41,7 @@ export function memberCapNotice(members: Members): string | null {
   if (members.over || !full(members) || members.cap === null) {
     return null;
   }
-  return `This server has reached the ${members.cap} active ${membersNoun(members.cap)} Zone Community allows, so ${ADD_LICENSE}. Everyone already here keeps access.`;
+  return `This server has reached the ${members.cap} active ${membersNoun(members.cap)} it allows ${WITHOUT_LICENSE}, so ${ADD_LICENSE}. Everyone already here keeps access.`;
 }
 
 export function overMemberNotice({ active, cap, over }: Members): string | null {
@@ -47,5 +49,5 @@ export function overMemberNotice({ active, cap, over }: Members): string | null 
     return null;
   }
   const extra = active - cap;
-  return `${active} people were active this month, ${extra} more than the ${cap} ${membersNoun(cap)} Zone Community allows. Everyone keeps access; ${ADD_LICENSE}.`;
+  return `${active} people were active this month, ${extra} more than the ${cap} ${membersNoun(cap)} this server allows ${WITHOUT_LICENSE}. Everyone keeps access; ${ADD_LICENSE}.`;
 }
