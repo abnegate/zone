@@ -55,6 +55,7 @@ pub struct Spend {
     pub organization: Uuid,
     pub workspace: Option<Uuid>,
     pub user: Option<Uuid>,
+    pub automated: bool,
     pub model: String,
     pub provider: String,
     pub microdollars: i64,
@@ -74,6 +75,7 @@ pub struct Stored {
     pub organization_id: Uuid,
     pub workspace_id: Option<Uuid>,
     pub user_id: Option<Uuid>,
+    pub automated: bool,
     pub token: String,
     pub model: String,
     pub provider: String,
@@ -223,8 +225,9 @@ impl Fixture {
 
     pub async fn stored(&self) -> Vec<Stored> {
         sqlx::query_as(
-            "SELECT request_id, organization_id, workspace_id, user_id, token, model, provider,
-                    spend_microdollars, prompt_tokens, completion_tokens, failed, occurred_at
+            "SELECT request_id, organization_id, workspace_id, user_id, automated, token, model,
+                    provider, spend_microdollars, prompt_tokens, completion_tokens, failed,
+                    occurred_at
              FROM spend_records ORDER BY request_id",
         )
         .fetch_all(self.pool())
@@ -238,6 +241,7 @@ impl Fixture {
             organization: self.policy.organization,
             workspace: Some(self.policy.workspace),
             user: Some(self.policy.owner.id),
+            automated: false,
             model: "gpt-4o".to_string(),
             provider: "openai".to_string(),
             microdollars: 1_000_000,
@@ -249,14 +253,16 @@ impl Fixture {
 
     pub async fn record(&self, spend: Spend) {
         sqlx::query(
-            "INSERT INTO spend_records (request_id, organization_id, workspace_id, user_id, token,
-                 model, provider, spend_microdollars, prompt_tokens, completion_tokens, occurred_at)
-             VALUES ($1, $2, $3, $4, 'spend-routes-token', $5, $6, $7, $8, $9, $10)",
+            "INSERT INTO spend_records (request_id, organization_id, workspace_id, user_id,
+                 automated, token, model, provider, spend_microdollars, prompt_tokens,
+                 completion_tokens, occurred_at)
+             VALUES ($1, $2, $3, $4, $5, 'spend-routes-token', $6, $7, $8, $9, $10, $11)",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(spend.organization)
         .bind(spend.workspace)
         .bind(spend.user)
+        .bind(spend.automated)
         .bind(spend.model)
         .bind(spend.provider)
         .bind(spend.microdollars)
@@ -290,6 +296,7 @@ impl Fixture {
             organization: subject.organization,
             workspace: Some(subject.workspace),
             user: subject.user,
+            automated: subject.user.is_none(),
             microdollars,
             occurred_at: Utc::now() - TimeDelta::minutes(1),
             ..self.spend()

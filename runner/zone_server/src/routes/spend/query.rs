@@ -10,7 +10,6 @@ const TO: &str = "to";
 const WORKSPACE_ID: &str = "workspace_id";
 const USER_ID: &str = "user_id";
 
-/// The days and the workspace and member a report or export covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Query {
     pub range: Range,
@@ -54,7 +53,6 @@ impl Query {
         }
     }
 
-    /// What an export's audit row records it covered.
     pub fn audited(&self) -> Value {
         json!({
             FROM: self.range.from,

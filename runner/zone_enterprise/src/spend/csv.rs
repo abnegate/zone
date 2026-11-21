@@ -4,12 +4,13 @@ use uuid::Uuid;
 use crate::audit::csv::field;
 use crate::spend::microdollars::Microdollars;
 
-pub const HEADER: &str = "date,workspace_id,workspace,user_id,user_email,model,provider,requests,prompt_tokens,completion_tokens,spend_usd\r\n";
+pub const HEADER: &str = "date,workspace_id,workspace,user_id,user_email,automated,model,provider,requests,prompt_tokens,completion_tokens,spend_usd\r\n";
 
 const DELIMITER: &str = ",";
 const TERMINATOR: &str = "\r\n";
 
-/// One CSV row: a day's usage for one workspace, user, model and provider.
+/// A day's usage for one workspace, user, model and provider. With no user it is the workspace's
+/// automation when `automated`, and otherwise a member since deleted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     pub date: NaiveDate,
@@ -17,6 +18,7 @@ pub struct Line {
     pub workspace: Option<String>,
     pub user_id: Option<Uuid>,
     pub user_email: Option<String>,
+    pub automated: bool,
     pub model: String,
     pub provider: String,
     pub requests: i64,
@@ -32,6 +34,7 @@ pub fn row(line: &Line) -> String {
         field(line.workspace.as_deref().unwrap_or_default()),
         identifier(line.user_id),
         field(line.user_email.as_deref().unwrap_or_default()),
+        line.automated.to_string(),
         field(&line.model),
         field(&line.provider),
         line.requests.to_string(),

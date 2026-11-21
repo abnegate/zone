@@ -27,7 +27,7 @@ pub use exhausted::{BUDGET_EXHAUSTED, Exhausted};
 pub use microdollars::Microdollars;
 pub use month::Month;
 pub use patch::Patch;
-pub use range::Range;
+pub use range::{MAXIMUM_DAYS, Range};
 pub use scope::Scope;
 pub use state::State;
 pub use target::Target;

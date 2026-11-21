@@ -6,6 +6,7 @@ use super::*;
 
 const WORKSPACE: Uuid = Uuid::from_u128(0x2222_2222_2222_4222_8222_2222_2222_2222);
 const USER: Uuid = Uuid::from_u128(0x3333_3333_3333_4333_8333_3333_3333_3333);
+const SCOPES: [Scope; 3] = [Scope::Organization, Scope::Workspace, Scope::User];
 
 fn day(text: &str) -> NaiveDate {
     NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap()
@@ -225,6 +226,38 @@ fn refuses_bad_dates_and_backward_ranges() {
 }
 
 #[test]
+fn a_range_covers_at_most_a_leap_year_of_days() {
+    let today = day("2026-11-21");
+    let longest = Range::parse(Some("2025-11-21"), None, today).unwrap();
+    assert_eq!(longest.length(), MAXIMUM_DAYS);
+    assert_eq!(longest.days().count(), 366);
+    assert_eq!(
+        Range::parse(Some("2025-11-20"), None, today),
+        Err(Error::RangeInvalid),
+        "a day longer than the longest range"
+    );
+    assert_eq!(
+        Range::parse(Some("2000-01-01"), Some("2026-11-21"), today),
+        Err(Error::RangeInvalid)
+    );
+}
+
+#[test]
+fn a_range_walks_its_days_in_order() {
+    let range = Range::parse(Some("2026-02-27"), Some("2026-03-02"), day("2026-11-21")).unwrap();
+    assert_eq!(
+        range.days().collect::<Vec<_>>(),
+        [
+            day("2026-02-27"),
+            day("2026-02-28"),
+            day("2026-03-01"),
+            day("2026-03-02"),
+        ]
+    );
+    assert_eq!(range.length(), 4);
+}
+
+#[test]
 fn state_follows_the_threshold_and_the_limit() {
     let budget = budget(100_000_000, 80);
     for (spent, state) in [
@@ -267,12 +300,14 @@ fn states_and_scopes_serialise_as_the_contract() {
         json!([State::Under, State::Warning, State::Exhausted]),
         json!(["under", "warning", "exhausted"])
     );
+    assert_eq!(json!(SCOPES), json!(["organization", "workspace", "user"]));
     assert_eq!(
-        json!(Scope::ALL),
-        json!(["organization", "workspace", "user"])
-    );
-    assert_eq!(
-        json!(Uncounted::ALL),
+        json!([
+            Uncounted::CodingAgent,
+            Uncounted::DirectProvider,
+            Uncounted::ExternalEndpoint,
+            Uncounted::SavedKey,
+        ]),
         json!([
             "coding_agent",
             "direct_provider",
@@ -448,7 +483,7 @@ fn a_stored_target_takes_its_scope_from_its_ids() {
 
 #[test]
 fn exhausted_messages_are_the_contract() {
-    let messages: Vec<String> = Scope::ALL
+    let messages: Vec<String> = SCOPES
         .into_iter()
         .map(|scope| Exhausted { scope }.to_string())
         .collect();
@@ -460,7 +495,7 @@ fn exhausted_messages_are_the_contract() {
             "Your monthly AI budget is used up, so this request wasn't sent. An organization admin can raise it under Settings › Spend; it resets on the 1st (UTC).",
         ]
     );
-    for scope in Scope::ALL {
+    for scope in SCOPES {
         assert_eq!(Exhausted { scope }.code(), "budget_exhausted");
     }
 }
@@ -477,6 +512,7 @@ mod csv {
             workspace: Some("Platform".to_owned()),
             user_id: Some(USER),
             user_email: Some("ada@example.com".to_owned()),
+            automated: false,
             model: "gpt-4o".to_owned(),
             provider: "openai".to_owned(),
             requests: 3,
@@ -490,7 +526,7 @@ mod csv {
     fn header_names_every_column_and_ends_with_crlf() {
         assert_eq!(
             HEADER,
-            "date,workspace_id,workspace,user_id,user_email,model,provider,requests,prompt_tokens,completion_tokens,spend_usd\r\n"
+            "date,workspace_id,workspace,user_id,user_email,automated,model,provider,requests,prompt_tokens,completion_tokens,spend_usd\r\n"
         );
     }
 
@@ -500,7 +536,7 @@ mod csv {
             row(&line()),
             concat!(
                 "2026-11-03,22222222-2222-4222-8222-222222222222,Platform,",
-                "33333333-3333-4333-8333-333333333333,ada@example.com,gpt-4o,openai,",
+                "33333333-3333-4333-8333-333333333333,ada@example.com,false,gpt-4o,openai,",
                 "3,1200,340,1.234568\r\n",
             )
         );
@@ -513,12 +549,29 @@ mod csv {
             workspace: None,
             user_id: None,
             user_email: None,
+            automated: true,
             spend: Microdollars::ZERO,
             ..line()
         };
         assert_eq!(
             row(&line),
-            "2026-11-03,,,,,gpt-4o,openai,3,1200,340,0.000000\r\n"
+            "2026-11-03,,,,,true,gpt-4o,openai,3,1200,340,0.000000\r\n"
+        );
+    }
+
+    #[test]
+    fn writes_a_former_member_apart_from_automation() {
+        let line = Line {
+            user_id: None,
+            user_email: None,
+            ..line()
+        };
+        assert_eq!(
+            row(&line),
+            concat!(
+                "2026-11-03,22222222-2222-4222-8222-222222222222,Platform,,,false,",
+                "gpt-4o,openai,3,1200,340,1.234568\r\n",
+            )
         );
     }
 

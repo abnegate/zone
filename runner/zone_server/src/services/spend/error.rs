@@ -10,6 +10,8 @@ pub enum Error {
     Status(StatusCode),
     #[error("LiteLLM registered a key other than the one Zone derived")]
     Token,
+    #[error("Could not check {failed} of {checked} spend keys with LiteLLM")]
+    Unverified { failed: usize, checked: usize },
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }

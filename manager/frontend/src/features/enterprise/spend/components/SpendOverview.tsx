@@ -26,6 +26,8 @@ const DELETED_KEY = 'deleted';
 
 const AUTOMATION_KEY = 'automation';
 
+const FORMER_KEY = 'former';
+
 function workspaceRows(report: SpendReport): BreakdownRow[] {
   return report.workspaces.map(({ id, name, ...usage }) => ({
     key: id ?? DELETED_KEY,
@@ -35,11 +37,25 @@ function workspaceRows(report: SpendReport): BreakdownRow[] {
   }));
 }
 
+function personKey(id: string | null, automated: boolean): string {
+  if (automated) return AUTOMATION_KEY;
+  return id ?? FORMER_KEY;
+}
+
+function personDetail(
+  name: string | null,
+  email: string | null,
+  automated: boolean
+): string | undefined {
+  if (automated) return AUTOMATION_DETAIL;
+  return name ? (email ?? undefined) : undefined;
+}
+
 function personRows(report: SpendReport): BreakdownRow[] {
-  return report.users.map(({ id, name, email, ...usage }) => ({
-    key: id ?? AUTOMATION_KEY,
-    name: personName({ id, name, email }),
-    detail: id === null ? AUTOMATION_DETAIL : name ? (email ?? undefined) : undefined,
+  return report.users.map(({ id, name, email, automated, ...usage }) => ({
+    key: personKey(id, automated),
+    name: personName({ id, name, email, automated }),
+    detail: personDetail(name, email, automated),
     muted: id === null,
     usage,
   }));

@@ -1,24 +1,29 @@
 //! The spend data layer: budgets, derived keys, ingesting LiteLLM's spend logs, and keeping
 //! LiteLLM's keys in step.
 
+use std::time::Duration;
+
 use abnegate_secret::MasterKey;
 use chrono::{DateTime, NaiveDate, SubsecRound, TimeDelta, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
-use wiremock::matchers::{body_json, method, path};
+use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 use zone_enterprise::spend::{Budget, Microdollars, Month, Scope, State, Target};
 use zone_server::db::audit::lock::Lock;
 use zone_server::db::migrations;
+use zone_server::db::organization_members::OrgRole;
 use zone_server::db::spend::budgets::{self, Announcement, BudgetRow, CreateError, Crossing};
 use zone_server::db::spend::{cursor, keys};
 use zone_server::services::spend::attribution::attribute;
 use zone_server::services::spend::client::DATE_FORMAT;
 use zone_server::services::spend::ingest::{self, Ingested, OVERLAP, SPEND_LOCK};
-use zone_server::services::spend::{Key, registry, upkeep};
+use zone_server::services::spend::{Error, Key, Subject, registry, upkeep};
 
 use crate::common::Database;
-use crate::common::spend::{DELETE_PATH, Fixture, GENERATE_PATH, LOGS_PATH, MASTER, log};
+use crate::common::spend::{
+    DELETE_PATH, Fixture, GENERATE_PATH, INFO_PATH, LOGS_PATH, MASTER, log,
+};
 
 const PREFIX: &str = "spend_store";
 const TOKEN: &str = "spend-store-token";
@@ -86,8 +91,8 @@ impl Store {
     ) {
         sqlx::query(
             "INSERT INTO spend_records (request_id, organization_id, workspace_id, user_id, \
-             token, model, provider, spend_microdollars, occurred_at) \
-             VALUES ($1, $2, $3, $4, $5, 'gpt-4o', 'openai', $6, $7)",
+             automated, token, model, provider, spend_microdollars, occurred_at) \
+             VALUES ($1, $2, $3, $4, $4::uuid IS NULL, $5, 'gpt-4o', 'openai', $6, $7)",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(organization)
@@ -1023,6 +1028,7 @@ async fn keys_are_recorded_once_and_revoked_keys_stay() {
         ["automation"]
     );
     assert_eq!(active[0].user_id, None);
+    assert!(active[0].automated, "a key with no member is automation's");
     assert_eq!(keys::earliest(pool).await.unwrap(), Some(earliest));
 
     keys::insert(
@@ -1092,6 +1098,7 @@ async fn attributed_spend_lands_with_its_organization_workspace_and_user() {
     let automated = &stored[0];
     assert_eq!(automated.request_id, "automation-request");
     assert_eq!(automated.user_id, None);
+    assert!(automated.automated);
     assert_eq!(automated.spend_microdollars, 500_000);
     let spent = &stored[1];
     assert_eq!(spent.request_id, "member-request");
@@ -1516,27 +1523,225 @@ async fn a_key_an_earlier_encryption_key_derived_is_revoked_and_its_spend_still_
     fixture.cleanup().await;
 }
 
-#[tokio::test]
-async fn a_deleted_workspace_keeps_its_spend_in_the_organization() {
-    let fixture = Fixture::new("spend_workspace_deleted").await;
-    fixture.licensed().await;
-    let member = attributed(&fixture).await;
-    fixture
-        .mount_logs(vec![log("request", &member.token, Utc::now(), 0.1)])
-        .await;
-    ingested(&fixture).await;
-
+async fn delete_workspace(fixture: &Fixture, workspace: Uuid) {
     sqlx::query("DELETE FROM workspaces WHERE id = $1")
-        .bind(fixture.policy.workspace)
+        .bind(workspace)
         .execute(fixture.pool())
         .await
         .unwrap();
+}
+
+async fn delete_user(fixture: &Fixture, user: Uuid) {
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+}
+
+async fn revoked_at(fixture: &Fixture, token: &str) -> Option<DateTime<Utc>> {
+    sqlx::query_scalar("SELECT revoked_at FROM spend_keys WHERE token = $1")
+        .bind(token)
+        .fetch_one(fixture.pool())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn spend_landing_after_its_workspace_is_deleted_still_counts_for_the_organization() {
+    let fixture = Fixture::new("spend_workspace_deleted").await;
+    fixture.licensed().await;
+    let member = attributed(&fixture).await;
+    delete_workspace(&fixture, fixture.policy.workspace).await;
+    fixture
+        .mount_logs(vec![log("late", &member.token, Utc::now(), 0.1)])
+        .await;
+
+    assert_eq!(
+        ingested(&fixture).await,
+        Ingested::Done { rows: 1, stored: 1 }
+    );
 
     let stored = fixture.stored().await;
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].workspace_id, None);
     assert_eq!(stored[0].organization_id, fixture.policy.organization);
-    assert!(keys::active(fixture.pool()).await.unwrap().is_empty());
+    assert_eq!(stored[0].user_id, Some(fixture.policy.owner.id));
+    assert!(!stored[0].automated);
+    let active = keys::active(fixture.pool()).await.unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].workspace_id, None);
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn spend_landing_after_its_member_is_deleted_is_kept_apart_from_automation() {
+    let fixture = Fixture::new("spend_member_deleted").await;
+    fixture.licensed().await;
+    let departed = fixture.policy.member(OrgRole::Member, None).await;
+    let member = fixture
+        .derive(&Subject {
+            user: Some(departed.id),
+            ..fixture.subject()
+        })
+        .await;
+    let automation = fixture.derive(&fixture.automation()).await;
+    delete_user(&fixture, departed.id).await;
+    let start = Utc::now().trunc_subsecs(3);
+    fixture
+        .mount_logs(vec![
+            log("automation-request", &automation.token, start, 0.2),
+            log("member-request", &member.token, start, 0.1),
+        ])
+        .await;
+
+    assert_eq!(
+        ingested(&fixture).await,
+        Ingested::Done { rows: 2, stored: 2 }
+    );
+
+    let stored = fixture.stored().await;
+    assert_eq!(stored[0].request_id, "automation-request");
+    assert_eq!((stored[0].user_id, stored[0].automated), (None, true));
+    assert_eq!(stored[1].request_id, "member-request");
+    assert_eq!((stored[1].user_id, stored[1].automated), (None, false));
+    assert_eq!(stored[1].workspace_id, Some(fixture.policy.workspace));
+    assert_eq!(stored[1].organization_id, fixture.policy.organization);
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_keys_of_deleted_workspaces_and_members_are_revoked_and_never_registered_again() {
+    let fixture = Fixture::new("spend_revoke_deleted").await;
+    fixture.licensed().await;
+    let owner = attributed(&fixture).await;
+    let departed = fixture.policy.member(OrgRole::Member, None).await;
+    let former = attribute(
+        fixture.state(),
+        fixture.instance(),
+        &Subject {
+            user: Some(departed.id),
+            ..fixture.subject()
+        },
+    )
+    .await;
+    let former = Key::hash(former.key().expose());
+    let second = fixture.policy.another_workspace().await;
+    let closed = fixture
+        .derive(&Subject {
+            workspace: second,
+            user: None,
+            ..fixture.subject()
+        })
+        .await;
+    delete_user(&fixture, departed.id).await;
+    delete_workspace(&fixture, second).await;
+    fixture.litellm.reset().await;
+    Mock::given(method("GET"))
+        .and(path(INFO_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "info": {} })))
+        .expect(1)
+        .mount(&fixture.litellm)
+        .await;
+    Fixture::registration()
+        .expect(0)
+        .mount(&fixture.litellm)
+        .await;
+
+    assert_eq!(
+        upkeep::verify(fixture.state(), &fixture.client())
+            .await
+            .unwrap(),
+        0,
+        "only the owner's key is asked about"
+    );
+    fixture.litellm.verify().await;
+    fixture.litellm.reset().await;
+    Mock::given(method("POST"))
+        .and(path(DELETE_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(&fixture.litellm)
+        .await;
+
+    assert_eq!(
+        upkeep::revoke(fixture.state(), &fixture.client())
+            .await
+            .unwrap(),
+        2
+    );
+
+    fixture.litellm.verify().await;
+    let deleted: serde_json::Value =
+        serde_json::from_slice(&fixture.received(DELETE_PATH).await[0].body).unwrap();
+    let mut sent: Vec<&str> = deleted["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|token| token.as_str().unwrap())
+        .collect();
+    sent.sort_unstable();
+    let mut expected = [former.as_str(), closed.token.as_str()];
+    expected.sort_unstable();
+    assert_eq!(sent, expected);
+    assert!(revoked_at(&fixture, &former).await.is_some());
+    assert!(revoked_at(&fixture, &closed.token).await.is_some());
+    assert_eq!(revoked_at(&fixture, &owner.token).await, None);
+    let host = fixture.client().host().to_string();
+    assert!(!registry::registered(&host, &former));
+    assert!(registry::registered(&host, &owner.token));
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn verify_checks_every_key_when_litellm_fails_on_one() {
+    let fixture = Fixture::new("spend_verify_partial").await;
+    fixture.licensed().await;
+    let owner = attributed(&fixture).await;
+    let automation = attribute(fixture.state(), fixture.instance(), &fixture.automation()).await;
+    let automation = Key::hash(automation.key().expose());
+    fixture.litellm.reset().await;
+    Mock::given(method("GET"))
+        .and(path(INFO_PATH))
+        .and(query_param("key", owner.token.as_str()))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&fixture.litellm)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(INFO_PATH))
+        .and(query_param("key", automation.as_str()))
+        .respond_with(
+            ResponseTemplate::new(404)
+                .set_delay(Duration::from_millis(300))
+                .set_body_json(serde_json::json!({ "error": { "message": "Key not found" } })),
+        )
+        .mount(&fixture.litellm)
+        .await;
+    Fixture::registration()
+        .expect(1)
+        .mount(&fixture.litellm)
+        .await;
+
+    let failed = upkeep::verify(fixture.state(), &fixture.client())
+        .await
+        .expect_err("a key LiteLLM couldn't answer for fails the run");
+
+    assert!(
+        matches!(
+            failed,
+            Error::Unverified {
+                failed: 1,
+                checked: 2
+            }
+        ),
+        "{failed:?}"
+    );
+    fixture.litellm.verify().await;
+    let host = fixture.client().host().to_string();
+    assert!(registry::registered(&host, &automation));
 
     fixture.cleanup().await;
 }

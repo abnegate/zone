@@ -1,5 +1,7 @@
 //! The LiteLLM virtual keys Zone derived, by token, and whose spend each one carries. A revoked
 //! key keeps its row, so spend LiteLLM logged under it before the revocation still attributes.
+//! A key whose workspace or member is deleted keeps its row too, with that id cleared, so spend
+//! still in flight lands as a deleted workspace's or a former member's.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -11,8 +13,9 @@ use crate::db::DbResult;
 pub struct KeyRow {
     pub token: String,
     pub organization_id: Uuid,
-    pub workspace_id: Uuid,
+    pub workspace_id: Option<Uuid>,
     pub user_id: Option<Uuid>,
+    pub automated: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -26,8 +29,8 @@ pub async fn insert(
     user: Option<Uuid>,
 ) -> DbResult<()> {
     sqlx::query(
-        "INSERT INTO spend_keys (token, organization_id, workspace_id, user_id)
-         VALUES ($1, $2, $3, $4)
+        "INSERT INTO spend_keys (token, organization_id, workspace_id, user_id, automated)
+         VALUES ($1, $2, $3, $4, $4::uuid IS NULL)
          ON CONFLICT (token) DO UPDATE SET revoked_at = NULL
          WHERE spend_keys.revoked_at IS NOT NULL",
     )
@@ -42,7 +45,7 @@ pub async fn insert(
 
 pub async fn active(pool: &PgPool) -> DbResult<Vec<KeyRow>> {
     sqlx::query_as(
-        "SELECT token, organization_id, workspace_id, user_id, created_at
+        "SELECT token, organization_id, workspace_id, user_id, automated, created_at
          FROM spend_keys WHERE revoked_at IS NULL ORDER BY created_at, token",
     )
     .fetch_all(pool)

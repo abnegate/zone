@@ -4,7 +4,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Deserializer};
 use zone_enterprise::spend::Microdollars;
 
-use crate::db::spend::records::Record;
+use crate::db::spend::records::Charge;
 
 pub const FAILURE: &str = "failure";
 pub const UNKNOWN: &str = "unknown";
@@ -56,10 +56,10 @@ impl Log {
         self.status.as_deref() == Some(FAILURE)
     }
 
-    /// The record of this request, none when it was sent under no key.
-    pub fn record(&self) -> Option<Record> {
+    /// What this request cost, none when it was sent under no key.
+    pub fn record(&self) -> Option<Charge> {
         let token = named(self.api_key.as_deref())?;
-        Some(Record {
+        Some(Charge {
             request_id: self.request_id.clone(),
             token: token.to_string(),
             model: self.model().to_string(),

@@ -22,6 +22,7 @@ import {
 } from '../fixtures';
 import {
   ADD_LABEL,
+  AUTOMATION_DETAIL,
   AUTOMATION_LABEL,
   CHART_CAPTION,
   DELETED_WORKSPACE,
@@ -37,6 +38,7 @@ import {
   PAGE_TITLE,
   TO_LABEL,
   UNCOUNTED_FOOTNOTE,
+  UNKNOWN_PERSON,
   UPGRADE_NOTICE,
   WORKSPACE_FILTER_LABEL,
 } from '../labels';
@@ -204,6 +206,22 @@ describe('SpendPage', () => {
         'Completion tokens3,037,500',
       ]);
       expect(screen.getByText('Counted through Nov 21 at 10:04 AM UTC')).toBeInTheDocument();
+    });
+
+    it('labels a former member apart from automation', async () => {
+      await loaded(ACTIVE_REPORT);
+
+      const people = screen.getByRole('table', { name: 'By person' });
+      const names = within(people)
+        .getAllByRole('row')
+        .slice(1)
+        .map((row) => within(row).getAllByRole('cell')[0].textContent);
+      expect(names).toEqual([
+        'Ada Lovelaceada@example.com',
+        `${AUTOMATION_LABEL}${AUTOMATION_DETAIL}`,
+        'grace@example.com',
+        UNKNOWN_PERSON,
+      ]);
     });
 
     it('breaks spend down and labels deleted workspaces and automation', async () => {

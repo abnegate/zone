@@ -33,8 +33,10 @@ const ENTERPRISE = join(RUNNER, 'zone_enterprise/src');
 const SPEND = join(ENTERPRISE, 'spend');
 const ROUTES = join(SERVER, 'routes/spend');
 const REPORT = join(SERVER, 'db/spend/report');
-const REPORTS_RS = join(ROUTES, 'reports.rs');
-const BUDGETS_RS = join(ROUTES, 'budgets.rs');
+const REPORT_RESPONSE_RS = join(ROUTES, 'report_response.rs');
+const REPORT_RS = join(ROUTES, 'report.rs');
+const BUDGETS_RESPONSE_RS = join(ROUTES, 'budgets_response.rs');
+const BUDGET_RESPONSE_RS = join(ROUTES, 'budget_response.rs');
 const EXPORTS_RS = join(ROUTES, 'exports.rs');
 const QUERY_RS = join(ROUTES, 'query.rs');
 const ROUTES_RS = join(SERVER, 'routes/mod.rs');
@@ -61,15 +63,15 @@ const FILENAME = '"zone-spend-{}-{}.csv"';
 type Shaped = z.ZodObject<z.ZodRawShape>;
 
 const RESPONSES: [string, string, Shaped][] = [
-  ['ReportResponse', REPORTS_RS, SpendReportResponseSchema],
-  ['Report', REPORTS_RS, SpendReportSchema],
+  ['ReportResponse', REPORT_RESPONSE_RS, SpendReportResponseSchema],
+  ['Report', REPORT_RS, SpendReportSchema],
   ['Usage', join(REPORT, 'usage.rs'), UsageSchema],
   ['Day', join(REPORT, 'day.rs'), DayUsageSchema],
   ['WorkspaceUsage', join(REPORT, 'workspace_usage.rs'), WorkspaceUsageSchema],
   ['UserUsage', join(REPORT, 'user_usage.rs'), UserUsageSchema],
   ['NamedUsage', join(REPORT, 'named_usage.rs'), NamedUsageSchema],
-  ['BudgetsResponse', BUDGETS_RS, BudgetsResponseSchema],
-  ['BudgetResponse', BUDGETS_RS, BudgetSchema],
+  ['BudgetsResponse', BUDGETS_RESPONSE_RS, BudgetsResponseSchema],
+  ['BudgetResponse', BUDGET_RESPONSE_RS, BudgetSchema],
 ];
 
 const REQUESTS: [string, string, Shaped, Record<string, unknown>][] = [

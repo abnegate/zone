@@ -1298,10 +1298,12 @@ CREATE TABLE spend_cursor (
 CREATE TABLE spend_keys (
     token text NOT NULL PRIMARY KEY,
     organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    user_id uuid REFERENCES users(id) ON DELETE CASCADE,
+    workspace_id uuid REFERENCES workspaces(id) ON DELETE SET NULL,
+    user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+    automated boolean NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    revoked_at timestamp with time zone
+    revoked_at timestamp with time zone,
+    CONSTRAINT spend_keys_automated_check CHECK (NOT automated OR user_id IS NULL)
 );
 
 CREATE TABLE spend_records (
@@ -1309,6 +1311,7 @@ CREATE TABLE spend_records (
     organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     workspace_id uuid REFERENCES workspaces(id) ON DELETE SET NULL,
     user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+    automated boolean NOT NULL,
     token text NOT NULL,
     model text NOT NULL,
     provider text NOT NULL,
@@ -1318,7 +1321,8 @@ CREATE TABLE spend_records (
     failed boolean DEFAULT false NOT NULL,
     occurred_at timestamp with time zone NOT NULL,
     CONSTRAINT spend_records_spend_check CHECK (spend_microdollars >= 0),
-    CONSTRAINT spend_records_tokens_check CHECK (prompt_tokens >= 0 AND completion_tokens >= 0)
+    CONSTRAINT spend_records_tokens_check CHECK (prompt_tokens >= 0 AND completion_tokens >= 0),
+    CONSTRAINT spend_records_automated_check CHECK (NOT automated OR user_id IS NULL)
 );
 CREATE INDEX idx_spend_records_organization ON spend_records (organization_id, occurred_at);
 CREATE INDEX idx_spend_records_workspace ON spend_records (workspace_id, occurred_at);

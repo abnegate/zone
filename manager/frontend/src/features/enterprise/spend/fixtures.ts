@@ -151,12 +151,13 @@ export const POPULATED_WORKSPACES: WorkspaceUsage[] = [
   { id: null, name: null, ...DELETED },
 ];
 
-const [ADA, AUTOMATION, GRACE] = share(POPULATED_TOTAL, [48, 31, 21]);
+const [ADA, AUTOMATION, GRACE, FORMER] = share(POPULATED_TOTAL, [48, 31, 15, 6]);
 
 export const POPULATED_USERS: UserUsage[] = [
-  { id: ADA_ID, name: 'Ada Lovelace', email: 'ada@example.com', ...ADA },
-  { id: null, name: null, email: null, ...AUTOMATION },
-  { id: GRACE_ID, name: null, email: 'grace@example.com', ...GRACE },
+  { id: ADA_ID, name: 'Ada Lovelace', email: 'ada@example.com', automated: false, ...ADA },
+  { id: null, name: null, email: null, automated: true, ...AUTOMATION },
+  { id: GRACE_ID, name: null, email: 'grace@example.com', automated: false, ...GRACE },
+  { id: null, name: null, email: null, automated: false, ...FORMER },
 ];
 
 const [ANTHROPIC, OPENAI] = share(PRICED_TOTAL, [71, 29]);

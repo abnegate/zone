@@ -11,7 +11,7 @@ use super::client::{Client, PAGE_SIZE};
 use super::error::Error;
 use super::log::Log;
 use crate::db::audit::lock::Lock;
-use crate::db::spend::records::{self, Record};
+use crate::db::spend::records::{self, Charge};
 use crate::db::spend::{cursor, keys};
 use crate::state::AppState;
 
@@ -73,7 +73,7 @@ pub(crate) async fn page_through<Store, Stored>(
     mut store: Store,
 ) -> Result<(u64, u64), Error>
 where
-    Store: FnMut(Vec<Record>) -> Stored,
+    Store: FnMut(Vec<Charge>) -> Stored,
     Stored: Future<Output = Result<u64, Error>>,
 {
     let mut rows = 0;

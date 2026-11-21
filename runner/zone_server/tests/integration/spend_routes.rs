@@ -1,6 +1,8 @@
 //! The spend routes: who may see reports and change budgets, how the license gates each, what a
 //! report and an export contain, and what every change audits.
 
+use std::time::Duration;
+
 use axum::http::StatusCode;
 use chrono::{DateTime, Datelike, NaiveDate, TimeDelta, Utc};
 use serde_json::{Value, json};
@@ -26,7 +28,7 @@ const ORGANIZATION_MISSING: &str = "Organization not found";
 const BUDGET_MISSING: &str = "Budget not found";
 const LIMIT: i64 = 50_000_000;
 const OCTOBER: &str = "from=2026-10-01&to=2026-10-03";
-const CSV_HEADER: &str = "date,workspace_id,workspace,user_id,user_email,model,provider,requests,prompt_tokens,completion_tokens,spend_usd\r\n";
+const CSV_HEADER: &str = "date,workspace_id,workspace,user_id,user_email,automated,model,provider,requests,prompt_tokens,completion_tokens,spend_usd\r\n";
 const CSV_TYPE: &str = "text/csv; charset=utf-8";
 
 fn at(text: &str) -> DateTime<Utc> {
@@ -254,6 +256,13 @@ async fn without_a_license_nothing_is_reported_and_every_change_is_refused() {
         })
     );
     unlicensed(&fixture.get(&exports_path(organization), &owner.token).await);
+    refused(
+        &fixture
+            .get(&export_of(&fixture, "from=October"), &owner.token)
+            .await,
+        StatusCode::BAD_REQUEST,
+        RANGE_INVALID,
+    );
     let budgets = listed(&fixture, &owner.token).await;
     assert_eq!(budgets["entitled"], false);
     assert_eq!(budgets["editable"], false);
@@ -306,7 +315,21 @@ async fn a_lapsed_license_keeps_reports_and_exports_but_refuses_changes() {
     assert_eq!(report["report"]["total"], usage(1_000_000, 1));
     let export = fixture.get(&exports_path(organization), &owner.token).await;
     assert_eq!(export.status, StatusCode::OK, "{}", export.text());
-    assert!(export.text().starts_with(CSV_HEADER));
+    let csv = export.text();
+    let rows: Vec<&str> = csv
+        .strip_prefix(CSV_HEADER)
+        .expect("the export starts with its header")
+        .lines()
+        .collect();
+    assert_eq!(rows.len(), 1, "{csv}");
+    assert!(
+        rows[0].contains(&format!(
+            ",{},{},false,gpt-4o,openai,1,100,20,1.000000",
+            owner.id,
+            email(&fixture, owner.id).await
+        )),
+        "{csv}"
+    );
     let budgets = listed(&fixture, &owner.token).await;
     assert_eq!(budgets["editable"], false);
     assert_eq!(budgets["budgets"][0]["spent_microdollars"], 1_000_000);
@@ -680,6 +703,7 @@ async fn a_report_totals_and_splits_the_organizations_spend_over_its_days() {
         },
         Spend {
             user: None,
+            automated: true,
             model: "claude-sonnet".to_string(),
             provider: "anthropic".to_string(),
             microdollars: 500_000,
@@ -743,13 +767,14 @@ async fn a_report_totals_and_splits_the_organizations_spend_over_its_days() {
     assert_eq!(users.len(), 3);
     assert_eq!(users[0]["id"], json!(owner.id));
     assert_eq!(users[0]["email"], email(&fixture, owner.id).await);
+    assert_eq!(users[0]["automated"], false);
     assert_eq!(users[0]["spend_microdollars"], 3_000_000);
     assert_eq!(users[1]["id"], json!(member.id));
     assert_eq!(users[1]["spend_microdollars"], 1_000_000);
     assert_eq!(
         users[2],
         with_usage(
-            json!({ "id": null, "name": null, "email": null }),
+            json!({ "id": null, "name": null, "email": null, "automated": true }),
             500_000,
             1
         )
@@ -844,19 +869,26 @@ async fn filtering_on_another_organizations_workspace_reports_nothing() {
         })
         .await;
 
-    let report = reported(
-        &fixture,
-        &format!("{OCTOBER}&workspace_id={foreign_workspace}"),
-    )
-    .await["report"]
-        .clone();
-    assert_eq!(report["total"], usage(0, 0));
-    for breakdown in ["workspaces", "users", "models", "providers"] {
-        assert_eq!(report[breakdown], json!([]), "{breakdown}");
+    for filter in [
+        format!("workspace_id={foreign_workspace}"),
+        format!("user_id={}", stranger.id),
+    ] {
+        let report = reported(&fixture, &format!("{OCTOBER}&{filter}")).await["report"].clone();
+        assert_eq!(report["total"], usage(0, 0), "{filter}");
+        for breakdown in ["workspaces", "users", "models", "providers"] {
+            assert_eq!(report[breakdown], json!([]), "{filter}: {breakdown}");
+        }
+        let daily = report["daily"].as_array().unwrap();
+        assert_eq!(daily.len(), 3);
+        assert!(daily.iter().all(|day| day["spend_microdollars"] == 0));
+        let export = fixture
+            .get(
+                &export_of(&fixture, &format!("{OCTOBER}&{filter}")),
+                &fixture.policy.owner.token,
+            )
+            .await;
+        assert_eq!(export.text(), CSV_HEADER, "{filter}");
     }
-    let daily = report["daily"].as_array().unwrap();
-    assert_eq!(daily.len(), 3);
-    assert!(daily.iter().all(|day| day["spend_microdollars"] == 0));
     fixture.cleanup().await;
 }
 
@@ -871,6 +903,7 @@ async fn a_bad_range_is_refused_and_nothing_is_exported() {
         "from=October",
         "workspace_id=not-a-workspace",
         "from=2026-10-01&from=2026-10-02",
+        "from=2025-10-02&to=2026-10-03",
     ] {
         refused(
             &fixture.get(&report_of(&fixture, query), token).await,
@@ -913,6 +946,7 @@ async fn an_export_is_a_csv_attachment_with_neutralised_fields_and_is_audited() 
         fixture
             .record(Spend {
                 user: None,
+                automated: true,
                 microdollars: 500_000,
                 occurred_at: at(occurred_at),
                 ..spend.clone()
@@ -940,8 +974,8 @@ async fn an_export_is_a_csv_attachment_with_neutralised_fields_and_is_audited() 
         response.text(),
         format!(
             "{CSV_HEADER}\
-             2026-10-01,{workspace},Policy,{},{owner_email},\"'=HYPERLINK(\"\"http://example.com\"\")\",openai,1,100,20,1.234567\r\n\
-             2026-10-03,{workspace},Policy,,,gpt-4o,openai,2,200,40,1.000000\r\n",
+             2026-10-01,{workspace},Policy,{},{owner_email},false,\"'=HYPERLINK(\"\"http://example.com\"\")\",openai,1,100,20,1.234567\r\n\
+             2026-10-03,{workspace},Policy,,,true,gpt-4o,openai,2,200,40,1.000000\r\n",
             owner.id
         )
     );
@@ -1025,5 +1059,239 @@ async fn spend_recorded_before_the_month_counts_toward_no_budget() {
     .await;
     assert_eq!(budget["spent_microdollars"], 0);
     assert_eq!(budget["state"], "under");
+    fixture.cleanup().await;
+}
+
+async fn name_workspace(fixture: &Fixture, workspace: Uuid, name: &str) {
+    sqlx::query("UPDATE workspaces SET name = $2 WHERE id = $1")
+        .bind(workspace)
+        .bind(name)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+}
+
+async fn name_user(fixture: &Fixture, user: Uuid, name: &str) {
+    sqlx::query("UPDATE users SET display_name = $2 WHERE id = $1")
+        .bind(user)
+        .bind(name)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_former_members_spend_is_reported_and_exported_apart_from_automation() {
+    let fixture = Fixture::new(PREFIX).await;
+    fixture.licensed().await;
+    let workspace = fixture.policy.workspace;
+    let departed = fixture.policy.member(OrgRole::Member, None).await;
+    let spend = Spend {
+        occurred_at: at("2026-10-02T09:00:00Z"),
+        ..fixture.spend()
+    };
+    fixture
+        .record(Spend {
+            user: None,
+            automated: true,
+            microdollars: 2_000_000,
+            ..spend.clone()
+        })
+        .await;
+    fixture
+        .record(Spend {
+            user: Some(departed.id),
+            microdollars: 500_000,
+            ..spend.clone()
+        })
+        .await;
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(departed.id)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+
+    let report = reported(&fixture, OCTOBER).await["report"].clone();
+    assert_eq!(report["total"], usage(2_500_000, 2));
+    assert_eq!(
+        report["users"],
+        json!([
+            with_usage(
+                json!({ "id": null, "name": null, "email": null, "automated": true }),
+                2_000_000,
+                1
+            ),
+            with_usage(
+                json!({ "id": null, "name": null, "email": null, "automated": false }),
+                500_000,
+                1
+            ),
+        ])
+    );
+    let export = fixture
+        .get(&export_of(&fixture, OCTOBER), &fixture.policy.owner.token)
+        .await;
+    assert_eq!(
+        export.text(),
+        format!(
+            "{CSV_HEADER}\
+             2026-10-02,{workspace},Policy,,,true,gpt-4o,openai,1,100,20,2.000000\r\n\
+             2026-10-02,{workspace},Policy,,,false,gpt-4o,openai,1,100,20,0.500000\r\n"
+        )
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn breakdowns_with_the_same_spend_are_sorted_by_name() {
+    let fixture = Fixture::new(PREFIX).await;
+    fixture.licensed().await;
+    let owner = &fixture.policy.owner;
+    let first = fixture.policy.workspace;
+    let second = fixture.policy.another_workspace().await;
+    let member = fixture.policy.member(OrgRole::Member, None).await;
+    name_workspace(&fixture, second, "Alpha").await;
+    name_user(&fixture, owner.id, "Zed").await;
+    name_user(&fixture, member.id, "Ada").await;
+    let spend = Spend {
+        occurred_at: at("2026-10-02T09:00:00Z"),
+        ..fixture.spend()
+    };
+    fixture
+        .record(Spend {
+            workspace: Some(second),
+            user: Some(member.id),
+            model: "a-model".to_string(),
+            provider: "anthropic".to_string(),
+            ..spend.clone()
+        })
+        .await;
+    fixture.record(spend).await;
+
+    let report = reported(&fixture, OCTOBER).await["report"].clone();
+    let names = |breakdown: &str| -> Vec<Value> {
+        report[breakdown]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].clone())
+            .collect()
+    };
+    assert_eq!(names("workspaces"), [json!("Alpha"), json!("Policy")]);
+    assert_eq!(names("users"), [json!("Ada"), json!("Zed")]);
+    assert_eq!(names("models"), [json!("a-model"), json!("gpt-4o")]);
+    assert_eq!(names("providers"), [json!("anthropic"), json!("openai")]);
+    assert_eq!(report["workspaces"][0]["id"], json!(second));
+    assert_eq!(report["workspaces"][1]["id"], json!(first));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_admin_who_is_not_the_owner_creates_changes_and_deletes_budgets() {
+    let fixture = Fixture::new(PREFIX).await;
+    fixture.licensed().await;
+    let admin = fixture.policy.member(OrgRole::Admin, None).await;
+    let organization = fixture.policy.organization;
+
+    let budget = identifier(&created(&fixture, &admin.token, &organization_wide(LIMIT)).await);
+    let path = budget_path(organization, budget);
+    let patched = fixture
+        .patch(&path, &admin.token, &json!({ "hard": true }))
+        .await;
+    assert_eq!(patched.status, StatusCode::OK, "{}", patched.text());
+    assert_eq!(patched.json_value()["hard"], true);
+    let deleted = fixture.delete(&path, &admin.token).await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+
+    for action in [
+        actions::BUDGET_CREATED,
+        actions::BUDGET_UPDATED,
+        actions::BUDGET_DELETED,
+    ] {
+        let entries = fixture.policy.audits(action).await;
+        assert_eq!(entries.len(), 1, "{action}");
+        assert_eq!(entries[0].actor_id, Some(admin.id), "{action}");
+    }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_budget_of_another_organization_is_not_found_through_this_ones_path() {
+    let fixture = Fixture::new(PREFIX).await;
+    fixture.licensed().await;
+    let owner = &fixture.policy.owner;
+    let stranger = fixture.policy.stranger().await;
+    let (foreign, _) = fixture.policy.another_organization(&stranger).await;
+    let response = fixture
+        .post(
+            &budgets_path(foreign),
+            &stranger.token,
+            &organization_wide(LIMIT),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::CREATED, "{}", response.text());
+    let budget = identifier(&response.json_value());
+    let path = budget_path(fixture.policy.organization, budget);
+
+    for response in [
+        fixture
+            .patch(&path, &owner.token, &json!({ "limit_microdollars": 1 }))
+            .await,
+        fixture.delete(&path, &owner.token).await,
+    ] {
+        assert_eq!(
+            response.status,
+            StatusCode::NOT_FOUND,
+            "{}",
+            response.text()
+        );
+        assert_eq!(response.json_value(), json!({ "error": BUDGET_MISSING }));
+    }
+    let kept = fixture.get(&budgets_path(foreign), &stranger.token).await;
+    assert_eq!(kept.json_value()["budgets"][0]["limit_microdollars"], LIMIT);
+    assert!(
+        fixture
+            .policy
+            .audits(actions::BUDGET_UPDATED)
+            .await
+            .is_empty()
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn reading_spend_waits_on_no_lock_held_on_the_membership() {
+    let fixture = Fixture::new(PREFIX).await;
+    fixture.licensed().await;
+    let owner = &fixture.policy.owner;
+    let organization = fixture.policy.organization;
+    let mut holder = fixture.pool().begin().await.unwrap();
+    sqlx::query(
+        "SELECT 1 FROM organization_members WHERE organization_id = $1 AND user_id = $2 \
+         FOR UPDATE",
+    )
+    .bind(organization)
+    .bind(owner.id)
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+
+    for path in [
+        reports_path(organization),
+        exports_path(organization),
+        budgets_path(organization),
+    ] {
+        let response =
+            tokio::time::timeout(Duration::from_secs(5), fixture.get(&path, &owner.token))
+                .await
+                .unwrap_or_else(|_| panic!("{path} waited on the membership lock"));
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "{path}: {}",
+            response.text()
+        );
+    }
+    holder.rollback().await.unwrap();
     fixture.cleanup().await;
 }

@@ -47,10 +47,10 @@ async fn download(
     let user = caller(auth)?;
     let organization = organization(path)?;
     access::admit(state.db(), organization, user).await?;
+    let query = Query::read(query, Utc::now().date_naive())?;
     if !Standing::read(state).await.enforced {
         return Err(Unlicensed.into());
     }
-    let query = Query::read(query, Utc::now().date_naive())?;
     audit(
         state.db(),
         AuditEvent {
