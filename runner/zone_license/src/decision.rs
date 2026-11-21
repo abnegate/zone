@@ -1,9 +1,11 @@
 use serde::Deserialize;
+use zone_enterprise::Plan;
 
 use crate::grant::Grant;
 use crate::ignored::Ignored;
 use crate::order_error::OrderError;
 use crate::polar::{Event, EventType, Order, SubscriptionStatus};
+use crate::products::Products;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -11,7 +13,10 @@ pub enum Decision {
     Ignore(Ignored),
 }
 
-pub fn decide(event: &Event, products: &[String]) -> Result<Decision, OrderError> {
+/// Only the order's product decides whether a key is issued. The plan follows
+/// the subscription's product, which a plan change has already moved to the
+/// new one, and falls back to the order's when that product isn't listed.
+pub fn decide(event: &Event, products: &Products) -> Result<Decision, OrderError> {
     if event.kind != EventType::OrderPaid {
         return Ok(Decision::Ignore(Ignored::EventType));
     }
@@ -22,7 +27,7 @@ pub fn decide(event: &Event, products: &[String]) -> Result<Decision, OrderError
     if !order.billing_reason.issues() {
         return Ok(Decision::Ignore(Ignored::BillingReason));
     }
-    let Some(product) = sold(&order, products) else {
+    let Some((product, sold)) = sold(&order, products) else {
         return Ok(Decision::Ignore(Ignored::Product));
     };
     let misconfigured = || OrderError::Misconfigured {
@@ -48,14 +53,17 @@ pub fn decide(event: &Event, products: &[String]) -> Result<Decision, OrderError
         seats,
         period_start: subscription.current_period_start,
         period_end: subscription.current_period_end,
+        plan: subscription
+            .product_id
+            .as_deref()
+            .and_then(|product| products.plan(product))
+            .unwrap_or(sold),
     }))
 }
 
-fn sold<'a>(order: &'a Order, products: &[String]) -> Option<&'a str> {
-    order
-        .product_id
-        .as_deref()
-        .filter(|product| products.iter().any(|listed| listed == product))
+fn sold<'a>(order: &'a Order, products: &Products) -> Option<(&'a str, Plan)> {
+    let product = order.product_id.as_deref()?;
+    products.plan(product).map(|plan| (product, plan))
 }
 
 #[cfg(test)]
@@ -74,11 +82,15 @@ mod tests {
         .unwrap()
     }
 
+    fn products() -> Products {
+        Products::parse("p").unwrap()
+    }
+
     #[test]
     fn other_events_are_ignored_without_reading_data() {
         let event = event("subscription.updated", json!("not an order"));
         assert_eq!(
-            decide(&event, &[]),
+            decide(&event, &products()),
             Ok(Decision::Ignore(Ignored::EventType))
         );
     }
@@ -86,6 +98,6 @@ mod tests {
     #[test]
     fn malformed_order_is_an_error() {
         let event = event("order.paid", json!({"id": "o"}));
-        assert_eq!(decide(&event, &[]), Err(OrderError::Malformed));
+        assert_eq!(decide(&event, &products()), Err(OrderError::Malformed));
     }
 }

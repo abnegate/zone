@@ -22,6 +22,7 @@ fn license(expires_at: DateTime<Utc>, subscription: Option<&str>) -> License {
             expires_at,
             key_id: KEY_ID.into(),
             subscription: subscription.map(str::to_owned),
+            plan: None,
         },
         &signing,
     );

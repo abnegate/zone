@@ -2,23 +2,34 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
-use zone_enterprise::{Feature, LICENSE_REQUIRED};
+use zone_enterprise::{Feature, LICENSE_REQUIRED, Plan};
 
 use crate::routes::common::ErrorResponse;
 use crate::state::AppState;
 
-pub const MESSAGE: &str =
+pub const ENTERPRISE_MESSAGE: &str =
     "This needs a Zone Enterprise license that is active or in its grace period.";
+pub const TEAM_MESSAGE: &str =
+    "This needs a Zone Team or Enterprise license that is active or in its grace period.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unentitled(pub Feature);
+
+impl Unentitled {
+    pub fn message(self) -> &'static str {
+        match self.0.plan() {
+            Plan::Team => TEAM_MESSAGE,
+            Plan::Enterprise => ENTERPRISE_MESSAGE,
+        }
+    }
+}
 
 impl IntoResponse for Unentitled {
     fn into_response(self) -> Response {
         tracing::debug!(feature = ?self.0, "Refused a change the license doesn't allow");
         (
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::with_code(MESSAGE, LICENSE_REQUIRED)),
+            Json(ErrorResponse::with_code(self.message(), LICENSE_REQUIRED)),
         )
             .into_response()
     }
@@ -73,22 +84,44 @@ mod tests {
     }
 
     #[test]
-    fn the_message_names_the_one_paid_edition() {
+    fn each_message_names_the_plans_that_include_the_feature() {
         assert_eq!(
-            MESSAGE,
+            ENTERPRISE_MESSAGE,
             "This needs a Zone Enterprise license that is active or in its grace period."
         );
+        assert_eq!(
+            TEAM_MESSAGE,
+            "This needs a Zone Team or Enterprise license that is active or in its grace period."
+        );
+    }
+
+    #[test]
+    fn a_feature_is_refused_with_the_message_of_its_plan() {
+        let cases = [
+            (Feature::Sso, ENTERPRISE_MESSAGE),
+            (Feature::Policy, ENTERPRISE_MESSAGE),
+            (Feature::AuditExport, ENTERPRISE_MESSAGE),
+            (Feature::AuditStreaming, ENTERPRISE_MESSAGE),
+            (Feature::AuditRetention, ENTERPRISE_MESSAGE),
+            (Feature::Spend, TEAM_MESSAGE),
+            (Feature::Members, TEAM_MESSAGE),
+        ];
+        assert_eq!(cases.len(), Feature::ALL.len());
+        for (feature, message) in cases {
+            assert_eq!(Unentitled(feature).message(), message, "{feature:?}");
+        }
     }
 
     #[tokio::test]
     async fn every_feature_is_refused_as_forbidden_with_the_license_code() {
         for feature in Feature::ALL {
-            let response = Unentitled(feature).into_response();
+            let refusal = Unentitled(feature);
+            let response = refusal.into_response();
             assert_eq!(response.status(), StatusCode::FORBIDDEN, "{feature:?}");
             let bytes = response.into_body().collect().await.unwrap().to_bytes();
             assert_eq!(
                 serde_json::from_slice::<Value>(&bytes).unwrap(),
-                json!({ "error": MESSAGE, "code": "license_required" }),
+                json!({ "error": refusal.message(), "code": "license_required" }),
                 "{feature:?}"
             );
         }

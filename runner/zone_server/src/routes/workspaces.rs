@@ -35,6 +35,9 @@ const INVALID_ROLE: &str = "Invalid role. Must be one of: viewer, member, admin,
 const INVALID_SEATED_ROLE: &str = "Invalid role. Must be one of: viewer, member, admin";
 const PROMOTION_REFUSED: &str = "Only workspace owners can promote users to admin or owner";
 
+pub const OUTSIDE_ORGANIZATION: &str = "outside_organization";
+const OUTSIDE_ORGANIZATION_MESSAGE: &str = "Only members of this workspace's organization can join it. Add them to the organization first.";
+
 fn refusal(status: StatusCode, message: &str) -> Response {
     (status, Json(ErrorResponse::new(message))).into_response()
 }
@@ -377,6 +380,7 @@ impl Seating {
 enum Refusal {
     Promotion,
     Exceeds,
+    Outside,
     Seated,
     Vanished(Seating),
     Database(sqlx::Error),
@@ -393,6 +397,14 @@ impl IntoResponse for Refusal {
         match self {
             Self::Promotion => refusal(StatusCode::FORBIDDEN, PROMOTION_REFUSED),
             Self::Exceeds => exceeds().into_response(),
+            Self::Outside => (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::with_code(
+                    OUTSIDE_ORGANIZATION_MESSAGE,
+                    OUTSIDE_ORGANIZATION,
+                )),
+            )
+                .into_response(),
             Self::Seated => refusal(
                 StatusCode::CONFLICT,
                 "User is already an active member of this workspace",
@@ -443,13 +455,16 @@ pub async fn add_member(
 }
 
 /// Adds the user, or reactivates them if they were removed; an active member
-/// is a conflict.
+/// is a conflict, and so is anyone outside the workspace's organization.
 async fn seat(
     state: &AppState,
     member: &WorkspaceMember,
     user_id: Uuid,
     role: WorkspaceRole,
 ) -> Result<(StatusCode, WorkspaceMemberResponse), Refusal> {
+    if !workspace_members::in_organization(state.db(), member.workspace_id, user_id).await? {
+        return Err(Refusal::Outside);
+    }
     let seating =
         match workspace_members::get_member(state.db(), member.workspace_id, user_id).await? {
             Some(existing) if existing.is_active => return Err(Refusal::Seated),

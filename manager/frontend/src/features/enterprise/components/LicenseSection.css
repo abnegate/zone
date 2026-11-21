@@ -53,6 +53,29 @@
   color: var(--ui-text-secondary);
 }
 
+.plan-notice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ui-space-3);
+  min-width: 0;
+}
+
+.plan-notice-title {
+  margin: 0;
+  font-size: var(--ui-text-md);
+  font-weight: 600;
+  line-height: var(--ui-leading-tight);
+  color: var(--ui-text-primary);
+}
+
+.plan-notice p {
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-secondary);
+}
+
 .license-unverified {
   display: flex;
   flex-direction: column;

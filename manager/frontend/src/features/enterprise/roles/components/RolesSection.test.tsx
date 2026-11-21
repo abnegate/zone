@@ -5,8 +5,8 @@ import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../../../api/ApiError';
 import { AdministersServerProvider } from '../../components/AdministersServer';
 import { ASK_FOR_RENEWAL, RENEW_LINK } from '../../components/LapsedNotice';
-import { LICENSE_PATH } from '../../components/LicenseLink';
 import { ASK_FOR_LICENSE, LICENSE_LINK } from '../../components/UpgradeNotice';
+import { LICENSE_PATH } from '../../licensePath';
 import {
   ACTIVE,
   ACTIVE_EMPTY,

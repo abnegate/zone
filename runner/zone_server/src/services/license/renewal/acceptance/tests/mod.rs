@@ -1,6 +1,6 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use uuid::Uuid;
-use zone_enterprise::{Keyring, Payload, SigningKey, TrustedKey, sign};
+use zone_enterprise::{Keyring, Payload, Plan, SigningKey, TrustedKey, sign};
 
 use super::*;
 
@@ -30,6 +30,7 @@ fn current() -> Payload {
         expires_at: expiry(),
         key_id: KEY_ID.into(),
         subscription: Some(SUBSCRIPTION.into()),
+        plan: None,
     }
 }
 
@@ -117,4 +118,24 @@ fn a_key_with_the_same_id_is_refused() {
         ..renewal(&current)
     };
     assert!(!accepts(&verified(&current), &verified(&renewed)));
+}
+
+#[test]
+fn a_key_for_the_same_period_on_another_plan_is_accepted() {
+    let current = Payload {
+        plan: Some(Plan::Team),
+        ..current()
+    };
+    let renewed = Payload {
+        id: Uuid::new_v4(),
+        plan: Some(Plan::Enterprise),
+        ..current.clone()
+    };
+    let (current, renewed) = (verified(&current), verified(&renewed));
+
+    assert_eq!(renewed.expires_at(), current.expires_at());
+    assert_eq!(renewed.seats(), current.seats());
+    assert_eq!(renewed.subscription(), current.subscription());
+    assert_ne!(renewed.id(), current.id());
+    assert!(accepts(&current, &renewed));
 }

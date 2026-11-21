@@ -5,9 +5,25 @@ export {
   organizationScope,
   SERVER_SCOPE,
 } from './audit';
-export { AdministersServerProvider, LicenseSection } from './components';
+export {
+  AdministersServerProvider,
+  LicenseSection,
+  MemberCapBanner,
+  MemberCapRefusal,
+  UpgradeNotice,
+} from './components';
 export * from './hooks';
 export { LicenseRefusal } from './LicenseRefusal';
+export { LICENSE_PATH } from './licensePath';
+export { COMMUNITY_MEMBERS } from './limits';
+export {
+  isMemberCapRefusal,
+  memberCapMessage,
+  memberCapNotice,
+  memberText,
+  overMemberNotice,
+} from './members';
+export { availableOn, editionOf, includes, planLabel } from './plans';
 export {
   AGENT_POLICY_LINK,
   denialMessage,
@@ -54,6 +70,11 @@ export {
   LicenseResponseSchema,
   LicenseStatus,
   LicenseStatusSchema,
+  MemberCapCode,
+  MembersSchema,
+  PLANS,
+  Plan,
+  PlanSchema,
   SeatsSchema,
   SetLicenseRequestSchema,
   UNVERIFIED_CODES,
@@ -64,6 +85,7 @@ export type {
   LicenseDetails,
   LicenseRefusalBody,
   LicenseResponse,
+  Members,
   Seats,
   SetLicenseRequest,
   Unverified,

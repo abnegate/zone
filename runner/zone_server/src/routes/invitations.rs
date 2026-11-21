@@ -17,6 +17,7 @@ use crate::db::audit::{actions, resources};
 use crate::db::organization_members::OrgRole;
 use crate::db::workspace_members::WorkspaceRole;
 use crate::db::{invitations, organization_members, organizations, users, workspaces};
+use crate::services::members;
 use crate::state::AppState;
 
 use super::common::{AuditEvent, ErrorResponse, Timestamps, audit, exceeds};
@@ -31,11 +32,15 @@ fn refusal(status: StatusCode, message: impl Into<String>) -> Refusal {
     (status, Json(ErrorResponse::new(message)))
 }
 
-fn database(error: sqlx::Error) -> Refusal {
-    refusal(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!("Database error: {error}"),
-    )
+fn unavailable(error: sqlx::Error) -> Refusal {
+    tracing::error!(%error, "Failed to read or write invitations");
+    refusal(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+}
+
+fn duplicate(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .is_some_and(|error| error.is_unique_violation())
 }
 
 /// Invitation response
@@ -195,7 +200,7 @@ pub async fn create_invitation(
     for workspace_id in &workspace_ids {
         let workspace = workspaces::get_workspace(state.db(), *workspace_id)
             .await
-            .map_err(database)?;
+            .map_err(unavailable)?;
 
         if workspace.is_none_or(|workspace| workspace.organization_id != organization_id) {
             return Err(refusal(
@@ -205,11 +210,15 @@ pub async fn create_invitation(
         }
     }
 
-    if let Ok(Some(existing_user)) = users::get_user_by_email(state.db(), &request.email).await {
+    let existing_user = users::get_user_by_email(state.db(), &request.email)
+        .await
+        .map_err(unavailable)?;
+
+    if let Some(existing_user) = &existing_user {
         let existing_member =
             organization_members::get_member(state.db(), organization_id, existing_user.id)
                 .await
-                .map_err(database)?;
+                .map_err(unavailable)?;
 
         if existing_member.is_some_and(|member| member.is_active) {
             return Err(refusal(
@@ -219,10 +228,12 @@ pub async fn create_invitation(
         }
     }
 
+    members::admit(&state, existing_user.map(|user| user.id)).await?;
+
     let existing_invitation =
         invitations::get_pending_invitation_for_email(state.db(), &request.email, organization_id)
             .await
-            .map_err(database)?;
+            .map_err(unavailable)?;
 
     if existing_invitation.is_some() {
         return Err(refusal(
@@ -233,7 +244,7 @@ pub async fn create_invitation(
 
     invitations::delete_expired_invitations_for_email(state.db(), &request.email, organization_id)
         .await
-        .map_err(database)?;
+        .map_err(unavailable)?;
 
     let (invitation, token) = invitations::create_invitation(
         state.db(),
@@ -246,14 +257,10 @@ pub async fn create_invitation(
     )
     .await
     .map_err(|error| {
-        let message = error.to_string();
-        if message.contains("duplicate key") || message.contains("unique constraint") {
+        if duplicate(&error) {
             refusal(StatusCode::CONFLICT, "Invitation already exists")
         } else {
-            refusal(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to create invitation: {message}"),
-            )
+            unavailable(error)
         }
     })?;
 
@@ -294,7 +301,7 @@ pub async fn list_invitations(
 ) -> Result<impl IntoResponse, Refusal> {
     let invitations = invitations::list_pending_invitations(state.db(), reader.organization_id)
         .await
-        .map_err(database)?;
+        .map_err(unavailable)?;
 
     let response: Vec<InvitationResponse> = invitations
         .into_iter()
@@ -316,7 +323,7 @@ pub async fn revoke_invitation(
 ) -> Result<impl IntoResponse, Refusal> {
     let invitation = invitations::get_invitation_by_id(state.db(), invitation_id)
         .await
-        .map_err(database)?
+        .map_err(unavailable)?
         .ok_or_else(|| refusal(StatusCode::NOT_FOUND, "Invitation not found"))?;
 
     if invitation.organization_id != revoker.organization_id {
@@ -328,12 +335,9 @@ pub async fn revoke_invitation(
 
     invitations::revoke_invitation(state.db(), invitation_id)
         .await
-        .map_err(|error| {
-            if matches!(error, sqlx::Error::RowNotFound) {
-                refusal(StatusCode::NOT_FOUND, "Invitation not found")
-            } else {
-                database(error)
-            }
+        .map_err(|error| match error {
+            sqlx::Error::RowNotFound => refusal(StatusCode::NOT_FOUND, "Invitation not found"),
+            error => unavailable(error),
         })?;
 
     audit(
@@ -366,12 +370,12 @@ pub async fn get_invitation(
 ) -> Result<impl IntoResponse, Refusal> {
     let invitation = invitations::get_invitation_by_token(state.db(), &token)
         .await
-        .map_err(database)?
+        .map_err(unavailable)?
         .ok_or_else(|| refusal(StatusCode::NOT_FOUND, "Invitation not found or expired"))?;
 
     let organization = organizations::get_organization(state.db(), invitation.organization_id)
         .await
-        .map_err(database)?
+        .map_err(unavailable)?
         .ok_or_else(|| refusal(StatusCode::INTERNAL_SERVER_ERROR, "Organization not found"))?;
 
     let response = InvitationResponse::from_invitation(invitation, None)
@@ -397,12 +401,12 @@ pub async fn accept_invitation(
 
     let invitation = invitations::get_invitation_by_token(state.db(), &token)
         .await
-        .map_err(database)?
+        .map_err(unavailable)?
         .ok_or_else(|| refusal(StatusCode::NOT_FOUND, "Invitation not found or expired"))?;
 
     let user = users::get_user_by_id(state.db(), user_id)
         .await
-        .map_err(database)?
+        .map_err(unavailable)?
         .ok_or_else(|| refusal(StatusCode::UNAUTHORIZED, "User not found"))?;
 
     if user.email != invitation.email {
@@ -412,26 +416,20 @@ pub async fn accept_invitation(
         ));
     }
 
+    members::admit(&state, Some(user_id)).await?;
+
     invitations::accept_invitation(state.db(), &token, user_id)
         .await
-        .map_err(|error| {
-            let message = error.to_string();
-            if matches!(error, sqlx::Error::RowNotFound) {
-                refusal(
-                    StatusCode::NOT_FOUND,
-                    "Invitation not found or already accepted",
-                )
-            } else if message.contains("duplicate key") || message.contains("unique constraint") {
-                refusal(
-                    StatusCode::CONFLICT,
-                    "You are already a member of this organization",
-                )
-            } else {
-                refusal(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to accept invitation: {message}"),
-                )
-            }
+        .map_err(|error| match error {
+            sqlx::Error::RowNotFound => refusal(
+                StatusCode::NOT_FOUND,
+                "Invitation not found or already accepted",
+            ),
+            error if duplicate(&error) => refusal(
+                StatusCode::CONFLICT,
+                "You are already a member of this organization",
+            ),
+            error => unavailable(error),
         })?;
 
     audit(
@@ -459,3 +457,6 @@ pub async fn accept_invitation(
         "message": "Invitation accepted successfully"
     })))
 }
+
+#[cfg(test)]
+mod tests;

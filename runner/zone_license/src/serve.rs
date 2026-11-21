@@ -48,6 +48,13 @@ pub async fn start(config: Config) -> Result<Server, ServeError> {
     let renewal = renewer.is_some();
     let key_id = config.signer.key_id().to_owned();
     let products = config.products.len();
+    for product in config.products.iter() {
+        tracing::info!(
+            product = product.id.as_str(),
+            plan = %product.plan,
+            "Issuing licenses for a Polar product"
+        );
+    }
     let context = Context::new(
         config.signer,
         config.secret,
@@ -94,3 +101,6 @@ fn signals() -> io::Result<impl Future<Output = ()> + Send + 'static> {
         }
     })
 }
+
+#[cfg(test)]
+mod tests;

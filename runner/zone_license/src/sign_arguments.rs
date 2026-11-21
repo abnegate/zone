@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use clap::Args;
 use uuid::Uuid;
+use zone_enterprise::Plan;
 
 use crate::instant;
 
@@ -31,4 +32,7 @@ pub struct SignArguments {
     /// The Polar subscription id, which lets an online server renew the license. Omit it for a key that never renews.
     #[arg(long)]
     pub subscription: Option<String>,
+    /// The plan the license unlocks: team or enterprise.
+    #[arg(long, default_value_t = Plan::Enterprise)]
+    pub plan: Plan,
 }

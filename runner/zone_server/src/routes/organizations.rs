@@ -22,6 +22,7 @@ use crate::db::organization_members::{
 };
 use crate::db::{organizations, users, workspaces};
 use crate::services::login::devices;
+use crate::services::members;
 use crate::state::AppState;
 use crate::sync::hook::Removal;
 
@@ -172,6 +173,10 @@ pub async fn create(
         return refusal(StatusCode::UNAUTHORIZED, "Invalid user ID in token");
     };
 
+    if let Err(refusal) = members::admit(&state, Some(user_id)).await {
+        return refusal.into_response();
+    }
+
     let mut transaction = match state.db().begin().await {
         Ok(transaction) => transaction,
         Err(error) => {
@@ -248,6 +253,12 @@ pub async fn update(
     OrganizationPermit(member): OrganizationPermit<{ Permission::OrganizationUpdate.index() }>,
     Json(request): Json<UpdateOrganizationRequest>,
 ) -> impl IntoResponse {
+    if request.is_active == Some(true)
+        && let Err(refusal) = members::reactivate(&state, member.organization_id).await
+    {
+        return refusal.into_response();
+    }
+
     match organizations::update_organization(
         state.db(),
         member.organization_id,
@@ -580,6 +591,10 @@ pub async fn add_member(
             );
         }
     };
+
+    if let Err(refusal) = members::admit(&state, Some(target)).await {
+        return refusal.into_response();
+    }
 
     let (added, status) =
         match organization_members::get_member(state.db(), member.organization_id, target).await {

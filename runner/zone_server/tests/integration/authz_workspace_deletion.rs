@@ -65,7 +65,22 @@ async fn workspace(client: &TestClient, token: &str, organization: &str) -> Stri
         .to_string()
 }
 
-async fn seat(client: &TestClient, token: &str, workspace: &str, user: &str, role: &str) {
+async fn seat(
+    client: &TestClient,
+    token: &str,
+    organization: &str,
+    workspace: &str,
+    user: &str,
+    role: &str,
+) {
+    client
+        .post_json_auth(
+            &format!("/api/organizations/{organization}/members"),
+            &json!({ "user_id": user, "role": "member" }),
+            token,
+        )
+        .await
+        .assert_status(StatusCode::CREATED);
     client
         .post_json_auth(
             &format!("/api/workspaces/{workspace}/members"),
@@ -81,13 +96,21 @@ async fn a_workspace_admin_cannot_delete_the_workspace_they_were_seated_in() {
     let client = TestClient::with_db().await;
     let owner = account(&client).await;
     let deputy = account(&client).await;
-    let org = organization(&client, &owner.token).await;
-    let ws = workspace(&client, &owner.token, &org).await;
-    seat(&client, &owner.token, &ws, &deputy.user, "admin").await;
+    let organization_id = organization(&client, &owner.token).await;
+    let workspace_id = workspace(&client, &owner.token, &organization_id).await;
+    seat(
+        &client,
+        &owner.token,
+        &organization_id,
+        &workspace_id,
+        &deputy.user,
+        "admin",
+    )
+    .await;
 
     let refused = client
         .delete_auth(
-            &format!("/api/workspaces/{ws}/members/{}", owner.user),
+            &format!("/api/workspaces/{workspace_id}/members/{}", owner.user),
             &deputy.token,
         )
         .await;
@@ -99,7 +122,7 @@ async fn a_workspace_admin_cannot_delete_the_workspace_they_were_seated_in() {
     );
 
     let deleted = client
-        .delete_auth(&format!("/api/workspaces/{ws}"), &deputy.token)
+        .delete_auth(&format!("/api/workspaces/{workspace_id}"), &deputy.token)
         .await;
     assert_eq!(
         deleted.status,
@@ -109,7 +132,7 @@ async fn a_workspace_admin_cannot_delete_the_workspace_they_were_seated_in() {
     );
 
     let survives = client
-        .get_auth(&format!("/api/workspaces/{ws}"), &owner.token)
+        .get_auth(&format!("/api/workspaces/{workspace_id}"), &owner.token)
         .await;
     assert_eq!(
         survives.status,
@@ -123,11 +146,11 @@ async fn a_workspace_admin_cannot_delete_the_workspace_they_were_seated_in() {
 async fn a_workspace_owner_can_still_delete_their_own_workspace() {
     let client = TestClient::with_db().await;
     let owner = account(&client).await;
-    let org = organization(&client, &owner.token).await;
-    let ws = workspace(&client, &owner.token, &org).await;
+    let organization_id = organization(&client, &owner.token).await;
+    let workspace_id = workspace(&client, &owner.token, &organization_id).await;
 
     client
-        .delete_auth(&format!("/api/workspaces/{ws}"), &owner.token)
+        .delete_auth(&format!("/api/workspaces/{workspace_id}"), &owner.token)
         .await
         .assert_status(StatusCode::NO_CONTENT);
 }
@@ -137,13 +160,21 @@ async fn a_workspace_admin_can_still_rename_the_workspace() {
     let client = TestClient::with_db().await;
     let owner = account(&client).await;
     let deputy = account(&client).await;
-    let org = organization(&client, &owner.token).await;
-    let ws = workspace(&client, &owner.token, &org).await;
-    seat(&client, &owner.token, &ws, &deputy.user, "admin").await;
+    let organization_id = organization(&client, &owner.token).await;
+    let workspace_id = workspace(&client, &owner.token, &organization_id).await;
+    seat(
+        &client,
+        &owner.token,
+        &organization_id,
+        &workspace_id,
+        &deputy.user,
+        "admin",
+    )
+    .await;
 
     let renamed = client
         .patch_json_auth(
-            &format!("/api/workspaces/{ws}"),
+            &format!("/api/workspaces/{workspace_id}"),
             &json!({ "name": "Renamed by the deputy" }),
             &deputy.token,
         )

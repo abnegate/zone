@@ -165,6 +165,7 @@ fn sign(context: &Context, license: &License, status: Option<&str>, terms: &Term
         status,
         renewed = %terms.id,
         seats = terms.seats,
+        plan = %terms.plan,
         "Renewed a license"
     );
     (outcome.status(), Json(Renewed { license: key })).into_response()

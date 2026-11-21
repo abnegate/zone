@@ -3,7 +3,7 @@ import { HttpStatus } from '../../api/HttpStatus';
 
 export const RETRY_LIMIT = 3;
 
-function refused(error: Error): boolean {
+export function refused(error: Error): boolean {
   return (
     error instanceof ApiError &&
     error.status >= HttpStatus.BadRequest &&

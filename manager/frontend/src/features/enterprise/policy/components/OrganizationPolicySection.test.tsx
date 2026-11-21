@@ -5,12 +5,15 @@ import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../../../api/ApiError';
 import { AdministersServerProvider } from '../../components/AdministersServer';
 import { ASK_FOR_RENEWAL } from '../../components/LapsedNotice';
-import { ASK_FOR_LICENSE } from '../../components/UpgradeNotice';
+import { ASK_FOR_LICENSE, LICENSE_LINK } from '../../components/UpgradeNotice';
+import { LICENSE_PATH } from '../../licensePath';
 import {
   ACTIVE_ORGANIZATION,
   COMMUNITY_ORGANIZATION,
   LAPSED_ORGANIZATION,
   ORGANIZATION_ID,
+  TEAM_LAPSED_ORGANIZATION,
+  TEAM_ORGANIZATION,
 } from '../fixtures';
 import { DISCARD_LABEL, LAPSED_NOTICE, SAVE_LABEL, UPGRADE_NOTICE } from '../labels';
 import { NOTHING_ALLOWED_WARNING, refusalMessage, unrestrictedText } from '../messages';
@@ -121,6 +124,25 @@ describe('OrganizationPolicySection', () => {
       expect(warning).toHaveTextContent(ASK_FOR_RENEWAL);
       expect(screen.queryByRole('link')).not.toBeInTheDocument();
     });
+
+    for (const [name, response] of [
+      ['an active Team license', TEAM_ORGANIZATION],
+      ['a lapsed Team license', TEAM_LAPSED_ORGANIZATION],
+    ] as const) {
+      it(`shows ${name} the Enterprise upgrade notice and no editor`, async () => {
+        await loaded(response);
+
+        expect(screen.getByRole('note')).toHaveTextContent(UPGRADE_NOTICE);
+        expect(UPGRADE_NOTICE).toContain('Zone Enterprise');
+        expect(screen.getByRole('link', { name: LICENSE_LINK })).toHaveAttribute(
+          'href',
+          LICENSE_PATH
+        );
+        expect(screen.queryByText(LAPSED_NOTICE)).not.toBeInTheDocument();
+        expect(screen.queryByRole('group', { name: 'Providers' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: SAVE_LABEL })).not.toBeInTheDocument();
+      });
+    }
 
     it('warns that a lapsed license keeps enforcing and shows the policy read-only', async () => {
       await loaded(LAPSED_ORGANIZATION);

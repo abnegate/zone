@@ -81,6 +81,27 @@ pub async fn verify_sources_in_workspace(
     Ok(count == source_ids.len() as i64)
 }
 
+pub async fn in_organization(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<bool> {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM workspaces w
+            JOIN organizations o ON o.id = w.organization_id
+            JOIN organization_members m ON m.organization_id = o.id
+            WHERE w.id = $1
+              AND m.user_id = $2
+              AND m.is_active
+              AND o.is_active IS NOT FALSE
+        )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+}
+
 /// Add a user to a workspace with a specific role
 ///
 /// CRITICAL-7: This function now fails if the member already exists (active or inactive).

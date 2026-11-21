@@ -1,6 +1,6 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use uuid::Uuid;
-use zone_enterprise::{Keyring, TrustedKey};
+use zone_enterprise::{Keyring, Plan, TrustedKey};
 
 use super::*;
 use crate::private_key::PrivateKey;
@@ -32,10 +32,23 @@ fn signer() -> Signer {
 }
 
 fn license(expires_at: DateTime<Utc>, seats: u32) -> License {
-    signed(expires_at - TimeDelta::days(365), expires_at, seats)
+    planned(expires_at, seats, Plan::Enterprise)
+}
+
+fn planned(expires_at: DateTime<Utc>, seats: u32, plan: Plan) -> License {
+    signed_for(expires_at - TimeDelta::days(365), expires_at, seats, plan)
 }
 
 fn signed(issued_at: DateTime<Utc>, expires_at: DateTime<Utc>, seats: u32) -> License {
+    signed_for(issued_at, expires_at, seats, Plan::Enterprise)
+}
+
+fn signed_for(
+    issued_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    seats: u32,
+    plan: Plan,
+) -> License {
     let signer = signer();
     let text = signer
         .sign(&Terms {
@@ -45,6 +58,7 @@ fn signed(issued_at: DateTime<Utc>, expires_at: DateTime<Utc>, seats: u32) -> Li
             issued_at,
             expires_at,
             subscription: Some(SUBSCRIPTION.to_owned()),
+            plan,
         })
         .unwrap();
     Keyring::new([TrustedKey::new(KEY_ID, signer.public()).unwrap()])
@@ -70,8 +84,12 @@ fn subscription() -> OrderSubscription {
     }
 }
 
-fn products() -> Vec<String> {
-    vec![PRODUCT.to_owned()]
+fn products() -> Products {
+    Products::parse(PRODUCT).unwrap()
+}
+
+fn team() -> Products {
+    Products::parse(&format!("{PRODUCT}=team")).unwrap()
 }
 
 fn verdict(license: &License, subscription: &OrderSubscription) -> Verdict {
@@ -95,14 +113,106 @@ fn an_active_subscription_with_a_later_period_renews_for_that_period() {
     assert_eq!(
         terms,
         Terms {
-            id: license_id::derive(SUBSCRIPTION, period_end(), 5),
+            id: license_id::derive(SUBSCRIPTION, period_end(), 5, Plan::Enterprise),
             customer: CUSTOMER.to_owned(),
             seats: 5,
             issued_at: period_start(),
             expires_at: period_end(),
             subscription: Some(SUBSCRIPTION.to_owned()),
+            plan: Plan::Enterprise,
         }
     );
+}
+
+#[test]
+fn the_renewed_plan_is_the_current_products() {
+    let terms = renewed(decide(
+        &expiring(),
+        Some(&subscription()),
+        &team(),
+        settled(),
+    ));
+    assert_eq!(terms.plan, Plan::Team);
+    assert_eq!(
+        terms.id,
+        license_id::derive(SUBSCRIPTION, period_end(), 5, Plan::Team)
+    );
+}
+
+#[test]
+fn an_upgrade_in_the_same_period_renews_to_enterprise() {
+    let terms = renewed(verdict(
+        &planned(period_end(), 5, Plan::Team),
+        &subscription(),
+    ));
+    assert_eq!(terms.plan, Plan::Enterprise);
+    assert_eq!(terms.seats, 5);
+    assert_eq!(terms.expires_at, period_end());
+    assert_eq!(
+        terms.id,
+        license_id::derive(SUBSCRIPTION, period_end(), 5, Plan::Enterprise)
+    );
+}
+
+#[test]
+fn a_downgrade_in_the_same_period_renews_to_team() {
+    let terms = renewed(decide(
+        &planned(period_end(), 5, Plan::Enterprise),
+        Some(&subscription()),
+        &team(),
+        settled(),
+    ));
+    assert_eq!(terms.plan, Plan::Team);
+    assert_eq!(terms.seats, 5);
+    assert_eq!(terms.expires_at, period_end());
+    assert_eq!(
+        terms.id,
+        license_id::derive(SUBSCRIPTION, period_end(), 5, Plan::Team)
+    );
+}
+
+#[test]
+fn a_plan_change_derives_another_id_for_the_same_period() {
+    let current = planned(period_end(), 5, Plan::Team);
+    let terms = renewed(verdict(&current, &subscription()));
+    assert_ne!(
+        terms.id,
+        license_id::derive(SUBSCRIPTION, period_end(), 5, Plan::Team)
+    );
+}
+
+#[test]
+fn a_plan_change_in_the_same_period_is_not_held() {
+    let terms = renewed(decide(
+        &planned(period_end(), 5, Plan::Enterprise),
+        Some(&subscription()),
+        &team(),
+        period_start() + TimeDelta::hours(1),
+    ));
+    assert_eq!(terms.plan, Plan::Team);
+}
+
+#[test]
+fn the_same_period_seats_and_plan_is_current_on_either_plan() {
+    assert_eq!(
+        decide(
+            &planned(period_end(), 5, Plan::Team),
+            Some(&subscription()),
+            &team(),
+            settled()
+        ),
+        Verdict::Current
+    );
+    assert_eq!(
+        verdict(&planned(period_end(), 5, Plan::Enterprise), &subscription()),
+        Verdict::Current
+    );
+}
+
+#[test]
+fn an_earlier_period_is_current_even_with_another_plan() {
+    let later = planned(period_end() + TimeDelta::days(30), 5, Plan::Team);
+    assert_eq!(verdict(&later, &subscription()), Verdict::Current);
 }
 
 #[test]
@@ -130,7 +240,10 @@ fn a_seat_change_in_the_same_period_renews() {
     let terms = renewed(verdict(&license(period_end(), 3), &subscription()));
     assert_eq!(terms.seats, 5);
     assert_eq!(terms.expires_at, period_end());
-    assert_eq!(terms.id, license_id::derive(SUBSCRIPTION, period_end(), 5));
+    assert_eq!(
+        terms.id,
+        license_id::derive(SUBSCRIPTION, period_end(), 5, Plan::Enterprise)
+    );
 }
 
 #[test]
@@ -235,8 +348,9 @@ fn an_unlisted_or_missing_product_has_ended() {
         ..subscription()
     };
     assert_eq!(verdict(&expiring(), &none), Verdict::Ended(Reason::Product));
+    let elsewhere = Products::parse("another-product=team").unwrap();
     assert_eq!(
-        decide(&expiring(), Some(&subscription()), &[], settled()),
+        decide(&expiring(), Some(&subscription()), &elsewhere, settled()),
         Verdict::Ended(Reason::Product)
     );
 }

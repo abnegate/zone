@@ -1,7 +1,15 @@
 import { z } from 'zod';
 
+export { MemberCapCode } from './MemberCapCode';
+
 export const Edition = {
   Community: 'community',
+  Team: 'team',
+  Enterprise: 'enterprise',
+} as const;
+
+export const Plan = {
+  Team: 'team',
   Enterprise: 'enterprise',
 } as const;
 
@@ -35,7 +43,9 @@ export const RenewalOutcome = {
   Unreachable: 'unreachable',
 } as const;
 
-export const EDITIONS = [Edition.Community, Edition.Enterprise] as const;
+export const EDITIONS = [Edition.Community, Edition.Team, Edition.Enterprise] as const;
+
+export const PLANS = [Plan.Team, Plan.Enterprise] as const;
 
 export const LICENSE_STATUSES = [
   LicenseStatus.Community,
@@ -76,10 +86,13 @@ export const RENEWAL_OUTCOMES = [
 
 export const EditionSchema = z.enum(EDITIONS);
 
+export const PlanSchema = z.enum(PLANS);
+
 export const LicenseStatusSchema = z.enum(LICENSE_STATUSES);
 
 export const LicenseDetailsSchema = z.object({
   id: z.string(),
+  plan: PlanSchema,
   customer: z.string(),
   seats: z.number().int().positive(),
   issued_at: z.string(),
@@ -91,6 +104,12 @@ export const LicenseDetailsSchema = z.object({
 export const SeatsSchema = z.object({
   used: z.number().int().nonnegative().nullable(),
   licensed: z.number().int().positive().nullable(),
+  over: z.boolean(),
+});
+
+export const MembersSchema = z.object({
+  active: z.number().int().nonnegative().nullable(),
+  cap: z.number().int().positive().nullable(),
   over: z.boolean(),
 });
 
@@ -109,6 +128,7 @@ export const LicenseResponseSchema = z.object({
   status: LicenseStatusSchema,
   license: LicenseDetailsSchema.nullable(),
   seats: SeatsSchema,
+  members: MembersSchema,
   unverified: UnverifiedSchema.nullable(),
   renewal: RenewalSchema.nullable(),
 });

@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { AuthRequestError } from '../../../../api/auth';
 import { clientModule } from '../../../../test/client';
 import { chooseSelectElement } from '../../../../test/select';
+import { memberCapMessage } from '../../../enterprise/members';
+import { PRICING_URL } from '../../../enterprise/pricing';
 import { ACTIVE, AUDITOR, LAPSED, RELEASE_MANAGER } from '../../../enterprise/roles/fixtures';
 import { RoleRefusal } from '../../../enterprise/roles/RoleRefusal';
 import { Permission, RoleCode } from '../../../enterprise/roles/schemas';
@@ -625,6 +628,59 @@ describe('OrgMembersSection', () => {
         expect(screen.getByText('Member added successfully')).toBeInTheDocument();
         expect(screen.getByText('New User')).toBeInTheDocument();
       });
+    });
+  });
+
+  describe('Member cap', () => {
+    async function add() {
+      render(<OrgMembersSection orgId="org-123" />);
+      fireEvent.click(await screen.findByRole('button', { name: /Add Member/i }));
+      fireEvent.change(await screen.findByLabelText(/Email/i), {
+        target: { value: 'fourth@test.com' },
+      });
+      const submit = screen
+        .getAllByRole('button', { name: /Add/i })
+        .find((button) => button.getAttribute('type') === 'submit');
+      fireEvent.click(submit!);
+    }
+
+    it('explains the member cap inside the add form, with a link to the plans', async () => {
+      mockClient.addOrgMember.mockRejectedValue(
+        new AuthRequestError('Server text', 'member_cap_reached')
+      );
+
+      await add();
+
+      const dialog = screen.getByRole('dialog', { name: 'Add Organization Member' });
+      const alert = await within(dialog).findByRole('alert');
+      expect(alert).toHaveTextContent(memberCapMessage());
+      expect(within(alert).getByRole('link', { name: /Compare plans/ })).toHaveAttribute(
+        'href',
+        PRICING_URL
+      );
+      expect(screen.queryByText('Server text')).not.toBeInTheDocument();
+    });
+
+    it('drops the member cap explanation once the add form closes', async () => {
+      mockClient.addOrgMember.mockRejectedValue(
+        new AuthRequestError('Server text', 'member_cap_reached')
+      );
+      await add();
+      await screen.findByText(memberCapMessage(), { exact: false });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
+
+      expect(screen.queryByText(memberCapMessage(), { exact: false })).not.toBeInTheDocument();
+    });
+
+    it('shows the plain message for a refusal that is not the cap', async () => {
+      mockClient.addOrgMember.mockRejectedValue(new Error('User not found'));
+
+      await add();
+
+      expect(await screen.findByText('User not found')).toBeInTheDocument();
+      expect(screen.queryByText(memberCapMessage(), { exact: false })).not.toBeInTheDocument();
     });
   });
 

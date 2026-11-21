@@ -118,6 +118,7 @@ fn mailbox(sender: &Sender) -> Result<Mailbox, MailError> {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
+    use zone_enterprise::Plan;
 
     use super::*;
 
@@ -136,6 +137,7 @@ mod tests {
     fn letter() -> Letter {
         Letter::license(
             "Acme Ltd",
+            Plan::Enterprise,
             5,
             Utc.with_ymd_and_hms(2027, 11, 18, 0, 0, 0).unwrap(),
             "payload.signature",
