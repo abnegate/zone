@@ -62,6 +62,8 @@ const PUBLIC_ROUTES = [
   '"/api/auth/sso/providers"',
   '"/api/auth/sso/providers/{provider_id}/authorizations"',
   '"/api/auth/sso/callbacks"',
+  '"/api/auth/sso/saml/metadata"',
+  '"/api/auth/sso/saml/acs"',
 ];
 
 type Shaped = z.ZodObject<z.ZodRawShape>;

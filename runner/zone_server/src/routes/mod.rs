@@ -110,6 +110,8 @@ pub fn create_router(state: AppState) -> Router {
             post(sso::sign_in::authorize),
         )
         .route("/api/auth/sso/callbacks", post(sso::sign_in::callback))
+        .route("/api/auth/sso/saml/metadata", get(sso::saml::metadata))
+        .route("/api/auth/sso/saml/acs", post(sso::saml::acs))
         // Public invitation route (to view invitation details)
         .route("/api/invitations/{token}", get(invitations::get_invitation))
         // Artifact reads (public - a bearer header or an HMAC-signed URL, checked
