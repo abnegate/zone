@@ -140,6 +140,9 @@ describe('SpendPage', () => {
       const { container } = await loaded(UNLICENSED_REPORT, UNLICENSED_BUDGETS);
 
       const notice = screen.getByRole('note');
+      expect(
+        within(notice).getByRole('heading', { name: 'Available on Team' })
+      ).toBeInTheDocument();
       expect(notice).toHaveTextContent(UPGRADE_NOTICE);
       expect(within(notice).getByRole('link', { name: 'Go to License' })).toHaveAttribute(
         'href',

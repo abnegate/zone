@@ -11,6 +11,7 @@ use zone_enterprise::spend::{
     BODY_INVALID, BUDGET_EXISTS, LIMIT_INVALID, Month, RANGE_INVALID, SCOPE_INVALID,
     THRESHOLD_INVALID,
 };
+use zone_server::auth::entitlement::TEAM_MESSAGE;
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::organization_members::OrgRole;
 use zone_server::db::spend::cursor;
@@ -21,8 +22,6 @@ use crate::common::sso::grace;
 
 const PREFIX: &str = "spend_routes";
 const LICENSE_REQUIRED: &str = "license_required";
-const LICENSE_MESSAGE: &str =
-    "This needs a Zone Team license that is active or in its grace period.";
 const FORBIDDEN: &str = "Only organization owners and admins can see spend or change budgets";
 const ORGANIZATION_MISSING: &str = "Organization not found";
 const BUDGET_MISSING: &str = "Budget not found";
@@ -75,7 +74,7 @@ fn refused(response: &TestResponse, status: StatusCode, code: &str) {
     );
 }
 
-fn unlicensed(response: &TestResponse) {
+fn unentitled(response: &TestResponse) {
     assert_eq!(
         response.status,
         StatusCode::FORBIDDEN,
@@ -84,7 +83,7 @@ fn unlicensed(response: &TestResponse) {
     );
     assert_eq!(
         response.json_value(),
-        json!({ "error": LICENSE_MESSAGE, "code": LICENSE_REQUIRED })
+        json!({ "error": TEAM_MESSAGE, "code": LICENSE_REQUIRED })
     );
 }
 
@@ -236,6 +235,29 @@ async fn only_owners_and_admins_reach_spend_and_strangers_are_told_it_does_not_e
 }
 
 #[tokio::test]
+async fn a_team_license_reports_spend_and_changes_budgets() {
+    let fixture = Fixture::new(PREFIX).await;
+    fixture.licensed().await;
+    let owner = &fixture.policy.owner;
+    fixture.record(fixture.spend()).await;
+
+    let report = reported(&fixture, "").await;
+    assert_eq!(report["edition"], "team");
+    assert_eq!(report["status"], "active");
+    assert_eq!(report["enforced"], true);
+    assert_eq!(report["entitled"], true);
+    assert_eq!(report["editable"], true);
+    assert_eq!(report["report"]["total"], usage(1_000_000, 1));
+    let budget = created(&fixture, &owner.token, &organization_wide(LIMIT)).await;
+    assert_eq!(budget["limit_microdollars"], LIMIT);
+    assert_eq!(budget["spent_microdollars"], 1_000_000);
+    let budgets = listed(&fixture, &owner.token).await;
+    assert_eq!(budgets["editable"], true);
+    assert_eq!(budgets["budgets"][0]["id"], budget["id"]);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn without_a_license_nothing_is_reported_and_every_change_is_refused() {
     let fixture = Fixture::new(PREFIX).await;
     fixture.licensed().await;
@@ -255,7 +277,7 @@ async fn without_a_license_nothing_is_reported_and_every_change_is_refused() {
             "report": null,
         })
     );
-    unlicensed(&fixture.get(&exports_path(organization), &owner.token).await);
+    unentitled(&fixture.get(&exports_path(organization), &owner.token).await);
     refused(
         &fixture
             .get(&export_of(&fixture, "from=October"), &owner.token)
@@ -268,7 +290,7 @@ async fn without_a_license_nothing_is_reported_and_every_change_is_refused() {
     assert_eq!(budgets["editable"], false);
     assert_eq!(budgets["month"], Month::current().label());
     assert_eq!(budgets["budgets"][0]["id"], json!(budget));
-    unlicensed(
+    unentitled(
         &fixture
             .post(
                 &budgets_path(organization),
@@ -277,7 +299,7 @@ async fn without_a_license_nothing_is_reported_and_every_change_is_refused() {
             )
             .await,
     );
-    unlicensed(
+    unentitled(
         &fixture
             .patch(
                 &budget_path(organization, budget),
@@ -286,7 +308,7 @@ async fn without_a_license_nothing_is_reported_and_every_change_is_refused() {
             )
             .await,
     );
-    unlicensed(
+    unentitled(
         &fixture
             .delete(&budget_path(organization, budget), &owner.token)
             .await,
@@ -333,7 +355,7 @@ async fn a_lapsed_license_keeps_reports_and_exports_but_refuses_changes() {
     let budgets = listed(&fixture, &owner.token).await;
     assert_eq!(budgets["editable"], false);
     assert_eq!(budgets["budgets"][0]["spent_microdollars"], 1_000_000);
-    unlicensed(
+    unentitled(
         &fixture
             .post(
                 &budgets_path(organization),
@@ -342,7 +364,7 @@ async fn a_lapsed_license_keeps_reports_and_exports_but_refuses_changes() {
             )
             .await,
     );
-    unlicensed(
+    unentitled(
         &fixture
             .patch(
                 &budget_path(organization, budget),
@@ -351,7 +373,7 @@ async fn a_lapsed_license_keeps_reports_and_exports_but_refuses_changes() {
             )
             .await,
     );
-    unlicensed(
+    unentitled(
         &fixture
             .delete(&budget_path(organization, budget), &owner.token)
             .await,

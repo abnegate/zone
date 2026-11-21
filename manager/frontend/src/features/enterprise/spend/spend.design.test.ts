@@ -76,7 +76,6 @@ describe('spend copy', () => {
   it('names the Team plan wherever it names a plan', () => {
     for (const text of [
       labels.UPGRADE_NOTICE,
-      labels.UPGRADE_DETAIL,
       labels.LAPSED_NOTICE,
       refusalMessage('license_required'),
     ]) {

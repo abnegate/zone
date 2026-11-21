@@ -14,7 +14,6 @@ pub mod registry;
 pub mod standing;
 pub mod subject;
 pub mod sweep;
-pub mod unlicensed;
 pub mod upkeep;
 
 #[cfg(test)]
@@ -27,7 +26,6 @@ pub use error::Error;
 pub use key::Key;
 pub use standing::Standing;
 pub use subject::Subject;
-pub use unlicensed::Unlicensed;
 
 use crate::state::AppState;
 

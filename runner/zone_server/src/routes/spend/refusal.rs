@@ -4,10 +4,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use zone_enterprise::spend::{BODY_INVALID, Error};
 
+use crate::auth::entitlement::Unentitled;
 use crate::db::spend::budgets::CreateError;
 use crate::error::ServerError;
 use crate::routes::common::ErrorResponse;
-use crate::services::spend::Unlicensed;
 
 const FAILED: &str = "Could not load or save spend";
 const UNAUTHENTICATED: &str = "Invalid user ID in token";
@@ -17,15 +17,15 @@ pub enum Refusal {
     Unauthenticated,
     Missing(&'static str),
     Forbidden(&'static str),
-    Unlicensed(Unlicensed),
+    Unentitled(Unentitled),
     Body(JsonRejection),
     Invalid(Error),
     Database(sqlx::Error),
 }
 
-impl From<Unlicensed> for Refusal {
-    fn from(unlicensed: Unlicensed) -> Self {
-        Self::Unlicensed(unlicensed)
+impl From<Unentitled> for Refusal {
+    fn from(refusal: Unentitled) -> Self {
+        Self::Unentitled(refusal)
     }
 }
 
@@ -62,7 +62,7 @@ impl IntoResponse for Refusal {
             Self::Forbidden(message) => {
                 (StatusCode::FORBIDDEN, Json(ErrorResponse::new(message))).into_response()
             }
-            Self::Unlicensed(unlicensed) => unlicensed.into_response(),
+            Self::Unentitled(refusal) => refusal.into_response(),
             Self::Body(rejection) => (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::with_code(
@@ -101,13 +101,13 @@ mod tests {
     use axum::http::Request;
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
-    use zone_enterprise::LICENSE_REQUIRED;
     use zone_enterprise::spend::{
         BUDGET_EXISTS, Draft, LIMIT_INVALID, RANGE_INVALID, SCOPE_INVALID, THRESHOLD_INVALID,
     };
+    use zone_enterprise::{Feature, LICENSE_REQUIRED};
 
     use super::*;
-    use crate::services::spend::unlicensed::MESSAGE;
+    use crate::auth::entitlement::TEAM_MESSAGE;
 
     async fn body(response: Response) -> Value {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
@@ -172,12 +172,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unlicensed_change_is_forbidden_with_the_license_code() {
-        let response = Refusal::from(Unlicensed).into_response();
+    async fn an_unentitled_change_is_forbidden_with_the_team_message_and_the_license_code() {
+        let response = Refusal::from(Unentitled(Feature::Spend)).into_response();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             body(response).await,
-            json!({ "error": MESSAGE, "code": LICENSE_REQUIRED })
+            json!({ "error": TEAM_MESSAGE, "code": LICENSE_REQUIRED })
         );
     }
 

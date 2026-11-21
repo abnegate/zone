@@ -9,12 +9,8 @@ export const LOADING_LABEL = 'Loading spend...';
 
 export const RETRY_LABEL = 'Retry';
 
-export const UPGRADE_NOTICE = 'Spend reports and budgets are available on Team.';
-
-export const UPGRADE_DETAIL =
+export const UPGRADE_NOTICE =
   'Add a Team license to see what each workspace and person spends on AI, and to set monthly budgets with optional hard limits.';
-
-export const UPGRADE_ACTION = 'Go to License';
 
 export const LAPSED_NOTICE =
   "Your Team license has lapsed. Reports stay readable and hard limits stay enforced, but budgets can't be changed until a new license is added.";

@@ -35,11 +35,6 @@
   color: var(--ui-text-secondary);
 }
 
-.spend-notice .spend-notice-title {
-  font-weight: 600;
-  color: var(--ui-text-primary);
-}
-
 .spend-range {
   display: flex;
   flex-direction: column;

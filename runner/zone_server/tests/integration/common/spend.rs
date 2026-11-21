@@ -133,12 +133,12 @@ impl Fixture {
 
     /// Installs a Team license that is active.
     pub async fn licensed(&self) {
-        self.policy.license().await;
+        self.policy.install(&sso::team()).await;
     }
 
-    /// Stores a license past its grace period.
+    /// Stores a Team license past its grace period.
     pub async fn lapsed(&self) {
-        self.policy.store_license(&sso::lapsed()).await;
+        self.policy.store_license(&sso::lapsed_team()).await;
     }
 
     /// The owner's own spend in the fixture's workspace.

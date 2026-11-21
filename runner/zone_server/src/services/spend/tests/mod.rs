@@ -4,9 +4,7 @@ use abnegate_agent_cli::AgentKind;
 use abnegate_notify::{Fanout, Severity};
 use abnegate_secret::{MasterKey, SecretValue};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use chrono::{DateTime, TimeDelta, Utc};
-use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use uuid::Uuid;
 use wiremock::matchers::{body_json, header, method, path, query_param};
@@ -14,7 +12,8 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
 use zone_enterprise::spend::{Budget, Microdollars, Target, Uncounted};
 use zone_enterprise::{
-    Edition, Error as LicenseError, Keyring, License, Payload, SigningKey, Status, TrustedKey, sign,
+    Edition, Error as LicenseError, Feature, Keyring, License, Payload, Plan, SigningKey, Status,
+    TrustedKey, sign,
 };
 
 use super::client::{Client, DATE_FORMAT, PAGE_SIZE};
@@ -29,7 +28,7 @@ use super::registry::{self, COOLDOWN, Entry};
 use super::standing::{Standing, standing};
 use super::subject::Subject;
 use super::sweep::{INTERVAL_SECONDS, NOTICE_LOCK, Sweep, VERIFY_EVERY};
-use super::unlicensed::{MESSAGE, Unlicensed};
+use crate::auth::entitlement::Unentitled;
 use crate::config::{Config, ModelBackend};
 use crate::db::ai_settings::{EffectiveAiSettings, PROVIDER_ANTHROPIC, PROVIDER_CLAUDE_CODE};
 use crate::db::spend::budgets::{Announcement, BudgetRow};
@@ -603,7 +602,7 @@ async fn the_key_is_derived_from_the_encryption_key_never_from_the_litellm_key()
     assert!(!key.secret.expose().contains("sk-first-master-key-0123"));
 }
 
-fn license() -> License {
+fn license(plan: Option<Plan>) -> License {
     let signing = SigningKey::from_bytes(&SEED);
     let keyring =
         Keyring::new([TrustedKey::new(KEY_ID, signing.verifying_key().to_bytes()).unwrap()])
@@ -617,7 +616,7 @@ fn license() -> License {
             expires_at: moment("2027-01-01T00:00:00Z"),
             key_id: KEY_ID.into(),
             subscription: None,
-            plan: None,
+            plan,
         },
         &signing,
     );
@@ -626,37 +625,72 @@ fn license() -> License {
 
 #[test]
 fn the_standing_of_each_license_state() {
-    let license = license();
-    let expires = license.expires_at();
+    let team = license(Some(Plan::Team));
+    let enterprise = license(Some(Plan::Enterprise));
+    let unplanned = license(None);
+    let expires = team.expires_at();
+    let active = expires - TimeDelta::days(1);
+    let grace = expires + TimeDelta::days(1);
+    let lapsed = team.grace_ends_at() + TimeDelta::days(1);
     let cases = [
         (
             "community",
             Stored::Empty,
-            expires,
+            active,
             (false, false, Edition::Community, Status::Community),
         ),
         (
-            "active",
-            Stored::Verified(license.clone()),
-            expires - TimeDelta::days(1),
+            "team active",
+            Stored::Verified(team.clone()),
+            active,
+            (true, true, Edition::Team, Status::Active),
+        ),
+        (
+            "team grace",
+            Stored::Verified(team.clone()),
+            grace,
+            (true, true, Edition::Team, Status::Grace),
+        ),
+        (
+            "team lapsed",
+            Stored::Verified(team),
+            lapsed,
+            (false, true, Edition::Team, Status::Lapsed),
+        ),
+        (
+            "enterprise active",
+            Stored::Verified(enterprise.clone()),
+            active,
             (true, true, Edition::Enterprise, Status::Active),
         ),
         (
-            "grace",
-            Stored::Verified(license.clone()),
-            expires + TimeDelta::days(1),
+            "enterprise grace",
+            Stored::Verified(enterprise.clone()),
+            grace,
             (true, true, Edition::Enterprise, Status::Grace),
         ),
         (
-            "lapsed",
-            Stored::Verified(license.clone()),
-            license.grace_ends_at() + TimeDelta::days(1),
+            "enterprise lapsed",
+            Stored::Verified(enterprise),
+            lapsed,
             (false, true, Edition::Enterprise, Status::Lapsed),
+        ),
+        (
+            "no plan active",
+            Stored::Verified(unplanned.clone()),
+            active,
+            (true, true, Edition::Enterprise, Status::Active),
+        ),
+        (
+            "no plan grace",
+            Stored::Verified(unplanned),
+            grace,
+            (true, true, Edition::Enterprise, Status::Grace),
         ),
         (
             "unverified",
             Stored::Unverified(LicenseError::Signature),
-            expires - TimeDelta::days(1),
+            active,
             (false, true, Edition::Community, Status::Community),
         ),
     ];
@@ -707,23 +741,7 @@ fn only_an_entitled_standing_edits_or_passes() {
     assert!(!entitled.editable(false));
     assert!(!lapsed.editable(true));
     assert_eq!(entitled.require(), Ok(()));
-    assert_eq!(lapsed.require(), Err(Unlicensed));
-}
-
-#[tokio::test]
-async fn an_unlicensed_change_is_forbidden_with_the_license_code() {
-    let response = Unlicensed.into_response();
-
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(
-        serde_json::from_slice::<Value>(&bytes).unwrap(),
-        json!({
-            "error": "This needs a Zone Team license that is active or in its grace period.",
-            "code": "license_required",
-        })
-    );
-    assert!(!MESSAGE.contains("Enterprise"));
+    assert_eq!(lapsed.require(), Err(Unentitled(Feature::Spend)));
 }
 
 fn log(fields: Value) -> Log {

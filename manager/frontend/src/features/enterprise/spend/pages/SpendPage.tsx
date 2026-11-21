@@ -1,11 +1,13 @@
 import { useId, useState } from 'react';
+import { PlanUpgradeNotice } from '../../components/PlanUpgradeNotice';
+import { Plan } from '../../schemas';
 import { LoadFailure } from '../components/LoadFailure';
 import { SpendBudgets } from '../components/SpendBudgets';
-import { SpendNotice, SpendNoticeVariant } from '../components/SpendNotice';
+import { SpendLapsedNotice } from '../components/SpendLapsedNotice';
 import { SpendOverview } from '../components/SpendOverview';
 import { SpendRange } from '../components/SpendRange';
 import { useBudgets, useSpendReport, useSpendTargets } from '../hooks';
-import { LOADING_LABEL, PAGE_DESCRIPTION, PAGE_TITLE } from '../labels';
+import { LOADING_LABEL, PAGE_DESCRIPTION, PAGE_TITLE, UPGRADE_NOTICE } from '../labels';
 import { lapsed, unlicensed } from '../license';
 import { monthToDate } from '../range';
 import type { SpendQuery } from '../schemas';
@@ -40,10 +42,10 @@ export function SpendPage({ organizationId }: SpendPageProps) {
         </div>
       </div>
       {community ? (
-        <SpendNotice variant={SpendNoticeVariant.Upgrade} />
+        <PlanUpgradeNotice plan={Plan.Team} message={UPGRADE_NOTICE} />
       ) : (
         <>
-          {license && lapsed(license) && <SpendNotice variant={SpendNoticeVariant.Lapsed} />}
+          {license && lapsed(license) && <SpendLapsedNotice />}
           {report.error && (
             <LoadFailure error={report.error} onRetry={() => void report.refresh()} />
           )}

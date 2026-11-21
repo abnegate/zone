@@ -1,11 +1,10 @@
 //! The one place spend reads the license: everything else asks a [`Standing`].
 
 use chrono::{DateTime, Utc};
-use zone_enterprise::{Edition, Status, status};
+use zone_enterprise::{Edition, Feature, Status, status};
 
-use super::unlicensed::Unlicensed;
+use crate::auth::entitlement::Unentitled;
 use crate::services::license::Stored;
-use crate::services::policy;
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,13 +20,14 @@ pub struct Standing {
 /// The gate for every spend feature.
 pub fn standing(stored: &Stored, now: DateTime<Utc>) -> Standing {
     let license = stored.license();
-    let status = status(license, now);
     Standing {
-        entitled: matches!(stored, Stored::Verified(_))
-            && matches!(status, Status::Active | Status::Grace),
-        enforced: policy::enforces(stored),
+        entitled: Feature::Spend.entitled(license, now),
+        enforced: match stored {
+            Stored::Unverified(_) => true,
+            Stored::Empty | Stored::Verified(_) => Feature::Spend.enforced(license),
+        },
         edition: Edition::from(license),
-        status,
+        status: status(license, now),
     }
 }
 
@@ -54,10 +54,10 @@ impl Standing {
         self.entitled && writable
     }
 
-    pub fn require(&self) -> Result<(), Unlicensed> {
+    pub fn require(&self) -> Result<(), Unentitled> {
         if self.entitled {
             return Ok(());
         }
-        Err(Unlicensed)
+        Err(Unentitled(Feature::Spend))
     }
 }
