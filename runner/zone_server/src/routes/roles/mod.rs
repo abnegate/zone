@@ -211,13 +211,17 @@ async fn member(
 async fn editor(state: &AppState, auth: &AuthUser, organization: Uuid) -> Result<Uuid, Refusal> {
     let (editor, grant) = member(state, auth, organization).await?;
     if !grant.allows(Permission::RolesUpdate) {
-        return Err(Refusal::Forbidden(Permission::RolesUpdate.refusal()));
+        return Err(forbidden());
     }
     let stored = state.stored_license().await?;
     if !Feature::CustomRoles.entitled(stored.license(), Utc::now()) {
         return Err(Unentitled(Feature::CustomRoles).into());
     }
     Ok(editor)
+}
+
+fn forbidden() -> Refusal {
+    Refusal::Forbidden(Permission::RolesUpdate.refusal())
 }
 
 async fn read(
@@ -317,6 +321,7 @@ async fn change(
         custom_roles::update(state.db(), target.organization, role, &patch, editor).await?;
     let (previous, saved) = match updated {
         Update::Saved { previous, saved } => (*previous, *saved),
+        Update::Forbidden => return Err(forbidden()),
         Update::Exceeds => return Err(Refusal::Exceeds),
         Update::NameTaken => return Err(Refusal::NameTaken),
         Update::Missing => return Err(Refusal::Missing(ROLE_MISSING)),
@@ -348,8 +353,9 @@ async fn remove(
     let target = Target::parse(path)?;
     let editor = editor(state, auth, target.organization).await?;
     let role = target.role()?;
-    let deleted = match custom_roles::delete(state.db(), target.organization, role).await? {
+    let deleted = match custom_roles::delete(state.db(), target.organization, role, editor).await? {
         Deletion::Deleted(deleted) => *deleted,
+        Deletion::Forbidden => return Err(forbidden()),
         Deletion::InUse(members) => return Err(Refusal::InUse(members)),
         Deletion::Missing => return Err(Refusal::Missing(ROLE_MISSING)),
     };

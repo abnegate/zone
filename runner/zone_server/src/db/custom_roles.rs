@@ -106,6 +106,7 @@ pub enum Update {
         previous: Box<CustomRoleRow>,
         saved: Box<CustomRoleRow>,
     },
+    Forbidden,
     Exceeds,
     NameTaken,
     Missing,
@@ -114,6 +115,7 @@ pub enum Update {
 #[derive(Debug)]
 pub enum Deletion {
     Deleted(Box<CustomRoleRow>),
+    Forbidden,
     InUse(i64),
     Missing,
 }
@@ -262,7 +264,7 @@ pub async fn create(
 ///
 /// The editor's membership is share-locked before the role, as every role
 /// change locks member rows before role rows: a demotion in flight lands first
-/// and the widening is judged by what the editor holds after it.
+/// and the edit is judged by what the editor holds after it.
 pub async fn update(
     pool: &PgPool,
     organization_id: Uuid,
@@ -272,11 +274,9 @@ pub async fn update(
 ) -> DbResult<Update> {
     let mut transaction = pool.begin().await?;
 
-    let caller =
-        super::organization_members::lock_membership(&mut transaction, organization_id, editor)
-            .await?
-            .map(|membership| membership.grant)
-            .unwrap_or_default();
+    let Some(caller) = lock_editor(&mut transaction, organization_id, editor).await? else {
+        return Ok(Update::Forbidden);
+    };
     if !lock_for_update(&mut transaction, organization_id, role_id).await? {
         return Ok(Update::Missing);
     }
@@ -339,10 +339,22 @@ pub async fn update(
 
 /// A role someone holds is never deleted out from under them. Inactive
 /// memberships still pointing at it let go of it first, so the deferred
-/// foreign key has nothing left to refuse at commit.
-pub async fn delete(pool: &PgPool, organization_id: Uuid, role_id: Uuid) -> DbResult<Deletion> {
+/// foreign key has nothing left to refuse at commit. The editor is judged as
+/// [`update`] judges one.
+pub async fn delete(
+    pool: &PgPool,
+    organization_id: Uuid,
+    role_id: Uuid,
+    editor: Uuid,
+) -> DbResult<Deletion> {
     let mut transaction = pool.begin().await?;
 
+    if lock_editor(&mut transaction, organization_id, editor)
+        .await?
+        .is_none()
+    {
+        return Ok(Deletion::Forbidden);
+    }
     if !lock_for_update(&mut transaction, organization_id, role_id).await? {
         return Ok(Deletion::Missing);
     }
@@ -407,6 +419,23 @@ pub async fn lock(
         Summary { id, name },
         Grant::stored(scope, permissions),
     )))
+}
+
+/// What the editor holds, share-locked for the transaction, or `None` unless
+/// it still includes `roles:update`. A custom role never carries that
+/// permission, so an editor who gets past this holds no custom role, and an
+/// edit never waits for a role while it share-locks another.
+async fn lock_editor(
+    connection: &mut PgConnection,
+    organization_id: Uuid,
+    editor: Uuid,
+) -> DbResult<Option<Grant>> {
+    Ok(
+        super::organization_members::lock_membership(connection, organization_id, editor)
+            .await?
+            .map(|membership| membership.grant)
+            .filter(|grant| grant.allows(Permission::RolesUpdate)),
+    )
 }
 
 async fn lock_for_update(

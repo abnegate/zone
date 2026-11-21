@@ -962,6 +962,7 @@ async fn a_role_someone_holds_cannot_be_deleted() {
     .await;
     let member = user(&pool).await;
     seat_workspace(&pool, workspace, member, WorkspaceRole::Viewer, Some(role)).await;
+    let admin = editor(&pool, organization, OrgRole::Admin).await;
 
     let error = sqlx::query("DELETE FROM custom_roles WHERE id = $1")
         .bind(role)
@@ -973,7 +974,7 @@ async fn a_role_someone_holds_cannot_be_deleted() {
         Some(FOREIGN_KEY_VIOLATION)
     );
 
-    let outcome = custom_roles::delete(&pool, organization, role)
+    let outcome = custom_roles::delete(&pool, organization, role, admin)
         .await
         .expect("the delete is answered");
     assert!(matches!(outcome, Deletion::InUse(1)), "{outcome:?}");
@@ -981,7 +982,7 @@ async fn a_role_someone_holds_cannot_be_deleted() {
     workspace_members::remove_member(&pool, workspace, member)
         .await
         .expect("the holder leaves");
-    let outcome = custom_roles::delete(&pool, organization, role)
+    let outcome = custom_roles::delete(&pool, organization, role, admin)
         .await
         .expect("the delete is answered");
     assert!(
@@ -989,7 +990,7 @@ async fn a_role_someone_holds_cannot_be_deleted() {
         "{outcome:?}"
     );
 
-    let outcome = custom_roles::delete(&pool, organization, role)
+    let outcome = custom_roles::delete(&pool, organization, role, admin)
         .await
         .expect("the delete is answered");
     assert!(matches!(outcome, Deletion::Missing), "{outcome:?}");
@@ -1017,8 +1018,9 @@ async fn delete_lets_go_of_inactive_references_before_it_deletes() {
     .execute(&pool)
     .await
     .expect("an inactive member pointing at the role");
+    let admin = editor(&pool, organization, OrgRole::Admin).await;
 
-    let outcome = custom_roles::delete(&pool, organization, role)
+    let outcome = custom_roles::delete(&pool, organization, role, admin)
         .await
         .expect("the delete is answered");
     assert!(matches!(outcome, Deletion::Deleted(_)), "{outcome:?}");
@@ -1026,6 +1028,41 @@ async fn delete_lets_go_of_inactive_references_before_it_deletes() {
         custom_role_of_organization_member(&pool, organization, member).await,
         None
     );
+}
+
+#[tokio::test]
+async fn only_an_editor_holding_roles_update_edits_or_deletes_a_role() {
+    let pool = create_test_pool().await;
+    let organization = organization(&pool).await;
+    let role = composed(
+        &pool,
+        organization,
+        Scope::Organization,
+        &[Permission::DevicesRead],
+    )
+    .await;
+    let member = editor(&pool, organization, OrgRole::Member).await;
+    let outsider = user(&pool).await;
+    let rename = Change {
+        name: Some("Renamed"),
+        ..Change::default()
+    };
+
+    for refused in [member, outsider] {
+        let outcome = custom_roles::update(&pool, organization, role, &rename, refused)
+            .await
+            .expect("answered");
+        assert!(matches!(outcome, Update::Forbidden), "{outcome:?}");
+        let outcome = custom_roles::delete(&pool, organization, role, refused)
+            .await
+            .expect("answered");
+        assert!(matches!(outcome, Deletion::Forbidden), "{outcome:?}");
+    }
+    let kept = custom_roles::get(&pool, organization, role)
+        .await
+        .expect("answered")
+        .expect("the role exists");
+    assert_ne!(kept.name, "Renamed");
 }
 
 #[tokio::test]
@@ -1209,7 +1246,8 @@ async fn update_renames_describes_and_regrants_sparsely() {
     assert!(matches!(outcome, Update::NameTaken), "{outcome:?}");
 
     let elsewhere = self::organization(&pool).await;
-    let outcome = custom_roles::update(&pool, elsewhere, role, &Change::default(), admin)
+    let stranger = editor(&pool, elsewhere, OrgRole::Admin).await;
+    let outcome = custom_roles::update(&pool, elsewhere, role, &Change::default(), stranger)
         .await
         .expect("answered");
     assert!(matches!(outcome, Update::Missing), "{outcome:?}");

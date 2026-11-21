@@ -25,7 +25,7 @@ use tokio::sync::Barrier;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 use zone_server::auth::{Grant, Permission, Scope};
-use zone_server::db::custom_roles::{self, Assignment, Change, Update};
+use zone_server::db::custom_roles::{self, Assignment, Change, Deletion, Update};
 use zone_server::db::organization_members::{self, OrgRole, RoleChange};
 use zone_server::db::workspace_members::{self, WorkspaceRole};
 
@@ -601,3 +601,99 @@ async fn a_custom_caller_changing_an_editor_of_its_role_never_deadlocks_with_the
     fixture.cleanup().await;
 }
 
+/// Demotes `editor` to member in a transaction left open, so an edit or a
+/// delete by them waits for their row.
+async fn demotion(
+    pool: &PgPool,
+    organization: Uuid,
+    editor: Uuid,
+) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut demotion = pool.begin().await.expect("a transaction");
+    sqlx::query(
+        "UPDATE organization_members SET role = $3 WHERE organization_id = $1 AND user_id = $2",
+    )
+    .bind(organization)
+    .bind(editor)
+    .bind(OrgRole::Member.as_str())
+    .execute(&mut *demotion)
+    .await
+    .expect("the editor is demoted");
+    demotion
+}
+
+#[tokio::test]
+async fn an_edit_behind_its_editors_demotion_to_member_is_refused() {
+    let fixture = fixture().await;
+    let pool = fixture.pool();
+    let organization = organization(pool).await;
+    let admin = editor(pool, organization, OrgRole::Admin).await;
+    let role = role(pool, organization, admin, Scope::Organization, &NARROW).await;
+
+    let demotion = demotion(pool, organization, admin).await;
+    let edit = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let change = Change {
+                name: Some("Renamed"),
+                ..Change::default()
+            };
+            custom_roles::update(&pool, organization, role, &change, admin)
+                .await
+                .expect("the edit is answered")
+        })
+    };
+    assert!(
+        waiting(pool, 1).await,
+        "the edit waits for its editor's membership"
+    );
+    demotion.commit().await.expect("the demotion lands");
+
+    let edit = finished(edit).await;
+    assert!(
+        matches!(edit, Update::Forbidden),
+        "an editor demoted to member no longer holds roles:update: {edit:?}"
+    );
+    let kept = custom_roles::get(pool, organization, role)
+        .await
+        .expect("the role is read")
+        .expect("the role exists");
+    assert_ne!(kept.name, "Renamed");
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_delete_behind_its_editors_demotion_to_member_is_refused() {
+    let fixture = fixture().await;
+    let pool = fixture.pool();
+    let organization = organization(pool).await;
+    let admin = editor(pool, organization, OrgRole::Admin).await;
+    let role = role(pool, organization, admin, Scope::Organization, &NARROW).await;
+
+    let demotion = demotion(pool, organization, admin).await;
+    let deletion = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            custom_roles::delete(&pool, organization, role, admin)
+                .await
+                .expect("the delete is answered")
+        })
+    };
+    assert!(
+        waiting(pool, 1).await,
+        "the delete waits for its editor's membership"
+    );
+    demotion.commit().await.expect("the demotion lands");
+
+    let deletion = finished(deletion).await;
+    assert!(
+        matches!(deletion, Deletion::Forbidden),
+        "an editor demoted to member no longer holds roles:update: {deletion:?}"
+    );
+    let kept = custom_roles::get(pool, organization, role)
+        .await
+        .expect("the role is read");
+    assert!(kept.is_some(), "the role is kept");
+
+    fixture.cleanup().await;
+}
