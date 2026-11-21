@@ -1,10 +1,10 @@
 use url::Url;
 
 use crate::sso::error::Error;
-use crate::sso::issuer::endpoint_allowed;
 use crate::sso::saml::certificate::Certificate;
 use crate::sso::saml::document::Document;
 use crate::sso::saml::entity_id::EntityId;
+use crate::sso::saml::metadata_url;
 use crate::sso::saml::node_id::NodeId;
 use crate::sso::saml::uri;
 
@@ -60,16 +60,11 @@ impl Metadata {
 }
 
 pub(super) fn sso_url(location: &str) -> Result<Url, Error> {
-    let refused = || {
+    metadata_url::endpoint(location).ok_or_else(|| {
         invalid(
-            "The single sign-on URL must be an absolute https URL; plain http is only allowed for localhost.",
+            "The single sign-on URL must be an absolute https URL with no credentials or fragment; plain http is only allowed for localhost.",
         )
-    };
-    let url = Url::parse(location.trim()).map_err(|_| refused())?;
-    if !endpoint_allowed(&url) {
-        return Err(refused());
-    }
-    Ok(url)
+    })
 }
 
 fn descriptor(document: &Document, root: NodeId) -> Result<NodeId, Error> {

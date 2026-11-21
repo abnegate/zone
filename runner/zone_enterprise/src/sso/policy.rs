@@ -70,8 +70,14 @@ impl Policy {
 
 fn normalized(email: Option<&str>) -> Option<String> {
     let email = email?.trim().to_lowercase();
-    let (local, domain) = email.rsplit_once(AT)?;
-    (!local.is_empty() && !domain.is_empty()).then_some(email)
+    if email
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return None;
+    }
+    let (local, domain) = email.split_once(AT)?;
+    (!local.is_empty() && !domain.is_empty() && !domain.contains(AT)).then_some(email)
 }
 
 fn verified(claims: &Claims) -> bool {
@@ -178,6 +184,12 @@ mod tests {
             Some("jane"),
             Some("@acme.com"),
             Some("jane@"),
+            Some("x@evil.test@acme.com"),
+            Some("@@acme.com"),
+            Some("jane doe@acme.com"),
+            Some("jane\n@acme.com"),
+            Some("jane@acme\u{0}.com"),
+            Some("jane\u{2028}@acme.com"),
         ] {
             let claims = Claims {
                 email: email.map(str::to_owned),
@@ -189,6 +201,22 @@ mod tests {
                 "{email:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_email_with_a_second_at_never_reaches_the_domain_check() {
+        let claims = Claims {
+            email: Some("x@evil.test@acme.com".into()),
+            ..claims()
+        };
+        assert_eq!(
+            policy(&["acme.com"], false).admit(&issuer(OKTA), &claims),
+            Err(Error::EmailMissing)
+        );
+        assert_eq!(
+            policy(&["acme.com"], false).identity("name-id", claims.email.as_deref(), false, None),
+            Err(Error::EmailMissing)
+        );
     }
 
     #[test]

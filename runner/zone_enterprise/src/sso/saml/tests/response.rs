@@ -42,6 +42,9 @@ const ENTRA_EMAIL: &str = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims
 const ENTRA_UPN: &str = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name";
 const ENTRA_GIVEN_NAME: &str = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname";
 const ENTRA_SURNAME: &str = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname";
+const STATUS_LIMIT: usize = 256;
+const ENCRYPTED_DATA: &str =
+    "<xenc:EncryptedData xmlns:xenc=\"http://www.w3.org/2001/04/xmlenc#\"/>";
 
 fn now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 11, 21, 10, 0, 0).unwrap()
@@ -499,6 +502,23 @@ fn an_encrypted_assertion_or_name_id_is_refused() {
 }
 
 #[test]
+fn an_encrypted_attribute_is_refused() {
+    let xml = unsigned(&options());
+    let email = between(
+        &xml,
+        "<saml2:Attribute Name=\"email\"",
+        "</saml2:Attribute>",
+    )
+    .to_owned();
+    let encrypted = sign_assertion(&replaced(
+        &xml,
+        &email,
+        &format!("<saml2:EncryptedAttribute>{ENCRYPTED_DATA}</saml2:EncryptedAttribute>"),
+    ));
+    assert_eq!(refusal(consume_xml(&encrypted)), Refusal::Encrypted);
+}
+
+#[test]
 fn a_destination_must_name_the_acs_url() {
     assert_eq!(
         refused(&Options {
@@ -542,6 +562,25 @@ fn a_response_must_answer_this_request() {
         );
     }
     let encoded = response(&options());
+    assert_eq!(
+        refusal(consume(
+            &provider_for(ENTITY_ID),
+            &service(),
+            "",
+            &encoded,
+            now()
+        )),
+        Refusal::InResponseTo
+    );
+}
+
+#[test]
+fn an_empty_request_id_never_matches() {
+    let encoded = response(&Options {
+        in_response_to: Some(String::new()),
+        confirmation_in_response_to: Some(String::new()),
+        ..options()
+    });
     assert_eq!(
         refusal(consume(
             &provider_for(ENTITY_ID),
@@ -603,6 +642,16 @@ NotOnOrAfter=\"2026-11-21T10:05:00Z\" Recipient=\"{ACS_URL}\"/></saml2:SubjectCo
     );
     let xml = sign_assertion(&replaced(&xml, SUBJECT_END, &confirmation));
     assert!(consume_xml(&xml).is_ok());
+}
+
+#[test]
+fn a_bearer_confirmation_with_two_confirmation_data_is_refused() {
+    let data = format!(
+        "<saml2:SubjectConfirmationData InResponseTo=\"{REQUEST_ID}\" \
+NotOnOrAfter=\"2026-11-21T10:05:00Z\" Recipient=\"{ACS_URL}\"/>"
+    );
+    let xml = spliced(&data, &format!("{data}{data}"));
+    assert_eq!(refusal(consume_xml(&xml)), Refusal::Confirmation);
 }
 
 #[test]
@@ -801,7 +850,7 @@ fn fractional_second_timestamps_are_accepted() {
 #[test]
 fn timestamps_with_an_offset_are_refused() {
     let xml = sign_assertion(&unsigned(&options()).replace(INSTANT, "2026-11-21T10:00:00+00:00"));
-    assert_eq!(refusal(consume_xml(&xml)), Refusal::Version);
+    assert_eq!(refusal(consume_xml(&xml)), Refusal::Incomplete);
     let window = CONDITIONS_WINDOW.replace("Z\"", "+00:00\"");
     let xml = spliced(CONDITIONS_WINDOW, &window);
     assert_eq!(refusal(consume_xml(&xml)), Refusal::Condition);
@@ -973,6 +1022,40 @@ fn name_id_formats_parse() {
 }
 
 #[test]
+fn an_assertion_without_an_issue_instant_is_refused() {
+    let xml = spliced(
+        &format!("ID=\"{ASSERTION_ID}\" Version=\"2.0\" IssueInstant=\"{INSTANT}\""),
+        &format!("ID=\"{ASSERTION_ID}\" Version=\"2.0\""),
+    );
+    assert_eq!(refusal(consume_xml(&xml)), Refusal::Incomplete);
+}
+
+#[test]
+fn a_response_without_an_issue_instant_is_refused() {
+    let xml = spliced(
+        &format!("Version=\"2.0\" IssueInstant=\"{INSTANT}\" Destination="),
+        "Version=\"2.0\" Destination=",
+    );
+    assert_eq!(refusal(consume_xml(&xml)), Refusal::Incomplete);
+}
+
+#[test]
+fn an_assertion_without_an_id_is_refused() {
+    let identified = format!("{ASSERTION_START}ID=\"{ASSERTION_ID}\" ");
+    for anonymous in [
+        ASSERTION_START.to_owned(),
+        format!("{ASSERTION_START}ID=\"\" "),
+    ] {
+        let xml = sign_response(&replaced(&unsigned(&options()), &identified, &anonymous));
+        assert_eq!(
+            refusal(consume_xml(&xml)),
+            Refusal::Incomplete,
+            "{anonymous}"
+        );
+    }
+}
+
+#[test]
 fn an_assertion_without_an_authentication_statement_is_refused() {
     let xml = unsigned(&options());
     let statement = between(&xml, STATEMENT_START, STATEMENT_END).to_owned();
@@ -1021,7 +1104,50 @@ fn a_response_without_a_status_is_refused() {
     let xml = unsigned(&options());
     let status = between(&xml, "<saml2p:Status>", "</saml2p:Status>").to_owned();
     let without = sign_assertion(&replaced(&xml, &status, ""));
-    assert_eq!(refusal(consume_xml(&without)), Refusal::Version);
+    assert_eq!(refusal(consume_xml(&without)), Refusal::Incomplete);
+}
+
+#[test]
+fn a_status_code_without_a_value_is_refused() {
+    let xml = replaced(
+        &error_response(REQUEST_ID),
+        &format!("<saml2p:StatusCode Value=\"{RESPONDER}\">"),
+        "<saml2p:StatusCode>",
+    );
+    assert_eq!(refusal(consume_xml(&xml)), Refusal::Incomplete);
+}
+
+#[test]
+fn a_status_value_that_is_not_a_token_is_refused() {
+    for status in [
+        format!("{RESPONDER}&#10;forged log line"),
+        format!("{RESPONDER}&#13;"),
+        format!("{RESPONDER}&#9;"),
+        format!("{RESPONDER} forged"),
+        format!("{RESPONDER}&#127;"),
+        format!("{RESPONDER}\u{85}"),
+        "x".repeat(STATUS_LIMIT + 1),
+        String::new(),
+    ] {
+        let xml = replaced(&error_response(REQUEST_ID), RESPONDER, &status);
+        assert_eq!(
+            refusal(consume_xml(&xml)),
+            Refusal::Incomplete,
+            "{status:?}"
+        );
+    }
+}
+
+#[test]
+fn a_status_value_up_to_the_limit_is_carried_as_it_is() {
+    let longest = format!(
+        "{RESPONDER}:{}",
+        "x".repeat(STATUS_LIMIT - RESPONDER.len() - 1)
+    );
+    for status in [REQUEST_DENIED.to_owned(), longest] {
+        let xml = replaced(&error_response(REQUEST_ID), RESPONDER, &status);
+        assert_eq!(consume_xml(&xml), Err(Error::SignInRefused(status)));
+    }
 }
 
 #[test]
@@ -1095,6 +1221,40 @@ fn several_email_values_mean_no_email() {
         }),
         Err(Error::EmailMissing)
     );
+}
+
+#[test]
+fn an_empty_email_value_means_no_email() {
+    for name_id_format in [uri::PERSISTENT, uri::EMAIL_ADDRESS] {
+        assert_eq!(
+            outcome(&Options {
+                email: None,
+                name_id: EMAIL.to_owned(),
+                name_id_format: name_id_format.to_owned(),
+                claims: vec![Claim::new("email", &[""])],
+                ..options()
+            }),
+            Err(Error::EmailMissing),
+            "{name_id_format}"
+        );
+    }
+}
+
+#[test]
+fn an_email_with_several_ats_or_whitespace_means_no_email() {
+    for email in [
+        "attacker@evil.test@acme.com",
+        "@@acme.com",
+        "jane doe@acme.com",
+        "jane@acme.com&#10;x@acme.com",
+        "jane&#9;@acme.com",
+    ] {
+        let xml = spliced(
+            &format!("<saml2:AttributeValue xsi:type=\"xs:string\">{EMAIL}</saml2:AttributeValue>"),
+            &format!("<saml2:AttributeValue xsi:type=\"xs:string\">{email}</saml2:AttributeValue>"),
+        );
+        assert_eq!(consume_xml(&xml), Err(Error::EmailMissing), "{email}");
+    }
 }
 
 #[test]

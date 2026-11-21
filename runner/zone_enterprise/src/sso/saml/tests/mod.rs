@@ -37,6 +37,7 @@ fn every_refusal_completes_the_sentence() {
         Refusal::AssertionCount,
         Refusal::Encrypted,
         Refusal::Version,
+        Refusal::Incomplete,
         Refusal::Issuer,
         Refusal::Destination,
         Refusal::InResponseTo,

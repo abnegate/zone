@@ -20,6 +20,7 @@ const BOUND: Duration = Duration::from_secs(10);
 const FIXTURE_RESPONSE_ID: &str = "_fixture-response-31c7";
 const FIXTURE_ASSERTION_ID: &str = "_fixture-assertion-31c7";
 const FIXTURE_SIGNED_ASSERTION_ID: &str = "_fixture-assertion-8a02";
+const FIXTURE_PREFIX_LIST_ASSERTION_ID: &str = "_fixture-assertion-5d17";
 const ECDSA_SHA256: &str = "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha256";
 const HMAC_SHA256: &str = "http://www.w3.org/2001/04/xmldsig-more#hmac-sha256";
 const DSA_SHA1: &str = "http://www.w3.org/2000/09/xmldsig#dsa-sha1";
@@ -209,6 +210,46 @@ fn an_openssl_signed_assertion_matches_its_xmllint_canonical_form() {
         include_str!("fixtures/signed/assertion.c14n")
     );
     assert_eq!(pinned(xml, FIXTURE_SIGNED_ASSERTION_ID), Ok(true));
+}
+
+/// Made outside Zone, so a c14n bug shared by Zone's signer and verifier
+/// can't hide behind a matching signature. The Assertion's Transform carries
+/// `InclusiveNamespaces PrefixList="xs"` for its `xsi:type="xs:string"`
+/// values, and `xs` is declared only on the Response, outside the signed
+/// subtree. xmllint's `--exc-c14n` has no PrefixList option, so
+/// `prefix_list.c14n` was derived by hand: `xmllint --exc-c14n` of a
+/// standalone copy of the unsigned Assertion that declares `saml2` and `xsi`
+/// on it (which renders `saml2` at the apex and `xsi` on each AttributeValue
+/// that uses it), with `xmlns:xs` then added at the apex after `xmlns:saml2`,
+/// because exc-c14n renders an inclusive prefix in scope at the apex like
+/// inclusive c14n does, sorted by prefix. As an independent check, those bytes
+/// equal `xmllint --c14n` (inclusive) of a copy declaring `saml2` and `xs` on
+/// the Assertion and `xsi` on each AttributeValue. The DigestValue is
+/// `openssl dgst -sha256 -binary | base64` of those bytes, and the
+/// SignatureValue is `xmllint --exc-c14n` of a standalone SignedInfo (with
+/// `xmlns:ds` on it) piped to `openssl dgst -sha256 -sign`, using the key
+/// behind `CERTIFICATE`.
+#[test]
+fn an_openssl_signed_assertion_with_a_prefix_list_verifies() {
+    let xml = include_str!("fixtures/signed/prefix_list.xml");
+    let document = parse(xml);
+    let assertion = named(&document, uri::ASSERTION, "Assertion");
+    let signature = named(&document, uri::DSIG, "Signature");
+    assert_eq!(
+        String::from_utf8(exclusive(
+            &document,
+            assertion,
+            Some(signature),
+            &[SCHEMA_PREFIX.to_owned()]
+        ))
+        .unwrap(),
+        include_str!("fixtures/signed/prefix_list.c14n")
+    );
+    assert_eq!(pinned(xml, FIXTURE_PREFIX_LIST_ASSERTION_ID), Ok(true));
+    assert_eq!(
+        outcome(xml, FIXTURE_PREFIX_LIST_ASSERTION_ID, &[OTHER_CERTIFICATE]),
+        Err(Refusal::Signature)
+    );
 }
 
 #[test]
