@@ -18,6 +18,8 @@ import {
   LAPSED,
   ORGANIZATION_ID,
   RELEASE_MANAGER,
+  TEAM,
+  TEAM_LAPSED,
 } from '../fixtures';
 import {
   BASE_HINT,
@@ -184,6 +186,24 @@ describe('RolesSection', () => {
         within(item).getByRole('button', { name: 'View Release manager' })
       ).toBeInTheDocument();
       expect(within(item).queryByRole('button', { name: /Edit|Delete/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Create role' })).not.toBeInTheDocument();
+    });
+
+    it('shows a Team license the Enterprise upgrade notice and a read-only list', async () => {
+      await loaded(TEAM);
+
+      expect(screen.getByRole('note')).toHaveTextContent(UPGRADE_NOTICE);
+      expect(screen.queryByText(LAPSED_NOTICE)).not.toBeInTheDocument();
+      expect(screen.getAllByRole('button', { name: /^View / })).toHaveLength(1);
+      expect(screen.queryByRole('button', { name: /^Edit / })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Create role' })).not.toBeInTheDocument();
+    });
+
+    it('shows a lapsed Team license the upgrade notice, not a renewal notice', async () => {
+      await loaded(TEAM_LAPSED);
+
+      expect(screen.getByRole('note')).toHaveTextContent(UPGRADE_NOTICE);
+      expect(screen.queryByText(LAPSED_NOTICE)).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Create role' })).not.toBeInTheDocument();
     });
 

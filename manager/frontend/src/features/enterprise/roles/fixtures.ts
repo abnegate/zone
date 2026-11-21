@@ -97,3 +97,11 @@ export const LAPSED: RolesResponse = {
   editable: false,
   status: LicenseStatus.Lapsed,
 };
+
+export const TEAM: RolesResponse = {
+  ...COMMUNITY_WITH_ROLES,
+  edition: Edition.Team,
+  status: LicenseStatus.Active,
+};
+
+export const TEAM_LAPSED: RolesResponse = { ...TEAM, status: LicenseStatus.Lapsed };
