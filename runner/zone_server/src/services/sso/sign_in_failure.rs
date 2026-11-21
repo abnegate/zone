@@ -1,3 +1,4 @@
+use uuid::Uuid;
 use zone_enterprise::sso::Error;
 
 use crate::auth::password::PasswordError;
@@ -14,6 +15,8 @@ pub enum SignInFailure {
     Storage(#[from] sqlx::Error),
     #[error(transparent)]
     Provider(ProviderError),
+    #[error("The stored settings of SSO provider {0} no longer parse: {1}")]
+    Unreadable(Uuid, Error),
     #[error(transparent)]
     Password(#[from] PasswordError),
     #[error("The account changed while the sign-in was linking it")]

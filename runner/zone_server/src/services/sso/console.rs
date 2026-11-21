@@ -1,4 +1,5 @@
 use reqwest::Url;
+use zone_enterprise::sso::saml::ServiceProvider;
 
 pub const CALLBACK_PATH: &str = "/sso/callback";
 pub const SAML_METADATA_PATH: &str = "/api/auth/sso/saml/metadata";
@@ -15,6 +16,13 @@ pub fn saml_entity_id(app_base_url: &str) -> String {
 
 pub fn saml_acs_url(app_base_url: &str) -> String {
     format!("{}{SAML_ACS_PATH}", callback_origin(app_base_url))
+}
+
+pub fn service_provider(app_base_url: &str) -> ServiceProvider {
+    ServiceProvider {
+        entity_id: saml_entity_id(app_base_url),
+        acs_url: saml_acs_url(app_base_url),
+    }
 }
 
 /// The scheme, host and port of the console. A sign-in has to start on this origin, because the
@@ -100,6 +108,29 @@ mod tests {
                 "{base}"
             );
         }
+    }
+
+    #[test]
+    fn the_service_provider_is_the_saml_entity_id_and_acs_url() {
+        for base in ["https://zone.example.com/", "https://example.com/zone"] {
+            assert_eq!(
+                service_provider(base),
+                ServiceProvider {
+                    entity_id: saml_entity_id(base),
+                    acs_url: saml_acs_url(base),
+                },
+                "{base}"
+            );
+        }
+        let service = service_provider("https://zone.example.com:8443/app/");
+        assert_eq!(
+            service.entity_id,
+            "https://zone.example.com:8443/api/auth/sso/saml/metadata"
+        );
+        assert_eq!(
+            service.acs_url,
+            "https://zone.example.com:8443/api/auth/sso/saml/acs"
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@
 pub mod enforcement;
 pub mod providers;
 pub mod refusal;
+pub mod saml;
 pub mod settings;
 pub mod sign_in;
 

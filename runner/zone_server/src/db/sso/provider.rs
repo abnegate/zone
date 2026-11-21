@@ -1,7 +1,7 @@
 use abnegate_secret::{MasterKey, SecretValue};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
-use zone_enterprise::sso::{Fields, Protocol};
+use zone_enterprise::sso::{Fields, Protocol, saml};
 
 use super::connection::Connection;
 use super::provider_error::{ProviderError, ProviderResult};
@@ -47,6 +47,26 @@ impl ProviderRecord {
             issuer: &self.issuer,
             client_id,
             client_secret: client_secret.expose(),
+            allowed_domains: &self.allowed_domains,
+            require_verified_email: self.require_verified_email,
+        })
+    }
+
+    /// `None` for an OpenID Connect record.
+    pub fn saml_fields(&self) -> Option<saml::Fields<'_>> {
+        let Connection::Saml {
+            sso_url,
+            certificates,
+            ..
+        } = &self.connection
+        else {
+            return None;
+        };
+        Some(saml::Fields {
+            display_name: &self.display_name,
+            entity_id: &self.issuer,
+            sso_url,
+            certificates,
             allowed_domains: &self.allowed_domains,
             require_verified_email: self.require_verified_email,
         })
