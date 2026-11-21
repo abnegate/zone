@@ -1,7 +1,7 @@
 use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::sso::saml::testing::{
-    ACS_URL, ASSERTION_ID, ENTITY_ID, Key, REQUEST_ID, RESPONSE_ID, SERVICE_ENTITY_ID,
+    ACS_URL, ASSERTION_ID, Claim, ENTITY_ID, Key, REQUEST_ID, RESPONSE_ID, SERVICE_ENTITY_ID,
 };
 use crate::sso::saml::uri;
 use crate::sso::testing::{EMAIL, NAME, SUBJECT};
@@ -21,10 +21,14 @@ pub struct Options {
     pub name_id_format: String,
     pub email: Option<String>,
     pub display_name: Option<String>,
+    pub claims: Vec<Claim>,
     pub issue_instant: DateTime<Utc>,
     pub not_before: DateTime<Utc>,
     pub not_on_or_after: DateTime<Utc>,
     pub confirmation_not_on_or_after: DateTime<Utc>,
+    pub confirmation_not_before: Option<DateTime<Utc>>,
+    pub confirmation_in_response_to: Option<String>,
+    pub confirmation_method: String,
     pub status: String,
     pub sign_assertion: bool,
     pub sign_response: bool,
@@ -45,10 +49,14 @@ impl Options {
             name_id_format: uri::PERSISTENT.to_owned(),
             email: Some(EMAIL.to_owned()),
             display_name: Some(NAME.to_owned()),
+            claims: Vec::new(),
             issue_instant: now,
             not_before: now,
             not_on_or_after: now + LIFETIME,
             confirmation_not_on_or_after: now + LIFETIME,
+            confirmation_not_before: None,
+            confirmation_in_response_to: Some(REQUEST_ID.to_owned()),
+            confirmation_method: uri::BEARER.to_owned(),
             status: uri::SUCCESS.to_owned(),
             sign_assertion: true,
             sign_response: false,

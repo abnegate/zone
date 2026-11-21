@@ -1,3 +1,4 @@
+mod claim;
 mod key;
 mod options;
 mod signing;
@@ -21,6 +22,7 @@ use crate::sso::saml::signature::SIGNATURE_VALUE;
 use crate::sso::saml::signature_method::SignatureMethod;
 use crate::sso::saml::uri;
 
+pub use claim::Claim;
 pub use key::Key;
 pub use options::Options;
 pub use signing::Signing;
@@ -307,10 +309,13 @@ fn serialize(document: &Document) -> String {
 fn unsigned(options: &Options) -> String {
     let mut statement = String::new();
     if let Some(email) = &options.email {
-        statement.push_str(&attribute_element(uri::EMAIL_ATTRIBUTES[0], email));
+        statement.push_str(&attribute_element(uri::EMAIL_ATTRIBUTES[0], &[email]));
     }
     if let Some(name) = &options.display_name {
-        statement.push_str(&attribute_element(uri::NAME_ATTRIBUTES[0], name));
+        statement.push_str(&attribute_element(uri::NAME_ATTRIBUTES[0], &[name]));
+    }
+    for claim in &options.claims {
+        statement.push_str(&attribute_element(&claim.name, &claim.values));
     }
     if !statement.is_empty() {
         statement =
@@ -343,9 +348,9 @@ xmlns:xsi=\"{instance}\" ID=\"{response_id}\" Version=\"{VERSION}\" IssueInstant
     <saml2:Issuer>{issuer}</saml2:Issuer>\n    \
     <saml2:Subject>\n      \
       <saml2:NameID Format=\"{name_id_format}\">{name_id}</saml2:NameID>\n      \
-      <saml2:SubjectConfirmation Method=\"{bearer}\">\n        \
-        <saml2:SubjectConfirmationData{in_response_to} NotOnOrAfter=\"{confirmation}\" \
-Recipient=\"{recipient}\"/>\n      \
+      <saml2:SubjectConfirmation Method=\"{method}\">\n        \
+        <saml2:SubjectConfirmationData{confirmation_in_response_to}{confirmation_not_before} \
+NotOnOrAfter=\"{confirmation}\" Recipient=\"{recipient}\"/>\n      \
       </saml2:SubjectConfirmation>\n    \
     </saml2:Subject>\n    \
     <saml2:Conditions NotBefore=\"{not_before}\" NotOnOrAfter=\"{not_on_or_after}\">\n\
@@ -370,7 +375,15 @@ Recipient=\"{recipient}\"/>\n      \
         assertion_id = attribute(&options.assertion_id),
         name_id_format = attribute(&options.name_id_format),
         name_id = text(&options.name_id),
-        bearer = uri::BEARER,
+        method = attribute(&options.confirmation_method),
+        confirmation_in_response_to = optional(
+            "InResponseTo",
+            options.confirmation_in_response_to.as_deref()
+        ),
+        confirmation_not_before = optional(
+            "NotBefore",
+            options.confirmation_not_before.map(instant).as_deref()
+        ),
         confirmation = instant(options.confirmation_not_on_or_after),
         recipient = attribute(&options.recipient),
         not_before = instant(options.not_before),
@@ -378,13 +391,17 @@ Recipient=\"{recipient}\"/>\n      \
     )
 }
 
-fn attribute_element(name: &str, value: &str) -> String {
+fn attribute_element<S: AsRef<str>>(name: &str, values: &[S]) -> String {
+    let mut elements = String::new();
+    for value in values {
+        elements.push_str(&format!(
+            "        <saml2:AttributeValue xsi:type=\"{SCHEMA_PREFIX}:string\">{}</saml2:AttributeValue>\n",
+            text(value.as_ref())
+        ));
+    }
     format!(
-        "      <saml2:Attribute Name=\"{name}\" NameFormat=\"{BASIC}\">\n        \
-        <saml2:AttributeValue xsi:type=\"{SCHEMA_PREFIX}:string\">{value}</saml2:AttributeValue>\n      \
-      </saml2:Attribute>\n",
+        "      <saml2:Attribute Name=\"{name}\" NameFormat=\"{BASIC}\">\n{elements}      </saml2:Attribute>\n",
         name = attribute(name),
-        value = text(value),
     )
 }
 
