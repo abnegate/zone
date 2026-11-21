@@ -69,19 +69,19 @@ fn client_webview_uses_stable_loopback() {
 #[test]
 fn launcher_icon_is_theme_blue_and_inset() {
     let svg = fs::read_to_string(desktop_dir().join("icons/icon.svg")).unwrap();
-    assert!(svg.contains("#0011d9"), "launcher Z must use --ui-accent");
+    assert!(svg.contains("#0011d9"), "launcher mark must use --ui-accent");
     assert!(
         svg.contains("#1a1612"),
         "launcher background must match the dark canvas"
     );
     assert!(
         svg.contains("translate(21 21) scale(1.03125)"),
-        "Z must sit in the Android adaptive 66dp safe zone of 108: {svg}"
+        "mark must sit in the Android adaptive 66dp safe zone of 108: {svg}"
     );
     let night = fs::read_to_string(desktop_dir().join("icons/icon-night.svg")).unwrap();
     assert!(
         night.contains("#00f3ff"),
-        "night launcher Z must use dark --ui-accent"
+        "night launcher mark must use dark --ui-accent"
     );
     assert!(night.contains("translate(21 21) scale(1.03125)"));
     let script = fs::read_to_string(repo_root().join("scripts/generate-tauri-icons.sh")).unwrap();
