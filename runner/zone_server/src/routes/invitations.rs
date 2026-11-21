@@ -15,22 +15,10 @@ use uuid::Uuid;
 use crate::auth::{AuthUser, OrgAdmin};
 use crate::db::audit::{actions, resources};
 use crate::db::{invitations, organization_members, organizations, users, workspaces};
+use crate::services::members;
 use crate::state::AppState;
 
-use super::common::{AuditEvent, Timestamps, audit};
-
-#[derive(Debug, Serialize)]
-pub struct ErrorResponse {
-    error: String,
-}
-
-impl ErrorResponse {
-    fn new(error: impl Into<String>) -> Self {
-        Self {
-            error: error.into(),
-        }
-    }
-}
+use super::common::{AuditEvent, ErrorResponse, Timestamps, audit};
 
 /// Invitation response
 #[derive(Debug, Serialize)]
@@ -150,7 +138,6 @@ pub async fn create_invitation(
     }: OrgAdmin,
     Json(req): Json<CreateInvitationRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    // Validate email format
     if !is_valid_email(&req.email) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -172,7 +159,6 @@ pub async fn create_invitation(
         }
     };
 
-    // Validate roles
     let valid_org_roles = ["member", "admin", "owner"];
     let valid_workspace_roles = ["viewer", "member", "admin", "owner"];
 
@@ -227,11 +213,16 @@ pub async fn create_invitation(
         }
     }
 
-    // Check if a user with this email already exists
-    if let Ok(Some(existing_user)) =
-        crate::db::users::get_user_by_email(state.db(), &req.email).await
-    {
-        // Check if this user is already a member of the organization
+    let existing_user = users::get_user_by_email(state.db(), &req.email)
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(format!("Database error: {error}"))),
+            )
+        })?;
+
+    if let Some(existing_user) = &existing_user {
         let existing_member =
             organization_members::get_member(state.db(), org_id, existing_user.id)
                 .await
@@ -254,7 +245,8 @@ pub async fn create_invitation(
         }
     }
 
-    // Check if there's already a pending invitation
+    members::admit(&state, existing_user.map(|user| user.id)).await?;
+
     let existing_invitation =
         invitations::get_pending_invitation_for_email(state.db(), &req.email, org_id)
             .await
@@ -377,7 +369,6 @@ pub async fn revoke_invitation(
     }: OrgAdmin,
     Path((_org_id, invitation_id)): Path<(Uuid, Uuid)>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    // First get the invitation to verify org ownership
     let invitation = invitations::get_invitation_by_id(state.db(), invitation_id)
         .await
         .map_err(|e| {
@@ -393,7 +384,6 @@ pub async fn revoke_invitation(
             )
         })?;
 
-    // Verify invitation belongs to this organization
     if invitation.organization_id != org_id {
         return Err((
             StatusCode::FORBIDDEN,
@@ -460,7 +450,6 @@ pub async fn get_invitation(
             Json(ErrorResponse::new("Invitation not found or expired")),
         ))?;
 
-    // Get organization name
     let org = organizations::get_organization(state.db(), invitation.organization_id)
         .await
         .map_err(|e| {
@@ -499,7 +488,6 @@ pub async fn accept_invitation(
         )
     })?;
 
-    // Get invitation to verify it exists and get email
     let invitation = invitations::get_invitation_by_token(state.db(), &token)
         .await
         .map_err(|e| {
@@ -513,7 +501,6 @@ pub async fn accept_invitation(
             Json(ErrorResponse::new("Invitation not found or expired")),
         ))?;
 
-    // Verify the user's email matches the invitation email
     let user = crate::db::users::get_user_by_id(state.db(), user_id)
         .await
         .map_err(|e| {
@@ -536,7 +523,8 @@ pub async fn accept_invitation(
         ));
     }
 
-    // Accept the invitation
+    members::admit(&state, Some(user_id)).await?;
+
     invitations::accept_invitation(state.db(), &token, user_id)
         .await
         .map_err(|e| {

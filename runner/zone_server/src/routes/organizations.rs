@@ -14,6 +14,7 @@ use crate::db::DbResult;
 use crate::db::audit::{actions, resources};
 use crate::db::{organization_members, organizations, workspaces};
 use crate::services::login::devices;
+use crate::services::members;
 use crate::state::AppState;
 use crate::sync::hook::Removal;
 
@@ -175,7 +176,10 @@ pub async fn create(
         }
     };
 
-    // MAJOR-1: Wrap organization creation in a transaction
+    if let Err(refusal) = members::admit(&state, Some(user_id)).await {
+        return refusal.into_response();
+    }
+
     let mut tx = match state.db().begin().await {
         Ok(tx) => tx,
         Err(e) => {
@@ -188,7 +192,6 @@ pub async fn create(
         }
     };
 
-    // Create organization
     let org = match organizations::create_organization_tx(
         &mut tx,
         &req.name,
@@ -209,7 +212,6 @@ pub async fn create(
         }
     };
 
-    // Add creator as owner
     if let Err(e) = organization_members::add_member_tx(
         &mut tx,
         org.id,
@@ -230,7 +232,6 @@ pub async fn create(
             .into_response();
     }
 
-    // Commit transaction
     if let Err(e) = tx.commit().await {
         tracing::error!("Failed to commit transaction: {}", e);
         return (
@@ -816,7 +817,10 @@ pub async fn add_member(
         }
     };
 
-    // CRITICAL-7: Check if member already exists (active or inactive)
+    if let Err(refusal) = members::admit(&state, Some(target)).await {
+        return refusal.into_response();
+    }
+
     match organization_members::get_member(state.db(), admin.org_id, target).await {
         Ok(Some(existing)) => {
             if existing.is_active {
@@ -828,7 +832,6 @@ pub async fn add_member(
                 )
                     .into_response();
             } else {
-                // Member exists but is inactive - use reactivate instead
                 match organization_members::reactivate_member(
                     state.db(),
                     admin.org_id,
@@ -932,7 +935,6 @@ pub async fn update_member_role(
         }
     };
 
-    // CRITICAL-4: Prevent privilege escalation - only owners can grant owner role
     if role == organization_members::OrgRole::Owner
         && admin.role != organization_members::OrgRole::Owner
     {

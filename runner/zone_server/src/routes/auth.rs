@@ -17,6 +17,7 @@ use crate::db::users::UserRow;
 use crate::db::{password_reset, refresh_tokens, sessions, users};
 use crate::services::account::{AuthResponse, Credential, Grant, Refusal, provision, session};
 use crate::services::mail::Template;
+use crate::services::members;
 use crate::services::sso::enforcement;
 use crate::state::AppState;
 use crate::utils::crypto::hash_token;
@@ -104,6 +105,10 @@ pub async fn register(
         Ok(Some(_)) => return already_registered(),
         Err(error) => return unavailable(&error),
         Ok(None) => {}
+    }
+
+    if let Err(refusal) = members::admit(&state, None).await {
+        return refusal.into_response();
     }
 
     let password_hash = match hash_password(&request.password) {
