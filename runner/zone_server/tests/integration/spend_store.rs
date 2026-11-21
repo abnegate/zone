@@ -5,10 +5,12 @@ use std::time::{Duration, Instant};
 
 use abnegate_notify::Fanout;
 use abnegate_secret::MasterKey;
+use axum::http::StatusCode;
 use chrono::{DateTime, NaiveDate, SubsecRound, TimeDelta, Utc};
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
-use wiremock::matchers::{body_json, method, path};
+use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 use zone_enterprise::spend::{Budget, Microdollars, Month, Scope, State, Target};
 use zone_server::db::audit::lock::Lock;
@@ -18,9 +20,9 @@ use zone_server::db::spend::budgets::{self, Announcement, BudgetRow, CreateError
 use zone_server::db::spend::{cursor, keys};
 use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::services::spend::attribution::attribute;
-use zone_server::services::spend::client::DATE_FORMAT;
+use zone_server::services::spend::client::{DATE_FORMAT, PAGE_SIZE};
 use zone_server::services::spend::ingest::{self, Ingested, OVERLAP, SPEND_LOCK};
-use zone_server::services::spend::{Key, notice, registry, upkeep};
+use zone_server::services::spend::{Error, Key, notice, registry, upkeep};
 
 use crate::common::Database;
 use crate::common::spend::{DELETE_PATH, Fixture, GENERATE_PATH, LOGS_PATH, MASTER, Spend, log};
@@ -1355,6 +1357,12 @@ async fn the_cursor_is_read_back_where_it_was_advanced() {
     let second = first + TimeDelta::minutes(1);
     cursor::advance(pool, second).await.unwrap();
     assert_eq!(cursor::read(pool).await.unwrap(), Some(second));
+    cursor::advance(pool, first).await.unwrap();
+    assert_eq!(
+        cursor::read(pool).await.unwrap(),
+        Some(second),
+        "the cursor never moves back"
+    );
 
     fixture.cleanup().await;
 }
@@ -1518,6 +1526,76 @@ async fn a_request_logged_late_inside_the_overlap_is_still_ingested() {
     assert_eq!(
         query(&requests[0], "start_date"),
         seconds(through - overlap())
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_failed_page_keeps_the_cursor_at_the_last_page_stored() {
+    let fixture = Fixture::new("spend_partial").await;
+    fixture.licensed().await;
+    let member = attributed(&fixture).await;
+    sqlx::query("UPDATE spend_keys SET created_at = now() - interval '1 hour'")
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+    let first = Utc::now().trunc_subsecs(3) - TimeDelta::seconds(10);
+    let page = |number: i64| -> Value {
+        let rows: Vec<Value> = (0..PAGE_SIZE as i64)
+            .map(|row| {
+                let index = number * PAGE_SIZE as i64 + row;
+                let start = first + TimeDelta::milliseconds(index);
+                log(&format!("request-{index}"), &member.token, start, 0.001)
+            })
+            .collect();
+        json!({ "data": rows })
+    };
+    for number in 0..2 {
+        Mock::given(method("GET"))
+            .and(path(LOGS_PATH))
+            .and(query_param("page", (number + 1).to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(number)))
+            .expect(1)
+            .mount(&fixture.litellm)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path(LOGS_PATH))
+        .and(query_param("page", "3"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&fixture.litellm)
+        .await;
+
+    let failed = ingest::run(fixture.state(), &fixture.client()).await;
+    assert!(
+        matches!(
+            failed,
+            Err(Error::Status(StatusCode::INTERNAL_SERVER_ERROR))
+        ),
+        "{failed:?}"
+    );
+    let through = first + TimeDelta::milliseconds(2 * PAGE_SIZE as i64 - 1);
+    assert_eq!(
+        cursor::read(fixture.pool()).await.unwrap(),
+        Some(through),
+        "the cursor keeps the last start of the last page stored"
+    );
+    assert_eq!(fixture.stored().await.len(), 2 * PAGE_SIZE);
+    fixture.litellm.verify().await;
+
+    fixture.litellm.reset().await;
+    fixture.mount_logs(Vec::new()).await;
+    assert_eq!(
+        ingested(&fixture).await,
+        Ingested::Done { rows: 0, stored: 0 }
+    );
+    let requests = fixture.received(LOGS_PATH).await;
+    assert_eq!(
+        query(&requests[0], "start_date"),
+        seconds(through - overlap()),
+        "the next run picks up the overlap before the pages already stored"
     );
 
     fixture.cleanup().await;

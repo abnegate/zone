@@ -98,7 +98,7 @@ async fn read(
     end: DateTime<Utc>,
 ) -> Result<(u64, u64, Vec<usize>), Error> {
     let mut batches = Vec::new();
-    let (rows, stored) = ingest::page_through(client, start, end, |records| {
+    let (rows, stored) = ingest::page_through(client, start, end, |records, _| {
         batches.push(records.len());
         let stored = records.len() as u64;
         async move { Ok(stored) }
@@ -180,6 +180,55 @@ async fn a_failed_page_fails_the_run() {
     );
 }
 
+#[tokio::test]
+async fn each_page_reads_through_its_last_start_and_the_short_page_through_the_end() {
+    let (server, client) = litellm().await;
+    mount_page(&server, 1, PAGE_SIZE).await;
+    mount_page(&server, 2, PAGE_SIZE).await;
+    mount_page(&server, 3, 0).await;
+    let last = moment("2026-11-21T10:00:00Z");
+    let end = moment("2026-11-21T10:30:00Z");
+
+    let mut throughs = Vec::new();
+    ingest::page_through(
+        &client,
+        moment("2026-11-21T09:00:00Z"),
+        end,
+        |_, through| {
+            throughs.push(through);
+            async { Ok(0) }
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(throughs, [Some(last), Some(last), Some(end)]);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_full_page_never_reads_past_the_end() {
+    let (server, client) = litellm().await;
+    mount_page(&server, 1, PAGE_SIZE).await;
+    mount_page(&server, 2, 1).await;
+    let end = moment("2026-11-21T09:59:59Z");
+
+    let mut throughs = Vec::new();
+    ingest::page_through(
+        &client,
+        moment("2026-11-21T09:00:00Z"),
+        end,
+        |_, through| {
+            throughs.push(through);
+            async { Ok(0) }
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(throughs, [Some(end), Some(end)]);
+}
+
 #[test]
 fn the_overlap_outlasts_the_longest_request_by_five_minutes() {
     assert_eq!(OVERLAP, Duration::from_secs(35 * 60));
@@ -201,6 +250,11 @@ fn a_run_reads_from_the_overlap_before_the_cursor_or_the_first_key() {
     assert_eq!(
         ingest::start(None, earliest),
         moment("2026-10-31T23:25:00Z")
+    );
+    assert_eq!(
+        ingest::start(Some(moment("2026-10-01T00:00:00Z")), earliest),
+        moment("2026-10-31T23:25:00Z"),
+        "a cursor from before the first key reads from the first key"
     );
 }
 

@@ -49,23 +49,30 @@ async fn ingest(pool: &PgPool, client: &Client, end: DateTime<Utc>) -> Result<In
         return Ok(Ingested::Idle);
     };
     let start = start(cursor::read(pool).await?, earliest);
-    let (rows, stored) = page_through(client, start, end, |batch| async move {
-        Ok(records::upsert(pool, &batch).await?)
+    let (rows, stored) = page_through(client, start, end, |batch, through| async move {
+        let stored = records::upsert(pool, &batch).await?;
+        if let Some(through) = through {
+            cursor::advance(pool, through).await?;
+        }
+        Ok(stored)
     })
     .await?;
-    cursor::advance(pool, end).await?;
     tracing::debug!(rows, stored, %start, %end, "Ingested LiteLLM spend");
     Ok(Ingested::Done { rows, stored })
 }
 
 /// Where a run reads from: [`OVERLAP`] before the cursor, or before the first key was derived
-/// when nothing has been ingested yet.
+/// when that is later or nothing has been ingested yet.
 pub fn start(cursor: Option<DateTime<Utc>>, earliest: DateTime<Utc>) -> DateTime<Utc> {
-    cursor.unwrap_or(earliest) - TimeDelta::from_std(OVERLAP).expect("the overlap fits a delta")
+    cursor.map_or(earliest, |cursor| cursor.max(earliest))
+        - TimeDelta::from_std(OVERLAP).expect("the overlap fits a delta")
 }
 
 /// Reads every page of the logs from `start` through `end`, handing each page's records to
-/// `store`, until a page comes back short. Returns the rows read and what `store` stored.
+/// `store` with how far the run has read: a full page's last start, which a failure on a later
+/// page keeps, or `end` once a page comes back short. Rows come oldest first, and the next run
+/// reads [`OVERLAP`] behind it again, so a row sharing that start on the next page isn't lost.
+/// Returns the rows read and what `store` stored.
 pub(crate) async fn page_through<Store, Stored>(
     client: &Client,
     start: DateTime<Utc>,
@@ -73,7 +80,7 @@ pub(crate) async fn page_through<Store, Stored>(
     mut store: Store,
 ) -> Result<(u64, u64), Error>
 where
-    Store: FnMut(Vec<Record>) -> Stored,
+    Store: FnMut(Vec<Record>, Option<DateTime<Utc>>) -> Stored,
     Stored: Future<Output = Result<u64, Error>>,
 {
     let mut rows = 0;
@@ -83,8 +90,15 @@ where
         let fetched = client.logs(start, end, page).await?;
         let count = fetched.rows();
         rows += count as u64;
-        stored += store(fetched.logs().iter().filter_map(Log::record).collect()).await?;
-        if count < PAGE_SIZE {
+        let logs = fetched.logs();
+        let finished = count < PAGE_SIZE;
+        let through = if finished {
+            Some(end)
+        } else {
+            logs.last().map(|log| log.start_time.min(end))
+        };
+        stored += store(logs.iter().filter_map(Log::record).collect(), through).await?;
+        if finished {
             return Ok((rows, stored));
         }
         page += 1;
