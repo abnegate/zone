@@ -1,7 +1,16 @@
-import { Button, EmptyState, Modal, Select } from '@zone/ui';
+import { Button, EmptyState, Modal, Select, type SelectOption } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useAuth } from '../../../auth';
+import { RoleScope, useRoles } from '../../../enterprise';
+import {
+  type Assignment,
+  assignmentFailure,
+  assignmentOf,
+  assignsCustomRole,
+  customRoleOptions,
+  heldRole,
+} from '../../assignment';
 import { memberLabel } from '../../memberLabel';
 import type {
   AddWorkspaceMemberRequest,
@@ -41,7 +50,6 @@ export default function WorkspaceMembersSection({
   const [orgMembers, setOrgMembers] = useState<OrganizationMember[]>([]);
   const [currentUserRole, setCurrentUserRole] = useState<WorkspaceRole>('viewer');
 
-  // Track which member is being modified to prevent race conditions
   const [updatingMemberId, setUpdatingMemberId] = useState<string | null>(null);
 
   const [showAddModal, setShowAddModal] = useState(false);
@@ -128,11 +136,17 @@ export default function WorkspaceMembersSection({
     }
   };
 
-  const handleRoleChangeRequest = (member: WorkspaceMember, newRole: WorkspaceRole) => {
-    if (member.role === 'owner' && countOwners() === 1 && newRole !== 'owner') {
+  const handleRoleChangeRequest = (member: WorkspaceMember, value: string) => {
+    const assignment = assignmentOf<WorkspaceRole>(value);
+    if (member.role === 'owner' && countOwners() === 1 && heldRole(member) !== value) {
       setError('Cannot change role of the last owner');
       return;
     }
+    if (assignsCustomRole(assignment)) {
+      handleRoleChange(member.user_id, assignment);
+      return;
+    }
+    const newRole = assignment.role;
 
     if ((newRole === 'admin' || newRole === 'owner') && member.role === 'member') {
       setPendingRoleChange({ member, newRole });
@@ -144,11 +158,11 @@ export default function WorkspaceMembersSection({
       setPendingRoleChange({ member, newRole });
       setShowRoleConfirmModal(true);
     } else {
-      handleRoleChange(member.user_id, newRole);
+      handleRoleChange(member.user_id, assignment);
     }
   };
 
-  const handleRoleChange = async (userId: string, newRole: WorkspaceRole) => {
+  const handleRoleChange = async (userId: string, assignment: Assignment<WorkspaceRole>) => {
     const member = members.find((m) => m.user_id === userId);
     if (!member) return;
 
@@ -156,11 +170,11 @@ export default function WorkspaceMembersSection({
     setError(undefined);
 
     try {
-      await client.updateWorkspaceMemberRole(workspaceId, userId, { role: newRole });
+      await client.updateWorkspaceMemberRole(workspaceId, userId, assignment);
       showSuccessMessage('Role updated successfully');
       await loadMembers();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update role');
+      setError(assignmentFailure(err, 'Failed to update role'));
     } finally {
       setUpdatingMemberId(null);
     }
@@ -169,11 +183,10 @@ export default function WorkspaceMembersSection({
   const confirmRoleChange = async () => {
     if (!pendingRoleChange) return;
 
-    // Clear pending state BEFORE async call to prevent race conditions
     const { member, newRole } = pendingRoleChange;
     setPendingRoleChange(null);
     setShowRoleConfirmModal(false);
-    await handleRoleChange(member.user_id, newRole);
+    await handleRoleChange(member.user_id, { role: newRole });
   };
 
   const handleRemoveMember = async () => {
@@ -195,9 +208,13 @@ export default function WorkspaceMembersSection({
     }
   };
 
-  const getRoleBadgeClass = (role: WorkspaceRole): string => {
-    return `role-badge role-badge-${role}`;
-  };
+  const getRoleBadgeClass = (member: WorkspaceMember): string =>
+    member.custom_role === null
+      ? `role-badge role-badge-${member.role}`
+      : 'role-badge role-badge-custom';
+
+  const getRoleLabel = (member: WorkspaceMember): string =>
+    member.custom_role?.name ?? member.role.charAt(0).toUpperCase() + member.role.slice(1);
 
   const formatDate = (dateString: string): string => {
     if (!dateString) return '—';
@@ -216,6 +233,8 @@ export default function WorkspaceMembersSection({
 
   const canManageMembers = currentUserRole === 'admin' || currentUserRole === 'owner';
 
+  const { response: customRoles } = useRoles(canManageMembers ? orgId : null);
+
   const canModifyMember = (member: WorkspaceMember): boolean => {
     if (!canManageMembers) return false;
     if (member.user_id === user?.id) return false;
@@ -228,7 +247,7 @@ export default function WorkspaceMembersSection({
 
   // Both the add route and the role route refuse anyone but an owner granting
   // admin or owner, so one list serves the form and the rows alike.
-  const grantableRoles = (): Array<{ value: WorkspaceRole; label: string }> => {
+  const grantableRoles = (): SelectOption[] => {
     if (!canManageMembers) return [];
     if (currentUserRole === 'admin') {
       return roleOptions.filter((r) => r.value !== 'owner' && r.value !== 'admin');
@@ -236,20 +255,19 @@ export default function WorkspaceMembersSection({
     return roleOptions;
   };
 
-  const getAssignableRoles = (
-    member: WorkspaceMember
-  ): Array<{ value: WorkspaceRole; label: string }> => {
+  const getAssignableRoles = (member: WorkspaceMember): SelectOption[] => {
     if (!canManageMembers) return [];
     // Only an owner may re-seat someone already holding admin or owner.
     if (currentUserRole === 'admin' && (member.role === 'admin' || member.role === 'owner')) {
       return roleOptions.filter((r) => r.value === member.role);
     }
-    return grantableRoles();
+    return [
+      ...grantableRoles(),
+      ...customRoleOptions(customRoles, RoleScope.Workspace, member.custom_role),
+    ];
   };
 
-  const getAvailableRoles = (
-    member: WorkspaceMember
-  ): Array<{ value: WorkspaceRole; label: string }> =>
+  const getAvailableRoles = (member: WorkspaceMember): SelectOption[] =>
     canManageMembers
       ? getAssignableRoles(member)
       : roleOptions.filter((r) => r.value === member.role);
@@ -323,19 +341,15 @@ export default function WorkspaceMembersSection({
                       {editable ? (
                         <Select
                           compact
-                          value={member.role}
-                          onValueChange={(next) =>
-                            handleRoleChangeRequest(member, next as WorkspaceRole)
-                          }
+                          value={heldRole(member)}
+                          onValueChange={(next) => handleRoleChangeRequest(member, next)}
                           disabled={isUpdating}
                           className="role-select"
                           aria-label={`Change role for ${memberLabel(member)}`}
                           options={availableRoles}
                         />
                       ) : (
-                        <span className={getRoleBadgeClass(member.role)}>
-                          {member.role.charAt(0).toUpperCase() + member.role.slice(1)}
-                        </span>
+                        <span className={getRoleBadgeClass(member)}>{getRoleLabel(member)}</span>
                       )}
                     </td>
                     <td className="member-joined">{formatDate(member.joined_at)}</td>

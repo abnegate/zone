@@ -1,11 +1,34 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  AUDIT_ACTIONS,
+  AUDIT_RESOURCE_TYPES,
   DevicesResponseSchema,
   InvitationSchema,
   InvitationsResponseSchema,
   OrganizationMemberSchema,
+  OrganizationSchema,
   OrgMembersResponseSchema,
+  UpdateOrgMemberRequestSchema,
 } from './schemas';
+
+const ORGANIZATION = {
+  id: 'org-1',
+  name: 'Acme',
+  slug: 'acme',
+  description: null,
+  is_active: true,
+  role: 'member',
+  created_at: '2024-01-01T00:00:00Z',
+  updated_at: '2024-01-01T00:00:00Z',
+};
+
+const MEMBER = {
+  id: 'm1',
+  organization_id: 'org-1',
+  user_id: 'user-1',
+  role: 'member',
+  created_at: '2024-01-01T00:00:00Z',
+};
 
 describe('organization API schemas', () => {
   it('accepts members without email or display name', () => {
@@ -25,10 +48,64 @@ describe('organization API schemas', () => {
       organization_id: 'org-1',
       user_id: 'user-1',
       role: 'owner',
+      custom_role: null,
+      permissions: undefined,
       email: '',
       display_name: null,
       joined_at: '2024-01-01T00:00:00Z',
     });
+    expect(member.permissions).toBeUndefined();
+  });
+
+  it('keeps the custom role and permissions a member holds', () => {
+    const member = OrganizationMemberSchema.parse({
+      ...MEMBER,
+      custom_role: { id: 'role-1', name: 'Auditor' },
+      permissions: ['organization:read', 'audit_logs:read'],
+    });
+
+    expect(member.custom_role).toEqual({ id: 'role-1', name: 'Auditor' });
+    expect(member.permissions).toEqual(['organization:read', 'audit_logs:read']);
+  });
+
+  it('reads a member the server sends with a null custom role as holding a built-in role', () => {
+    expect(OrganizationMemberSchema.parse({ ...MEMBER, custom_role: null }).custom_role).toBeNull();
+  });
+
+  it('leaves the permissions of an organization unknown when the server does not send them', () => {
+    const organization = OrganizationSchema.parse(ORGANIZATION);
+
+    expect(organization.permissions).toBeUndefined();
+    expect(organization.custom_role).toBeUndefined();
+  });
+
+  it('keeps the permissions and custom role of an organization', () => {
+    const organization = OrganizationSchema.parse({
+      ...ORGANIZATION,
+      custom_role: { id: 'role-1', name: 'Auditor' },
+      permissions: ['organization:read', 'audit_logs:read'],
+    });
+
+    expect(organization.custom_role).toEqual({ id: 'role-1', name: 'Auditor' });
+    expect(organization.permissions).toEqual(['organization:read', 'audit_logs:read']);
+  });
+
+  it('accepts a built-in role or a custom role id as a role change, never both or neither', () => {
+    expect(UpdateOrgMemberRequestSchema.safeParse({ role: 'admin' }).success).toBe(true);
+    expect(UpdateOrgMemberRequestSchema.safeParse({ custom_role_id: 'role-1' }).success).toBe(true);
+    expect(
+      UpdateOrgMemberRequestSchema.safeParse({ role: 'admin', custom_role_id: 'role-1' }).success
+    ).toBe(false);
+    expect(UpdateOrgMemberRequestSchema.safeParse({}).success).toBe(false);
+    expect(UpdateOrgMemberRequestSchema.safeParse({ role: 'viewer' }).success).toBe(false);
+    expect(UpdateOrgMemberRequestSchema.safeParse({ custom_role_id: '' }).success).toBe(false);
+  });
+
+  it('offers the role audit events as filters', () => {
+    expect(AUDIT_ACTIONS).toContain('role.created');
+    expect(AUDIT_ACTIONS).toContain('role.updated');
+    expect(AUDIT_ACTIONS).toContain('role.deleted');
+    expect(AUDIT_RESOURCE_TYPES).toContain('role');
   });
 
   it('accepts a members list wrapper', () => {

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { render, screen } from '@testing-library/react';
 import type { OrgRole, WorkspaceRole } from '../../../types';
+import { Permission } from '../../enterprise/roles/schemas';
 import { type SettingsAccess, SettingsGroup, SettingsSection } from '../navigation/sections';
 
 const organizationId = 'org-1';
@@ -54,6 +55,7 @@ mock.module('../../enterprise', () => ({
   LicenseSection: marker('license-section'),
   OrganizationPolicySection: marker('organization-policy-section'),
   organizationScope: (id: string) => ({ kind: 'organization', organizationId: id }),
+  Permission,
   RolesSection: marker('roles-section'),
   SERVER_SCOPE: { kind: 'server' },
   SsoSection: marker('sso-section'),
@@ -285,7 +287,9 @@ describe('SettingsContent', () => {
     for (const { role, invitations } of cases) {
       it(`${invitations ? 'offers' : 'hides'} invitations for an organization ${role}`, () => {
         renderSection(SettingsGroup.Organization, SettingsSection.Members, access('member', role));
-        expect(propsOf('organization-members-section')).toEqual({ invitations });
+        expect(propsOf('organization-members-section')).toEqual({
+          invitations: { read: invitations, create: invitations, revoke: invitations },
+        });
       });
     }
   });
@@ -524,13 +528,13 @@ describe('SettingsContent', () => {
         group: SettingsGroup.Organization,
         section: SettingsSection.Ai,
         testId: 'organization-ai-section',
-        props: {},
+        props: { editable: true },
       },
       {
         group: SettingsGroup.Organization,
         section: SettingsSection.Devices,
         testId: 'devices-section',
-        props: { orgId: organizationId },
+        props: { orgId: organizationId, editable: true },
       },
       {
         group: SettingsGroup.Organization,
@@ -617,6 +621,143 @@ describe('SettingsContent', () => {
           group={SettingsGroup.Organization}
           section={SettingsSection.Devices}
           access={access('admin', 'admin')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+  });
+
+  describe('custom role permissions', () => {
+    function holding(
+      organizationPermissions: readonly string[] | undefined,
+      workspacePermissions: readonly string[] | undefined
+    ): SettingsAccess {
+      return {
+        ...access('viewer', 'member'),
+        organizationPermissions,
+        workspacePermissions,
+      };
+    }
+
+    const BASE = [Permission.OrganizationRead];
+    const WORKSPACE_BASE = [Permission.WorkspaceRead];
+
+    it('makes workspace AI editable for a viewer whose role grants workspace AI settings', () => {
+      renderSection(
+        SettingsGroup.Workspace,
+        SettingsSection.Ai,
+        holding(BASE, [...WORKSPACE_BASE, Permission.WorkspaceAiSettingsUpdate])
+      );
+      expect(propsOf('workspace-ai-section')).toEqual({ editable: true });
+    });
+
+    it('keeps the workspace sections read-only for a role holding only workspace:read, whatever its rank', () => {
+      const readOnly = { ...holding(BASE, WORKSPACE_BASE), workspaceRole: 'owner' as const };
+      renderSection(SettingsGroup.Workspace, SettingsSection.General, readOnly);
+      expect(propsOf('general-section')).toEqual({ editable: false });
+    });
+
+    it('opens theme, folders and sources to a role holding workspace:write', () => {
+      const writer = holding(BASE, [...WORKSPACE_BASE, Permission.WorkspaceWrite]);
+      renderSection(SettingsGroup.Workspace, SettingsSection.General, writer);
+      renderSection(SettingsGroup.Workspace, SettingsSection.Folders, writer);
+      renderSection(SettingsGroup.Workspace, SettingsSection.Sources, writer);
+      expect(propsOf('general-section')).toEqual({ editable: true });
+      expect(propsOf('host-folders-panel')).toEqual({
+        workspaceId,
+        orgId: organizationId,
+        readOnly: false,
+      });
+      expect(propsOf('sources-section')).toEqual({ readOnly: false });
+    });
+
+    it('opens workspace MCP overrides only to workspace_mcp_servers:update', () => {
+      renderSection(
+        SettingsGroup.Workspace,
+        SettingsSection.Mcp,
+        holding(BASE, [...WORKSPACE_BASE, Permission.WorkspaceWrite])
+      );
+      expect(propsOf('workspace-mcp-servers-section')).toEqual({
+        organizationId,
+        workspaceId,
+        editable: false,
+      });
+    });
+
+    it('links workspace AI to the organization defaults with ai_settings:read', () => {
+      const linked = holding([...BASE, Permission.AiSettingsRead], WORKSPACE_BASE);
+      renderSection(SettingsGroup.Workspace, SettingsSection.Ai, linked);
+      expect(propsOf('workspace-ai-section')).toEqual({
+        editable: false,
+        organizationDefaultsPath,
+      });
+    });
+
+    it('links the workspace policy to the organization policy only with policies:update', () => {
+      renderSection(
+        SettingsGroup.Workspace,
+        SettingsSection.AgentPolicy,
+        holding([...BASE, Permission.PoliciesUpdate], WORKSPACE_BASE)
+      );
+      expect(propsOf('workspace-policy-section')).toEqual({
+        organizationId,
+        workspaceId,
+        organizationPolicyPath,
+      });
+    });
+
+    it('shows the organization AI defaults read-only without ai_settings:update', () => {
+      renderSection(
+        SettingsGroup.Organization,
+        SettingsSection.Ai,
+        holding([...BASE, Permission.AiSettingsRead], undefined)
+      );
+      expect(propsOf('organization-ai-section')).toEqual({ editable: false });
+    });
+
+    it('shows devices read-only without devices:update', () => {
+      renderSection(
+        SettingsGroup.Organization,
+        SettingsSection.Devices,
+        holding([...BASE, Permission.DevicesRead], undefined)
+      );
+      expect(propsOf('devices-section')).toEqual({ orgId: organizationId, editable: false });
+    });
+
+    it('splits the invitation controls by invitations:read, create and delete', () => {
+      renderSection(
+        SettingsGroup.Organization,
+        SettingsSection.Members,
+        holding([...BASE, Permission.InvitationsRead, Permission.InvitationsDelete], undefined)
+      );
+      expect(propsOf('organization-members-section')).toEqual({
+        invitations: { read: true, create: false, revoke: true },
+      });
+    });
+
+    it('lets github:update manage GitHub and mcp_servers:update manage MCP servers', () => {
+      const manager = holding([...BASE, Permission.GitHubUpdate], undefined);
+      renderSection(SettingsGroup.Organization, SettingsSection.GitHub, manager);
+      expect(propsOf('github-section')).toEqual({ organizationId, canManage: true });
+      renderSection(SettingsGroup.Organization, SettingsSection.Mcp, manager);
+      expect(propsOf('mcp-servers-section')).toEqual({ organizationId, canManage: false });
+    });
+
+    it('renders the roles page only with roles:update', () => {
+      renderSection(
+        SettingsGroup.Organization,
+        SettingsSection.Roles,
+        holding([...BASE, Permission.RolesUpdate], undefined)
+      );
+      expect(propsOf('roles-section')).toEqual({ organizationId });
+    });
+
+    it('renders no roles page to an organization admin rank whose permissions lack roles:update', () => {
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.Roles}
+          access={{ ...holding(BASE, undefined), organizationRole: 'admin' }}
         />
       );
       expect(container.innerHTML).toBe('');

@@ -1,3 +1,5 @@
+import { RoleRefusal } from '../features/enterprise/roles/RoleRefusal';
+import { RoleRefusalSchema } from '../features/enterprise/roles/schemas';
 import type {
   CreateKnowledgeRequest,
   GatherContextRequest,
@@ -735,6 +737,25 @@ class Client {
     return parse(ResetPasswordResponseSchema, await response.json());
   }
 
+  private async roleChangeFailure(response: Response, action: string): Promise<Error> {
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      body = undefined;
+    }
+    const refusal = RoleRefusalSchema.safeParse(body);
+    if (refusal.success) {
+      return new RoleRefusal(refusal.data, response.status);
+    }
+    const details: { message?: unknown; error?: unknown; detail?: unknown } =
+      typeof body === 'object' && body !== null ? body : {};
+    const reason = [details.message, details.error, details.detail].find(
+      (value): value is string => typeof value === 'string' && value.length > 0
+    );
+    return new Error(reason ?? `${action}: ${response.status}`);
+  }
+
   private async parseErrorResponse(
     response: Response
   ): Promise<{ message?: string; code?: string }> {
@@ -891,10 +912,7 @@ class Client {
       }
     );
     if (!response.ok) {
-      const errorData = await this.parseErrorResponse(response);
-      throw new Error(
-        errorData.message || `Failed to update organization member role: ${response.status}`
-      );
+      throw await this.roleChangeFailure(response, 'Failed to update organization member role');
     }
     return parse(OrganizationMemberSchema, await response.json());
   }
@@ -964,10 +982,7 @@ class Client {
       }
     );
     if (!response.ok) {
-      const errorData = await this.parseErrorResponse(response);
-      throw new Error(
-        errorData.message || `Failed to update workspace member role: ${response.status}`
-      );
+      throw await this.roleChangeFailure(response, 'Failed to update workspace member role');
     }
     return parse(WorkspaceMemberSchema, await response.json());
   }

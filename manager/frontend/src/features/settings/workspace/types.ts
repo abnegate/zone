@@ -1,5 +1,6 @@
 import type { WorkspaceRole } from '../../auth/types';
-import type { ApiResponse, OrganizationMember } from '../organization/types';
+import type { CustomRoleReference } from '../../enterprise/roles/types';
+import type { ApiResponse, CustomRoleAssignment, OrganizationMember } from '../organization/types';
 
 export type { ApiResponse, OrganizationMember, WorkspaceRole };
 
@@ -56,6 +57,8 @@ export interface WorkspaceMember {
   user_id: string;
   workspace_id: string;
   role: WorkspaceRole;
+  custom_role: CustomRoleReference | null;
+  permissions?: readonly string[];
   email: string;
   display_name: string | null;
   joined_at: string;
@@ -66,9 +69,7 @@ export interface AddWorkspaceMemberRequest {
   role: WorkspaceRole;
 }
 
-export interface UpdateWorkspaceMemberRequest {
-  role: WorkspaceRole;
-}
+export type UpdateWorkspaceMemberRequest = { role: WorkspaceRole } | CustomRoleAssignment;
 
 export interface WorkspaceMembersResponse {
   members: WorkspaceMember[];

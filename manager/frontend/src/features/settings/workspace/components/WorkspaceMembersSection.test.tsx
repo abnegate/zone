@@ -3,9 +3,13 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event';
 import { clientModule } from '../../../../test/client';
 import { chooseSelectElement } from '../../../../test/select';
+import { ACTIVE, AUDITOR, LAPSED, RELEASE_MANAGER } from '../../../enterprise/roles/fixtures';
+import { RoleRefusal } from '../../../enterprise/roles/RoleRefusal';
+import { RoleCode } from '../../../enterprise/roles/schemas';
+import type { RolesResponse } from '../../../enterprise/roles/types';
+import { customRoleValue } from '../../assignment';
 import type { OrganizationMember, WorkspaceMember, WorkspaceRole } from '../types';
 
-// Mock client
 const mockClient = {
   getWorkspaceMembers: mock(),
   getOrgMembers: mock(),
@@ -16,7 +20,6 @@ const mockClient = {
 
 mock.module('../../../../api/client', () => clientModule(mockClient));
 
-// Mock useAuth
 const mockUseAuth = mock(() => ({
   isAuthenticated: true,
   user: { id: 'user-1', email: 'owner@test.com' },
@@ -25,6 +28,17 @@ const mockUseAuth = mock(() => ({
 mock.module('../../../auth', () => ({
   useAuth: mockUseAuth,
 }));
+
+let rolesResponse: RolesResponse | null = null;
+
+const mockUseRoles = mock((_organizationId: string | null) => ({
+  response: rolesResponse,
+  loading: false,
+  error: null,
+  refresh: async () => {},
+}));
+
+mock.module('../../../enterprise/roles/hooks/useRoles', () => ({ useRoles: mockUseRoles }));
 
 let WorkspaceMembersSection: typeof import('./WorkspaceMembersSection').default;
 
@@ -41,6 +55,7 @@ const mockOwner: WorkspaceMember = {
   user_id: 'user-1',
   workspace_id: 'ws-123',
   role: 'owner',
+  custom_role: null,
   email: 'owner@test.com',
   display_name: 'Test Owner',
   joined_at: '2024-01-01T00:00:00Z',
@@ -51,6 +66,7 @@ const mockAdmin: WorkspaceMember = {
   user_id: 'user-2',
   workspace_id: 'ws-123',
   role: 'admin',
+  custom_role: null,
   email: 'admin@test.com',
   display_name: 'Test Admin',
   joined_at: '2024-01-02T00:00:00Z',
@@ -61,6 +77,7 @@ const mockMember: WorkspaceMember = {
   user_id: 'user-3',
   workspace_id: 'ws-123',
   role: 'member',
+  custom_role: null,
   email: 'member@test.com',
   display_name: null,
   joined_at: '2024-01-03T00:00:00Z',
@@ -71,6 +88,7 @@ const mockViewer: WorkspaceMember = {
   user_id: 'user-4',
   workspace_id: 'ws-123',
   role: 'viewer',
+  custom_role: null,
   email: 'viewer@test.com',
   display_name: 'Test Viewer',
   joined_at: '2024-01-04T00:00:00Z',
@@ -81,6 +99,7 @@ const mockOrgMember1: OrganizationMember = {
   user_id: 'user-5',
   organization_id: 'org-123',
   role: 'member',
+  custom_role: null,
   email: 'orgmember@test.com',
   display_name: 'Org Member',
   joined_at: '2024-01-05T00:00:00Z',
@@ -155,6 +174,7 @@ const rolesOfferedForNewMember = (): string[] => {
 describe('WorkspaceMembersSection', () => {
   beforeEach(() => {
     mock.clearAllMocks();
+    rolesResponse = null;
     mockClient.getWorkspaceMembers.mockResolvedValue({
       members: [mockOwner, mockAdmin, mockMember, mockViewer],
     });
@@ -330,6 +350,7 @@ describe('WorkspaceMembersSection', () => {
         user_id: 'user-5',
         workspace_id: 'ws-123',
         role: 'member',
+        custom_role: null,
         email: 'orgmember@test.com',
         display_name: 'Org Member',
         joined_at: '2024-01-05T00:00:00Z',
@@ -497,7 +518,7 @@ describe('WorkspaceMembersSection', () => {
 
   describe('Remove Member Functionality', () => {
     it('removes member after confirmation', async () => {
-      mockClient.removeWorkspaceMember.mockResolvedValueOnce();
+      mockClient.removeWorkspaceMember.mockResolvedValueOnce(undefined);
 
       render(<WorkspaceMembersSection workspaceId="ws-123" orgId="org-123" />);
       await waitFor(() => {
@@ -695,5 +716,149 @@ describe('WorkspaceMembersSection', () => {
         { timeout: 2000 }
       );
     });
+  });
+});
+
+describe('WorkspaceMembersSection custom roles', () => {
+  const releaseManager = { id: RELEASE_MANAGER.id, name: RELEASE_MANAGER.name };
+
+  const holdingReleaseManager: WorkspaceMember = {
+    ...mockViewer,
+    role: 'member',
+    custom_role: releaseManager,
+    permissions: RELEASE_MANAGER.permissions,
+  };
+
+  const optionsOf = (email: string): string[] => {
+    const trigger = roleSelectFor(email);
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    const values = screen
+      .getAllByRole('option')
+      .map((option) => option.getAttribute('data-value') ?? '');
+    fireEvent.keyDown(trigger, { key: 'Escape' });
+    return values;
+  };
+
+  const renderRoster = async (members: WorkspaceMember[]) => {
+    mockClient.getWorkspaceMembers.mockResolvedValue({ members });
+    mockClient.getOrgMembers.mockResolvedValue({ members: [mockOrgMember1] });
+    render(<WorkspaceMembersSection workspaceId="ws-123" orgId="org-123" />);
+    await waitFor(() => {
+      expect(screen.getByText('viewer@test.com')).toBeInTheDocument();
+    });
+  };
+
+  beforeEach(() => {
+    mock.clearAllMocks();
+    rolesResponse = ACTIVE;
+    mockUseAuth.mockReturnValue({
+      isAuthenticated: true,
+      user: { id: 'user-1', email: 'owner@test.com' },
+    });
+  });
+
+  it('offers the workspace roles of the organization after the built-in ones when licensed', async () => {
+    await renderRoster([mockOwner, mockAdmin, mockMember, mockViewer]);
+
+    expect(optionsOf('viewer@test.com')).toEqual([
+      'viewer',
+      'member',
+      'admin',
+      'owner',
+      customRoleValue(RELEASE_MANAGER.id),
+    ]);
+    expect(optionsOf('viewer@test.com')).not.toContain(customRoleValue(AUDITOR.id));
+  });
+
+  it('asks for the roles of the workspace organization', async () => {
+    await renderRoster([mockOwner, mockAdmin, mockMember, mockViewer]);
+
+    expect(mockUseRoles).toHaveBeenLastCalledWith('org-123');
+  });
+
+  it('offers no custom roles without an active license', async () => {
+    rolesResponse = LAPSED;
+    await renderRoster([mockOwner, mockAdmin, mockMember, mockViewer]);
+
+    expect(optionsOf('viewer@test.com')).toEqual(['viewer', 'member', 'admin', 'owner']);
+  });
+
+  it('shows the custom role a member holds by name', async () => {
+    await renderRoster([mockOwner, mockAdmin, mockMember, holdingReleaseManager]);
+
+    expect(roleSelectFor('viewer@test.com')).toHaveTextContent('Release manager');
+  });
+
+  it('shows the custom role a member holds by name to someone who cannot change it', async () => {
+    await renderRoster(
+      rosterWithSignedInUserAs('viewer').map((member) =>
+        member.user_id === mockViewer.user_id ? holdingReleaseManager : member
+      )
+    );
+
+    const badge = roleBadgeFor('viewer@test.com');
+    expect(badge).toHaveTextContent('Release manager');
+    expect(badge).toHaveClass('role-badge-custom');
+    expect(mockUseRoles.mock.calls.every(([organizationId]) => organizationId === null)).toBe(true);
+  });
+
+  it('assigns a custom role by its id without asking to confirm', async () => {
+    mockClient.updateWorkspaceMemberRole.mockResolvedValueOnce(holdingReleaseManager);
+    await renderRoster([mockOwner, mockAdmin, mockMember, mockViewer]);
+
+    chooseSelectElement(roleSelectFor('viewer@test.com'), /Release manager/);
+
+    await waitFor(() => {
+      expect(mockClient.updateWorkspaceMemberRole).toHaveBeenCalledWith('ws-123', 'user-4', {
+        custom_role_id: RELEASE_MANAGER.id,
+      });
+    });
+    expect(screen.queryByText('Confirm Role Change')).not.toBeInTheDocument();
+  });
+
+  it('asks to confirm promoting a custom role holder to admin', async () => {
+    await renderRoster([mockOwner, mockAdmin, mockMember, holdingReleaseManager]);
+
+    chooseSelectElement(roleSelectFor('viewer@test.com'), 'Admin');
+
+    expect(await screen.findByText('Confirm Role Change')).toBeInTheDocument();
+    expect(mockClient.updateWorkspaceMemberRole).not.toHaveBeenCalled();
+  });
+
+  it('lets an admin give a viewer a custom role', async () => {
+    await renderRoster(
+      rosterWithSignedInUserAs('admin').filter((member) => member.user_id !== mockAdmin.user_id)
+    );
+
+    expect(optionsOf('viewer@test.com')).toEqual([
+      'viewer',
+      'member',
+      customRoleValue(RELEASE_MANAGER.id),
+    ]);
+  });
+
+  const refusals: [RoleCode, RegExp][] = [
+    [RoleCode.Exceeds, /permissions you don’t hold/],
+    [RoleCode.LicenseRequired, /Zone Enterprise license/],
+  ];
+
+  for (const [code, message] of refusals) {
+    it(`explains a ${code} refusal`, async () => {
+      mockClient.updateWorkspaceMemberRole.mockRejectedValueOnce(
+        new RoleRefusal({ error: 'Refused', code }, 403)
+      );
+      await renderRoster([mockOwner, mockAdmin, mockMember, mockViewer]);
+
+      chooseSelectElement(roleSelectFor('viewer@test.com'), /Release manager/);
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(message);
+    });
+  }
+
+  it('offers only built-in roles when adding a member', async () => {
+    await renderRoster([mockOwner, mockAdmin, mockMember, mockViewer]);
+    fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
+
+    expect(rolesOfferedForNewMember()).toEqual(['viewer', 'member', 'admin', 'owner']);
   });
 });

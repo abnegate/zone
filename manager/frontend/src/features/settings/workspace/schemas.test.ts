@@ -4,6 +4,7 @@ import {
   AiSettingsSchema,
   ConnectResponseSchema,
   UpdateAiSettingsRequestSchema,
+  UpdateWorkspaceMemberRequestSchema,
   WorkspaceAiSettingsResponseSchema,
   WorkspaceMemberSchema,
   WorkspaceMembersResponseSchema,
@@ -100,6 +101,44 @@ describe('workspace member API schemas', () => {
       display_name: null,
       joined_at: '2024-01-01T00:00:00Z',
     });
+  });
+
+  it('reads a member without a custom role as holding a built-in role, permissions unknown', () => {
+    const member = WorkspaceMemberSchema.parse({
+      id: 'm1',
+      workspace_id: 'ws-1',
+      user_id: 'user-1',
+      role: 'viewer',
+    });
+
+    expect(member.custom_role).toBeNull();
+    expect(member.permissions).toBeUndefined();
+  });
+
+  it('keeps the custom role and permissions a member holds', () => {
+    const member = WorkspaceMemberSchema.parse({
+      id: 'm1',
+      workspace_id: 'ws-1',
+      user_id: 'user-1',
+      role: 'member',
+      custom_role: { id: 'role-2', name: 'Release manager' },
+      permissions: ['workspace:read', 'workspace:write'],
+    });
+
+    expect(member.custom_role).toEqual({ id: 'role-2', name: 'Release manager' });
+    expect(member.permissions).toEqual(['workspace:read', 'workspace:write']);
+  });
+
+  it('accepts a built-in role or a custom role id as a role change, never both or neither', () => {
+    expect(UpdateWorkspaceMemberRequestSchema.safeParse({ role: 'viewer' }).success).toBe(true);
+    expect(UpdateWorkspaceMemberRequestSchema.safeParse({ custom_role_id: 'role-2' }).success).toBe(
+      true
+    );
+    expect(
+      UpdateWorkspaceMemberRequestSchema.safeParse({ role: 'viewer', custom_role_id: 'role-2' })
+        .success
+    ).toBe(false);
+    expect(UpdateWorkspaceMemberRequestSchema.safeParse({}).success).toBe(false);
   });
 
   it('accepts a members list wrapper', () => {
