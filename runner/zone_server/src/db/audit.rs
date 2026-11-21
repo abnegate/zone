@@ -141,6 +141,10 @@ pub mod actions {
     pub const AUDIT_RETENTION_UPDATED: &str = "audit_retention.updated";
     pub const AUDIT_RETENTION_APPLIED: &str = "audit_retention.applied";
     pub const AUDIT_EXPORT_DOWNLOADED: &str = "audit_export.downloaded";
+
+    pub const ROLE_CREATED: &str = "role.created";
+    pub const ROLE_UPDATED: &str = "role.updated";
+    pub const ROLE_DELETED: &str = "role.deleted";
 }
 
 pub mod resources {
@@ -170,6 +174,7 @@ pub mod resources {
     pub const AUDIT_DESTINATION: &str = "audit_destination";
     pub const AUDIT_RETENTION: &str = "audit_retention";
     pub const AUDIT_EXPORT: &str = "audit_export";
+    pub const ROLE: &str = "role";
 }
 
 /// Log an action to the audit trail
@@ -565,4 +570,17 @@ pub async fn export_audit_logs_csv(
     }
 
     Ok(csv)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_changes_are_recorded_under_the_role_wire_names() {
+        assert_eq!(actions::ROLE_CREATED, "role.created");
+        assert_eq!(actions::ROLE_UPDATED, "role.updated");
+        assert_eq!(actions::ROLE_DELETED, "role.deleted");
+        assert_eq!(resources::ROLE, "role");
+    }
 }
