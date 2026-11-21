@@ -92,14 +92,15 @@ impl<'a> Revision<'a> {
         })
     }
 
-    /// Whether the revision sets a field the provider's protocol doesn't have.
+    /// Whether the revision gives a value to a field the provider's protocol doesn't have. An
+    /// empty value counts as none, because a create can't tell an empty text field from a
+    /// missing one, and an update must agree with it.
     pub fn mismatches(&self, protocol: Protocol) -> bool {
-        match protocol {
-            Protocol::Oidc => self.metadata_url.is_some() || self.metadata.is_some(),
-            Protocol::Saml => {
-                self.issuer.is_some() || self.client_id.is_some() || self.client_secret.is_some()
-            }
-        }
+        let others: &[Option<&str>] = match protocol {
+            Protocol::Oidc => &[self.metadata_url, self.metadata],
+            Protocol::Saml => &[self.issuer, self.client_id, self.client_secret],
+        };
+        others.iter().flatten().any(|value| !value.is_empty())
     }
 
     pub fn enabled(&self, record: &ProviderRecord) -> bool {
@@ -385,6 +386,23 @@ mod tests {
         for protocol in Protocol::ALL {
             assert!(!shared.mismatches(protocol), "{protocol}");
         }
+    }
+
+    #[test]
+    fn an_empty_field_of_the_other_protocol_is_ignored_as_a_create_ignores_it() {
+        let oidc = Revision {
+            metadata_url: Some(""),
+            metadata: Some(""),
+            ..Revision::default()
+        };
+        assert!(!oidc.mismatches(Protocol::Oidc), "{oidc:?}");
+        let saml = Revision {
+            issuer: Some(""),
+            client_id: Some(""),
+            client_secret: Some(""),
+            ..Revision::default()
+        };
+        assert!(!saml.mismatches(Protocol::Saml), "{saml:?}");
     }
 
     #[test]

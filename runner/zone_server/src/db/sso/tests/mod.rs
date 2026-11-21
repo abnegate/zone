@@ -1,14 +1,16 @@
-use abnegate_secret::REDACTED;
+use abnegate_secret::{REDACTED, SecretValue};
 use chrono::Utc;
 use uuid::Uuid;
 use zone_enterprise::sso::Protocol;
 
 use super::providers::Row;
-use super::{Asserted, Connection, ProviderError};
+use super::{Asserted, Connection, NewConnection, ProviderChanges, ProviderError};
 
 const SEALED: &str = "ENC[v1:sealed]";
 const SSO_URL: &str = "https://acme.okta.com/app/zone/sso/saml";
 const CERTIFICATE: &str = "MIIC";
+const PINNED: &str = "MIIDazCCAlOgAwIBAgIUpinned";
+const CLIENT_SECRET: &str = "s3cret-client-value";
 
 fn oidc_row() -> Row {
     Row {
@@ -113,6 +115,75 @@ fn a_row_with_half_a_connection_is_refused() {
         client_secret: None,
         ..oidc_row()
     });
+}
+
+#[test]
+fn debug_counts_the_pinned_certificates_and_never_shows_them() {
+    let pinned = vec![PINNED.to_owned(), PINNED.to_owned()];
+    let shown = [
+        format!(
+            "{:?}",
+            Connection::Saml {
+                sso_url: SSO_URL.into(),
+                certificates: pinned.clone(),
+                metadata_url: None,
+            }
+        ),
+        format!(
+            "{:?}",
+            NewConnection::Saml {
+                sso_url: SSO_URL.into(),
+                certificates: pinned.clone(),
+                metadata_url: None,
+            }
+        ),
+    ];
+    for shown in shown {
+        assert!(!shown.contains(PINNED), "{shown}");
+        assert!(shown.contains("certificates: 2"), "{shown}");
+        assert!(shown.contains(SSO_URL), "{shown}");
+    }
+    let changes = format!(
+        "{:?}",
+        ProviderChanges {
+            certificates: Some(pinned),
+            ..ProviderChanges::default()
+        }
+    );
+    assert!(!changes.contains(PINNED), "{changes}");
+    assert!(changes.contains("certificates: Some(2)"), "{changes}");
+}
+
+#[test]
+fn debug_never_shows_a_sealed_or_replaced_secret() {
+    let shown = [
+        format!(
+            "{:?}",
+            Connection::Oidc {
+                client_id: "0oa1".into(),
+                sealed_secret: SEALED.into(),
+            }
+        ),
+        format!(
+            "{:?}",
+            NewConnection::Oidc {
+                client_id: "0oa1".into(),
+                client_secret: SecretValue::new(CLIENT_SECRET),
+            }
+        ),
+        format!(
+            "{:?}",
+            ProviderChanges {
+                client_secret: Some(SecretValue::new(CLIENT_SECRET)),
+                ..ProviderChanges::default()
+            }
+        ),
+    ];
+    for shown in shown {
+        assert!(!shown.contains(SEALED), "{shown}");
+        assert!(!shown.contains(CLIENT_SECRET), "{shown}");
+        assert!(shown.contains(REDACTED), "{shown}");
+    }
 }
 
 #[test]

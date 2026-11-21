@@ -637,8 +637,11 @@ the provider. It doesn't fetch the metadata again by itself, so after your
 identity provider gets a new signing certificate, refresh the metadata in
 Zone:
 
-- In the console, edit the provider and save its metadata URL again, or
-  paste the new metadata XML. A blank XML box keeps the current metadata.
+- In the console, edit the provider, turn on **Read the metadata again**
+  under its metadata URL, and save. Saving the same URL with the switch off
+  sends nothing, so the certificates stay as they were. Or choose
+  **Paste XML** and paste the new metadata. A blank XML box keeps the
+  current metadata.
 - Through the API, send `PATCH /api/sso/providers/{provider_id}` with
   `{"metadata_url": "…"}` or `{"metadata": "…"}`.
 
@@ -659,6 +662,12 @@ in between fail with `sso_assertion_invalid`.
 
 A refresh that keeps the same entity ID keeps every account link, and it
 works without a license, as described in [Licensing](#licensing).
+
+Any save that changes the entity ID, the single sign-on URL or the pinned
+certificates also ends every sign-in still in progress through that
+provider, including one the ACS already accepted whose handoff code the
+console hasn't redeemed yet: its response was checked against the old
+settings. Those people get `sso_state_invalid` and start again.
 
 ### Changing the entity ID
 
@@ -820,10 +829,19 @@ there and refresh the metadata in Zone again. See
    with an unsigned `AuthnRequest` over the HTTP-Redirect binding, and a
    `RelayState` that identifies the attempt.
 3. The identity provider posts its `SAMLResponse` and the `RelayState` to
-   Zone's ACS URL, `{APP_BASE_URL}/api/auth/sso/saml/acs`.
+   Zone's ACS URL, `{APP_BASE_URL}/api/auth/sso/saml/acs`. The ACS reads at
+   most 1 MiB of form body; real responses are 5 to 150 KB. It accepts a
+   `RelayState` of at most 80 bytes, the limit the SAML HTTP-POST binding
+   sets (Zone's own is 43 characters). A larger body, or a longer, missing
+   or empty `RelayState`, gets a redirect to
+   `{APP_BASE_URL}/sso/callback?error=sso_state_invalid` with no `state`,
+   because Zone can't trust it to name an attempt.
 4. The server runs the checks in [What Zone checks](#what-zone-checks) and
-   applies the provider's policy (email present, in an allowed domain). Each
-   attempt can be answered once: if a check fails, the attempt is discarded.
+   applies the provider's policy (email present, in an allowed domain). It
+   does the XML parsing and signature checks on a blocking worker thread,
+   so a slow response never holds up other requests. Each attempt can be
+   answered once: if a check fails, the attempt is discarded, unless another
+   post for the same attempt already succeeded, whose handoff is kept.
 5. On success, the server redirects the browser with `303 See Other` to
    `{APP_BASE_URL}/sso/callback?state=…&code=…`, with a one-time handoff
    code that expires after 2 minutes. On failure, it redirects to
@@ -1109,7 +1127,7 @@ each one.
 | `sso_client_id_invalid` | The client ID is empty or longer than 255 characters. | Copy the client ID from the provider again. |
 | `sso_client_secret_invalid` | The client secret is empty. | Paste the secret's value. |
 | `sso_domain_invalid` | An allowed domain isn't a plain domain name. | Use domains such as `acme.com`, without `@` or `*`. |
-| `sso_state_invalid` | The sign-in attempt is unknown, was already used, or is more than 10 minutes old. For SAML, also: the response wasn't started from Zone (IdP-initiated), it was posted twice, or the handoff code was wrong or more than 2 minutes old. | Start again from Zone's sign-in page, not from the identity provider's dashboard. |
+| `sso_state_invalid` | The sign-in attempt is unknown, was already used, or is more than 10 minutes old. For SAML, also: the response wasn't started from Zone (IdP-initiated), it was posted twice, the post was over 1 MiB or its `RelayState` over 80 bytes, the handoff code was wrong or more than 2 minutes old, or an admin changed the provider's entity ID, single sign-on URL or certificates before the console redeemed the code. | Start again from Zone's sign-in page, not from the identity provider's dashboard. |
 | `sso_metadata_invalid` | Zone couldn't fetch or use the SAML metadata. The message names the problem. | The metadata URL uses `https` and doesn't redirect. The document is a single `EntityDescriptor` with an `IDPSSODescriptor`, an HTTP-Redirect `SingleSignOnService` and an RSA signing certificate of at least 2048 bits. See [Metadata](#metadata). Send either a metadata URL or metadata XML, not both. |
 | `sso_assertion_invalid` | The SAML response failed a check: its signature, audience, recipient, destination, issuer, time limits, subject, or it was replayed or encrypted. The person sees a general message and the server log has the reason. | See [What Zone checks](#what-zone-checks). The identity provider uses Zone's exact entity ID and ACS URL, signs with SHA-256 and doesn't encrypt. The metadata in Zone is current after a certificate change. The Zone server's clock is correct. |
 | `sso_sign_in_refused` | The identity provider answered with a status other than Success. The server log has the status. | The person is assigned to the app at the identity provider. |
@@ -1184,7 +1202,7 @@ browser reach them without a Zone session:
 | Method and path | Purpose |
 |---|---|
 | `GET /api/auth/sso/saml/metadata` | Zone's SP metadata, as `application/samlmetadata+xml`. Its URL is also Zone's entity ID. |
-| `POST /api/auth/sso/saml/acs` | The ACS. Takes a form with `SAMLResponse` and `RelayState`, and answers `303` to `{APP_BASE_URL}/sso/callback` with the outcome. |
+| `POST /api/auth/sso/saml/acs` | The ACS. Takes a form of at most 1 MiB with `SAMLResponse` and a `RelayState` of at most 80 bytes, and answers `303` to `{APP_BASE_URL}/sso/callback` with the outcome. |
 
 ### Settings
 

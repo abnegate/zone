@@ -1,7 +1,7 @@
 use abnegate_secret::{MasterKey, SecretValue};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
-use zone_enterprise::sso::{Error, Fields, Protocol, Provider, saml};
+use zone_enterprise::sso::{DisplayName, Domains, Error, Fields, Protocol, Provider, saml};
 
 use super::failure::Failure;
 use super::imported::Imported;
@@ -9,8 +9,8 @@ use super::revision::Revision;
 use crate::db::audit::{actions, resources};
 use crate::db::sessions;
 use crate::db::sso::{
-    Connection, NewProvider, ProviderChanges, ProviderError, ProviderRecord, identities, providers,
-    settings,
+    Connection, NewProvider, ProviderChanges, ProviderError, ProviderRecord, attempts, identities,
+    providers, settings,
 };
 use crate::db::users::UserRow;
 use crate::routes::common::{AuditEvent, audit};
@@ -31,7 +31,12 @@ pub async fn create(
 ) -> Result<ProviderRecord, Failure> {
     let new = match fields.protocol {
         Protocol::Oidc => {
-            if metadata_url.is_some() || metadata.is_some() {
+            let saml = Revision {
+                metadata_url,
+                metadata,
+                ..Revision::default()
+            };
+            if saml.mismatches(Protocol::Oidc) {
                 return Err(Error::ProtocolMismatch.into());
             }
             let provider = Provider::parse(fields)?;
@@ -39,6 +44,11 @@ pub async fn create(
             NewProvider::new(&provider, enabled)
         }
         Protocol::Saml => {
+            admissible(
+                fields.display_name,
+                fields.allowed_domains,
+                fields.require_verified_email,
+            )?;
             let imported = Imported::read(state.saml(), metadata_url, metadata)
                 .await?
                 .ok_or_else(Imported::missing)?;
@@ -94,6 +104,12 @@ pub async fn update(
             None
         }
         Protocol::Saml => {
+            let fields = revision.saml_fields(&current)?;
+            admissible(
+                fields.display_name,
+                fields.allowed_domains,
+                fields.require_verified_email,
+            )?;
             Imported::read(state.saml(), revision.metadata_url, revision.metadata).await?
         }
     };
@@ -124,6 +140,9 @@ pub async fn update(
     } else {
         None
     };
+    if changes.voids_attempts() {
+        attempts::clear(&mut *transaction, id).await?;
+    }
     if changes.enabled == Some(false) {
         sessions::revoke_provider_sessions(&mut *transaction, id).await?;
     }
@@ -190,6 +209,23 @@ pub fn fingerprints(record: &ProviderRecord) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// The settings a SAML provider needs that don't come from its metadata, checked before the
+/// metadata URL is fetched so that a request already bound to fail sends nothing out.
+fn admissible(
+    display_name: &str,
+    allowed_domains: &[String],
+    require_verified_email: bool,
+) -> Result<(), Error> {
+    DisplayName::parse(display_name)?;
+    if Domains::parse(allowed_domains)?.is_empty() {
+        return Err(Error::DomainRequired);
+    }
+    if require_verified_email {
+        return Err(Error::VerifiedEmailUnsupported);
+    }
+    Ok(())
 }
 
 /// Only OIDC caches anything per issuer: its discovery document and signing keys.

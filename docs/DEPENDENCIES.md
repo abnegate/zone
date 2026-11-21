@@ -213,9 +213,11 @@ the `sso` feature, each pinned exactly:
 All five were already in `runner/Cargo.lock` at those versions: quick-xml
 through plist, flate2 through png, tiff, ureq and compression-codecs, and
 aws-lc-rs, rustls-webpki and rustls-pki-types through rustls, reqwest and
-jsonwebtoken. The lockfile change only adds
-dependency edges to `zone_enterprise`, so no package, version or license
-changes, and the license policy above needs no new entry.
+jsonwebtoken. The lockfile change only adds dependency edges: the five
+above to `zone_enterprise`, and a `flate2 = "=1.1.10"` dev-dependency to
+`zone_server`, whose integration tests inflate the AuthnRequest that Zone
+sends. No package, version or license changes, so the license policy above
+needs no new entry.
 `base64`, `chrono`, `rand`, `reqwest` and `url` were already `sso`
 dependencies.
 

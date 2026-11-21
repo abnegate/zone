@@ -23,6 +23,14 @@ pub const STATE: &str = "state";
 pub const CODE: &str = "code";
 pub const ERROR: &str = "error";
 
+/// Identity providers post responses of 5 to 150 KB, so 1 MiB leaves room for a large attribute
+/// set while bounding what one unauthenticated post makes the server buffer and parse.
+pub const BODY_LIMIT: usize = 1024 * 1024;
+
+/// The HTTP-POST binding's limit on RelayState (SAML 2.0 Bindings, section 3.5.3). Zone's own state
+/// is 43 characters.
+pub const RELAY_STATE_LIMIT: usize = 80;
+
 #[derive(Deserialize)]
 pub struct AcsForm {
     #[serde(rename = "SAMLResponse", default)]
@@ -51,6 +59,9 @@ pub async fn metadata(State(state): State<AppState>) -> Response {
 }
 
 /// POST /api/auth/sso/saml/acs
+///
+/// A body over [`BODY_LIMIT`] fails to read like any other unreadable form, so it gets the same
+/// state-less `sso_state_invalid` redirect.
 pub async fn acs(
     State(state): State<AppState>,
     form: Result<Form<AcsForm>, FormRejection>,
@@ -59,14 +70,14 @@ pub async fn acs(
     let form = match form {
         Ok(Form(form)) => form,
         Err(rejection) => {
-            tracing::warn!(%rejection, "Refused an unreadable SAML response");
+            tracing::warn!(?rejection, "Refused an unreadable SAML response");
             return redirect(&refused(&callback, None, STATE_INVALID));
         }
     };
     let Some(relay_state) = form
         .relay_state
         .as_deref()
-        .filter(|state| !state.is_empty())
+        .filter(|state| !state.is_empty() && state.len() <= RELAY_STATE_LIMIT)
     else {
         return redirect(&refused(&callback, None, STATE_INVALID));
     };
@@ -76,11 +87,14 @@ pub async fn acs(
     };
     match sign_in::assert(&state, &posted).await {
         Ok(handoff) => redirect(&handed_off(&callback, &handoff)),
-        Err(failure) => redirect(&refused(
-            &callback,
-            Some(relay_state),
-            refusal_code(&failure),
-        )),
+        Err(failure) => {
+            log(&failure);
+            redirect(&refused(
+                &callback,
+                Some(relay_state),
+                refusal_code(&failure),
+            ))
+        }
     }
 }
 
@@ -97,14 +111,19 @@ pub fn refused(callback: &str, state: Option<&str>, code: &str) -> String {
 
 pub fn refusal_code(failure: &SignInFailure) -> &'static str {
     match failure {
+        SignInFailure::Refused(error) => error.code(),
+        _ => SIGN_IN_FAILED,
+    }
+}
+
+/// A refusal can carry the identity provider's status text, which the poster chooses, so it is
+/// logged escaped.
+pub fn log(failure: &SignInFailure) {
+    match failure {
         SignInFailure::Refused(error) => {
-            tracing::warn!(%error, code = error.code(), "Refused a SAML sign-in");
-            error.code()
+            tracing::warn!(?error, code = error.code(), "Refused a SAML sign-in");
         }
-        failure => {
-            tracing::error!(%failure, "Failed to complete a SAML sign-in");
-            SIGN_IN_FAILED
-        }
+        failure => tracing::error!(%failure, "Failed to complete a SAML sign-in"),
     }
 }
 

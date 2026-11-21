@@ -1340,6 +1340,101 @@ async fn a_discarded_request_attempt_is_gone() {
 }
 
 #[tokio::test]
+async fn discarding_an_asserted_attempt_keeps_its_handoff() {
+    let fixture = Fixture::new().await;
+    let provider = fixture.provider("0oa1").await;
+    let state = authorization().state;
+    attempts::issue_request(fixture.pool(), provider.id, &state, REQUEST_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    let requested = attempts::requested(fixture.pool(), &state)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        attempts::assert(
+            fixture.pool(),
+            requested.id,
+            HANDOFF_CODE,
+            SUBJECT,
+            EMAIL,
+            None
+        )
+        .await
+        .unwrap()
+    );
+
+    assert!(
+        !attempts::discard(fixture.pool(), requested.id)
+            .await
+            .unwrap(),
+        "a refused second post must not end the first post's sign-in"
+    );
+
+    let consumed = attempts::consume(fixture.pool(), &state)
+        .await
+        .unwrap()
+        .expect("the asserted attempt survives");
+    assert_eq!(consumed.asserted.unwrap().subject, SUBJECT);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn clearing_a_provider_ends_only_its_own_attempts() {
+    let fixture = Fixture::new().await;
+    let cleared = fixture.provider("0oa1").await;
+    let kept = fixture.provider("0oa2").await;
+    let asserted = authorization().state;
+    attempts::issue_request(fixture.pool(), cleared.id, &asserted, REQUEST_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    let requested = attempts::requested(fixture.pool(), &asserted)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        attempts::assert(
+            fixture.pool(),
+            requested.id,
+            HANDOFF_CODE,
+            SUBJECT,
+            EMAIL,
+            None
+        )
+        .await
+        .unwrap()
+    );
+    attempts::issue(fixture.pool(), cleared.id, &authorization())
+        .await
+        .unwrap()
+        .unwrap();
+    let surviving = authorization();
+    attempts::issue(fixture.pool(), kept.id, &surviving)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        attempts::clear(fixture.pool(), cleared.id).await.unwrap(),
+        2
+    );
+
+    assert_eq!(
+        attempts::consume(fixture.pool(), &asserted).await.unwrap(),
+        None
+    );
+    assert!(
+        attempts::consume(fixture.pool(), &surviving.state)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn a_request_id_is_issued_once() {
     let fixture = Fixture::new().await;
     let provider = fixture.provider("0oa1").await;

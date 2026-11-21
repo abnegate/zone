@@ -1,11 +1,15 @@
+use std::io::Write;
+use std::sync::{Arc, Mutex};
+
 use axum::Router;
 use axum::body::Body;
-use axum::extract::FromRequest;
+use axum::extract::{DefaultBodyLimit, FromRequest};
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION, REFERRER_POLICY};
 use axum::http::{Request, StatusCode};
 use axum::routing::{get, post};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
+use tracing::Level;
 use uuid::Uuid;
 use zone_enterprise::sso::saml::{Document, Refusal};
 use zone_enterprise::sso::{ASSERTION_INVALID, Error, SIGN_IN_REFUSED};
@@ -44,10 +48,44 @@ async fn parsed(content_type: &str, body: &str) -> Result<AcsForm, FormRejection
         .map(|Form(form)| form)
 }
 
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Captured {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("the captured log")
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn captured<T>(run: impl FnOnce() -> T) -> (T, String) {
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_max_level(Level::DEBUG)
+        .with_ansi(false)
+        .finish();
+    let result = tracing::subscriber::with_default(subscriber, run);
+    let logged =
+        String::from_utf8_lossy(&captured.0.lock().expect("the captured log")).into_owned();
+    (result, logged)
+}
+
 fn router() -> Router {
     Router::new()
         .route(SAML_METADATA_PATH, get(metadata))
-        .route(SAML_ACS_PATH, post(acs))
+        .route(
+            SAML_ACS_PATH,
+            post(acs).layer(DefaultBodyLimit::max(BODY_LIMIT)),
+        )
         .with_state(AppState::new(test_config(), unreachable_pool(), None))
 }
 
@@ -149,8 +187,11 @@ fn a_refusal_without_a_relay_state_sends_only_the_error() {
     );
 }
 
-#[test]
-fn a_refusal_names_its_code_and_every_other_failure_is_a_failed_sign_in() {
+#[tokio::test]
+async fn a_refusal_names_its_code_and_every_other_failure_is_a_failed_sign_in() {
+    let cancelled = tokio::spawn(std::future::pending::<()>());
+    cancelled.abort();
+    let interrupted = cancelled.await.unwrap_err();
     let cases = [
         (
             SignInFailure::from(Error::AssertionInvalid(Refusal::Replayed)),
@@ -181,10 +222,30 @@ fn a_refusal_names_its_code_and_every_other_failure_is_a_failed_sign_in() {
         ),
         (SignInFailure::Stale, SIGN_IN_FAILED),
         (SignInFailure::Busy, SIGN_IN_FAILED),
+        (SignInFailure::Interrupted(interrupted), SIGN_IN_FAILED),
     ];
     for (failure, expected) in cases {
-        assert_eq!(refusal_code(&failure), expected, "{failure:?}");
+        let (code, logged) = captured(|| refusal_code(&failure));
+        assert_eq!(code, expected, "{failure:?}");
+        assert_eq!(logged, "", "naming the code logs nothing: {failure:?}");
     }
+}
+
+#[test]
+fn a_refused_status_is_logged_escaped() {
+    let forged = "urn:x\n2026-11-22T00:00:00Z  INFO zone_server: Signed in admin@acme.com\u{1b}[2K";
+    let ((), logged) = captured(|| log(&SignInFailure::from(Error::SignInRefused(forged.into()))));
+    assert_eq!(logged.lines().count(), 1, "{logged}");
+    assert!(!logged.contains('\u{1b}'), "{logged}");
+    assert!(logged.contains("urn:x\\n2026"), "{logged}");
+    assert!(logged.contains(SIGN_IN_REFUSED), "{logged}");
+}
+
+#[test]
+fn any_other_failure_is_logged_as_an_error() {
+    let ((), logged) = captured(|| log(&SignInFailure::Busy));
+    assert!(logged.contains("ERROR"), "{logged}");
+    assert!(logged.contains("Too many sign-ins"), "{logged}");
 }
 
 #[test]
@@ -217,6 +278,53 @@ async fn a_post_without_a_relay_state_is_an_invalid_state() {
             "{content_type} {body}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_relay_state_longer_than_the_binding_allows_is_an_invalid_state_sent_back_without_it() {
+    let callback = redirect_uri(&test_config().app_base_url);
+    let longest = "s".repeat(RELAY_STATE_LIMIT);
+    let response = posted(
+        FORM,
+        &format!("SAMLResponse=PHNhbWw%3D&RelayState={longest}"),
+    )
+    .await;
+    assert_eq!(
+        uncached_redirect(&response),
+        format!("{callback}?state={longest}&error=sso_sign_in_failed")
+    );
+
+    let longer = "s".repeat(RELAY_STATE_LIMIT + 1);
+    let response = posted(
+        FORM,
+        &format!("SAMLResponse=PHNhbWw%3D&RelayState={longer}"),
+    )
+    .await;
+    assert_eq!(
+        uncached_redirect(&response),
+        format!("{callback}?error=sso_state_invalid")
+    );
+}
+
+#[tokio::test]
+async fn a_body_over_the_limit_is_an_invalid_state_sent_back_without_one() {
+    let callback = redirect_uri(&test_config().app_base_url);
+    let form = |length: usize| {
+        let prefix = "RelayState=state-1&SAMLResponse=";
+        format!("{prefix}{}", "A".repeat(length - prefix.len()))
+    };
+
+    let response = posted(FORM, &form(BODY_LIMIT)).await;
+    assert_eq!(
+        uncached_redirect(&response),
+        format!("{callback}?state=state-1&error=sso_sign_in_failed")
+    );
+
+    let response = posted(FORM, &form(BODY_LIMIT + 1)).await;
+    assert_eq!(
+        uncached_redirect(&response),
+        format!("{callback}?error=sso_state_invalid")
+    );
 }
 
 #[tokio::test]

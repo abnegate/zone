@@ -93,14 +93,14 @@ async fn hand_off(
     let Configured::Saml(provider) = enabled(state, attempt.provider_id).await? else {
         return Err(Error::ProviderNotFound.into());
     };
-    let request_id = attempt.request_id.as_deref().ok_or(Error::StateInvalid)?;
-    let consumed = saml::consume(
-        &provider,
-        &service_provider(&state.config().app_base_url),
-        request_id,
-        response,
-        Utc::now(),
-    )?;
+    let request_id = attempt.request_id.clone().ok_or(Error::StateInvalid)?;
+    let service = service_provider(&state.config().app_base_url);
+    let response = response.to_owned();
+    let consumed = tokio::task::spawn_blocking(move || {
+        saml::consume(&provider, &service, &request_id, &response, Utc::now())
+    })
+    .await
+    .map_err(SignInFailure::Interrupted)??;
     if !assertions::record(
         state.db(),
         attempt.provider_id,
