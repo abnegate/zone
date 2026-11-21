@@ -1408,9 +1408,11 @@ async fn at_the_community_cap_a_first_saml_sign_in_is_refused_but_a_linked_perso
     );
     let newcomer = format!("newcomer-{}@{DOMAIN}", Uuid::new_v4().simple());
 
-    let response = server
-        .sign_in(as_person("newcomer", newcomer.clone()))
+    let started = server.start().await;
+    let code = server
+        .asserted(&started, as_person("newcomer", newcomer.clone()))
         .await;
+    let response = server.callback(&started.state, &code).await;
 
     response.assert_status(StatusCode::FORBIDDEN);
     assert_eq!(
@@ -1419,6 +1421,12 @@ async fn at_the_community_cap_a_first_saml_sign_in_is_refused_but_a_linked_perso
             "error": AdmissionError::Full { cap: COMMUNITY_MEMBERS }.to_string(),
             "code": MEMBER_CAP_REACHED,
         })
+    );
+    assert_eq!(server.attempts(&started.state).await, 0);
+    refused(
+        &server.callback(&started.state, &code).await,
+        StatusCode::BAD_REQUEST,
+        STATE_INVALID,
     );
     assert_eq!(server.users_with_email(&newcomer).await, 0);
     assert_eq!(

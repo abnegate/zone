@@ -15,7 +15,9 @@ use zone_enterprise::sso::saml::{Document, Refusal};
 use zone_enterprise::sso::{ASSERTION_INVALID, Error, SIGN_IN_REFUSED};
 
 use super::*;
+use crate::auth::password::PasswordError;
 use crate::db::sso::ProviderError;
+use crate::services::account;
 use crate::services::sso::console::{
     SAML_ACS_PATH, SAML_METADATA_PATH, saml_acs_url, saml_entity_id,
 };
@@ -224,6 +226,15 @@ async fn a_refusal_names_its_code_and_every_other_failure_is_a_failed_sign_in() 
         (SignInFailure::Busy, SIGN_IN_FAILED),
         (SignInFailure::Overloaded, SIGN_IN_FAILED),
         (SignInFailure::Interrupted(interrupted), SIGN_IN_FAILED),
+        (SignInFailure::Full { cap: 3 }, SIGN_IN_FAILED),
+        (
+            SignInFailure::Session(account::Refusal::Missing),
+            SIGN_IN_FAILED,
+        ),
+        (
+            SignInFailure::from(PasswordError::HashingFailed),
+            SIGN_IN_FAILED,
+        ),
     ];
     for (failure, expected) in cases {
         let (code, logged) = captured(|| refusal_code(&failure));
