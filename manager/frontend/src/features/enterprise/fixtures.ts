@@ -1,4 +1,5 @@
 import { COMMUNITY_MEMBERS } from './limits';
+import { editionOf } from './plans';
 import {
   Edition,
   LicenseRefusalCode,
@@ -63,7 +64,7 @@ export function licensed(
   plan: PlanValue = Plan.Enterprise
 ): LicenseResponse {
   return {
-    edition: plan,
+    edition: editionOf(plan),
     status,
     license: { ...ACME_LICENSE, plan },
     seats: { used, licensed: ACME_LICENSE.seats, over: used > ACME_LICENSE.seats },

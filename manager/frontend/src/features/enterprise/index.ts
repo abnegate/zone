@@ -22,7 +22,7 @@ export {
   memberText,
   overMemberNotice,
 } from './members';
-export { availableOn, includes, planLabel } from './plans';
+export { availableOn, editionOf, includes, planLabel } from './plans';
 export {
   AGENT_POLICY_LINK,
   denialMessage,

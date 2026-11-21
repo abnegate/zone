@@ -7,6 +7,11 @@ const INCLUDED: Readonly<Record<EditionValue, readonly PlanValue[]>> = {
   [Edition.Enterprise]: [Plan.Team, Plan.Enterprise],
 };
 
+const EDITIONS: Readonly<Record<PlanValue, EditionValue>> = {
+  [Plan.Team]: Edition.Team,
+  [Plan.Enterprise]: Edition.Enterprise,
+};
+
 const PLAN_LABELS: Readonly<Record<PlanValue, string>> = {
   [Plan.Team]: 'Team',
   [Plan.Enterprise]: 'Enterprise',
@@ -14,6 +19,10 @@ const PLAN_LABELS: Readonly<Record<PlanValue, string>> = {
 
 export function includes(edition: EditionValue, plan: PlanValue): boolean {
   return INCLUDED[edition].includes(plan);
+}
+
+export function editionOf(plan: PlanValue): EditionValue {
+  return EDITIONS[plan];
 }
 
 export function planLabel(plan: PlanValue): string {
