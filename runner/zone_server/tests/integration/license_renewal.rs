@@ -240,12 +240,7 @@ async fn a_renewal_against_a_key_no_longer_stored_leaves_the_admins_key() {
 
     let change = fixture
         .licenses
-        .renew(
-            fixture.pool(),
-            stale.text(),
-            &renewed(&payload),
-            fixture.now,
-        )
+        .renew(fixture.pool(), stale.text(), verified(&renewed(&payload)))
         .await
         .unwrap();
 
