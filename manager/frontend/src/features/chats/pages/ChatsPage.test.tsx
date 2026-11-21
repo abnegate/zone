@@ -6160,6 +6160,7 @@ describe('ChatsPage', () => {
         mergeable: 'clean' as const,
         auto_merge: { enabled: false, unavailable: null },
         threads: { open: 0, resolved: 0 },
+        comments: null,
         draft_unavailable: null,
         merge_unavailable: null,
         observed_at: '2026-11-13T10:00:00Z',

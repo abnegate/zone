@@ -23,8 +23,12 @@ pub struct Status {
     pub draft_unavailable: Option<String>,
     /// Why it cannot be merged now, if it cannot.
     pub merge_unavailable: Option<String>,
-    /// Its review threads while it is open, unless GitHub would not list them all.
+    /// Its review threads, settled or open alike, unless GitHub would not list
+    /// them all.
     pub threads: Option<Threads>,
+    /// How many comments its conversation carries, GitHub's bots included,
+    /// unless GitHub could not be asked.
+    pub comments: Option<u32>,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -70,6 +74,7 @@ mod tests {
                 open: 0,
                 resolved: 4,
             }),
+            comments: Some(2),
             observed_at: Utc::now(),
         }
     }
@@ -77,6 +82,20 @@ mod tests {
     #[test]
     fn passing_checks_a_clean_merge_and_no_open_threads_is_ready() {
         assert!(ready().ready_to_merge());
+    }
+
+    #[test]
+    fn the_comment_count_never_decides_whether_it_is_ready_to_merge() {
+        for comments in [None, Some(0), Some(2), Some(1000)] {
+            assert!(
+                Status {
+                    comments,
+                    ..ready()
+                }
+                .ready_to_merge(),
+                "{comments:?} comments changed readiness"
+            );
+        }
     }
 
     #[test]

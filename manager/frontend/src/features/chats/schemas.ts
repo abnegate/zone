@@ -503,6 +503,7 @@ export const PullRequestStatusSchema = z.object({
     .object({ open: z.number().int().nonnegative(), resolved: z.number().int().nonnegative() })
     .nullable()
     .catch(null),
+  comments: z.number().int().nonnegative().nullable().catch(null),
   observed_at: z.string(),
 });
 

@@ -641,6 +641,8 @@ export interface PullRequestStatus {
   /** Why it cannot be merged now, if it cannot. */
   merge_unavailable: string | null;
   threads: PullRequestThreads | null;
+  /** How many comments its conversation carries, or unknown if GitHub could not be asked. */
+  comments: number | null;
   observed_at: string;
 }
 

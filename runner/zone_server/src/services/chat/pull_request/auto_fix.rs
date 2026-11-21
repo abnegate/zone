@@ -455,6 +455,7 @@ mod tests {
             draft_unavailable: None,
             merge_unavailable: None,
             threads: None,
+            comments: None,
             observed_at: Utc::now(),
         }
     }

@@ -160,7 +160,12 @@ export function PullRequestItem(props: PullRequestItemProps) {
               </span>
             </span>
           )}
-          {pullRequest.status?.threads && <ReviewThreads threads={pullRequest.status.threads} />}
+          {pullRequest.status && (
+            <ReviewThreads
+              comments={pullRequest.status.comments}
+              threads={pullRequest.status.threads}
+            />
+          )}
           {autoMerging && (
             <span className="chat-change-auto" title={AUTO_MERGE_HINT}>
               Auto-merge
