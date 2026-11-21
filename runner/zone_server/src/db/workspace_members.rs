@@ -169,8 +169,9 @@ pub async fn remove_guarded(
     let mut transaction = pool.begin().await?;
 
     let privileged = lock_privileged(&mut transaction, workspace_id).await?;
-    let caller = lock_caller(&mut transaction, workspace_id, caller).await?;
-    let Some(target) = lock_member(&mut transaction, workspace_id, user_id).await? else {
+    let Some((caller, target)) =
+        lock_parties(&mut transaction, workspace_id, caller, user_id).await?
+    else {
         return Ok(Removal::Missing);
     };
     if outranked(&caller, &target.membership) {
@@ -584,37 +585,82 @@ pub async fn lock_membership(
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> DbResult<Option<Membership<WorkspaceRole>>> {
-    let row: Option<(String, Option<Uuid>, Uuid)> = sqlx::query_as(
-        r#"
-        SELECT wm.role, wm.custom_role_id, w.organization_id
-        FROM workspace_members wm
-        INNER JOIN workspaces w ON w.id = wm.workspace_id
-        WHERE wm.workspace_id = $1 AND wm.user_id = $2 AND wm.is_active = TRUE
-        FOR SHARE OF wm
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(&mut *connection)
-    .await?;
-
-    let Some((role, assigned, organization_id)) = row else {
+    let Some(seat) = Seat::lock(connection, workspace_id, user_id, Lock::Share).await? else {
         return Ok(None);
     };
-    let role = role.parse().unwrap_or(WorkspaceRole::Viewer);
-    let (custom_role, grant) = custom_roles::held(
-        connection,
-        organization_id,
-        assigned,
-        Scope::Workspace,
-        Grant::workspace(role),
-    )
-    .await?;
-    Ok(Some(Membership {
-        role,
-        custom_role,
-        grant,
-    }))
+    Ok(Some(seat.membership(connection).await?))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Lock {
+    Share,
+    Update,
+}
+
+impl Lock {
+    fn seat(self) -> &'static str {
+        match self {
+            Self::Share => {
+                "SELECT wm.role, wm.custom_role_id, w.organization_id \
+                 FROM workspace_members wm INNER JOIN workspaces w ON w.id = wm.workspace_id \
+                 WHERE wm.workspace_id = $1 AND wm.user_id = $2 AND wm.is_active = TRUE \
+                 FOR SHARE OF wm"
+            }
+            Self::Update => {
+                "SELECT wm.role, wm.custom_role_id, w.organization_id \
+                 FROM workspace_members wm INNER JOIN workspaces w ON w.id = wm.workspace_id \
+                 WHERE wm.workspace_id = $1 AND wm.user_id = $2 AND wm.is_active = TRUE \
+                 FOR UPDATE OF wm"
+            }
+        }
+    }
+}
+
+/// An active member row read under `lock`, before the custom role it points at.
+struct Seat {
+    role: WorkspaceRole,
+    assigned: Option<Uuid>,
+    organization_id: Uuid,
+}
+
+impl Seat {
+    async fn lock(
+        connection: &mut PgConnection,
+        workspace_id: Uuid,
+        user_id: Uuid,
+        lock: Lock,
+    ) -> DbResult<Option<Self>> {
+        let row: Option<(String, Option<Uuid>, Uuid)> = sqlx::query_as(lock.seat())
+            .bind(workspace_id)
+            .bind(user_id)
+            .fetch_optional(connection)
+            .await?;
+        Ok(row.map(|(role, assigned, organization_id)| Self {
+            role: role.parse().unwrap_or(WorkspaceRole::Viewer),
+            assigned,
+            organization_id,
+        }))
+    }
+
+    /// Share-locks the custom role the row points at and reads what it grants.
+    async fn membership(
+        self,
+        connection: &mut PgConnection,
+    ) -> DbResult<Membership<WorkspaceRole>> {
+        let (custom_role, grant) = custom_roles::held(
+            connection,
+            self.organization_id,
+            self.assigned,
+            Scope::Workspace,
+            Grant::workspace(self.role),
+        )
+        .await?;
+        Ok(Membership {
+            role: self.role,
+            custom_role,
+            grant,
+        })
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -642,51 +688,41 @@ impl Privileged {
     }
 }
 
-/// The target's own role, held for the length of the transaction.
+/// What the caller holds and the target's own role, both held for the length
+/// of the transaction: a demotion of the caller that lands first is what the
+/// change is judged by, and a caller who is no longer a member holds nothing.
 ///
-/// Reading it in the route and acting on it here are two moments: an owner can
-/// promote the target in between, and the request then lands on an admin or
-/// owner the caller was never allowed to touch. Read it under the same lock as
-/// the count.
-async fn lock_member(
+/// Both member rows are locked before either custom role is, the order an
+/// edit of a role keeps, so a change never holds a role while it waits for a
+/// member row.
+///
+/// Reading the target in the route and acting on it here are two moments: an
+/// owner can promote the target in between, and the request then lands on an
+/// admin or owner the caller was never allowed to touch. Read it under the
+/// same lock as the count.
+async fn lock_parties(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     workspace_id: Uuid,
+    caller: Uuid,
     user_id: Uuid,
-) -> DbResult<Option<Target>> {
-    let row: Option<(String, Option<Uuid>, Uuid)> = sqlx::query_as(
-        r#"
-        SELECT wm.role, wm.custom_role_id, w.organization_id
-        FROM workspace_members wm
-        INNER JOIN workspaces w ON w.id = wm.workspace_id
-        WHERE wm.workspace_id = $1 AND wm.user_id = $2 AND wm.is_active = TRUE
-        FOR UPDATE OF wm
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(&mut **transaction)
-    .await?;
-
-    let Some((role, assigned, organization_id)) = row else {
+) -> DbResult<Option<(Grant, Target)>> {
+    let caller = Seat::lock(transaction, workspace_id, caller, Lock::Share).await?;
+    let Some(target) = Seat::lock(transaction, workspace_id, user_id, Lock::Update).await? else {
         return Ok(None);
     };
-    let role = role.parse().unwrap_or(WorkspaceRole::Viewer);
-    let (custom_role, grant) = custom_roles::held(
-        transaction,
-        organization_id,
-        assigned,
-        Scope::Workspace,
-        Grant::workspace(role),
-    )
-    .await?;
-    Ok(Some(Target {
-        organization_id,
-        membership: Membership {
-            role,
-            custom_role,
-            grant,
+    let caller = match caller {
+        Some(caller) => caller.membership(transaction).await?.grant,
+        None => Grant::default(),
+    };
+    let organization_id = target.organization_id;
+    let membership = target.membership(transaction).await?;
+    Ok(Some((
+        caller,
+        Target {
+            organization_id,
+            membership,
         },
-    }))
+    )))
 }
 
 struct Target {
@@ -697,19 +733,6 @@ struct Target {
 /// Only the workspace administrators permission touches an admin or owner.
 fn outranked(caller: &Grant, target: &Membership<WorkspaceRole>) -> bool {
     target.role >= WorkspaceRole::Admin && !caller.allows(Permission::WorkspaceAdministratorsUpdate)
-}
-
-/// What the caller holds now, under the same transaction as the change it
-/// asks for: a demotion that lands first is what the change is judged by. A
-/// caller who is no longer a member holds nothing.
-async fn lock_caller(
-    transaction: &mut sqlx::Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    caller: Uuid,
-) -> DbResult<Grant> {
-    Ok(lock_membership(transaction, workspace_id, caller)
-        .await?
-        .map_or_else(Grant::default, |membership| membership.grant))
 }
 
 async fn lock_privileged(
@@ -788,8 +811,9 @@ pub async fn change_role(
     let mut transaction = pool.begin().await?;
 
     let privileged = lock_privileged(&mut transaction, workspace_id).await?;
-    let caller = lock_caller(&mut transaction, workspace_id, caller).await?;
-    let Some(target) = lock_member(&mut transaction, workspace_id, user_id).await? else {
+    let Some((caller, target)) =
+        lock_parties(&mut transaction, workspace_id, caller, user_id).await?
+    else {
         return Ok(RoleChange::Missing);
     };
     if outranked(&caller, &target.membership) {

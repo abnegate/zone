@@ -12,6 +12,10 @@
 //! `change_role` also reads its caller's membership under a share lock, so a
 //! demotion of the caller already in flight lands first and the change is
 //! judged by what the caller holds afterwards.
+//!
+//! Every side locks member rows before role rows, so a change that waits for
+//! its caller's role never holds that role while an edit by its target waits
+//! for it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -532,3 +536,68 @@ async fn a_workspace_change_behind_its_callers_demotion_is_judged_by_the_demoted
 
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn a_custom_caller_changing_an_editor_of_its_role_never_deadlocks_with_the_edit() {
+    let fixture = fixture().await;
+    let pool = fixture.pool();
+    let organization = organization(pool).await;
+    let owner = editor(pool, organization, OrgRole::Owner).await;
+    let admin = editor(pool, organization, OrgRole::Admin).await;
+    let caller = user(pool).await;
+    seat_organization(pool, organization, caller, OrgRole::Member).await;
+    let held = role(pool, organization, owner, Scope::Organization, &WIDE).await;
+    assign_organization(pool, organization, owner, caller, held).await;
+
+    let mut blocker = pool.begin().await.expect("a transaction");
+    sqlx::query("SELECT 1 FROM custom_roles WHERE id = $1 FOR UPDATE")
+        .bind(held)
+        .execute(&mut *blocker)
+        .await
+        .expect("the caller's role is held");
+    let change = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            organization_members::change_role(
+                &pool,
+                organization,
+                admin,
+                Assignment::BuiltIn(OrgRole::Member),
+                caller,
+            )
+            .await
+        })
+    };
+    assert!(
+        waiting(pool, 1).await,
+        "the change waits for the caller's role"
+    );
+    let edit = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let narrowed = composed(Scope::Organization, &NARROW);
+            let change = Change {
+                grant: Some(&narrowed),
+                ..Change::default()
+            };
+            custom_roles::update(&pool, organization, held, &change, admin).await
+        })
+    };
+    assert!(waiting(pool, 2).await, "the edit queues behind the change");
+    blocker.commit().await.expect("the caller's role is let go");
+
+    let outcome = finished(change)
+        .await
+        .expect("the change is answered without a deadlock");
+    assert!(
+        matches!(outcome, RoleChange::Forbidden),
+        "a custom caller never touches an admin: {outcome:?}"
+    );
+    let edit = finished(edit)
+        .await
+        .expect("the edit is answered without a deadlock");
+    assert!(matches!(edit, Update::Saved { .. }), "{edit:?}");
+
+    fixture.cleanup().await;
+}
+

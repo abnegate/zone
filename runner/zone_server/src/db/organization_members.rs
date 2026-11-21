@@ -166,45 +166,102 @@ pub async fn remove_member(pool: &PgPool, organization_id: Uuid, user_id: Uuid) 
     Ok(result.rows_affected() > 0)
 }
 
-/// The target's own role, held for the length of the transaction.
+#[derive(Debug, Clone, Copy)]
+enum Lock {
+    Share,
+    Update,
+}
+
+impl Lock {
+    fn seat(self) -> &'static str {
+        match self {
+            Self::Share => {
+                "SELECT role, custom_role_id FROM organization_members \
+                 WHERE organization_id = $1 AND user_id = $2 AND is_active = TRUE FOR SHARE"
+            }
+            Self::Update => {
+                "SELECT role, custom_role_id FROM organization_members \
+                 WHERE organization_id = $1 AND user_id = $2 AND is_active = TRUE FOR UPDATE"
+            }
+        }
+    }
+}
+
+/// An active member row read under `lock`, before the custom role it points at.
+struct Seat {
+    role: OrgRole,
+    assigned: Option<Uuid>,
+}
+
+impl Seat {
+    async fn lock(
+        connection: &mut PgConnection,
+        organization_id: Uuid,
+        user_id: Uuid,
+        lock: Lock,
+    ) -> DbResult<Option<Self>> {
+        let row: Option<(String, Option<Uuid>)> = sqlx::query_as(lock.seat())
+            .bind(organization_id)
+            .bind(user_id)
+            .fetch_optional(connection)
+            .await?;
+        Ok(row.map(|(role, assigned)| Self {
+            role: role.parse().unwrap_or(OrgRole::Member),
+            assigned,
+        }))
+    }
+
+    /// Share-locks the custom role the row points at and reads what it grants.
+    async fn membership(
+        self,
+        connection: &mut PgConnection,
+        organization_id: Uuid,
+    ) -> DbResult<Membership<OrgRole>> {
+        let (custom_role, grant) = custom_roles::held(
+            connection,
+            organization_id,
+            self.assigned,
+            Scope::Organization,
+            Grant::organization(self.role),
+        )
+        .await?;
+        Ok(Membership {
+            role: self.role,
+            custom_role,
+            grant,
+        })
+    }
+}
+
+/// What the caller holds and the target's own role, both held for the length
+/// of the transaction: a demotion of the caller that lands first is what the
+/// change is judged by, and a caller who is no longer a member holds nothing.
 ///
-/// Reading it in the route and acting on it here are two moments: an owner can
-/// promote the target in between, and the request then lands on an admin or
-/// owner the caller was never allowed to touch.
-async fn lock_member(
+/// Both member rows are locked before either custom role is: an edit of a
+/// role holds its editor's member row while it waits for the role, so a change
+/// that held the caller's role while it waited for the target's row would
+/// close a cycle with an edit by the target.
+///
+/// Reading the target in the route and acting on it here are two moments: an
+/// owner can promote the target in between, and the request then lands on an
+/// admin or owner the caller was never allowed to touch.
+async fn lock_parties(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     organization_id: Uuid,
+    caller: Uuid,
     user_id: Uuid,
-) -> DbResult<Option<Membership<OrgRole>>> {
-    let row: Option<(String, Option<Uuid>)> = sqlx::query_as(
-        r#"
-        SELECT role, custom_role_id FROM organization_members
-        WHERE organization_id = $1 AND user_id = $2 AND is_active = TRUE
-        FOR UPDATE
-        "#,
-    )
-    .bind(organization_id)
-    .bind(user_id)
-    .fetch_optional(&mut **transaction)
-    .await?;
-
-    let Some((role, assigned)) = row else {
+) -> DbResult<Option<(Grant, Membership<OrgRole>)>> {
+    let caller = Seat::lock(transaction, organization_id, caller, Lock::Share).await?;
+    let Some(target) = Seat::lock(transaction, organization_id, user_id, Lock::Update).await?
+    else {
         return Ok(None);
     };
-    let role = role.parse().unwrap_or(OrgRole::Member);
-    let (custom_role, grant) = custom_roles::held(
-        transaction,
-        organization_id,
-        assigned,
-        Scope::Organization,
-        Grant::organization(role),
-    )
-    .await?;
-    Ok(Some(Membership {
-        role,
-        custom_role,
-        grant,
-    }))
+    let caller = match caller {
+        Some(caller) => caller.membership(transaction, organization_id).await?.grant,
+        None => Grant::default(),
+    };
+    let target = target.membership(transaction, organization_id).await?;
+    Ok(Some((caller, target)))
 }
 
 /// Only the administrators permission touches an admin or owner.
@@ -229,19 +286,6 @@ async fn lock_owners(
     .bind(organization_id)
     .fetch_all(&mut **transaction)
     .await
-}
-
-/// What the caller holds now, under the same transaction as the change it
-/// asks for: a demotion that lands first is what the change is judged by. A
-/// caller who is no longer a member holds nothing.
-async fn lock_caller(
-    transaction: &mut sqlx::Transaction<'_, Postgres>,
-    organization_id: Uuid,
-    caller: Uuid,
-) -> DbResult<Grant> {
-    Ok(lock_membership(transaction, organization_id, caller)
-        .await?
-        .map_or_else(Grant::default, |membership| membership.grant))
 }
 
 /// Outcome of a removal that must leave an owner seated.
@@ -269,8 +313,9 @@ pub async fn remove_guarded(
     let mut transaction = pool.begin().await?;
 
     let owners = lock_owners(&mut transaction, organization_id).await?;
-    let caller = lock_caller(&mut transaction, organization_id, caller).await?;
-    let Some(target) = lock_member(&mut transaction, organization_id, user_id).await? else {
+    let Some((caller, target)) =
+        lock_parties(&mut transaction, organization_id, caller, user_id).await?
+    else {
         return Ok(Removal::Missing);
     };
     if outranked(&caller, &target) {
@@ -592,8 +637,9 @@ pub async fn change_role(
     let mut transaction = pool.begin().await?;
 
     let owners = lock_owners(&mut transaction, organization_id).await?;
-    let caller = lock_caller(&mut transaction, organization_id, caller).await?;
-    let Some(target) = lock_member(&mut transaction, organization_id, user_id).await? else {
+    let Some((caller, target)) =
+        lock_parties(&mut transaction, organization_id, caller, user_id).await?
+    else {
         return Ok(RoleChange::Missing);
     };
     if outranked(&caller, &target) {
@@ -705,36 +751,10 @@ pub async fn lock_membership(
     organization_id: Uuid,
     user_id: Uuid,
 ) -> DbResult<Option<Membership<OrgRole>>> {
-    let row: Option<(String, Option<Uuid>)> = sqlx::query_as(
-        r#"
-        SELECT role, custom_role_id
-        FROM organization_members
-        WHERE organization_id = $1 AND user_id = $2 AND is_active = TRUE
-        FOR SHARE
-        "#,
-    )
-    .bind(organization_id)
-    .bind(user_id)
-    .fetch_optional(&mut *connection)
-    .await?;
-
-    let Some((role, assigned)) = row else {
+    let Some(seat) = Seat::lock(connection, organization_id, user_id, Lock::Share).await? else {
         return Ok(None);
     };
-    let role = role.parse().unwrap_or(OrgRole::Member);
-    let (custom_role, grant) = custom_roles::held(
-        connection,
-        organization_id,
-        assigned,
-        Scope::Organization,
-        Grant::organization(role),
-    )
-    .await?;
-    Ok(Some(Membership {
-        role,
-        custom_role,
-        grant,
-    }))
+    Ok(Some(seat.membership(connection, organization_id).await?))
 }
 
 /// Whether an active member holds `permission` in their organization.
