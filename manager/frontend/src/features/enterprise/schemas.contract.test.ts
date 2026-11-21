@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { z } from 'zod';
 
 import { rustVariants, structFields } from '../../test/rust';
+import { COMMUNITY_MEMBERS } from './limits';
 import {
   EDITIONS,
   LICENSE_REFUSAL_CODES,
@@ -34,6 +35,7 @@ const ERRORS = join(ENTERPRISE, 'error.rs');
 const MEMBERS = join(ENTERPRISE, 'members.rs');
 
 const CODE = /pub const [A-Z_]+: &str = "([^"]+)";/g;
+const MEMBER_CAP = /pub const COMMUNITY_MEMBERS: u32 = (\d+);/;
 const OPTION = /^pub\s+([a-z_][a-z_0-9]*)\s*:\s*Option</;
 
 const read = (path: string): string => readFileSync(path, 'utf8');
@@ -75,6 +77,12 @@ function zodNullable(schema: Shaped): string[] {
 
 function codes(path: string): string[] {
   return [...read(path).matchAll(CODE)].map((match) => match[1]);
+}
+
+function rustMemberCap(path: string): number {
+  const cap = MEMBER_CAP.exec(read(path))?.[1];
+  if (cap === undefined) throw new Error(`COMMUNITY_MEMBERS is not a u32 constant in ${path}`);
+  return Number(cap);
 }
 
 describe('the license reads as the server serialises it', () => {
@@ -135,6 +143,10 @@ describe('the license vocabularies match the server', () => {
 
   test('a refusal at the member cap carries the code the server sends', () => {
     expect(codes(MEMBERS)).toEqual([MemberCapCode]);
+  });
+
+  test('the member cap without a license is the one the server enforces', () => {
+    expect(COMMUNITY_MEMBERS).toBe(rustMemberCap(MEMBERS));
   });
 
   test('statuses', () => {
