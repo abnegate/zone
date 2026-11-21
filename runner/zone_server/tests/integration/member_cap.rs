@@ -12,6 +12,7 @@ use uuid::Uuid;
 use zone_enterprise::sso::{Claims, testing};
 use zone_enterprise::{COMMUNITY_MEMBERS, MEMBER_CAP_REACHED, period_start};
 use zone_server::db::seats;
+use zone_server::routes::workspaces::OUTSIDE_ORGANIZATION;
 
 use crate::common::identity_provider::IdentityProvider;
 use crate::common::sso::{Fixture, active, grace, lapsed, lapsed_team, team};
@@ -155,6 +156,59 @@ impl Server {
         .unwrap()
     }
 
+    async fn workspace(&self, owner: &Member) -> Uuid {
+        sqlx::query_scalar(
+            "SELECT workspace_id FROM workspace_members
+             WHERE user_id = $1 AND role = 'owner' AND is_active
+             ORDER BY created_at LIMIT 1",
+        )
+        .bind(owner.id)
+        .fetch_one(self.pool())
+        .await
+        .unwrap()
+    }
+
+    async fn add_to_workspace(&self, owner: &Member, member: &Member) -> TestResponse {
+        let workspace = self.workspace(owner).await;
+        self.post(
+            &format!("/api/workspaces/{workspace}/members"),
+            &json!({ "user_id": member.id, "role": "member" }),
+            owner,
+        )
+        .await
+    }
+
+    async fn in_workspace(&self, owner: &Member, member: &Member) -> bool {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM workspace_members
+             WHERE workspace_id = $1 AND user_id = $2 AND is_active)",
+        )
+        .bind(self.workspace(owner).await)
+        .bind(member.id)
+        .fetch_one(self.pool())
+        .await
+        .unwrap()
+    }
+
+    async fn activate(&self, owner: &Member, organization: Uuid, active: bool) -> TestResponse {
+        self.fixture
+            .client
+            .patch_json_auth(
+                &format!("{ORGANIZATIONS}/{organization}"),
+                &json!({ "is_active": active }),
+                &owner.access,
+            )
+            .await
+    }
+
+    async fn organization_active(&self, organization: Uuid) -> bool {
+        sqlx::query_scalar("SELECT COALESCE(is_active, true) FROM organizations WHERE id = $1")
+            .bind(organization)
+            .fetch_one(self.pool())
+            .await
+            .unwrap()
+    }
+
     /// Ends every membership `member` holds, so they neither count nor are a member.
     async fn strand(&self, member: &Member) {
         sqlx::query("UPDATE organization_members SET is_active = false WHERE user_id = $1")
@@ -268,7 +322,7 @@ impl SingleSignOn {
 
 fn message() -> String {
     format!(
-        "This server runs Zone Community, which allows {COMMUNITY_MEMBERS} active members. Add a Zone Team or Enterprise license to add more people."
+        "This server allows {COMMUNITY_MEMBERS} active members without an active Zone Team or Enterprise license. Add a license to add more people."
     )
 }
 
@@ -570,5 +624,100 @@ async fn a_member_is_an_active_user_with_an_active_membership_of_an_active_organ
         assert!(!seats::member(server.pool(), outsider.id).await.unwrap());
     }
     assert!(!seats::member(server.pool(), Uuid::new_v4()).await.unwrap());
+    server.cleanup().await;
+}
+
+fn outside(response: &TestResponse) {
+    response.assert_status(StatusCode::CONFLICT);
+    assert_eq!(response.json_value()["code"], json!(OUTSIDE_ORGANIZATION));
+}
+
+#[tokio::test]
+async fn at_the_cap_a_stranded_account_is_not_added_to_a_workspace() {
+    let server = Server::capped().await;
+    let owner = server.join().await;
+    server.join().await;
+    let outsider = server.join().await;
+    server.strand(&outsider).await;
+    server.join().await;
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS);
+
+    outside(&server.add_to_workspace(&owner, &outsider).await);
+
+    assert!(!server.in_workspace(&owner, &outsider).await);
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS);
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn only_a_member_of_its_organization_is_added_to_a_workspace() {
+    let server = Server::uncapped().await;
+    let owner = server.join().await;
+    let stranger = server.join().await;
+
+    outside(&server.add_to_workspace(&owner, &stranger).await);
+    assert!(!server.in_workspace(&owner, &stranger).await);
+
+    server
+        .add(&owner, &stranger)
+        .await
+        .assert_status(StatusCode::CREATED);
+    server
+        .add_to_workspace(&owner, &stranger)
+        .await
+        .assert_status(StatusCode::CREATED);
+    assert!(server.in_workspace(&owner, &stranger).await);
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn at_the_cap_an_organization_whose_members_would_return_stays_inactive() {
+    let server = Server::capped().await;
+    let owner = server.join().await;
+    let colleague = server.join().await;
+    server
+        .add(&owner, &colleague)
+        .await
+        .assert_status(StatusCode::CREATED);
+    let organization = server.organization(&owner).await;
+    server
+        .activate(&owner, organization, false)
+        .await
+        .assert_status(StatusCode::OK);
+    assert!(!seats::member(server.pool(), owner.id).await.unwrap());
+    server.members(2).await;
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS);
+
+    refused(&server.activate(&owner, organization, true).await);
+
+    assert!(!server.organization_active(organization).await);
+    assert!(!seats::member(server.pool(), owner.id).await.unwrap());
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn under_the_cap_an_organization_is_reactivated_counting_only_those_who_return() {
+    let server = Server::capped().await;
+    let owner = server.join().await;
+    let colleague = server.join().await;
+    server
+        .add(&owner, &colleague)
+        .await
+        .assert_status(StatusCode::CREATED);
+    let organization = server.organization(&owner).await;
+    server
+        .activate(&owner, organization, false)
+        .await
+        .assert_status(StatusCode::OK);
+    server.join().await;
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS - 1);
+
+    server
+        .activate(&owner, organization, true)
+        .await
+        .assert_status(StatusCode::OK);
+
+    assert!(server.organization_active(organization).await);
+    assert!(seats::member(server.pool(), owner.id).await.unwrap());
     server.cleanup().await;
 }

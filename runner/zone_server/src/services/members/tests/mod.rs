@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use zone_enterprise::{COMMUNITY_MEMBERS, MEMBER_CAP_REACHED};
 
-use super::{AdmissionError, admit};
+use super::{AdmissionError, admit, reactivate};
 use crate::state::{AppState, test_config, unreachable_pool};
 
 async fn answered(error: AdmissionError) -> (StatusCode, Value) {
@@ -31,7 +31,7 @@ async fn a_full_server_refuses_with_the_code_and_a_message_naming_the_cap() {
         (
             StatusCode::FORBIDDEN,
             json!({
-                "error": "This server runs Zone Community, which allows 3 active members. Add a Zone Team or Enterprise license to add more people.",
+                "error": "This server allows 3 active members without an active Zone Team or Enterprise license. Add a license to add more people.",
                 "code": MEMBER_CAP_REACHED,
             })
         )
@@ -56,6 +56,7 @@ async fn a_state_that_never_opted_in_admits_without_reading_the_database() {
     assert!(!state.members_capped());
     admit(&state, None).await.unwrap();
     admit(&state, Some(Uuid::new_v4())).await.unwrap();
+    reactivate(&state, Uuid::new_v4()).await.unwrap();
 }
 
 #[tokio::test]
@@ -66,6 +67,10 @@ async fn an_opted_in_state_reads_the_license_and_fails_closed_when_it_cannot() {
     assert!(state.members_capped());
     assert!(matches!(
         admit(&state, None).await,
+        Err(AdmissionError::Database(_))
+    ));
+    assert!(matches!(
+        reactivate(&state, Uuid::new_v4()).await,
         Err(AdmissionError::Database(_))
     ));
 }

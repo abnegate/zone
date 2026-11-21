@@ -163,7 +163,7 @@ pub async fn list(State(state): State<AppState>, auth: AuthUser) -> impl IntoRes
 pub async fn create(
     State(state): State<AppState>,
     auth: AuthUser,
-    Json(req): Json<CreateOrganizationRequest>,
+    Json(request): Json<CreateOrganizationRequest>,
 ) -> impl IntoResponse {
     let user_id = match Uuid::parse_str(&auth.0.sub) {
         Ok(id) => id,
@@ -180,10 +180,10 @@ pub async fn create(
         return refusal.into_response();
     }
 
-    let mut tx = match state.db().begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::error!("Failed to start transaction: {}", e);
+    let mut transaction = match state.db().begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            tracing::error!("Failed to start transaction: {}", error);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Internal server error")),
@@ -192,18 +192,18 @@ pub async fn create(
         }
     };
 
-    let org = match organizations::create_organization_tx(
-        &mut tx,
-        &req.name,
-        &req.slug,
-        req.description.as_deref(),
+    let organization = match organizations::create_organization_tx(
+        &mut transaction,
+        &request.name,
+        &request.slug,
+        request.description.as_deref(),
     )
     .await
     {
-        Ok(org) => org,
-        Err(e) => {
-            tracing::error!("Database error creating organization: {}", e);
-            let _ = tx.rollback().await;
+        Ok(organization) => organization,
+        Err(error) => {
+            tracing::error!("Database error creating organization: {}", error);
+            let _ = transaction.rollback().await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Internal server error")),
@@ -212,17 +212,17 @@ pub async fn create(
         }
     };
 
-    if let Err(e) = organization_members::add_member_tx(
-        &mut tx,
-        org.id,
+    if let Err(error) = organization_members::add_member_tx(
+        &mut transaction,
+        organization.id,
         user_id,
         organization_members::OrgRole::Owner,
         None,
     )
     .await
     {
-        tracing::error!("Failed to add organization owner: {}", e);
-        let _ = tx.rollback().await;
+        tracing::error!("Failed to add organization owner: {}", error);
+        let _ = transaction.rollback().await;
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::new(
@@ -232,8 +232,8 @@ pub async fn create(
             .into_response();
     }
 
-    if let Err(e) = tx.commit().await {
-        tracing::error!("Failed to commit transaction: {}", e);
+    if let Err(error) = transaction.commit().await {
+        tracing::error!("Failed to commit transaction: {}", error);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::new("Internal server error")),
@@ -244,7 +244,7 @@ pub async fn create(
     (
         StatusCode::CREATED,
         Json(SingleOrganizationResponse {
-            organization: OrganizationResponse::from(org),
+            organization: OrganizationResponse::from(organization),
         }),
     )
         .into_response()
@@ -277,19 +277,25 @@ pub async fn get(State(state): State<AppState>, member: OrgMember) -> impl IntoR
 pub async fn update(
     State(state): State<AppState>,
     admin: OrgAdmin,
-    Json(req): Json<UpdateOrganizationRequest>,
+    Json(request): Json<UpdateOrganizationRequest>,
 ) -> impl IntoResponse {
+    if request.is_active == Some(true)
+        && let Err(refusal) = members::reactivate(&state, admin.org_id).await
+    {
+        return refusal.into_response();
+    }
+
     match organizations::update_organization(
         state.db(),
         admin.org_id,
-        req.name.as_deref(),
-        req.description.as_deref(),
-        req.is_active,
+        request.name.as_deref(),
+        request.description.as_deref(),
+        request.is_active,
     )
     .await
     {
-        Ok(Some(org)) => {
-            let organization = OrganizationResponse::from(org).with_role(admin.role);
+        Ok(Some(row)) => {
+            let organization = OrganizationResponse::from(row).with_role(admin.role);
             audit(
                 state.db(),
                 AuditEvent {
@@ -316,8 +322,8 @@ pub async fn update(
             Json(ErrorResponse::new("Organization not found")),
         )
             .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
+        Err(error) => {
+            tracing::error!("Database error: {}", error);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Internal server error")),
@@ -757,10 +763,10 @@ pub async fn list_members(State(state): State<AppState>, member: OrgMember) -> i
 pub async fn add_member(
     State(state): State<AppState>,
     admin: OrgAdmin,
-    Json(req): Json<AddMemberRequest>,
+    Json(request): Json<AddMemberRequest>,
 ) -> impl IntoResponse {
-    let role = match req.role.parse::<organization_members::OrgRole>() {
-        Ok(r) => r,
+    let role = match request.role.parse::<organization_members::OrgRole>() {
+        Ok(role) => role,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -784,7 +790,7 @@ pub async fn add_member(
             .into_response();
     }
 
-    let target = match (req.user_id, req.email.as_deref()) {
+    let target = match (request.user_id, request.email.as_deref()) {
         (Some(user_id), None) => user_id,
         (None, Some(email)) => match crate::db::users::get_user_by_email(state.db(), email).await {
             Ok(Some(user)) => user.id,
@@ -797,8 +803,8 @@ pub async fn add_member(
                 )
                     .into_response();
             }
-            Err(e) => {
-                tracing::error!("Database error resolving email: {}", e);
+            Err(error) => {
+                tracing::error!("Database error resolving email: {}", error);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse::new("Internal server error")),
@@ -853,8 +859,8 @@ pub async fn add_member(
                         let response = describe_member(&state, member).await;
                         return (StatusCode::OK, Json(response)).into_response();
                     }
-                    Err(e) => {
-                        tracing::error!("Database error reactivating member: {}", e);
+                    Err(error) => {
+                        tracing::error!("Database error reactivating member: {}", error);
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(ErrorResponse::new("Internal server error")),
@@ -867,8 +873,8 @@ pub async fn add_member(
         Ok(None) => {
             // Member doesn't exist, proceed with add
         }
-        Err(e) => {
-            tracing::error!("Database error checking existing member: {}", e);
+        Err(error) => {
+            tracing::error!("Database error checking existing member: {}", error);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Internal server error")),
@@ -898,8 +904,8 @@ pub async fn add_member(
             let response = describe_member(&state, member).await;
             (StatusCode::CREATED, Json(response)).into_response()
         }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
+        Err(error) => {
+            tracing::error!("Database error: {}", error);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Internal server error")),

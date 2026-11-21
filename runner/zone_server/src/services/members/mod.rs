@@ -1,6 +1,3 @@
-//! The Community edition's cap on active members, checked wherever a person
-//! would become a member.
-
 mod admission_error;
 
 use chrono::Utc;
@@ -16,13 +13,7 @@ pub use admission_error::AdmissionError;
 /// server is capped and full. An existing member is always admitted, however
 /// far over the cap the server is.
 pub async fn admit(state: &AppState, user: Option<Uuid>) -> Result<(), AdmissionError> {
-    #[cfg(any(test, feature = "testing"))]
-    if !state.members_capped() {
-        return Ok(());
-    }
-    let now = Utc::now();
-    let license = state.settled_license().await?;
-    let Some(cap) = Members::cap(license.as_ref(), now) else {
+    let Some(cap) = cap(state).await? else {
         return Ok(());
     };
     if let Some(user) = user
@@ -30,11 +21,32 @@ pub async fn admit(state: &AppState, user: Option<Uuid>) -> Result<(), Admission
     {
         return Ok(());
     }
-    let members = Members {
-        active: seats::used(state.db(), period_start(now)).await?,
-        cap: Some(cap),
+    make_room(state, cap, 1).await
+}
+
+/// Admits everyone that activating `organization` would make a member again.
+pub async fn reactivate(state: &AppState, organization: Uuid) -> Result<(), AdmissionError> {
+    let Some(cap) = cap(state).await? else {
+        return Ok(());
     };
-    if members.full() {
+    match seats::returning(state.db(), organization).await? {
+        0 => Ok(()),
+        returning => make_room(state, cap, returning).await,
+    }
+}
+
+async fn cap(state: &AppState) -> Result<Option<u32>, AdmissionError> {
+    #[cfg(any(test, feature = "testing"))]
+    if !state.members_capped() {
+        return Ok(None);
+    }
+    let license = state.settled_license().await?;
+    Ok(Members::cap(license.as_ref(), Utc::now()))
+}
+
+async fn make_room(state: &AppState, cap: u32, joining: u32) -> Result<(), AdmissionError> {
+    let active = seats::used(state.db(), period_start(Utc::now())).await?;
+    if active.saturating_add(joining) > cap {
         return Err(AdmissionError::Full { cap });
     }
     Ok(())
