@@ -128,14 +128,20 @@ async fn role(
     }
 }
 
-/// Gives an organization member a custom role, as an owner would.
-async fn assign_organization(pool: &PgPool, organization: Uuid, member: Uuid, role: Uuid) {
+/// Gives an organization member a custom role, as the owner `assigner` would.
+async fn assign_organization(
+    pool: &PgPool,
+    organization: Uuid,
+    assigner: Uuid,
+    member: Uuid,
+    role: Uuid,
+) {
     let outcome = organization_members::change_role(
         pool,
         organization,
         member,
         Assignment::Custom(role),
-        &Grant::organization(OrgRole::Owner),
+        assigner,
     )
     .await
     .expect("the assignment is answered");
@@ -145,17 +151,18 @@ async fn assign_organization(pool: &PgPool, organization: Uuid, member: Uuid, ro
     );
 }
 
-/// Gives a workspace member a custom role, as an owner would.
-async fn assign_workspace(pool: &PgPool, workspace: Uuid, member: Uuid, role: Uuid) {
-    let outcome = workspace_members::change_role(
-        pool,
-        workspace,
-        member,
-        Assignment::Custom(role),
-        &Grant::workspace(WorkspaceRole::Owner),
-    )
-    .await
-    .expect("the assignment is answered");
+/// Gives a workspace member a custom role, as the owner `assigner` would.
+async fn assign_workspace(
+    pool: &PgPool,
+    workspace: Uuid,
+    assigner: Uuid,
+    member: Uuid,
+    role: Uuid,
+) {
+    let outcome =
+        workspace_members::change_role(pool, workspace, member, Assignment::Custom(role), assigner)
+            .await
+            .expect("the assignment is answered");
     assert!(
         matches!(outcome, workspace_members::RoleChange::Applied(_)),
         "an owner assigns a custom role to a workspace member: {outcome:?}"
@@ -179,7 +186,14 @@ async fn organization_holder(fixture: &Fixture, permissions: &[Permission]) -> A
 /// Someone holding the custom organization role `role` in the fixture's organization.
 async fn holding_organization(fixture: &Fixture, role: Uuid) -> Account {
     let account = fixture.member(OrgRole::Member, None).await;
-    assign_organization(fixture.pool(), fixture.organization, account.id, role).await;
+    assign_organization(
+        fixture.pool(),
+        fixture.organization,
+        fixture.owner.id,
+        account.id,
+        role,
+    )
+    .await;
     account
 }
 
@@ -202,7 +216,14 @@ async fn holding_workspace(fixture: &Fixture, role: Uuid) -> Account {
     let account = fixture
         .member(OrgRole::Member, Some(WorkspaceRole::Viewer))
         .await;
-    assign_workspace(fixture.pool(), fixture.workspace, account.id, role).await;
+    assign_workspace(
+        fixture.pool(),
+        fixture.workspace,
+        fixture.owner.id,
+        account.id,
+        role,
+    )
+    .await;
     account
 }
 

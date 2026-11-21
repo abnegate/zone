@@ -1,4 +1,5 @@
-//! An assignment racing an edit of the role it assigns.
+//! An assignment racing an edit of the role it assigns, or a demotion of the
+//! member who makes it.
 //!
 //! `change_role` share-locks the role it assigns and reads its permissions
 //! under that lock; `custom_roles::update` takes the role for update before it
@@ -8,6 +9,9 @@
 //!
 //! An edit share-locks its editor's membership before the role, so a demotion
 //! in flight lands first and the edit is judged by what the editor holds after.
+//! `change_role` also reads its caller's membership under a share lock, so a
+//! demotion of the caller already in flight lands first and the change is
+//! judged by what the caller holds afterwards.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,8 +26,8 @@ use zone_server::db::organization_members::{self, OrgRole, RoleChange};
 use zone_server::db::workspace_members::{self, WorkspaceRole};
 
 use super::{
-    assign_workspace, composed, fixture, organization, role, seat_organization, seat_workspace,
-    user, workspace,
+    assign_organization, assign_workspace, composed, fixture, organization, role,
+    seat_organization, seat_workspace, user, workspace,
 };
 use crate::common::eventually::eventually;
 
@@ -60,7 +64,7 @@ fn assign(
     organization: Uuid,
     member: Uuid,
     role: Uuid,
-    caller: Grant,
+    caller: Uuid,
 ) -> JoinHandle<RoleChange> {
     let pool = pool.clone();
     tokio::spawn(async move {
@@ -69,7 +73,7 @@ fn assign(
             organization,
             member,
             Assignment::Custom(role),
-            &caller,
+            caller,
         )
         .await
         .expect("the assignment is answered")
@@ -105,39 +109,65 @@ async fn held(pool: &PgPool, organization: Uuid, member: Uuid) -> Grant {
         .grant
 }
 
-/// An organization with a member and a wide role nobody holds yet.
-async fn arranged(pool: &PgPool, creator: Uuid) -> (Uuid, Uuid, Uuid) {
+/// The people and roles an assignment race needs.
+struct Arranged {
+    organization: Uuid,
+    member: Uuid,
+    role: Uuid,
+    caller: Uuid,
+}
+
+/// An organization with a member, a wide role nobody holds yet, and a caller
+/// holding only the narrow permissions.
+async fn arranged(pool: &PgPool, creator: Uuid) -> Arranged {
     let organization = organization(pool).await;
+    let owner = user(pool).await;
+    seat_organization(pool, organization, owner, OrgRole::Owner).await;
     let member = user(pool).await;
     seat_organization(pool, organization, member, OrgRole::Member).await;
+    let caller = user(pool).await;
+    seat_organization(pool, organization, caller, OrgRole::Member).await;
+    let narrow = role(pool, organization, creator, Scope::Organization, &NARROW).await;
+    assign_organization(pool, organization, owner, caller, narrow).await;
     let role = role(pool, organization, creator, Scope::Organization, &WIDE).await;
-    (organization, member, role)
+    Arranged {
+        organization,
+        member,
+        role,
+        caller,
+    }
 }
 
 #[tokio::test]
 async fn an_assignment_held_at_the_member_lock_is_checked_against_the_narrowed_role() {
     let fixture = fixture().await;
     let pool = fixture.pool();
-    let (organization, member, role) = arranged(pool, fixture.owner.id).await;
+    let arranged = arranged(pool, fixture.owner.id).await;
     let narrowed = composed(Scope::Organization, &NARROW);
 
     let mut blocker = pool.begin().await.expect("a transaction");
     sqlx::query(
         "SELECT 1 FROM organization_members WHERE organization_id = $1 AND user_id = $2 FOR UPDATE",
     )
-    .bind(organization)
-    .bind(member)
+    .bind(arranged.organization)
+    .bind(arranged.member)
     .execute(&mut *blocker)
     .await
     .expect("the member row is held");
-    let assignment = assign(pool, organization, member, role, narrowed.clone());
+    let assignment = assign(
+        pool,
+        arranged.organization,
+        arranged.member,
+        arranged.role,
+        arranged.caller,
+    );
     assert!(
         waiting(pool, 1).await,
         "the assignment waits for the member row"
     );
 
-    let editor = editor(pool, organization, OrgRole::Admin).await;
-    let edit = finished(narrow(pool, organization, role, editor)).await;
+    let editor = editor(pool, arranged.organization, OrgRole::Admin).await;
+    let edit = finished(narrow(pool, arranged.organization, arranged.role, editor)).await;
     assert!(
         matches!(edit, Update::Saved { .. }),
         "nobody holds the role yet: {edit:?}"
@@ -149,7 +179,7 @@ async fn an_assignment_held_at_the_member_lock_is_checked_against_the_narrowed_r
         matches!(outcome, RoleChange::Applied(_)),
         "a caller holding the narrowed permissions assigns the narrowed role: {outcome:?}"
     );
-    assert!(held(pool, organization, member).await == narrowed);
+    assert!(held(pool, arranged.organization, arranged.member).await == narrowed);
 
     fixture.cleanup().await;
 }
@@ -158,22 +188,28 @@ async fn an_assignment_held_at_the_member_lock_is_checked_against_the_narrowed_r
 async fn an_assignment_behind_an_edit_in_flight_reads_what_the_edit_saved() {
     let fixture = fixture().await;
     let pool = fixture.pool();
-    let (organization, member, role) = arranged(pool, fixture.owner.id).await;
+    let arranged = arranged(pool, fixture.owner.id).await;
     let narrowed = composed(Scope::Organization, &NARROW);
 
     let mut blocker = pool.begin().await.expect("a transaction");
     sqlx::query("SELECT 1 FROM custom_role_permissions WHERE role_id = $1 FOR UPDATE")
-        .bind(role)
+        .bind(arranged.role)
         .execute(&mut *blocker)
         .await
         .expect("the stored permissions are held");
-    let editor = editor(pool, organization, OrgRole::Admin).await;
-    let edit = narrow(pool, organization, role, editor);
+    let editor = editor(pool, arranged.organization, OrgRole::Admin).await;
+    let edit = narrow(pool, arranged.organization, arranged.role, editor);
     assert!(
         waiting(pool, 1).await,
         "the edit holds the role and waits to rewrite it"
     );
-    let assignment = assign(pool, organization, member, role, narrowed.clone());
+    let assignment = assign(
+        pool,
+        arranged.organization,
+        arranged.member,
+        arranged.role,
+        arranged.caller,
+    );
     assert!(
         waiting(pool, 2).await,
         "the assignment waits for the edit's lock on the role"
@@ -190,7 +226,7 @@ async fn an_assignment_behind_an_edit_in_flight_reads_what_the_edit_saved() {
         matches!(outcome, RoleChange::Applied(_)),
         "the assignment read the narrowed permissions, not the wide ones it queued behind: {outcome:?}"
     );
-    assert!(held(pool, organization, member).await == narrowed);
+    assert!(held(pool, arranged.organization, arranged.member).await == narrowed);
 
     fixture.cleanup().await;
 }
@@ -202,12 +238,18 @@ async fn an_assignment_racing_a_narrowing_is_checked_against_what_the_holder_get
     let narrowed = composed(Scope::Organization, &NARROW);
 
     for iteration in 0..ITERATIONS {
-        let (organization, member, role) = arranged(pool, fixture.owner.id).await;
-        let editor = editor(pool, organization, OrgRole::Admin).await;
+        let arranged = arranged(pool, fixture.owner.id).await;
+        let editor = editor(pool, arranged.organization, OrgRole::Admin).await;
         let start = Arc::new(Barrier::new(2));
 
         let assignment = {
-            let (pool, start, caller) = (pool.clone(), start.clone(), narrowed.clone());
+            let (pool, start) = (pool.clone(), start.clone());
+            let (organization, member, role, caller) = (
+                arranged.organization,
+                arranged.member,
+                arranged.role,
+                arranged.caller,
+            );
             tokio::spawn(async move {
                 start.wait().await;
                 organization_members::change_role(
@@ -215,7 +257,7 @@ async fn an_assignment_racing_a_narrowing_is_checked_against_what_the_holder_get
                     organization,
                     member,
                     Assignment::Custom(role),
-                    &caller,
+                    caller,
                 )
                 .await
                 .expect("the assignment is answered")
@@ -223,6 +265,7 @@ async fn an_assignment_racing_a_narrowing_is_checked_against_what_the_holder_get
         };
         let edit = {
             let (pool, start) = (pool.clone(), start.clone());
+            let (organization, role) = (arranged.organization, arranged.role);
             tokio::spawn(async move {
                 start.wait().await;
                 finished(narrow(&pool, organization, role, editor)).await
@@ -235,7 +278,7 @@ async fn an_assignment_racing_a_narrowing_is_checked_against_what_the_holder_get
             matches!(edit, Update::Saved { .. }),
             "iteration {iteration}: {edit:?}"
         );
-        let holds = held(pool, organization, member).await;
+        let holds = held(pool, arranged.organization, arranged.member).await;
         match outcome {
             RoleChange::Applied(_) => assert!(
                 holds == narrowed,
@@ -267,12 +310,14 @@ async fn an_assignment_racing_a_widening_never_leaves_a_holder_beyond_its_assign
         let workspace = workspace(pool, organization).await;
         let member = user(pool).await;
         seat_workspace(pool, workspace, member, WorkspaceRole::Viewer).await;
+        let caller = user(pool).await;
+        seat_workspace(pool, workspace, caller, WorkspaceRole::Member).await;
         let editor = editor(pool, organization, OrgRole::Admin).await;
         let role = role(pool, organization, fixture.owner.id, Scope::Workspace, &[]).await;
         let start = Arc::new(Barrier::new(2));
 
         let assignment = {
-            let (pool, start, caller) = (pool.clone(), start.clone(), assigner.clone());
+            let (pool, start) = (pool.clone(), start.clone());
             tokio::spawn(async move {
                 start.wait().await;
                 workspace_members::change_role(
@@ -280,7 +325,7 @@ async fn an_assignment_racing_a_widening_never_leaves_a_holder_beyond_its_assign
                     workspace,
                     member,
                     Assignment::Custom(role),
-                    &caller,
+                    caller,
                 )
                 .await
                 .expect("the assignment is answered")
@@ -331,10 +376,12 @@ async fn a_widening_behind_its_editors_demotion_is_judged_by_the_demoted_grant()
     let pool = fixture.pool();
     let organization = organization(pool).await;
     let workspace = workspace(pool, organization).await;
+    let assigner = user(pool).await;
+    seat_workspace(pool, workspace, assigner, WorkspaceRole::Owner).await;
     let holder = user(pool).await;
     seat_workspace(pool, workspace, holder, WorkspaceRole::Viewer).await;
     let role = role(pool, organization, fixture.owner.id, Scope::Workspace, &[]).await;
-    assign_workspace(pool, workspace, holder, role).await;
+    assign_workspace(pool, workspace, assigner, holder, role).await;
     let owner = editor(pool, organization, OrgRole::Owner).await;
 
     let mut demotion = pool.begin().await.expect("a transaction");
@@ -376,6 +423,112 @@ async fn a_widening_behind_its_editors_demotion_is_judged_by_the_demoted_grant()
         .expect("the role is read")
         .expect("the role exists");
     assert!(!kept.grant.allows(Permission::WorkspaceWrite));
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_change_behind_its_callers_demotion_is_judged_by_the_demoted_role() {
+    let fixture = fixture().await;
+    let pool = fixture.pool();
+    let organization = organization(pool).await;
+    seat_organization(pool, organization, user(pool).await, OrgRole::Owner).await;
+    let caller = user(pool).await;
+    seat_organization(pool, organization, caller, OrgRole::Admin).await;
+    let target = user(pool).await;
+    seat_organization(pool, organization, target, OrgRole::Member).await;
+
+    let mut demotion = pool.begin().await.expect("a transaction");
+    sqlx::query(
+        "UPDATE organization_members SET role = 'member' \
+         WHERE organization_id = $1 AND user_id = $2",
+    )
+    .bind(organization)
+    .bind(caller)
+    .execute(&mut *demotion)
+    .await
+    .expect("the caller is demoted");
+    let change = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            organization_members::change_role(
+                &pool,
+                organization,
+                target,
+                Assignment::BuiltIn(OrgRole::Admin),
+                caller,
+            )
+            .await
+            .expect("the change is answered")
+        })
+    };
+    assert!(
+        waiting(pool, 1).await,
+        "the change waits for the caller's row"
+    );
+    demotion.commit().await.expect("the demotion lands");
+
+    let outcome = finished(change).await;
+    assert!(
+        matches!(outcome, RoleChange::Exceeds),
+        "a caller demoted to member cannot seat an admin: {outcome:?}"
+    );
+    assert!(held(pool, organization, target).await == Grant::organization(OrgRole::Member));
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_workspace_change_behind_its_callers_demotion_is_judged_by_the_demoted_role() {
+    let fixture = fixture().await;
+    let pool = fixture.pool();
+    let workspace = workspace(pool, organization(pool).await).await;
+    seat_workspace(pool, workspace, user(pool).await, WorkspaceRole::Owner).await;
+    let caller = user(pool).await;
+    seat_workspace(pool, workspace, caller, WorkspaceRole::Admin).await;
+    let target = user(pool).await;
+    seat_workspace(pool, workspace, target, WorkspaceRole::Viewer).await;
+
+    let mut demotion = pool.begin().await.expect("a transaction");
+    sqlx::query(
+        "UPDATE workspace_members SET role = 'viewer' \
+         WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace)
+    .bind(caller)
+    .execute(&mut *demotion)
+    .await
+    .expect("the caller is demoted");
+    let change = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            workspace_members::change_role(
+                &pool,
+                workspace,
+                target,
+                Assignment::BuiltIn(WorkspaceRole::Member),
+                caller,
+            )
+            .await
+            .expect("the change is answered")
+        })
+    };
+    assert!(
+        waiting(pool, 1).await,
+        "the change waits for the caller's row"
+    );
+    demotion.commit().await.expect("the demotion lands");
+
+    let outcome = finished(change).await;
+    assert!(
+        matches!(outcome, workspace_members::RoleChange::Exceeds),
+        "a caller demoted to viewer cannot seat a member: {outcome:?}"
+    );
+    let membership = workspace_members::membership(pool, workspace, target)
+        .await
+        .expect("the membership is read")
+        .expect("an active member");
+    assert_eq!(membership.role, WorkspaceRole::Viewer);
 
     fixture.cleanup().await;
 }

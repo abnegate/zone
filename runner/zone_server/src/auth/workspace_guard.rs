@@ -19,6 +19,15 @@ use crate::{
     state::AppState,
 };
 
+const INACTIVE: &str = "Workspace membership is inactive";
+
+fn database(error: sqlx::Error) -> AuthError {
+    AuthError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: format!("Database error: {error}"),
+    }
+}
+
 /// An active member of the workspace in the path, with what they hold.
 /// `role` is the stored built-in column.
 #[derive(Debug, Clone)]
@@ -111,19 +120,26 @@ where
             message: "Invalid user ID in token".to_string(),
         })?;
 
-        let refusal = || AuthError {
+        let refusal = |message: String| AuthError {
             status: StatusCode::FORBIDDEN,
-            message: Permission::WorkspaceRead.refusal(),
+            message,
         };
         let membership = workspace_members::membership(app_state.db(), workspace_id, user_id)
             .await
-            .map_err(|error| AuthError {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                message: format!("Database error: {error}"),
-            })?
-            .ok_or_else(refusal)?;
+            .map_err(database)?;
+        let Some(membership) = membership else {
+            let inactive = workspace_members::get_member(app_state.db(), workspace_id, user_id)
+                .await
+                .map_err(database)?
+                .is_some_and(|member| !member.is_active);
+            return Err(refusal(if inactive {
+                INACTIVE.to_string()
+            } else {
+                Permission::WorkspaceRead.refusal()
+            }));
+        };
         if !membership.grant.allows(Permission::WorkspaceRead) {
-            return Err(refusal());
+            return Err(refusal(Permission::WorkspaceRead.refusal()));
         }
 
         Ok(WorkspaceMember {

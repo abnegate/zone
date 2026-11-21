@@ -1,12 +1,16 @@
 //! Common response types and utilities for API routes
 
+use axum::Json;
+use axum::http::StatusCode;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::auth::Grant;
 use crate::db::audit::{AuditContext, log_action};
+use crate::db::custom_roles::{EXCEEDS, EXCEEDS_MESSAGE, Summary};
 use crate::db::workspaces;
 
 /// Macro to define a response struct with automatic timestamps.
@@ -187,7 +191,6 @@ impl Timestamps {
     }
 }
 
-/// Standard error response format
 /// One recorded change: who did what to which resource, and in which tenant.
 /// Either `organization_id` or `workspace_id` names the tenant; a workspace
 /// alone is resolved to its organization when the entry is written.
@@ -261,5 +264,49 @@ impl ErrorResponse {
             error: error.into(),
             code: Some(code),
         }
+    }
+}
+
+/// The refusal for a role that grants more than the caller holds.
+pub fn exceeds() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse::with_code(EXCEEDS_MESSAGE, EXCEEDS)),
+    )
+}
+
+/// What a membership holds, as the API reports it: `role` is the highest
+/// built-in role the grant fully covers, not the stored column.
+#[derive(Debug, Clone, Serialize)]
+pub struct MembershipResponse {
+    role: &'static str,
+    custom_role: Option<Summary>,
+    permissions: Grant,
+}
+
+impl MembershipResponse {
+    pub fn organization(custom_role: Option<Summary>, grant: Grant) -> Self {
+        Self {
+            role: grant.organization_rank().as_str(),
+            custom_role,
+            permissions: grant,
+        }
+    }
+
+    pub fn workspace(custom_role: Option<Summary>, grant: Grant) -> Self {
+        Self {
+            role: grant.workspace_rank().as_str(),
+            custom_role,
+            permissions: grant,
+        }
+    }
+
+    /// The audit record of `user_id` holding this membership.
+    pub fn audited(&self, user_id: Uuid) -> Value {
+        json!({
+            "user_id": user_id,
+            "role": self.role,
+            "custom_role": self.custom_role,
+        })
     }
 }

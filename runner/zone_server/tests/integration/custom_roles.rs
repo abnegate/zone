@@ -128,7 +128,7 @@ async fn seat_with(fixture: &Fixture, workspace: Uuid, account: &Account, role: 
         workspace,
         account.id,
         Assignment::Custom(role),
-        &Grant::workspace(WorkspaceRole::Owner),
+        fixture.owner.id,
     )
     .await
     .unwrap();
@@ -154,7 +154,7 @@ async fn give_organization_role(fixture: &Fixture, account: &Account, role: Uuid
         fixture.organization,
         account.id,
         Assignment::Custom(role),
-        &Grant::organization(OrgRole::Owner),
+        fixture.owner.id,
     )
     .await
     .unwrap();
@@ -170,7 +170,7 @@ async fn give_built_in(fixture: &Fixture, workspace: Uuid, account: &Account) {
         workspace,
         account.id,
         Assignment::BuiltIn(WorkspaceRole::Member),
-        &Grant::workspace(WorkspaceRole::Owner),
+        fixture.owner.id,
     )
     .await
     .unwrap();
