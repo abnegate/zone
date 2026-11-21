@@ -9,7 +9,7 @@ use super::providers::ProviderResponse;
 use crate::auth::ServerAdmin;
 use crate::db::sso::{providers, settings};
 use crate::error::ServerError;
-use crate::services::sso::console::{redirect_uri, saml_acs_url, saml_entity_id};
+use crate::services::sso::console::{redirect_uri, service_provider};
 use crate::state::AppState;
 
 const LOAD_FAILED: &str = "Could not load single sign-on";
@@ -36,10 +36,11 @@ pub struct ServiceProviderResponse {
 
 impl ServiceProviderResponse {
     pub fn new(app_base_url: &str) -> Self {
+        let service = service_provider(app_base_url);
         Self {
-            entity_id: saml_entity_id(app_base_url),
-            acs_url: saml_acs_url(app_base_url),
-            metadata_url: saml_entity_id(app_base_url),
+            metadata_url: service.entity_id.clone(),
+            entity_id: service.entity_id,
+            acs_url: service.acs_url,
         }
     }
 }
