@@ -1,0 +1,339 @@
+use axum::Json;
+use axum::extract::rejection::{JsonRejection, PathRejection};
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+use serde_json::{Value, json};
+use sqlx::PgConnection;
+use uuid::Uuid;
+use zone_enterprise::spend::{Draft, Error, Month, Patch, Scope, State as Spent, Target};
+use zone_enterprise::{Edition, Status};
+
+use super::access::{self, ORGANIZATION_MISSING};
+use super::refusal::Refusal;
+use super::{caller, organization};
+use crate::auth::AuthUser;
+use crate::db::audit::{actions, resources};
+use crate::db::organization_members;
+use crate::db::spend::budgets::{self, BudgetRow};
+use crate::db::workspaces;
+use crate::routes::common::{AuditEvent, audit};
+use crate::services::spend::Standing;
+use crate::state::AppState;
+
+pub const BUDGET_MISSING: &str = "Budget not found";
+
+#[derive(Debug, Serialize)]
+pub struct BudgetsResponse {
+    pub entitled: bool,
+    pub enforced: bool,
+    pub edition: Edition,
+    pub status: Status,
+    pub editable: bool,
+    pub month: String,
+    pub budgets: Vec<BudgetResponse>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BudgetResponse {
+    pub id: Uuid,
+    pub scope: Scope,
+    pub workspace_id: Option<Uuid>,
+    pub workspace_name: Option<String>,
+    pub user_id: Option<Uuid>,
+    pub user_name: Option<String>,
+    pub user_email: Option<String>,
+    pub limit_microdollars: i64,
+    pub threshold_percent: u8,
+    pub hard: bool,
+    /// This month's, in UTC.
+    pub spent_microdollars: i64,
+    pub state: Spent,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<BudgetRow> for BudgetResponse {
+    fn from(row: BudgetRow) -> Self {
+        let state = row.state();
+        Self {
+            id: row.id,
+            scope: row.target.scope,
+            workspace_id: row.target.workspace,
+            workspace_name: row.workspace_name,
+            user_id: row.target.user,
+            user_name: row.user_name,
+            user_email: row.user_email,
+            limit_microdollars: row.budget.limit.0,
+            threshold_percent: row.budget.threshold_percent,
+            hard: row.budget.hard,
+            spent_microdollars: row.spent.0,
+            state,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+/// GET /api/organizations/{org_id}/budgets
+pub async fn list(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    path: Result<Path<Uuid>, PathRejection>,
+) -> Response {
+    respond(listed(&state, &auth, path).await, StatusCode::OK)
+}
+
+/// POST /api/organizations/{org_id}/budgets
+pub async fn create(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<Draft>, JsonRejection>,
+) -> Response {
+    respond(
+        created(&state, &auth, path, body).await,
+        StatusCode::CREATED,
+    )
+}
+
+/// PATCH /api/organizations/{org_id}/budgets/{budget_id}
+pub async fn update(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    path: Result<Path<(String, String)>, PathRejection>,
+    body: Result<Json<Patch>, JsonRejection>,
+) -> Response {
+    respond(updated(&state, &auth, path, body).await, StatusCode::OK)
+}
+
+/// DELETE /api/organizations/{org_id}/budgets/{budget_id}
+pub async fn delete(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    path: Result<Path<(String, String)>, PathRejection>,
+) -> Response {
+    match deleted(&state, &auth, path).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(refusal) => refusal.into_response(),
+    }
+}
+
+fn respond<T: Serialize>(result: Result<T, Refusal>, status: StatusCode) -> Response {
+    match result {
+        Ok(response) => (status, Json(response)).into_response(),
+        Err(refusal) => refusal.into_response(),
+    }
+}
+
+async fn listed(
+    state: &AppState,
+    auth: &AuthUser,
+    path: Result<Path<Uuid>, PathRejection>,
+) -> Result<BudgetsResponse, Refusal> {
+    let user = caller(auth)?;
+    let organization = organization(path)?;
+    let month = Month::current();
+    let mut connection = state.db().acquire().await?;
+    access::administer(&mut connection, organization, user).await?;
+    let rows = budgets::list(&mut *connection, organization, month).await?;
+    drop(connection);
+    let standing = Standing::read(state).await;
+    Ok(BudgetsResponse {
+        entitled: standing.entitled,
+        enforced: standing.enforced,
+        edition: standing.edition,
+        status: standing.status,
+        editable: standing.editable(true),
+        month: month.label(),
+        budgets: rows.into_iter().map(BudgetResponse::from).collect(),
+    })
+}
+
+async fn created(
+    state: &AppState,
+    auth: &AuthUser,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<Draft>, JsonRejection>,
+) -> Result<BudgetResponse, Refusal> {
+    let user = caller(auth)?;
+    let organization = organization(path)?;
+    let standing = Standing::read(state).await;
+    let mut transaction = state.db().begin().await?;
+    access::administer(&mut transaction, organization, user).await?;
+    standing.require()?;
+    let Json(draft) = body.map_err(Refusal::Body)?;
+    let (target, budget) = draft.validate()?;
+    covered(&mut transaction, organization, &target).await?;
+    let month = Month::current();
+    let row = budgets::create(
+        &mut transaction,
+        organization,
+        &target,
+        &budget,
+        user,
+        month,
+    )
+    .await?;
+    budgets::refresh(&mut transaction, row.id, month).await?;
+    transaction.commit().await?;
+    record(
+        state,
+        auth,
+        user,
+        &row,
+        actions::BUDGET_CREATED,
+        None,
+        Some(audited(&row)),
+    )
+    .await;
+    Ok(row.into())
+}
+
+async fn updated(
+    state: &AppState,
+    auth: &AuthUser,
+    path: Result<Path<(String, String)>, PathRejection>,
+    body: Result<Json<Patch>, JsonRejection>,
+) -> Result<BudgetResponse, Refusal> {
+    let user = caller(auth)?;
+    let (organization, budget) = identified(path)?;
+    let standing = Standing::read(state).await;
+    let mut transaction = state.db().begin().await?;
+    access::administer(&mut transaction, organization, user).await?;
+    standing.require()?;
+    let Json(patch) = body.map_err(Refusal::Body)?;
+    let current = locked(&mut transaction, organization, budget).await?;
+    let next = patch.applied(&current.budget)?;
+    if next == current.budget {
+        transaction.rollback().await?;
+        return Ok(current.into());
+    }
+    let month = Month::current();
+    let saved = budgets::update(&mut transaction, current.id, &next, user, month).await?;
+    budgets::refresh(&mut transaction, current.id, month).await?;
+    transaction.commit().await?;
+    record(
+        state,
+        auth,
+        user,
+        &saved,
+        actions::BUDGET_UPDATED,
+        Some(audited(&current)),
+        Some(audited(&saved)),
+    )
+    .await;
+    Ok(saved.into())
+}
+
+async fn deleted(
+    state: &AppState,
+    auth: &AuthUser,
+    path: Result<Path<(String, String)>, PathRejection>,
+) -> Result<(), Refusal> {
+    let user = caller(auth)?;
+    let (organization, budget) = identified(path)?;
+    let standing = Standing::read(state).await;
+    let mut transaction = state.db().begin().await?;
+    access::administer(&mut transaction, organization, user).await?;
+    standing.require()?;
+    let current = locked(&mut transaction, organization, budget).await?;
+    budgets::delete(&mut transaction, current.id).await?;
+    transaction.commit().await?;
+    record(
+        state,
+        auth,
+        user,
+        &current,
+        actions::BUDGET_DELETED,
+        Some(audited(&current)),
+        None,
+    )
+    .await;
+    Ok(())
+}
+
+/// The organization and, when it reads as one, the budget a budget path names. A budget that
+/// isn't an id is only reported missing once the caller is known to administer the organization.
+fn identified(
+    path: Result<Path<(String, String)>, PathRejection>,
+) -> Result<(Uuid, Option<Uuid>), Refusal> {
+    let Ok(Path((organization, budget))) = path else {
+        return Err(Refusal::Missing(ORGANIZATION_MISSING));
+    };
+    let organization =
+        Uuid::parse_str(&organization).map_err(|_| Refusal::Missing(ORGANIZATION_MISSING))?;
+    Ok((organization, Uuid::parse_str(&budget).ok()))
+}
+
+async fn locked(
+    connection: &mut PgConnection,
+    organization: Uuid,
+    budget: Option<Uuid>,
+) -> Result<BudgetRow, Refusal> {
+    let Some(budget) = budget else {
+        return Err(Refusal::Missing(BUDGET_MISSING));
+    };
+    budgets::lock(connection, organization, budget)
+        .await?
+        .ok_or(Refusal::Missing(BUDGET_MISSING))
+}
+
+/// Refuses a target outside the organization: a workspace it doesn't own, or someone who isn't
+/// one of its members.
+async fn covered(
+    connection: &mut PgConnection,
+    organization: Uuid,
+    target: &Target,
+) -> Result<(), Refusal> {
+    if let Some(workspace) = target.workspace
+        && !workspaces::lock_owned(connection, organization, workspace).await?
+    {
+        return Err(Error::ScopeInvalid.into());
+    }
+    if let Some(member) = target.user
+        && organization_members::lock_role(connection, organization, member)
+            .await?
+            .is_none()
+    {
+        return Err(Error::ScopeInvalid.into());
+    }
+    Ok(())
+}
+
+fn audited(row: &BudgetRow) -> Value {
+    json!({
+        "scope": row.target.scope,
+        "workspace_id": row.target.workspace,
+        "user_id": row.target.user,
+        "limit_microdollars": row.budget.limit.0,
+        "threshold_percent": row.budget.threshold_percent,
+        "hard": row.budget.hard,
+    })
+}
+
+async fn record(
+    state: &AppState,
+    auth: &AuthUser,
+    user: Uuid,
+    row: &BudgetRow,
+    action: &str,
+    old_values: Option<Value>,
+    new_values: Option<Value>,
+) {
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: Some(row.organization_id),
+            workspace_id: row.target.workspace,
+            actor_id: user,
+            actor_email: &auth.0.email,
+            action,
+            resource_type: resources::BUDGET,
+            resource_id: Some(row.id),
+            old_values,
+            new_values,
+        },
+    )
+    .await;
+}

@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_secret::{MasterKey, SecretValue};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -9,12 +10,14 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
-use zone_enterprise::spend::Microdollars;
+use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
+use zone_enterprise::spend::{Microdollars, Uncounted};
 use zone_enterprise::{
     Edition, Error as LicenseError, Keyring, License, Payload, SigningKey, Status, TrustedKey, sign,
 };
 
 use super::client::{Client, DATE_FORMAT, PAGE_SIZE};
+use super::coverage::{merged, reasons};
 use super::error::Error;
 use super::ingest::{self, OVERLAP};
 use super::key::{Key, PREFIX};
@@ -24,6 +27,9 @@ use super::registry::{self, COOLDOWN, Entry};
 use super::standing::{Standing, standing};
 use super::subject::Subject;
 use super::unlicensed::{MESSAGE, Unlicensed};
+use crate::config::{Config, ModelBackend};
+use crate::db::ai_settings::{EffectiveAiSettings, PROVIDER_ANTHROPIC, PROVIDER_CLAUDE_CODE};
+use crate::services::endpoint::testing::settings;
 use crate::services::license::Stored;
 use crate::state::{AppState, test_config, unreachable_pool};
 
@@ -749,4 +755,141 @@ fn an_unreadable_row_is_skipped_but_still_counted() {
     assert_eq!(logs[0].request_id, "kept");
     let empty: Page = serde_json::from_value(json!({})).unwrap();
     assert_eq!(empty.rows(), 0);
+}
+
+const INSTANCE: &str = "http://litellm.internal:4000";
+const SAVED_KEY: &str = "sk-saved-0123456789abcdef";
+
+fn instance_config() -> Config {
+    Config {
+        litellm_host: INSTANCE.to_string(),
+        litellm_key: MASTER.to_string(),
+        ..test_config()
+    }
+}
+
+fn provider_keyed(provider: &str) -> EffectiveAiSettings {
+    let key = Some(SecretValue::new(SAVED_KEY));
+    EffectiveAiSettings {
+        openai_api_key: key.clone(),
+        anthropic_api_key: key,
+        ..settings(provider)
+    }
+}
+
+fn litellm_at(host: &str, key: Option<&str>) -> EffectiveAiSettings {
+    EffectiveAiSettings {
+        litellm_host: Some(host.to_string()),
+        litellm_key: key.map(SecretValue::new),
+        ..settings(PROVIDER_SELF_HOSTED)
+    }
+}
+
+#[test]
+fn traffic_through_the_instance_litellm_under_its_own_key_is_all_counted() {
+    let config = instance_config();
+
+    assert_eq!(reasons(&config, &settings(PROVIDER_SELF_HOSTED)), []);
+    assert_eq!(reasons(&config, &litellm_at(INSTANCE, None)), []);
+    assert_eq!(reasons(&config, &litellm_at(INSTANCE, Some(MASTER))), []);
+    assert_eq!(reasons(&config, &settings(PROVIDER_OPENAI)), []);
+}
+
+#[test]
+fn a_coding_agent_is_uncounted_whether_settings_or_the_instance_pick_it() {
+    let config = instance_config();
+    let cli = Config {
+        model_backend: ModelBackend::Cli {
+            agent: AgentKind::Claude,
+            executable: None,
+        },
+        ..instance_config()
+    };
+
+    assert_eq!(
+        reasons(&config, &settings(PROVIDER_CLAUDE_CODE)),
+        [Uncounted::CodingAgent]
+    );
+    assert_eq!(
+        reasons(&cli, &settings(PROVIDER_SELF_HOSTED)),
+        [Uncounted::CodingAgent]
+    );
+}
+
+#[test]
+fn a_provider_key_sends_straight_to_the_provider() {
+    let config = instance_config();
+    for provider in [PROVIDER_OPENAI, PROVIDER_ANTHROPIC] {
+        assert_eq!(
+            reasons(&config, &provider_keyed(provider)),
+            [Uncounted::DirectProvider],
+            "{provider}"
+        );
+    }
+}
+
+#[test]
+fn a_litellm_saved_for_another_host_is_another_endpoint() {
+    assert_eq!(
+        reasons(
+            &instance_config(),
+            &litellm_at("http://192.168.1.10:4000", Some(SAVED_KEY))
+        ),
+        [Uncounted::ExternalEndpoint]
+    );
+}
+
+#[test]
+fn a_key_saved_for_the_instance_host_is_not_attributed() {
+    assert_eq!(
+        reasons(&instance_config(), &litellm_at(INSTANCE, Some(SAVED_KEY))),
+        [Uncounted::SavedKey]
+    );
+}
+
+#[test]
+fn an_instance_without_a_master_key_names_no_saved_key() {
+    let keyless = Config {
+        litellm_key: String::new(),
+        ..instance_config()
+    };
+
+    assert_eq!(reasons(&keyless, &settings(PROVIDER_SELF_HOSTED)), []);
+    assert_eq!(
+        reasons(&keyless, &litellm_at(INSTANCE, Some(SAVED_KEY))),
+        []
+    );
+}
+
+#[test]
+fn settings_whose_url_is_refused_send_nothing_to_count() {
+    assert_eq!(
+        reasons(
+            &instance_config(),
+            &litellm_at("http://169.254.169.254", Some(SAVED_KEY))
+        ),
+        []
+    );
+}
+
+#[test]
+fn every_workspace_reason_is_named_once_in_order() {
+    let config = instance_config();
+    let workspaces = [
+        litellm_at(INSTANCE, Some(SAVED_KEY)),
+        settings(PROVIDER_CLAUDE_CODE),
+        provider_keyed(PROVIDER_OPENAI),
+        settings(PROVIDER_CLAUDE_CODE),
+        settings(PROVIDER_SELF_HOSTED),
+    ];
+
+    assert_eq!(
+        merged(&config, &workspaces),
+        [
+            Uncounted::CodingAgent,
+            Uncounted::DirectProvider,
+            Uncounted::SavedKey
+        ]
+    );
+    assert_eq!(merged(&config, &[]), []);
 }
