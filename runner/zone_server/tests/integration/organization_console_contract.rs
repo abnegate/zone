@@ -178,6 +178,15 @@ async fn members_are_listed_with_their_emails_and_names() {
     assert_eq!(members.len(), 1, "{body}");
     assert_eq!(members[0]["email"], json!(owner.email), "{body}");
     assert_eq!(members[0]["display_name"], json!("Console"), "{body}");
+    assert_eq!(members[0]["role"], json!("owner"), "{body}");
+    assert_eq!(members[0]["custom_role"], Value::Null, "{body}");
+    assert!(
+        members[0]["permissions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("administrators:update")),
+        "the owner's row must list what an owner holds: {body}"
+    );
 }
 
 #[tokio::test]
@@ -198,12 +207,87 @@ async fn every_organization_carries_the_callers_role() {
         .find(|organization| organization["id"] == json!(org.to_string()))
         .unwrap_or_else(|| panic!("the member's organization is missing: {body}"));
     assert_eq!(seat["role"], json!("member"), "{body}");
+    assert_eq!(seat["custom_role"], Value::Null, "{body}");
+    assert_eq!(seat["permissions"], json!(["organization:read"]), "{body}");
 
     let single = client
         .get_auth(&format!("/api/organizations/{org}"), &owner.token)
         .await;
     single.assert_status(StatusCode::OK);
-    assert_eq!(single.json_value()["organization"]["role"], json!("owner"));
+    let single = single.json_value();
+    assert_eq!(single["organization"]["role"], json!("owner"));
+    assert_eq!(
+        single["organization"]["custom_role"],
+        Value::Null,
+        "{single}"
+    );
+    assert!(
+        single["organization"]["permissions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("organization:delete")),
+        "the owner's organization must list what an owner holds: {single}"
+    );
+}
+
+#[tokio::test]
+async fn a_role_change_names_exactly_one_of_a_role_or_a_custom_role() {
+    let client = TestClient::with_db().await;
+    let owner = register(&client).await;
+    let hand = register(&client).await;
+    let org = organization(&client, &owner).await;
+    seat(&client, &owner, org, &hand, "member").await;
+    let member = format!("/api/organizations/{org}/members/{}", hand.user);
+
+    for body in [
+        json!({}),
+        json!({ "role": "admin", "custom_role_id": Uuid::new_v4() }),
+    ] {
+        let response = client.patch_json_auth(&member, &body, &owner.token).await;
+        assert_eq!(
+            response.status,
+            StatusCode::BAD_REQUEST,
+            "{body} was accepted: {}",
+            response.text()
+        );
+    }
+
+    let unknown = client
+        .patch_json_auth(&member, &json!({ "role": "deity" }), &owner.token)
+        .await;
+    unknown.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        unknown.json_value()["error"],
+        json!("Invalid role. Must be one of: member, admin, owner")
+    );
+}
+
+#[tokio::test]
+async fn assigning_a_custom_role_needs_the_license_and_a_built_in_role_does_not() {
+    let client = TestClient::with_db().await;
+    let owner = register(&client).await;
+    let hand = register(&client).await;
+    let org = organization(&client, &owner).await;
+    seat(&client, &owner, org, &hand, "member").await;
+    let member = format!("/api/organizations/{org}/members/{}", hand.user);
+
+    let custom = client
+        .patch_json_auth(
+            &member,
+            &json!({ "custom_role_id": Uuid::new_v4() }),
+            &owner.token,
+        )
+        .await;
+    custom.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(custom.json_value()["code"], json!("license_required"));
+
+    let built_in = client
+        .patch_json_auth(&member, &json!({ "role": "admin" }), &owner.token)
+        .await;
+    built_in.assert_status(StatusCode::OK);
+    let body = built_in.json_value();
+    assert_eq!(body["role"], json!("admin"), "{body}");
+    assert_eq!(body["custom_role"], Value::Null, "{body}");
 }
 
 async fn seat_in_workspace(
@@ -367,6 +451,7 @@ async fn a_role_change_is_written_to_the_audit_log() {
         "{change}"
     );
     assert_eq!(change["new_values"]["role"], json!("admin"), "{change}");
+    assert_eq!(change["new_values"]["custom_role"], Value::Null, "{change}");
     assert!(
         logs.iter()
             .any(|log| log["action"] == json!("member.added")),
