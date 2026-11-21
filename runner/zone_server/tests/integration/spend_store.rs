@@ -2042,6 +2042,7 @@ async fn the_keys_of_deleted_workspaces_and_members_are_revoked_and_never_regist
             user: Some(departed.id),
             ..fixture.subject()
         },
+        &Standing::read(fixture.state()).await,
     )
     .await;
     let former = Key::hash(former.key().expose());
@@ -2118,7 +2119,13 @@ async fn verify_checks_every_key_when_litellm_fails_on_one() {
     let fixture = Fixture::new("spend_verify_partial").await;
     fixture.licensed().await;
     let owner = attributed(&fixture).await;
-    let automation = attribute(fixture.state(), fixture.instance(), &fixture.automation()).await;
+    let automation = attribute(
+        fixture.state(),
+        fixture.instance(),
+        &fixture.automation(),
+        &Standing::read(fixture.state()).await,
+    )
+    .await;
     let automation = Key::hash(automation.key().expose());
     fixture.litellm.reset().await;
     Mock::given(method("GET"))
