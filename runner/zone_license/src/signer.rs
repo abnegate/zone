@@ -38,6 +38,7 @@ impl Signer {
             expires_at: terms.expires_at,
             key_id: self.key_id.clone(),
             subscription: terms.subscription.clone(),
+            plan: None,
         };
         payload.validate()?;
         Ok(zone_enterprise::sign(&payload, &self.key))

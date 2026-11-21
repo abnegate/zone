@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::Error;
+use crate::plan::Plan;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Payload {
@@ -14,6 +15,8 @@ pub struct Payload {
     pub key_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Plan>,
 }
 
 impl Payload {
@@ -136,6 +139,69 @@ mod tests {
         };
         let bytes = serde_json::to_vec(&payload).unwrap();
         assert_eq!(serde_json::from_slice::<Payload>(&bytes).unwrap(), payload);
+    }
+
+    #[test]
+    fn serializes_a_plan_last() {
+        let payload = Payload {
+            subscription: Some(SUBSCRIPTION.into()),
+            plan: Some(Plan::Team),
+            ..fixtures::payload()
+        };
+        assert!(
+            serde_json::to_string(&payload).unwrap().ends_with(&format!(
+                r#""key_id":"test-1","subscription":"{SUBSCRIPTION}","plan":"team"}}"#
+            )),
+            "plan is not serialized last"
+        );
+        let alone = Payload {
+            plan: Some(Plan::Enterprise),
+            ..fixtures::payload()
+        };
+        assert!(
+            serde_json::to_string(&alone)
+                .unwrap()
+                .ends_with(r#""key_id":"test-1","plan":"enterprise"}"#),
+            "plan is not serialized last"
+        );
+    }
+
+    #[test]
+    fn decodes_a_payload_without_a_plan_as_none() {
+        let value = serde_json::to_value(fixtures::payload()).unwrap();
+        assert!(!value.as_object().unwrap().contains_key("plan"));
+        assert_eq!(serde_json::from_value::<Payload>(value).unwrap().plan, None);
+    }
+
+    #[test]
+    fn round_trips_each_plan() {
+        for plan in Plan::ALL {
+            let payload = Payload {
+                plan: Some(plan),
+                ..fixtures::payload()
+            };
+            let bytes = serde_json::to_vec(&payload).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Payload>(&bytes).unwrap(),
+                payload,
+                "{plan:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_an_unknown_plan() {
+        for plan in ["business", "Team", "community", ""] {
+            let mut value = serde_json::to_value(fixtures::payload()).unwrap();
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert("plan".into(), Value::from(plan));
+            assert!(
+                serde_json::from_value::<Payload>(value).is_err(),
+                "accepted plan {plan:?}"
+            );
+        }
     }
 
     #[test]
