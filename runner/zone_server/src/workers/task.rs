@@ -3603,7 +3603,7 @@ mod tests {
     #[tokio::test]
     async fn the_worker_follows_the_triggers_custom_role() {
         use crate::auth::{Permission, Scope};
-        use crate::db::tenant::Tenant;
+        use crate::db::testing::Tenant;
 
         let _execution = EXECUTION.lock().await;
         let tenant = Tenant::new().await;

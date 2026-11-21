@@ -188,7 +188,7 @@ pub async fn delete_authorized(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::tenant::Tenant;
+    use crate::db::testing::Tenant;
 
     const COLOR: &str = "#112233";
 

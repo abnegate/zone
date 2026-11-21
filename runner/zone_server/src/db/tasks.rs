@@ -2231,7 +2231,7 @@ pub async fn mark_pr_status(
 mod tests {
     use super::*;
     use crate::auth::Scope;
-    use crate::db::tenant::Tenant;
+    use crate::db::testing::Tenant;
 
     #[test]
     fn a_placeholder_is_the_first_line_of_the_description_cut_on_a_word() {

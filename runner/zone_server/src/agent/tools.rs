@@ -2257,7 +2257,7 @@ mod tests {
     #[tokio::test]
     async fn a_task_writer_is_whoever_their_custom_role_lets_write() {
         use crate::auth::Permission;
-        use crate::db::tenant::Tenant;
+        use crate::db::testing::Tenant;
 
         let tenant = Tenant::new().await;
         let writer = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;

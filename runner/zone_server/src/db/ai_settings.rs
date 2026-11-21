@@ -1460,7 +1460,7 @@ mod tests {
     use crate::auth::Scope;
     use crate::config::ComfyUiConfig;
     use crate::db::organization_members::OrgRole;
-    use crate::db::tenant::Tenant;
+    use crate::db::testing::Tenant;
     use crate::db::workspace_members::WorkspaceRole;
     use crate::services::provider::Provider;
     use abnegate_secret::OptionalSecretExtension;

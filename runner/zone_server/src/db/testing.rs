@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::{Permission, Scope};
-use crate::db::custom_roles::testing;
+use crate::db::custom_roles;
 use crate::db::organization_members::OrgRole;
 use crate::db::workspace_members::WorkspaceRole;
 
@@ -103,15 +103,16 @@ impl Tenant {
     /// the base of `scope`.
     pub async fn custom_role(&self, scope: Scope, permissions: &[Permission]) -> Uuid {
         let creator = self.user().await;
-        testing::role(&self.pool, self.organization, creator, scope, permissions).await
+        custom_roles::testing::role(&self.pool, self.organization, creator, scope, permissions)
+            .await
     }
 
     pub async fn hold_organization_role(&self, user: Uuid, role: Uuid) {
-        testing::assign_organization(&self.pool, self.organization, user, role).await;
+        custom_roles::testing::assign_organization(&self.pool, self.organization, user, role).await;
     }
 
     pub async fn hold_workspace_role(&self, user: Uuid, role: Uuid) {
-        testing::assign_workspace(&self.pool, self.workspace, user, role).await;
+        custom_roles::testing::assign_workspace(&self.pool, self.workspace, user, role).await;
     }
 
     /// Removes the organization, which takes its workspace, memberships and

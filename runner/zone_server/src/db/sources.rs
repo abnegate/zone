@@ -1515,7 +1515,7 @@ mod tests {
     /// on seating order.
     #[tokio::test]
     async fn the_indexer_prefers_a_built_in_writer_to_an_earlier_custom_one() {
-        let tenant = crate::db::tenant::Tenant::new().await;
+        let tenant = crate::db::testing::Tenant::new().await;
         let custom = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;
         let member = tenant.user().await;
         tenant.workspace_member(member, WorkspaceRole::Member).await;

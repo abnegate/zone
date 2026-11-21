@@ -3,7 +3,7 @@ use uuid::Uuid;
 use super::*;
 use crate::auth::Scope;
 use crate::db::organization_members::OrgRole;
-use crate::db::tenant::Tenant;
+use crate::db::testing::Tenant;
 use crate::db::workspace_members::WorkspaceRole;
 
 async fn organization_access(tenant: &Tenant, user: Uuid) -> Result<Access, Refusal> {

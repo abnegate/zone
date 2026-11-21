@@ -89,7 +89,7 @@ mod tests {
     use crate::auth::Scope;
     use crate::db::actions::{self, StartTask, Task};
     use crate::db::organization_members::OrgRole;
-    use crate::db::tenant::Tenant;
+    use crate::db::testing::Tenant;
     use crate::db::workspace_members::WorkspaceRole;
 
     async fn pool() -> PgPool {

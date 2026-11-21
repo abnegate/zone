@@ -949,7 +949,7 @@ mod tests {
     #[tokio::test]
     async fn document_tools_follow_the_callers_custom_role() {
         use crate::auth::Permission;
-        use crate::db::tenant::Tenant;
+        use crate::db::testing::Tenant;
 
         let tenant = Tenant::new().await;
         let writer = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;
