@@ -193,3 +193,62 @@ cargo tree -p zone_server -i rusqlite
 
 The first prints nothing and the second reports no match. Enabling any aiusg
 feature must pass that check again.
+
+## SAML implementation
+
+SAML sign-in in `zone_enterprise` (see [SSO.md](SSO.md#saml-20)) uses its
+own narrow implementation of the XML parsing, exclusive canonicalization and
+XML signature verification that SAML needs, in
+`runner/zone_enterprise/src/sso/saml`. It adds five direct dependencies to
+the `sso` feature, each pinned exactly:
+
+| Package and version | SPDX expression | Used for |
+|---|---|---|
+| quick-xml 0.41.0 | MIT | The XML tokenizer under Zone's own tree builder and namespace resolution |
+| rustls-webpki 0.103.16 (no default features; `std`) | ISC | Reading the subject public key of an identity provider's X.509 certificate |
+| rustls-pki-types 1.15.1 | MIT OR Apache-2.0 | `CertificateDer`, which rustls-webpki takes and doesn't re-export |
+| aws-lc-rs 1.18.1 (default features) | ISC AND (Apache-2.0 OR ISC) | RSA PKCS#1 v1.5 verification with SHA-256, SHA-384 and SHA-512, the digests, constant-time comparison and the RSA key size check |
+| flate2 1.1.10 | MIT OR Apache-2.0 | Raw DEFLATE for the HTTP-Redirect binding |
+
+All five were already in `runner/Cargo.lock` at those versions: quick-xml
+through plist, flate2 through png, tiff, ureq and compression-codecs, and
+aws-lc-rs, rustls-webpki and rustls-pki-types through rustls, reqwest and
+jsonwebtoken. The lockfile change only adds
+dependency edges to `zone_enterprise`, so no package, version or license
+changes, and the license policy above needs no new entry.
+`base64`, `chrono`, `rand`, `reqwest` and `url` were already `sso`
+dependencies.
+
+### Advisories
+
+- quick-xml 0.41.0 is the release patched for RUSTSEC-2026-0194 and
+  RUSTSEC-2026-0195; both advisories list `>= 0.41.0` as patched.
+- rustls-webpki 0.103.16 is patched for RUSTSEC-2026-0382.
+- The RustSec advisory database (updated 2026-11-19) and the GitHub
+  advisory database (queried 2026-11-21) have no advisories for any of the
+  rejected candidates below or for roxmltree.
+
+### Candidates not used
+
+| Candidate | Why not |
+|---|---|
+| [samael](https://crates.io/crates/samael) 0.0.22 | Its default `xmlsec` feature pulls in openssl, openssl-sys, bindgen and libxml 0.3, plus the system libraries libxml2 and xmlsec1. That would mean `libxmlsec1-dev`, `libxml2-dev` and clang on the Ubuntu CI runners, Homebrew packages on the macOS job and runtime libraries in the manager image. [Issue #82](https://github.com/njaremko/samael/issues/82) reports that signature verification fails with xmlsec 1.2.3x because `xmlSecAddIDs` isn't registered. It is still on 0.0.x. |
+| [saml-rs](https://crates.io/crates/saml-rs) 0.8.0 | Created 2026-06-14, with eight releases in five months, 7 stars and 84 open issues. It depends on bergshamra. |
+| [bergshamra](https://crates.io/crates/bergshamra) 0.12.0 | Created 2026-02. Its default features pull in clap, PKCS#11 and post-quantum algorithms, and it brings its own XML stack (`uppsala`, `kryptering`): a large and new attack surface. |
+| [xml_c14n](https://crates.io/crates/xml_c14n), [libxml](https://crates.io/crates/libxml) | Wrappers around the system libxml2. |
+| [xml-canonicalization](https://crates.io/crates/xml-canonicalization) 0.1.2 | Built on pest and regex, about 9,000 downloads, and no exclusive canonicalization guarantees. |
+| [roxmltree](https://crates.io/crates/roxmltree) | Refuses DTDs by default, but has no public accessor for an element's prefix, which exclusive canonicalization has to render. |
+
+### Namespace resolution
+
+Zone reads XML with quick-xml's plain `Reader`, not its `NsReader`, and
+resolves namespaces with its own scope stack. quick-xml 0.41.0's
+`NamespaceResolver` counts open elements in a `u16` (`nesting_level` in
+`src/name.rs`) and increments it with `+= 1`, so a document nested more than
+65,535 elements deep panics in a debug build and wraps around in a release
+build, where the resolver then loses track of which declarations are in
+scope. Zone's
+resolver has no such limit, and every walk over the tree, from building it to
+canonicalizing it, is iterative, so a deeply nested document can't overflow
+the stack either. The SAML tests parse and canonicalize a document nested
+100,000 elements deep.
