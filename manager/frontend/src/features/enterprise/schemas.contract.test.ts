@@ -11,6 +11,9 @@ import {
   LicenseDetailsSchema,
   LicenseRefusalSchema,
   LicenseResponseSchema,
+  MemberCapCode,
+  MembersSchema,
+  PLANS,
   RENEWAL_MODES,
   RENEWAL_OUTCOMES,
   RenewalSchema,
@@ -28,6 +31,7 @@ const COMMON = join(SERVER, 'routes/common.rs');
 const SERVICE = join(SERVER, 'services/license/error.rs');
 const RENEWAL = join(SERVER, 'services/license/renewal');
 const ERRORS = join(ENTERPRISE, 'error.rs');
+const MEMBERS = join(ENTERPRISE, 'members.rs');
 
 const CODE = /pub const [A-Z_]+: &str = "([^"]+)";/g;
 const OPTION = /^pub\s+([a-z_][a-z_0-9]*)\s*:\s*Option</;
@@ -78,6 +82,7 @@ describe('the license reads as the server serialises it', () => {
     ['LicenseResponse', LicenseResponseSchema],
     ['LicenseDetails', LicenseDetailsSchema],
     ['SeatsResponse', SeatsSchema],
+    ['MembersResponse', MembersSchema],
     ['UnverifiedResponse', UnverifiedSchema],
     ['RenewalResponse', RenewalSchema],
   ])('%s carries the same fields on both sides, none of them omitted', (structName, schema) => {
@@ -88,6 +93,7 @@ describe('the license reads as the server serialises it', () => {
     ['LicenseResponse', LicenseResponseSchema],
     ['LicenseDetails', LicenseDetailsSchema],
     ['SeatsResponse', SeatsSchema],
+    ['MembersResponse', MembersSchema],
     ['UnverifiedResponse', UnverifiedSchema],
     ['RenewalResponse', RenewalSchema],
   ])('%s is null in exactly the fields the server may send as null', (structName, schema) => {
@@ -97,6 +103,11 @@ describe('the license reads as the server serialises it', () => {
   test('seat usage is null when the server could not count it', () => {
     expect(rustNullable(ROUTE, 'SeatsResponse')).toEqual(['licensed', 'used']);
     expect(zodNullable(SeatsSchema)).toEqual(['licensed', 'used']);
+  });
+
+  test('active members are null when uncounted and the cap is null when there is none', () => {
+    expect(rustNullable(ROUTE, 'MembersResponse')).toEqual(['active', 'cap']);
+    expect(zodNullable(MembersSchema)).toEqual(['active', 'cap']);
   });
 
   test('SetLicenseRequest is sent with the fields the server reads', () => {
@@ -115,6 +126,15 @@ describe('the license vocabularies match the server', () => {
     expect(sorted(EDITIONS)).toEqual(
       sorted(rustVariants(read(join(ENTERPRISE, 'edition.rs')), 'Edition'))
     );
+    expect(EDITIONS).toHaveLength(3);
+  });
+
+  test('plans', () => {
+    expect(sorted(PLANS)).toEqual(sorted(rustVariants(read(join(ENTERPRISE, 'plan.rs')), 'Plan')));
+  });
+
+  test('a refusal at the member cap carries the code the server sends', () => {
+    expect(codes(MEMBERS)).toEqual([MemberCapCode]);
   });
 
   test('statuses', () => {
