@@ -18,7 +18,6 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_enterprise::LICENSE_REQUIRED;
 use zone_enterprise::sso::saml::testing::{self, Key, Options};
 use zone_enterprise::sso::saml::{Certificate, Document, ServiceProvider, service_metadata, uri};
 use zone_enterprise::sso::testing::{EMAIL, SUBJECT};
@@ -27,9 +26,12 @@ use zone_enterprise::sso::{
     METADATA_INVALID, PROTOCOL_MISMATCH, PROVIDER_DUPLICATE, PROVIDER_NOT_FOUND, SIGN_IN_FAILED,
     SIGN_IN_REFUSED, SSO_REQUIRED, STATE_INVALID, VERIFIED_EMAIL_UNSUPPORTED,
 };
+use zone_enterprise::{COMMUNITY_MEMBERS, LICENSE_REQUIRED, MEMBER_CAP_REACHED, period_start};
 use zone_server::db::audit::actions;
+use zone_server::db::seats;
 use zone_server::db::sso::attempts;
 use zone_server::routes::sso::saml::{BODY_LIMIT, RELAY_STATE_LIMIT};
+use zone_server::services::members::AdmissionError;
 use zone_server::utils::crypto::hash_token;
 
 use crate::common::identity_provider::IdentityProvider;
@@ -1388,6 +1390,42 @@ async fn an_existing_account_with_the_email_is_never_linked() {
         .login(EMAIL, &test_password())
         .await
         .assert_status(StatusCode::OK);
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn at_the_community_cap_a_first_saml_sign_in_is_refused_but_a_linked_person_signs_in() {
+    let server = Server::new().await;
+    server.fixture.state().cap_members();
+    let existing = server.signed_in(unchanged).await;
+    server.fixture.register().await;
+    server.fixture.remove_license(&server.admin).await;
+    assert_eq!(
+        seats::used(server.fixture.pool(), period_start(Utc::now()))
+            .await
+            .unwrap(),
+        COMMUNITY_MEMBERS
+    );
+    let newcomer = format!("newcomer-{}@{DOMAIN}", Uuid::new_v4().simple());
+
+    let response = server
+        .sign_in(as_person("newcomer", newcomer.clone()))
+        .await;
+
+    response.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.json_value(),
+        json!({
+            "error": AdmissionError::Full { cap: COMMUNITY_MEMBERS }.to_string(),
+            "code": MEMBER_CAP_REACHED,
+        })
+    );
+    assert_eq!(server.users_with_email(&newcomer).await, 0);
+    assert_eq!(
+        server.identities().await,
+        [(existing.user, SUBJECT.to_owned(), EMAIL.to_owned())]
+    );
+    assert_eq!(server.signed_in(unchanged).await.user, existing.user);
     server.cleanup().await;
 }
 
