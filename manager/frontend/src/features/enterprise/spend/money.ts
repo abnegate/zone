@@ -6,6 +6,8 @@ export const MICRODOLLARS_PER_DOLLAR = 1_000_000;
 
 const MICRODOLLARS_PER_CENT = 10_000;
 
+const MAXIMUM_MICRODOLLARS = Number.MAX_SAFE_INTEGER;
+
 const FRACTION_DIGITS = 6;
 
 const CENT_DIGITS = 2;
@@ -75,13 +77,23 @@ export function dollarsInput(microdollars: number): string {
   return `${whole}.${trimmed.padEnd(CENT_DIGITS, '0')}`;
 }
 
-export function parseDollars(text: string): number | null {
+function read(text: string): number | null {
   const match = AMOUNT.exec(text.trim());
   if (match === null) return null;
   const [, whole = '', fraction = ''] = match;
   if (whole === '' && fraction === '') return null;
-  const microdollars =
+  return (
     Number(whole.replace(THOUSANDS, '') || '0') * MICRODOLLARS_PER_DOLLAR +
-    Number(fraction.padEnd(FRACTION_DIGITS, '0'));
-  return Number.isSafeInteger(microdollars) ? microdollars : null;
+    Number(fraction.padEnd(FRACTION_DIGITS, '0'))
+  );
+}
+
+export function parseDollars(text: string): number | null {
+  const microdollars = read(text);
+  return microdollars !== null && microdollars <= MAXIMUM_MICRODOLLARS ? microdollars : null;
+}
+
+export function exceedsMaximum(text: string): boolean {
+  const microdollars = read(text);
+  return microdollars !== null && microdollars > MAXIMUM_MICRODOLLARS;
 }

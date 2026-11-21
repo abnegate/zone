@@ -21,6 +21,7 @@ import {
   HARD_LABEL,
   HARD_LIMIT_NOTE,
   LIMIT_LABEL,
+  LIMIT_TOO_LARGE,
   PERSON_PICKER_LABEL,
   SAVE_LABEL,
   SCOPE_LABEL,
@@ -167,6 +168,18 @@ describe('BudgetEditor', () => {
       expect(screen.getByText(refusalMessage(SpendCode.ScopeInvalid))).toBeInTheDocument();
       expect(screen.getByText(refusalMessage(SpendCode.LimitInvalid))).toBeInTheDocument();
       expect(screen.getByText(refusalMessage(SpendCode.ThresholdInvalid))).toBeInTheDocument();
+      expect(createBudget).not.toHaveBeenCalled();
+    });
+
+    it('says a limit is too large instead of asking for one above $0', async () => {
+      renderEditor();
+      await sourcesLoaded();
+
+      type(LIMIT_LABEL, '9007199255');
+      submit();
+
+      expect(screen.getByText(LIMIT_TOO_LARGE)).toBeInTheDocument();
+      expect(screen.queryByText(refusalMessage(SpendCode.LimitInvalid))).not.toBeInTheDocument();
       expect(createBudget).not.toHaveBeenCalled();
     });
 

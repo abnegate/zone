@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { SectionCard } from '../../../analytics/components/SectionCard';
 import { type SpendTargets, useBudgetMutations } from '../hooks';
-import { BUDGETS_TITLE, READ_ONLY } from '../labels';
+import { BUDGETS_TITLE } from '../labels';
 import { budgetsDescription } from '../messages';
 import type { Budget, BudgetsResponse } from '../schemas';
 import { BudgetEditor } from './BudgetEditor';
@@ -25,12 +25,12 @@ export function SpendBudgets({ organizationId, response, targets }: SpendBudgets
   return (
     <SectionCard title={BUDGETS_TITLE} description={budgetsDescription(response.month)} wide>
       <div className="spend-budget-panel">
-        {response.entitled && !editable && <p className="spend-hint">{READ_ONLY}</p>}
         <BudgetList
           budgets={response.budgets}
           editable={editable}
           editing={editing?.id ?? null}
           onEdit={(budget) => {
+            mutations.create.reset();
             mutations.update.reset();
             setEditing(budget);
           }}

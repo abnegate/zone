@@ -23,6 +23,7 @@ import {
 import {
   ADD_LABEL,
   AUTOMATION_LABEL,
+  CANCEL_LABEL,
   CHART_CAPTION,
   DELETED_WORKSPACE,
   DOWNLOAD_LABEL,
@@ -35,6 +36,7 @@ import {
   NO_SPEND,
   NOTHING_COUNTED,
   PAGE_TITLE,
+  RANGE_TOO_LONG,
   TO_LABEL,
   UNCOUNTED_FOOTNOTE,
   UPGRADE_NOTICE,
@@ -42,6 +44,7 @@ import {
 } from '../labels';
 import { refusalMessage, uncountedLine } from '../messages';
 import { monthToDate } from '../range';
+import { SpendRefusal } from '../SpendRefusal';
 import { SpendCode, type SpendReportResponse, UncountedReason } from '../schemas';
 
 const report = mock();
@@ -288,6 +291,18 @@ describe('SpendPage', () => {
       expect(report).toHaveBeenCalledTimes(calls);
     });
 
+    it('holds the report and explains a range longer than the server reads', async () => {
+      await loaded(ACTIVE_REPORT);
+      const calls = report.mock.calls.length;
+
+      fireEvent.change(screen.getByLabelText(FROM_LABEL), { target: { value: '2025-01-01' } });
+      fireEvent.change(screen.getByLabelText(TO_LABEL), { target: { value: '2026-01-02' } });
+
+      expect(screen.getByText(RANGE_TOO_LONG)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: DOWNLOAD_LABEL })).toBeDisabled();
+      expect(report).toHaveBeenCalledTimes(calls);
+    });
+
     it('downloads the CSV through saveDownload and names the file', async () => {
       const file = { blob: new Blob(['date\r\n']), filename: EXPORT_FILENAME };
       download.mockResolvedValue(file);
@@ -413,6 +428,28 @@ describe('SpendPage', () => {
           within(budgetsRegion).getByRole('form', { name: 'Add a budget' })
         ).toBeInTheDocument()
       );
+    });
+
+    it('drops a refused add once another budget is edited, so it does not reappear', async () => {
+      createBudget.mockRejectedValue(
+        new SpendRefusal({ error: 'raw', code: SpendCode.BudgetExists }, 409)
+      );
+      await loaded(ACTIVE_REPORT);
+      const budgetsRegion = await screen.findByRole('region', { name: 'Monthly budgets' });
+      const adder = within(budgetsRegion).getByRole('form', { name: 'Add a budget' });
+      fireEvent.change(within(adder).getByLabelText(LIMIT_LABEL), { target: { value: '50' } });
+      fireEvent.click(within(adder).getByRole('button', { name: ADD_LABEL }));
+      const refused = refusalMessage(SpendCode.BudgetExists);
+      await within(budgetsRegion).findByText(refused);
+
+      fireEvent.click(
+        within(budgetsRegion).getByRole('button', { name: 'Edit the budget for Ada Lovelace' })
+      );
+      const editor = within(budgetsRegion).getByRole('form', { name: 'Edit budget' });
+      fireEvent.click(within(editor).getByRole('button', { name: CANCEL_LABEL }));
+
+      expect(within(budgetsRegion).getByRole('form', { name: 'Add a budget' })).toBeInTheDocument();
+      expect(within(budgetsRegion).queryByText(refused)).not.toBeInTheDocument();
     });
   });
 });

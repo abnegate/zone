@@ -152,6 +152,31 @@ describe('useBudgetMutations', () => {
     act(() => result.current.create.reset());
     await waitFor(() => expect(result.current.create.refusal).toBeNull());
   });
+
+  it('refreshes the budgets after a refusal, since a license refusal means the license changed', async () => {
+    const refusal = new SpendRefusal({ error: 'raw', code: SpendCode.LicenseRequired }, 403);
+    createBudget.mockRejectedValue(refusal);
+    updateBudget.mockRejectedValue(refusal);
+    deleteBudget.mockRejectedValue(refusal);
+    const queryClient = client();
+    const key = spendQueryKeys.budgets(ORGANIZATION_ID);
+    const { result } = renderHook(() => hooks.useBudgetMutations(ORGANIZATION_ID), {
+      wrapper: wrapper(queryClient),
+    });
+    const done = mock();
+
+    for (const run of [
+      () => result.current.create.run({ scope: 'organization', limit_microdollars: 1 }, done),
+      () => result.current.update.run(ORGANIZATION_BUDGET.id, { hard: true }, done),
+      () => result.current.remove.run(ORGANIZATION_BUDGET.id, done),
+    ]) {
+      queryClient.setQueryData(key, ACTIVE_BUDGETS);
+      act(run);
+      await waitFor(() => expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true));
+    }
+
+    expect(done).not.toHaveBeenCalled();
+  });
 });
 
 describe('spendQueryKeys', () => {

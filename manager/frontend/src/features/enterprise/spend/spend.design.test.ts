@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { media, read, rule } from '../../../test/css';
+import { findSection, SettingsGroup, SettingsSection } from '../../settings/navigation/sections';
 import * as labels from './labels';
 import {
   actionLabel,
@@ -97,6 +98,12 @@ describe('spend copy', () => {
     ]) {
       expect(labels.UNCOUNTED_FOOTNOTE).toContain(piece);
     }
+  });
+
+  it('names the AI settings link the way the Settings navigation does', () => {
+    const section = findSection(SettingsGroup.Organization, SettingsSection.Ai);
+    expect(section).toBeDefined();
+    expect(labels.AI_SETTINGS_LINK).toEndWith(`Settings › ${section?.label}`);
   });
 
   it('tells admins that hard limits never stop coding agents or direct providers', () => {

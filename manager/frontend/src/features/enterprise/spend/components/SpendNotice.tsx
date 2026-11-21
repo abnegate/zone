@@ -1,10 +1,6 @@
 import { buttonVariants } from '@zone/ui';
 import { Link } from 'react-router-dom';
-import {
-  SettingsGroup,
-  SettingsSection,
-  settingsPath,
-} from '../../../settings/navigation/sections';
+import { LICENSE_PATH } from '../../audit/components';
 import {
   LAPSED_ACTION,
   LAPSED_NOTICE,
@@ -12,8 +8,6 @@ import {
   UPGRADE_DETAIL,
   UPGRADE_NOTICE,
 } from '../labels';
-
-export const LICENSE_PATH = settingsPath(SettingsGroup.Server, SettingsSection.License);
 
 export const SpendNoticeVariant = {
   Upgrade: 'upgrade',

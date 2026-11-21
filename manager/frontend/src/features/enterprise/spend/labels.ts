@@ -1,3 +1,5 @@
+import { MAXIMUM_DAYS } from './range';
+
 export const PAGE_TITLE = 'Spend';
 
 export const PAGE_DESCRIPTION =
@@ -25,7 +27,7 @@ export const HARD_LIMIT_NOTE =
 export const UNCOUNTED_FOOTNOTE =
   "Not counted: coding-agent subscriptions, direct provider keys, other endpoints, workspace keys saved for this server's LiteLLM, chats that pick their own provider, requests outside a workspace, and embeddings. Local models show tokens at $0 unless LiteLLM prices them.";
 
-export const AI_SETTINGS_LINK = 'See coding agents and providers in Settings › AI';
+export const AI_SETTINGS_LINK = 'See coding agents and providers in Settings › AI defaults';
 
 export const FROM_LABEL = 'From';
 
@@ -46,6 +48,8 @@ export const DOWNLOADED_LABEL = 'Saved';
 export const DOWNLOAD_INTERRUPTED = 'The download was interrupted. Try again.';
 
 export const RANGE_LEGEND = 'Report range and filters';
+
+export const RANGE_TOO_LONG = `Choose a range of ${MAXIMUM_DAYS} days or fewer.`;
 
 export const SPEND_TILE = 'Spend';
 
@@ -109,8 +113,6 @@ export const BUDGETS_TITLE = 'Monthly budgets';
 
 export const NO_BUDGETS = 'No budgets yet.';
 
-export const READ_ONLY = 'Only organization owners and admins can change budgets.';
-
 export const ADD_TITLE = 'Add a budget';
 
 export const EDIT_TITLE = 'Edit budget';
@@ -128,6 +130,8 @@ export const CHOOSE_PERSON = 'Choose a person';
 export const LIMIT_LABEL = 'Monthly limit (USD)';
 
 export const LIMIT_PLACEHOLDER = '50.00';
+
+export const LIMIT_TOO_LARGE = 'Enter a monthly limit under $9 billion.';
 
 export const THRESHOLD_LABEL = 'Warn at (% of the limit)';
 
