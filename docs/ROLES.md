@@ -131,7 +131,7 @@ composable, and neither is deleting the organization or a workspace.
 | `workspace_mcp_servers:update` | Change the workspace's MCP server settings | admin, owner | Yes |
 | `workspace_policies:update` | Change the workspace's agent policy | admin, owner | Yes |
 | `project_syncs:update` | Add and remove a project's sync, and rotate its webhook secret | admin, owner | Yes |
-| `pull_requests:override` | Merge a pull request as a GitHub administrator, when the server allows it with `ZONE_AUTO_ADMIN_MERGE` | admin, owner | Yes |
+| `pull_requests:override` | Merge a pull request from the Pull Requests page as a GitHub administrator, when the server allows it with [`ZONE_GITHUB_ADMIN_MERGE`](CONFIGURATION.md#zone_github_admin_merge) (off by default) | admin, owner | Yes |
 
 ### Server permissions
 

@@ -2404,7 +2404,7 @@ The console's **Pull Requests** and **Releases** pages read every active GitHub 
 
 ### `ZONE_GITHUB_ADMIN_MERGE`
 - **Default**: `false`
-- **Description**: When branch protection refuses a merge from the Pull Requests page at the moment of merging, try again through the merge mutation an administrator merges with. Only a workspace admin or owner's merge is retried; a member's merge stops at the protection. Works when the source's credential belongs to a repository administrator the protection does not include, or a ruleset bypass actor. It does not bypass a merge GitHub already reports as blocked, behind, conflicted or not yet worked out: that pull request is not ready, and the page refuses it before asking GitHub to merge.
+- **Description**: When branch protection refuses a merge from the Pull Requests page at the moment of merging, try again through the merge mutation an administrator merges with. Only the merge of someone holding the `pull_requests:override` permission in the workspace is retried, which the built-in workspace admin and owner roles hold; anyone else's merge stops at the protection. See [ROLES.md](ROLES.md). Works when the source's credential belongs to a repository administrator the protection does not include, or a ruleset bypass actor. It does not bypass a merge GitHub already reports as blocked, behind, conflicted or not yet worked out: that pull request is not ready, and the page refuses it before asking GitHub to merge.
 
 ---
 
