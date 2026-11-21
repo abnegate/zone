@@ -214,6 +214,9 @@
   --ui-border-control: #857b6f;
   --ui-border-focus: #0011d9;
 
+  /* Brand */
+  --ui-brand: #008c94;
+
   /* Overlays */
   --ui-overlay-light: rgb(26 22 18 / 0.04);
   --ui-overlay-medium: rgb(26 22 18 / 0.32);
@@ -246,6 +249,9 @@
   --ui-border-strong: #3f3830;
   --ui-border-control: #776f63;
   --ui-border-focus: #00f3ff;
+
+  /* Brand */
+  --ui-brand: #00f3ff;
 
   /* Overlays */
   --ui-overlay-light: rgb(0 0 0 / 0.22);
