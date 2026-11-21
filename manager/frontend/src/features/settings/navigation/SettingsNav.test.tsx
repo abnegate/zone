@@ -124,6 +124,7 @@ describe('SettingsNav', () => {
       ['Devices', '/settings/organization/devices'],
       ['Audit log', '/settings/organization/audit'],
       ['Audit export', '/settings/organization/audit-export'],
+      ['Spend', '/settings/organization/spend'],
       ['GitHub', '/settings/organization/github'],
       ['MCP servers', '/settings/organization/mcp'],
       ['Features', '/settings/server/features'],
@@ -184,6 +185,7 @@ describe('SettingsNav', () => {
       'Devices',
       'Audit log',
       'Audit export',
+      'Spend',
       'GitHub',
       'MCP servers',
     ]);
