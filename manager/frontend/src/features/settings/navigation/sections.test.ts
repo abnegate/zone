@@ -34,6 +34,7 @@ const ALL_SECTIONS = [
     label: 'Agent policy',
   },
   { group: SettingsGroup.Organization, section: SettingsSection.Members, label: 'Members' },
+  { group: SettingsGroup.Organization, section: SettingsSection.Roles, label: 'Roles' },
   { group: SettingsGroup.Organization, section: SettingsSection.Devices, label: 'Devices' },
   { group: SettingsGroup.Organization, section: SettingsSection.Audit, label: 'Audit log' },
   {
@@ -76,6 +77,7 @@ const ORGANIZATION_AUDIT_EXPORT = settingsPath(
   SettingsGroup.Organization,
   SettingsSection.AuditExport
 );
+const ORGANIZATION_ROLES = settingsPath(SettingsGroup.Organization, SettingsSection.Roles);
 const SESSIONS = settingsPath(SettingsGroup.You, SettingsSection.Sessions);
 const SOURCES = settingsPath(SettingsGroup.Workspace, SettingsSection.Sources);
 
@@ -99,6 +101,7 @@ describe('settings constants', () => {
       Folders: 'folders',
       Sources: 'sources',
       Members: 'members',
+      Roles: 'roles',
       Devices: 'devices',
       Audit: 'audit',
       AuditExport: 'audit-export',
@@ -233,7 +236,7 @@ describe('visibleSections', () => {
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
 
-  it('shows all twenty-one sections to a server admin who owns the organization and administers the workspace', () => {
+  it('shows all twenty-two sections to a server admin who owns the organization and administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -244,7 +247,7 @@ describe('visibleSections', () => {
       administersServer: true,
     });
 
-    expect(visible).toHaveLength(21);
+    expect(visible).toHaveLength(22);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 
@@ -459,6 +462,52 @@ describe('visibleSections', () => {
         String(organizationRole)
       ).toBe(shown);
     }
+  });
+
+  it('shows Roles only to organization owners and admins', () => {
+    for (const [organizationRole, shown] of [
+      ['owner', true],
+      ['admin', true],
+      ['member', false],
+      [undefined, true],
+    ] as const) {
+      expect(
+        paths({
+          organization: true,
+          organizationRole,
+          workspace: true,
+          workspaceRole: 'viewer',
+          installsModels: false,
+          readsSources: false,
+          administersServer: false,
+        }).includes(ORGANIZATION_ROLES),
+        String(organizationRole)
+      ).toBe(shown);
+    }
+  });
+
+  it('hides Roles outside an organization', () => {
+    expect(
+      paths({
+        organization: false,
+        organizationRole: undefined,
+        workspace: false,
+        workspaceRole: undefined,
+        installsModels: true,
+        readsSources: true,
+        administersServer: true,
+      })
+    ).not.toContain(ORGANIZATION_ROLES);
+  });
+
+  it('finds Roles in the organization group only', () => {
+    expect(findSection(SettingsGroup.Organization, 'roles')).toMatchObject({
+      group: SettingsGroup.Organization,
+      section: SettingsSection.Roles,
+      label: 'Roles',
+    });
+    expect(findSection(SettingsGroup.Workspace, 'roles')).toBeUndefined();
+    expect(ORGANIZATION_ROLES).toBe('/settings/organization/roles');
   });
 
   it('shows the server Audit export only to a server admin', () => {

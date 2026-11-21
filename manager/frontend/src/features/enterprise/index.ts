@@ -25,6 +25,24 @@ export {
 } from './policy';
 export { licenseMutationKeys, licenseQueryKeys } from './queryKeys';
 export {
+  type CreateRoleRequest,
+  type CustomRole,
+  type CustomRoleReference,
+  PERMISSIONS,
+  Permission,
+  type PermissionDefinition,
+  type PermissionName,
+  ROLE_CODES,
+  RoleCode,
+  RoleRefusal,
+  RoleScope,
+  type RolesResponse,
+  RolesSection,
+  rolesApi,
+  type UpdateRoleRequest,
+  useRoles,
+} from './roles';
+export {
   EDITIONS,
   Edition,
   EditionSchema,

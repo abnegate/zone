@@ -6,6 +6,7 @@ import {
   LicenseSection,
   OrganizationPolicySection,
   organizationScope,
+  RolesSection,
   SERVER_SCOPE,
   SsoSection,
   WorkspacePolicySection,
@@ -129,6 +130,8 @@ function organizationContent(
           invitations={allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE)}
         />
       );
+    case SettingsSection.Roles:
+      return <RolesSection organizationId={organizationId} />;
     case SettingsSection.GitHub:
       return (
         <GitHubSection
