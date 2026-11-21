@@ -345,16 +345,33 @@ CREATE TABLE sso_providers (
     protocol text DEFAULT 'oidc'::text NOT NULL,
     display_name text NOT NULL,
     issuer text NOT NULL,
-    client_id text NOT NULL,
-    client_secret text NOT NULL,
+    client_id text,
+    client_secret text,
+    sso_url text,
+    certificates text[],
+    metadata_url text,
     allowed_domains text[] DEFAULT '{}'::text[] NOT NULL,
     require_verified_email boolean DEFAULT true NOT NULL,
     enabled boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     UNIQUE (issuer, client_id),
-    CONSTRAINT sso_providers_protocol_check CHECK ((protocol = 'oidc'::text))
+    CONSTRAINT sso_providers_protocol_check CHECK ((protocol = ANY (ARRAY['oidc'::text, 'saml'::text]))),
+    CONSTRAINT sso_providers_connection_check CHECK (
+        CASE protocol
+            WHEN 'oidc'::text THEN client_id IS NOT NULL AND client_secret IS NOT NULL
+                AND sso_url IS NULL AND certificates IS NULL AND metadata_url IS NULL
+            WHEN 'saml'::text THEN client_id IS NULL AND client_secret IS NULL
+                AND sso_url IS NOT NULL
+                AND certificates IS NOT NULL AND cardinality(certificates) > 0
+                AND array_position(certificates, NULL) IS NULL
+                AND NOT require_verified_email
+                AND cardinality(allowed_domains) > 0
+            ELSE true
+        END
+    )
 );
+CREATE UNIQUE INDEX sso_providers_saml_issuer_key ON sso_providers (issuer) WHERE (protocol = 'saml'::text);
 
 CREATE TABLE sso_settings (
     id boolean DEFAULT true NOT NULL PRIMARY KEY,
@@ -582,12 +599,35 @@ CREATE TABLE sso_attempts (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     state_hash text NOT NULL UNIQUE,
     provider_id uuid NOT NULL REFERENCES sso_providers(id) ON DELETE CASCADE,
-    nonce text NOT NULL,
-    code_verifier text NOT NULL,
+    nonce text,
+    code_verifier text,
+    request_id text UNIQUE,
+    code_hash text,
+    subject text,
+    email text,
+    display_name text,
     expires_at timestamp with time zone NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT sso_attempts_flow_check CHECK (
+        (nonce IS NOT NULL AND code_verifier IS NOT NULL AND request_id IS NULL)
+        OR (request_id IS NOT NULL AND nonce IS NULL AND code_verifier IS NULL)
+    ),
+    CONSTRAINT sso_attempts_asserted_check CHECK (
+        (code_hash IS NULL) = (subject IS NULL)
+        AND (subject IS NULL) = (email IS NULL)
+        AND (code_hash IS NULL OR request_id IS NOT NULL)
+        AND (display_name IS NULL OR subject IS NOT NULL)
+    )
 );
 CREATE INDEX sso_attempts_expires_at_idx ON sso_attempts (expires_at);
+
+CREATE TABLE sso_assertions (
+    provider_id uuid NOT NULL REFERENCES sso_providers(id) ON DELETE CASCADE,
+    assertion_id text NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    PRIMARY KEY (provider_id, assertion_id)
+);
+CREATE INDEX sso_assertions_expires_at_idx ON sso_assertions (expires_at);
 
 CREATE TABLE sso_identities (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,

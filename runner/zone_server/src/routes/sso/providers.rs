@@ -25,7 +25,7 @@ pub struct ProviderResponse {
     pub protocol: Protocol,
     pub display_name: String,
     pub issuer: String,
-    pub client_id: String,
+    pub client_id: Option<String>,
     pub allowed_domains: Vec<String>,
     pub require_verified_email: bool,
     pub enabled: bool,
@@ -40,7 +40,7 @@ impl From<&ProviderRecord> for ProviderResponse {
             protocol: record.protocol,
             display_name: record.display_name.clone(),
             issuer: record.issuer.clone(),
-            client_id: record.client_id.clone(),
+            client_id: record.client_id().map(str::to_owned),
             allowed_domains: record.allowed_domains.clone(),
             require_verified_email: record.require_verified_email,
             enabled: record.enabled,
@@ -212,6 +212,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::db::sso::Connection;
 
     #[test]
     fn a_provider_is_sent_without_its_secret() {
@@ -220,8 +221,10 @@ mod tests {
             protocol: Protocol::Oidc,
             display_name: "Okta".into(),
             issuer: "https://acme.okta.com".into(),
-            client_id: "0oa1".into(),
-            sealed_secret: "ENC[v1:s3cret]".into(),
+            connection: Connection::Oidc {
+                client_id: "0oa1".into(),
+                sealed_secret: "ENC[v1:s3cret]".into(),
+            },
             allowed_domains: vec!["acme.com".into()],
             require_verified_email: true,
             enabled: false,

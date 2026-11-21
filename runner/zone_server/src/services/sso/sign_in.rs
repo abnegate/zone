@@ -10,7 +10,7 @@ use super::sign_in_failure::SignInFailure;
 use crate::auth::hash_password;
 use crate::auth::password::PasswordError;
 use crate::db::audit::{actions, resources};
-use crate::db::sso::{attempts, identities, providers};
+use crate::db::sso::{Connection, attempts, identities, providers};
 use crate::db::users::{self, UserRow};
 use crate::db::{refresh_tokens, sessions};
 use crate::routes::common::{AuditEvent, audit};
@@ -58,8 +58,8 @@ pub async fn complete(
             &provider,
             &Grant {
                 code: callback.code,
-                verifier: &attempt.verifier,
-                nonce: &attempt.nonce,
+                verifier: attempt.verifier.as_deref().ok_or(Error::StateInvalid)?,
+                nonce: attempt.nonce.as_deref().ok_or(Error::StateInvalid)?,
                 redirect_uri: &redirect_uri,
             },
         )
@@ -100,10 +100,10 @@ pub async fn complete(
 async fn enabled(state: &AppState, provider_id: Uuid) -> Result<Provider, SignInFailure> {
     let record = providers::get(state.db(), provider_id)
         .await?
-        .filter(|record| record.enabled)
+        .filter(|record| record.enabled && matches!(record.connection, Connection::Oidc { .. }))
         .ok_or(Error::ProviderNotFound)?;
     let client_secret = record.client_secret(state.master_key())?;
-    Ok(Provider::parse(&record.fields(&client_secret))?)
+    Ok(Provider::parse(&record.fields(&client_secret)?)?)
 }
 
 async fn settle(

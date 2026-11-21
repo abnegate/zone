@@ -146,7 +146,7 @@ fn revised(
     key: &MasterKey,
 ) -> Result<Provider, Failure> {
     let client_secret = revision.client_secret(record, key)?;
-    Ok(Provider::parse(&revision.fields(record, &client_secret))?)
+    Ok(Provider::parse(&revision.fields(record, &client_secret)?)?)
 }
 
 async fn last_enabled(
@@ -157,7 +157,8 @@ async fn last_enabled(
 }
 
 fn rediscovers(record: &ProviderRecord, provider: &Provider) -> bool {
-    record.issuer != provider.issuer.as_str() || record.client_id != provider.client_id.as_str()
+    record.issuer != provider.issuer.as_str()
+        || record.client_id() != Some(provider.client_id.as_str())
 }
 
 fn changes(
@@ -170,7 +171,8 @@ fn changes(
     ProviderChanges {
         display_name: differs(&record.display_name, provider.display_name.as_str()),
         issuer: differs(&record.issuer, provider.issuer.as_str()),
-        client_id: differs(&record.client_id, provider.client_id.as_str()),
+        client_id: (record.client_id() != Some(provider.client_id.as_str()))
+            .then(|| provider.client_id.as_str().to_owned()),
         client_secret: replaces_secret.then(|| SecretValue::new(provider.client_secret.expose())),
         allowed_domains: (record.allowed_domains != provider.policy.domains.as_slice())
             .then(|| provider.policy.domains.as_slice().to_vec()),
@@ -178,6 +180,7 @@ fn changes(
             != provider.policy.require_verified_email)
             .then_some(provider.policy.require_verified_email),
         enabled: (record.enabled != enabled).then_some(enabled),
+        ..ProviderChanges::default()
     }
 }
 
@@ -186,7 +189,7 @@ pub fn recorded(record: &ProviderRecord) -> Map<String, Value> {
         "protocol": record.protocol,
         "display_name": record.display_name,
         "issuer": record.issuer,
-        "client_id": record.client_id,
+        "client_id": record.client_id(),
         "allowed_domains": record.allowed_domains,
         "require_verified_email": record.require_verified_email,
         "enabled": record.enabled,
@@ -243,6 +246,7 @@ mod tests {
     use zone_enterprise::sso::Protocol;
 
     use super::*;
+    use crate::db::sso::Connection;
 
     const SECRET: &str = "s3cret-client-value";
 
@@ -254,8 +258,11 @@ mod tests {
             protocol: Protocol::Oidc,
             display_name: "Okta".into(),
             issuer: "https://acme.okta.com".into(),
-            client_id: "0oa1".into(),
-            sealed_secret: encrypt_value(&SecretValue::new(SECRET), &KEY).expect("a sealed secret"),
+            connection: Connection::Oidc {
+                client_id: "0oa1".into(),
+                sealed_secret: encrypt_value(&SecretValue::new(SECRET), &KEY)
+                    .expect("a sealed secret"),
+            },
             allowed_domains: vec!["acme.com".into()],
             require_verified_email: true,
             enabled: true,
