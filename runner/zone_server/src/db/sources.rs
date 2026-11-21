@@ -1454,7 +1454,7 @@ mod tests {
         let [viewer, reader, writer] = seated[..] else {
             unreachable!("three members were seated");
         };
-        crate::db::actions::testing::hold(&pool, organization, workspace, reader, &[]).await;
+        crate::db::custom_roles::testing::hold(&pool, organization, workspace, reader, &[]).await;
         let source = widgets(&pool, workspace, None, None).await;
         let actor = || async {
             list_active_index_sources(&pool)
@@ -1472,7 +1472,7 @@ mod tests {
             "a member without workspace:write was chosen"
         );
 
-        crate::db::actions::testing::hold(
+        crate::db::custom_roles::testing::hold(
             &pool,
             organization,
             workspace,

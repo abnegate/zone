@@ -25,6 +25,8 @@ const IN_USE: &str = "role_in_use";
 const UNKNOWN: &str = "permission_unknown";
 const NOT_COMPOSABLE: &str = "permission_not_composable";
 const OUT_OF_SCOPE: &str = "permission_out_of_scope";
+const BODY_INVALID: &str = "body_invalid";
+const SCOPE_INVALID: &str = "scope_invalid";
 const ORGANIZATION_MISSING: &str = "Organization not found";
 const ROLE_MISSING: &str = "Role not found";
 
@@ -495,15 +497,42 @@ async fn a_role_of_another_organization_is_not_found() {
         uncoded(&response, StatusCode::NOT_FOUND);
         assert_eq!(response.json_value()["error"], ROLE_MISSING);
     }
-    fixture
+    for response in [
+        fixture
+            .sso
+            .client
+            .delete_auth(
+                &role_path(fixture.organization, "not-a-role"),
+                &fixture.owner.token,
+            )
+            .await,
+        fixture
+            .sso
+            .client
+            .patch_json_auth(
+                &role_path(fixture.organization, "not-a-role"),
+                &json!({ "name": "Ghost" }),
+                &fixture.owner.token,
+            )
+            .await,
+    ] {
+        uncoded(&response, StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.json_value()["error"],
+            ROLE_MISSING,
+            "a malformed role id in a real organization names no role"
+        );
+    }
+    let response = fixture
         .sso
         .client
         .delete_auth(
-            &role_path(fixture.organization, "not-a-role"),
+            &format!("/api/organizations/not-an-organization/roles/{elsewhere}"),
             &fixture.owner.token,
         )
-        .await
-        .assert_status(StatusCode::NOT_FOUND);
+        .await;
+    uncoded(&response, StatusCode::NOT_FOUND);
+    assert_eq!(response.json_value()["error"], ORGANIZATION_MISSING);
 
     let survivor = fixture
         .sso
@@ -608,16 +637,32 @@ async fn every_invalid_role_is_refused_with_its_code() {
         );
     }
 
-    for body in [
-        json!({ "scope": "workspace", "permissions": [] }),
-        json!({ "name": "Writer", "scope": "workspace" }),
-        json!({ "name": "Writer", "scope": "team", "permissions": [] }),
-        json!({ "name": "Writer", "scope": "server", "permissions": [] }),
-        json!({ "name": "Writer", "scope": "workspace", "permissions": [], "members": 3 }),
+    for (body, code) in [
+        (
+            json!({ "scope": "workspace", "permissions": [] }),
+            BODY_INVALID,
+        ),
+        (
+            json!({ "name": "Writer", "scope": "workspace" }),
+            BODY_INVALID,
+        ),
+        (
+            json!({ "name": "Writer", "scope": "team", "permissions": [] }),
+            BODY_INVALID,
+        ),
+        (
+            json!({ "name": "Writer", "scope": "server", "permissions": [] }),
+            SCOPE_INVALID,
+        ),
+        (
+            json!({ "name": "Writer", "scope": "workspace", "permissions": [], "members": 3 }),
+            BODY_INVALID,
+        ),
     ] {
-        uncoded(
+        refused(
             &create(&fixture, token, &body).await,
             StatusCode::BAD_REQUEST,
+            code,
         );
     }
 
@@ -795,9 +840,10 @@ async fn the_scope_cannot_be_changed() {
         json!({ "name": "Author", "scope": "organization" }),
         json!({ "organization_id": Uuid::new_v4() }),
     ] {
-        uncoded(
+        refused(
             &update(&fixture, token, role, &body).await,
             StatusCode::BAD_REQUEST,
+            BODY_INVALID,
         );
     }
     let role = listed(&fixture, role).await;

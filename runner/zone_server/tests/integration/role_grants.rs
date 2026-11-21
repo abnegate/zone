@@ -108,6 +108,13 @@ async fn seat_workspace(
     .expect("a workspace member is seated");
 }
 
+/// Someone seated in `organization` with the built-in `role`, to edit its custom roles.
+async fn editor(pool: &PgPool, organization: Uuid, role: OrgRole) -> Uuid {
+    let editor = user(pool).await;
+    seat_organization(pool, organization, editor, role, None).await;
+    editor
+}
+
 async fn composed(pool: &PgPool, organization: Uuid, scope: Scope, granted: &[Permission]) -> Uuid {
     let grant = Grant::compose(scope, &names(granted)).expect("the role composes");
     let creator = user(pool).await;
@@ -373,6 +380,114 @@ async fn the_check_accepts_exactly_the_composable_and_base_names() {
             .await
             .expect_err("an unknown name is refused");
     assert_eq!(database_code(&unknown).as_deref(), Some(CHECK_VIOLATION));
+}
+
+#[tokio::test]
+async fn the_admin_grant_is_every_composable_workspace_name_and_the_base() {
+    let pool = create_test_pool().await;
+    let seeded: BTreeSet<String> =
+        sqlx::query_scalar("SELECT permission FROM workspace_role_permissions WHERE role = $1")
+            .bind(WorkspaceRole::Admin.as_str())
+            .fetch_all(&pool)
+            .await
+            .expect("the seeded admin rows")
+            .into_iter()
+            .collect();
+    let composable: BTreeSet<String> = scoped(Scope::Workspace)
+        .filter(|permission| {
+            permission.composable() || Some(*permission) == Scope::Workspace.base()
+        })
+        .map(|permission| permission.name().to_string())
+        .collect();
+    assert_eq!(
+        seeded, composable,
+        "workspace_permits reads the admin rows as the names a custom workspace role may carry"
+    );
+}
+
+#[tokio::test]
+async fn workspace_permits_ignores_a_stored_name_no_custom_role_may_carry() {
+    let pool = create_test_pool().await;
+    let mut transaction = pool.begin().await.expect("a transaction");
+    sqlx::query(
+        "ALTER TABLE custom_role_permissions \
+         DROP CONSTRAINT custom_role_permissions_permission_check",
+    )
+    .execute(&mut *transaction)
+    .await
+    .expect("the check is dropped inside the transaction");
+
+    let organization: Uuid =
+        sqlx::query_scalar("INSERT INTO organizations (name, slug) VALUES ($1, $2) RETURNING id")
+            .bind("Roles")
+            .bind(Uuid::new_v4().to_string())
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("an organization");
+    let workspace: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (organization_id, name, slug) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(organization)
+    .bind("Roles")
+    .bind(Uuid::new_v4().to_string())
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("a workspace");
+    let member: Uuid =
+        sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id")
+            .bind(format!("{}@example.test", Uuid::new_v4()))
+            .bind("x")
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("a user");
+    let role: Uuid = sqlx::query_scalar(
+        "INSERT INTO custom_roles (organization_id, name, scope) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(organization)
+    .bind(format!("Raw {}", Uuid::new_v4()))
+    .bind(Scope::Workspace.name())
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("a raw role");
+    let stored: Vec<Permission> = scoped(Scope::Workspace)
+        .filter(|permission| Some(*permission) != Scope::Workspace.base())
+        .collect();
+    for permission in &stored {
+        sqlx::query("INSERT INTO custom_role_permissions (role_id, permission) VALUES ($1, $2)")
+            .bind(role)
+            .bind(permission.name())
+            .execute(&mut *transaction)
+            .await
+            .expect("a stored permission past the check");
+    }
+    sqlx::query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role, custom_role_id) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(workspace)
+    .bind(member)
+    .bind(WorkspaceRole::Viewer.as_str())
+    .bind(role)
+    .execute(&mut *transaction)
+    .await
+    .expect("a workspace member is seated");
+
+    for permission in stored {
+        let permits: bool = sqlx::query_scalar("SELECT workspace_permits($1, $2, $3)")
+            .bind(member)
+            .bind(workspace)
+            .bind(permission.name())
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("workspace_permits answers");
+        assert_eq!(
+            permits,
+            permission.composable(),
+            "workspace_permits for a stored {}",
+            permission.name()
+        );
+    }
+    transaction.rollback().await.expect("the check is restored");
 }
 
 #[tokio::test]
@@ -1031,7 +1146,7 @@ async fn update_renames_describes_and_regrants_sparsely() {
         .expect("answered")
         .expect("the role exists")
         .name;
-    let admin = Grant::organization(OrgRole::Admin);
+    let admin = editor(&pool, organization, OrgRole::Admin).await;
 
     let outcome = custom_roles::update(
         &pool,
@@ -1042,7 +1157,7 @@ async fn update_renames_describes_and_regrants_sparsely() {
             description: Some(Some("Fleet")),
             grant: None,
         },
-        &admin,
+        admin,
     )
     .await
     .expect("answered");
@@ -1068,7 +1183,7 @@ async fn update_renames_describes_and_regrants_sparsely() {
             description: Some(None),
             grant: Some(&regranted),
         },
-        &admin,
+        admin,
     )
     .await
     .expect("answered");
@@ -1087,14 +1202,14 @@ async fn update_renames_describes_and_regrants_sparsely() {
             name: Some(&other_name.to_uppercase()),
             ..Change::default()
         },
-        &admin,
+        admin,
     )
     .await
     .expect("answered");
     assert!(matches!(outcome, Update::NameTaken), "{outcome:?}");
 
     let elsewhere = self::organization(&pool).await;
-    let outcome = custom_roles::update(&pool, elsewhere, role, &Change::default(), &admin)
+    let outcome = custom_roles::update(&pool, elsewhere, role, &Change::default(), admin)
         .await
         .expect("answered");
     assert!(matches!(outcome, Update::Missing), "{outcome:?}");
@@ -1115,8 +1230,8 @@ async fn widening_a_held_workspace_role_needs_the_administrators_permission() {
     let member = user(&pool).await;
     seat_workspace(&pool, workspace, member, WorkspaceRole::Viewer, Some(held)).await;
 
-    let admin = Grant::organization(OrgRole::Admin);
-    let owner = Grant::organization(OrgRole::Owner);
+    let admin = editor(&pool, organization, OrgRole::Admin).await;
+    let owner = editor(&pool, organization, OrgRole::Owner).await;
     let wider = Grant::compose(
         Scope::Workspace,
         &names(&[Permission::WorkspaceWrite, Permission::WorkspaceUpdate]),
@@ -1128,7 +1243,7 @@ async fn widening_a_held_workspace_role_needs_the_administrators_permission() {
         ..Change::default()
     };
 
-    let outcome = custom_roles::update(&pool, organization, held, &widen, &admin)
+    let outcome = custom_roles::update(&pool, organization, held, &widen, admin)
         .await
         .expect("answered");
     assert!(matches!(outcome, Update::Exceeds), "{outcome:?}");
@@ -1146,7 +1261,7 @@ async fn widening_a_held_workspace_role_needs_the_administrators_permission() {
             grant: Some(&narrower),
             ..Change::default()
         },
-        &admin,
+        admin,
     )
     .await
     .expect("answered");
@@ -1155,7 +1270,7 @@ async fn widening_a_held_workspace_role_needs_the_administrators_permission() {
         "narrowing is always allowed: {outcome:?}"
     );
 
-    let outcome = custom_roles::update(&pool, organization, held, &widen, &owner)
+    let outcome = custom_roles::update(&pool, organization, held, &widen, owner)
         .await
         .expect("answered");
     assert!(
@@ -1170,7 +1285,7 @@ async fn widening_a_held_workspace_role_needs_the_administrators_permission() {
         &[Permission::WorkspaceWrite],
     )
     .await;
-    let outcome = custom_roles::update(&pool, organization, unheld, &widen, &admin)
+    let outcome = custom_roles::update(&pool, organization, unheld, &widen, admin)
         .await
         .expect("answered");
     assert!(
@@ -1207,7 +1322,7 @@ async fn widening_a_held_workspace_role_needs_the_administrators_permission() {
             grant: Some(&wider),
             ..Change::default()
         },
-        &admin,
+        admin,
     )
     .await
     .expect("answered");

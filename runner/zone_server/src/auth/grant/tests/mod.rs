@@ -17,41 +17,45 @@ enum Threshold {
 /// The "built-in" column of the catalogue, written out by hand so the grants
 /// are checked against the specification rather than against themselves.
 fn threshold(permission: Permission) -> Threshold {
-    use OrgRole as O;
-    use Permission as P;
     use Threshold::{Organization, Server, Workspace};
-    use WorkspaceRole as W;
     match permission {
-        P::ModelsCreate | P::ModelsDelete | P::PullRequestsUpdate | P::ReleasesCreate => Server,
-        P::OrganizationRead => Organization(O::Member),
-        P::OrganizationUpdate => Organization(O::Admin),
-        P::OrganizationDelete => Organization(O::Owner),
-        P::MembersCreate | P::MembersUpdate | P::MembersDelete => Organization(O::Admin),
-        P::AdministratorsUpdate => Organization(O::Owner),
-        P::InvitationsCreate | P::InvitationsRead | P::InvitationsDelete => Organization(O::Admin),
-        P::WorkspacesCreate => Organization(O::Admin),
-        P::DevicesRead | P::DevicesUpdate => Organization(O::Admin),
-        P::GitHubUpdate => Organization(O::Admin),
-        P::McpServersUpdate => Organization(O::Admin),
-        P::AiSettingsRead | P::AiSettingsUpdate => Organization(O::Admin),
-        P::AgentLoginsUpdate => Organization(O::Admin),
-        P::PoliciesUpdate => Organization(O::Admin),
-        P::AuditLogsRead => Organization(O::Admin),
-        P::AuditUpdate => Organization(O::Admin),
-        P::RolesUpdate => Organization(O::Admin),
-        P::WorkspaceRead => Workspace(W::Viewer),
-        P::WorkspaceWrite => Workspace(W::Member),
-        P::WorkspaceUpdate => Workspace(W::Admin),
-        P::WorkspaceDelete => Workspace(W::Owner),
-        P::WorkspaceMembersCreate | P::WorkspaceMembersUpdate | P::WorkspaceMembersDelete => {
-            Workspace(W::Admin)
+        Permission::ModelsCreate
+        | Permission::ModelsDelete
+        | Permission::PullRequestsUpdate
+        | Permission::ReleasesCreate => Server,
+        Permission::OrganizationRead => Organization(OrgRole::Member),
+        Permission::OrganizationUpdate => Organization(OrgRole::Admin),
+        Permission::OrganizationDelete => Organization(OrgRole::Owner),
+        Permission::MembersCreate | Permission::MembersUpdate | Permission::MembersDelete => {
+            Organization(OrgRole::Admin)
         }
-        P::WorkspaceAdministratorsUpdate => Workspace(W::Owner),
-        P::WorkspaceAiSettingsUpdate => Workspace(W::Admin),
-        P::WorkspaceMcpServersUpdate => Workspace(W::Admin),
-        P::WorkspacePoliciesUpdate => Workspace(W::Admin),
-        P::ProjectSyncsUpdate => Workspace(W::Admin),
-        P::PullRequestsOverride => Workspace(W::Admin),
+        Permission::AdministratorsUpdate => Organization(OrgRole::Owner),
+        Permission::InvitationsCreate
+        | Permission::InvitationsRead
+        | Permission::InvitationsDelete => Organization(OrgRole::Admin),
+        Permission::WorkspacesCreate => Organization(OrgRole::Admin),
+        Permission::DevicesRead | Permission::DevicesUpdate => Organization(OrgRole::Admin),
+        Permission::GitHubUpdate => Organization(OrgRole::Admin),
+        Permission::McpServersUpdate => Organization(OrgRole::Admin),
+        Permission::AiSettingsRead | Permission::AiSettingsUpdate => Organization(OrgRole::Admin),
+        Permission::AgentLoginsUpdate => Organization(OrgRole::Admin),
+        Permission::PoliciesUpdate => Organization(OrgRole::Admin),
+        Permission::AuditLogsRead => Organization(OrgRole::Admin),
+        Permission::AuditUpdate => Organization(OrgRole::Admin),
+        Permission::RolesUpdate => Organization(OrgRole::Admin),
+        Permission::WorkspaceRead => Workspace(WorkspaceRole::Viewer),
+        Permission::WorkspaceWrite => Workspace(WorkspaceRole::Member),
+        Permission::WorkspaceUpdate => Workspace(WorkspaceRole::Admin),
+        Permission::WorkspaceDelete => Workspace(WorkspaceRole::Owner),
+        Permission::WorkspaceMembersCreate
+        | Permission::WorkspaceMembersUpdate
+        | Permission::WorkspaceMembersDelete => Workspace(WorkspaceRole::Admin),
+        Permission::WorkspaceAdministratorsUpdate => Workspace(WorkspaceRole::Owner),
+        Permission::WorkspaceAiSettingsUpdate => Workspace(WorkspaceRole::Admin),
+        Permission::WorkspaceMcpServersUpdate => Workspace(WorkspaceRole::Admin),
+        Permission::WorkspacePoliciesUpdate => Workspace(WorkspaceRole::Admin),
+        Permission::ProjectSyncsUpdate => Workspace(WorkspaceRole::Admin),
+        Permission::PullRequestsOverride => Workspace(WorkspaceRole::Admin),
     }
 }
 
