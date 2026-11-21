@@ -1119,7 +1119,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_model_change_needs_workspace_write_from_the_callers_custom_role() {
-        use crate::db::tenant;
+        use crate::db::custom_roles::testing;
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let ollama = MockServer::start().await;
@@ -1140,9 +1140,9 @@ mod tests {
                 .expect("the workspace's organization");
         let delete = json!({"name": "llama3.2:3b"});
 
-        tenant::hold(pool, organization, scope.workspace_id, scope.user_id, &[]).await;
+        testing::hold(pool, organization, scope.workspace_id, scope.user_id, &[]).await;
         let refused = run(&scope, "delete_model", delete.clone()).await;
-        tenant::hold(
+        testing::hold(
             pool,
             organization,
             scope.workspace_id,

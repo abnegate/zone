@@ -9,11 +9,8 @@ use sqlx::Transaction;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
-use crate::auth::Grant;
 use crate::auth::Scope;
-use crate::db::custom_roles;
-use crate::db::custom_roles::Creation;
-use crate::db::custom_roles::Definition;
+use crate::db::custom_roles::testing;
 use crate::db::organization_members::OrgRole;
 use crate::db::workspace_members::WorkspaceRole;
 use crate::services::mcp_servers::transport::Transport;
@@ -141,58 +138,6 @@ async fn join_workspace(pool: &PgPool, workspace: Uuid, user: Uuid, role: Worksp
         .execute(pool)
         .await
         .expect("a workspace membership");
-}
-
-async fn custom_role(
-    pool: &PgPool,
-    organization: Uuid,
-    scope: Scope,
-    permissions: &[Permission],
-) -> Uuid {
-    let names: Vec<String> = permissions
-        .iter()
-        .map(|permission| permission.name().to_owned())
-        .collect();
-    let grant = Grant::compose(scope, &names).expect("a composable grant");
-    let name = Uuid::new_v4().to_string();
-    let definition = Definition {
-        name: &name,
-        description: None,
-        scope,
-        grant: &grant,
-    };
-    let creator = user(pool).await;
-    match custom_roles::create(pool, organization, &definition, creator)
-        .await
-        .expect("a custom role")
-    {
-        Creation::Created(role) => role.id,
-        Creation::NameTaken => panic!("a fresh name is never taken"),
-    }
-}
-
-async fn hold_organization_role(pool: &PgPool, organization: Uuid, user: Uuid, role: Uuid) {
-    sqlx::query(
-        "UPDATE organization_members SET custom_role_id = $3 WHERE organization_id = $1 AND user_id = $2",
-    )
-    .bind(organization)
-    .bind(user)
-    .bind(role)
-    .execute(pool)
-    .await
-    .expect("an organization custom role");
-}
-
-async fn hold_workspace_role(pool: &PgPool, workspace: Uuid, user: Uuid, role: Uuid) {
-    sqlx::query(
-        "UPDATE workspace_members SET custom_role_id = $3 WHERE workspace_id = $1 AND user_id = $2",
-    )
-    .bind(workspace)
-    .bind(user)
-    .bind(role)
-    .execute(pool)
-    .await
-    .expect("a workspace custom role");
 }
 
 async fn tenant() -> Fixture {
@@ -1925,16 +1870,18 @@ async fn offered_leaves_out_what_the_organization_or_the_workspace_switched_off(
 #[tokio::test]
 async fn a_custom_role_manages_servers_only_with_the_servers_permission() {
     let fixture = tenant().await;
-    let managing = custom_role(
+    let managing = testing::role(
         &fixture.pool,
         fixture.organization,
+        fixture.owner,
         Scope::Organization,
         &[Permission::McpServersUpdate],
     )
     .await;
-    let reading = custom_role(
+    let reading = testing::role(
         &fixture.pool,
         fixture.organization,
+        fixture.owner,
         Scope::Organization,
         &[Permission::AiSettingsRead, Permission::PoliciesUpdate],
     )
@@ -1947,8 +1894,8 @@ async fn a_custom_role_manages_servers_only_with_the_servers_permission() {
         OrgRole::Member,
     )
     .await;
-    hold_organization_role(&fixture.pool, fixture.organization, manager, managing).await;
-    hold_organization_role(&fixture.pool, fixture.organization, fixture.member, reading).await;
+    testing::assign_organization(&fixture.pool, fixture.organization, manager, managing).await;
+    testing::assign_organization(&fixture.pool, fixture.organization, fixture.member, reading).await;
 
     let created = create_authorized(
         &fixture.pool,
@@ -1999,16 +1946,18 @@ async fn a_custom_role_manages_servers_only_with_the_servers_permission() {
 async fn a_workspace_custom_role_writes_overrides_only_with_the_servers_permission() {
     let fixture = tenant().await;
     let github = fixture.create(http("github")).await;
-    let overriding = custom_role(
+    let overriding = testing::role(
         &fixture.pool,
         fixture.organization,
+        fixture.owner,
         Scope::Workspace,
         &[Permission::WorkspaceMcpServersUpdate],
     )
     .await;
-    let writing = custom_role(
+    let writing = testing::role(
         &fixture.pool,
         fixture.organization,
+        fixture.owner,
         Scope::Workspace,
         &[
             Permission::WorkspaceWrite,
@@ -2030,8 +1979,8 @@ async fn a_workspace_custom_role_writes_overrides_only_with_the_servers_permissi
         WorkspaceRole::Viewer,
     )
     .await;
-    hold_workspace_role(&fixture.pool, fixture.workspace, fixture.member, overriding).await;
-    hold_workspace_role(&fixture.pool, fixture.workspace, fixture.admin, writing).await;
+    testing::assign_workspace(&fixture.pool, fixture.workspace, fixture.member, overriding).await;
+    testing::assign_workspace(&fixture.pool, fixture.workspace, fixture.admin, writing).await;
 
     let set = set_workspace_overrides_authorized(
         &fixture.pool,
@@ -2073,14 +2022,15 @@ async fn a_workspace_custom_role_writes_overrides_only_with_the_servers_permissi
 async fn a_custom_role_of_another_organization_grants_nothing() {
     let fixture = tenant().await;
     let other = tenant().await;
-    let foreign = custom_role(
+    let foreign = testing::role(
         &other.pool,
         other.organization,
+        other.owner,
         Scope::Organization,
         &[Permission::McpServersUpdate],
     )
     .await;
-    hold_organization_role(&fixture.pool, fixture.organization, fixture.member, foreign).await;
+    testing::assign_organization(&fixture.pool, fixture.organization, fixture.member, foreign).await;
 
     let created = create_authorized(
         &fixture.pool,
@@ -2106,16 +2056,18 @@ async fn a_custom_role_of_another_organization_grants_nothing() {
 async fn a_role_that_grants_nothing_reads_no_workspace_servers() {
     let fixture = tenant().await;
     let other = tenant().await;
-    let foreign = custom_role(
+    let foreign = testing::role(
         &other.pool,
         other.organization,
+        other.owner,
         Scope::Organization,
         &[Permission::McpServersUpdate],
     )
     .await;
-    let roaming = custom_role(
+    let roaming = testing::role(
         &other.pool,
         other.organization,
+        other.owner,
         Scope::Workspace,
         &[Permission::WorkspaceMcpServersUpdate],
     )
@@ -2137,8 +2089,8 @@ async fn a_role_that_grants_nothing_reads_no_workspace_servers() {
         )
         .await;
     }
-    hold_organization_role(&fixture.pool, fixture.organization, fixture.member, foreign).await;
-    hold_workspace_role(&fixture.pool, fixture.workspace, wanderer, roaming).await;
+    testing::assign_organization(&fixture.pool, fixture.organization, fixture.member, foreign).await;
+    testing::assign_workspace(&fixture.pool, fixture.workspace, wanderer, roaming).await;
 
     let mut connection = fixture.pool.acquire().await.expect("a connection");
     for (user, expected) in [
