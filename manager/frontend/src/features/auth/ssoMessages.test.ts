@@ -13,6 +13,9 @@ const CALLBACK_CODES = [
   'sso_email_unverified',
   'sso_domain_not_allowed',
   'sso_email_conflict',
+  'sso_assertion_invalid',
+  'sso_sign_in_refused',
+  'sso_sign_in_failed',
   'account_disabled',
 ];
 
@@ -38,6 +41,18 @@ describe('ssoMessages', () => {
 
   it('pins the message shown when a callback cannot be trusted', () => {
     expect(SSO_INCOMPLETE).toBe("Sign-in didn't complete. Start again from the sign-in page.");
+  });
+
+  it('pins the SAML sign-in messages', () => {
+    expect(SSO_MESSAGES[SsoCode.AssertionInvalid]).toBe(
+      "Zone couldn't verify the sign-in from your identity provider. Try again, or ask a server admin to check the provider's metadata."
+    );
+    expect(SSO_MESSAGES[SsoCode.SignInRefused]).toBe(
+      "Your identity provider refused the sign-in. Check that you're assigned to Zone there."
+    );
+    expect(SSO_MESSAGES[SsoCode.SignInFailed]).toBe(
+      "Zone couldn't finish signing you in. Try again in a moment, or ask a server admin to check the server logs."
+    );
   });
 
   it('looks up a known code and returns null for anything else', () => {

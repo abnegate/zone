@@ -9,15 +9,19 @@ import {
   ENFORCED,
   ENTITLED,
   ENTITLED_EMPTY,
+  ENTITLED_WITH_SAML,
   ENTRA,
+  KEYCLOAK,
   LAPSED_WITH_PROVIDER,
   OKTA,
   REDIRECT_URI,
+  SERVICE_PROVIDER,
 } from '../fixtures';
 import { refusalMessage } from '../messages';
 import { SsoRefusal } from '../SsoRefusal';
 import { SsoAdminCode } from '../schemas';
 import type { SettingsResponse } from '../types';
+import { SERVICE_PROVIDER_TITLE } from './ServiceProviderDetails';
 import {
   ENFORCED_READ_ONLY,
   ENFORCEMENT_BLOCKED,
@@ -127,6 +131,7 @@ describe('SsoSection', () => {
       expect(screen.queryByRole('switch')).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Add provider' })).not.toBeInTheDocument();
       expect(screen.queryByText(REDIRECT_URI)).not.toBeInTheDocument();
+      expect(screen.queryByText(SERVICE_PROVIDER_TITLE)).not.toBeInTheDocument();
       expect(screen.queryByText('Identity providers')).not.toBeInTheDocument();
     });
 
@@ -151,6 +156,7 @@ describe('SsoSection', () => {
       expect(providerNames()).toEqual(['Okta']);
       expect(screen.queryByRole('button', { name: /Edit|Delete|Add provider/ })).toBeNull();
       expect(screen.queryByText(REDIRECT_URI)).not.toBeInTheDocument();
+      expect(screen.queryByText(SERVICE_PROVIDER_TITLE)).not.toBeInTheDocument();
     });
 
     it('treats a grace period as entitled', async () => {
@@ -179,6 +185,7 @@ describe('SsoSection', () => {
       expect(providerNames()).toEqual(['Okta', 'Microsoft Entra ID']);
       const okta = provider('Okta');
       expect(okta).toHaveTextContent('Enabled');
+      expect(within(okta).getByText('OIDC')).toBeInTheDocument();
       expect(okta).toHaveTextContent(OKTA.issuer);
       expect(okta).toHaveTextContent('Domains: acme.com');
       expect(okta).toHaveTextContent('Verified email required');
@@ -225,6 +232,61 @@ describe('SsoSection', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Copy redirect URI' }));
 
       expect(await screen.findByRole('alert')).toHaveTextContent('Could not copy');
+    });
+  });
+
+  describe('SAML', () => {
+    it('shows the service provider values to copy into the identity provider', async () => {
+      await loaded(ENTITLED_EMPTY);
+
+      const card = screen
+        .getByText(SERVICE_PROVIDER_TITLE)
+        .closest('.settings-card') as HTMLElement;
+      expect(card).not.toBeNull();
+      for (const label of ['Entity ID', 'ACS URL', 'Metadata URL']) {
+        expect(within(card).getByText(label)).toBeInTheDocument();
+      }
+      expect(within(card).getByText(SERVICE_PROVIDER.acs_url)).toBeInTheDocument();
+      expect(within(card).getAllByText(SERVICE_PROVIDER.entity_id)).toHaveLength(2);
+    });
+
+    it.each([
+      ['entity ID', SERVICE_PROVIDER.entity_id],
+      ['ACS URL', SERVICE_PROVIDER.acs_url],
+      ['metadata URL', SERVICE_PROVIDER.metadata_url],
+    ])('copies the %s', async (name, value) => {
+      await loaded(ENTITLED);
+
+      fireEvent.click(screen.getByRole('button', { name: `Copy ${name}` }));
+
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith(value));
+      expect(await screen.findByRole('button', { name: `Copied ${name}` })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Copy redirect URI' })).toBeInTheDocument();
+    });
+
+    it('badges each provider with its protocol and shows the SAML entity ID', async () => {
+      await loaded(ENTITLED_WITH_SAML);
+
+      expect(providerNames()).toEqual(['Okta', 'Keycloak']);
+      expect(within(provider('Okta')).getByText('OIDC')).toBeInTheDocument();
+      const keycloak = provider('Keycloak');
+      expect(within(keycloak).getByText('SAML')).toBeInTheDocument();
+      expect(keycloak).toHaveTextContent(KEYCLOAK.issuer);
+      expect(keycloak).toHaveTextContent('Domains: acme.com');
+      expect(keycloak).toHaveTextContent('Never joins accounts by email');
+      expect(keycloak).not.toHaveTextContent('Provider emails trusted');
+    });
+
+    it('opens the SAML edit form without client fields', async () => {
+      await loaded(ENTITLED_WITH_SAML);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Edit Keycloak' }));
+
+      const dialog = screen.getByRole('dialog', { name: 'Edit Keycloak' });
+      expect(within(dialog).queryByLabelText('Client ID')).toBeNull();
+      expect((within(dialog).getByLabelText('Metadata URL') as HTMLInputElement).value).toBe(
+        KEYCLOAK.metadata_url
+      );
     });
   });
 

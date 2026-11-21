@@ -5,6 +5,7 @@ import type {
   EnforcementResponseSchema,
   ProtocolSchema,
   ProviderResponseSchema,
+  ServiceProviderResponseSchema,
   SettingsResponseSchema,
   SsoAdminCodeSchema,
   SsoRefusalSchema,
@@ -14,6 +15,7 @@ import type {
 export type Protocol = z.infer<typeof ProtocolSchema>;
 export type SsoAdminCode = z.infer<typeof SsoAdminCodeSchema>;
 export type ProviderResponse = z.infer<typeof ProviderResponseSchema>;
+export type ServiceProviderResponse = z.infer<typeof ServiceProviderResponseSchema>;
 export type SettingsResponse = z.infer<typeof SettingsResponseSchema>;
 export type CreateProviderRequest = z.infer<typeof CreateProviderRequestSchema>;
 export type UpdateProviderRequest = z.infer<typeof UpdateProviderRequestSchema>;
