@@ -8,6 +8,8 @@ use abnegate_secret::MasterKey;
 use chrono::Utc;
 use dashmap::DashMap;
 use sqlx::PgPool;
+#[cfg(any(test, feature = "testing"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::OnceCell;
@@ -145,6 +147,10 @@ struct AppStateInner {
     pub pull_request_statuses: StatusCache,
     pub github_snapshots: Snapshots,
     pub background: TaskTracker,
+    /// Whether the Community member cap applies, which a test build leaves off
+    /// until a test opts in with [`AppState::cap_members`].
+    #[cfg(any(test, feature = "testing"))]
+    capped: AtomicBool,
 }
 
 impl AppState {
@@ -274,6 +280,8 @@ impl AppState {
                 pull_request_statuses: StatusCache::default(),
                 github_snapshots,
                 background: TaskTracker::new(),
+                #[cfg(any(test, feature = "testing"))]
+                capped: AtomicBool::new(false),
             }),
         }
     }
@@ -510,6 +518,16 @@ impl AppState {
     /// [`Self::settled_license`] as the key stored, verified or not.
     pub async fn stored_license(&self) -> DbResult<Stored> {
         self.inner.licenses.stored(&self.inner.db).await
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn cap_members(&self) {
+        self.inner.capped.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn members_capped(&self) -> bool {
+        self.inner.capped.load(Ordering::Relaxed)
     }
 
     pub async fn edition(&self) -> Edition {

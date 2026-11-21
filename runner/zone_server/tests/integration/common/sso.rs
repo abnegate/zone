@@ -10,7 +10,7 @@ use chrono::{SubsecRound, TimeDelta, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
-use zone_enterprise::{GRACE_DAYS, Keyring, Payload, SigningKey, TrustedKey, sign};
+use zone_enterprise::{GRACE_DAYS, Keyring, Payload, Plan, SigningKey, TrustedKey, sign};
 use zone_server::db::{licenses, migrations};
 use zone_server::services::mail::AccountMail;
 use zone_server::state::AppState;
@@ -69,6 +69,13 @@ impl Fixture {
             client,
             mail,
         }
+    }
+
+    /// As [`Fixture::new`], with the Community member cap in force.
+    pub async fn capped(prefix: &'static str) -> Self {
+        let fixture = Self::new(prefix).await;
+        fixture.state().cap_members();
+        fixture
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -226,7 +233,7 @@ pub fn keyring() -> Keyring {
     Keyring::new([TrustedKey::new(KEY_ID, signing.verifying_key().to_bytes()).unwrap()]).unwrap()
 }
 
-fn expiring(expires_in: TimeDelta) -> String {
+fn expiring(expires_in: TimeDelta, plan: Option<Plan>) -> String {
     let expires_at = Utc::now().trunc_subsecs(0) + expires_in;
     sign(
         &Payload {
@@ -237,20 +244,29 @@ fn expiring(expires_in: TimeDelta) -> String {
             expires_at,
             key_id: KEY_ID.into(),
             subscription: None,
-            plan: None,
+            plan,
         },
         &SigningKey::from_bytes(&SEED),
     )
 }
 
+/// An Enterprise license that names no plan, as every key signed before plans did.
 pub fn active() -> String {
-    expiring(TimeDelta::days(365))
+    expiring(TimeDelta::days(365), None)
 }
 
 pub fn grace() -> String {
-    expiring(-TimeDelta::days(1))
+    expiring(-TimeDelta::days(1), None)
 }
 
 pub fn lapsed() -> String {
-    expiring(-TimeDelta::days(GRACE_DAYS + 1))
+    expiring(-TimeDelta::days(GRACE_DAYS + 1), None)
+}
+
+pub fn team() -> String {
+    expiring(TimeDelta::days(365), Some(Plan::Team))
+}
+
+pub fn lapsed_team() -> String {
+    expiring(-TimeDelta::days(GRACE_DAYS + 1), Some(Plan::Team))
 }
