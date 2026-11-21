@@ -1,28 +1,79 @@
-//! Workspace member management endpoints
+//! Workspace and workspace member endpoints
+
+use std::fmt::Display;
 
 use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use uuid::Uuid;
+use zone_enterprise::Feature;
 
-use crate::auth::{Grant, OrgMember, WorkspaceAdmin, WorkspaceMember, WorkspaceOwner};
+use crate::auth::{
+    Grant, OrganizationMember, Permission, WorkspaceMember, WorkspacePermit, entitlement,
+};
 use crate::db::audit::{actions, resources};
-use crate::db::custom_roles::{self, Assignment};
-use crate::db::{workspace_members, workspaces};
+use crate::db::custom_roles::{self, Assignment, Summary};
+use crate::db::workspace_members::{self, RoleChange, WorkspaceRole};
+use crate::db::workspaces;
 use crate::state::AppState;
 use crate::sync::hook::Removal;
 
 use super::common::{AuditEvent, ErrorResponse, Timestamps, audit};
 
-// ============================================================================
-// Workspace Endpoints
-// ============================================================================
+const WORKSPACE_NOT_FOUND: &str = "Workspace not found";
+const MEMBER_NOT_FOUND: &str = "Member not found";
+const ROLE_NOT_FOUND: &str = "Role not found";
+const PROMOTION_REFUSED: &str = "Only workspace owners can promote users to admin or owner";
+const EXCEEDS_REFUSAL: &str = "This role grants permissions you do not hold";
 
-/// Workspace response
+fn refusal(status: StatusCode, message: &str) -> Response {
+    (status, Json(ErrorResponse::new(message))).into_response()
+}
+
+fn exceeds() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse::with_code(
+            EXCEEDS_REFUSAL,
+            custom_roles::EXCEEDS,
+        )),
+    )
+        .into_response()
+}
+
+fn internal(error: impl Display) -> Response {
+    tracing::error!(%error, "Database error");
+    refusal(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+}
+
+/// What a membership holds, as the API reports it: `role` is the highest
+/// built-in role the grant fully covers, not the stored column.
+#[derive(Debug, Serialize)]
+struct Standing {
+    role: &'static str,
+    custom_role: Option<Summary>,
+    permissions: Grant,
+}
+
+impl Standing {
+    fn new(custom_role: Option<Summary>, grant: Grant) -> Self {
+        Self {
+            role: grant.workspace_rank().as_str(),
+            custom_role,
+            permissions: grant,
+        }
+    }
+
+    fn built_in(role: WorkspaceRole) -> Self {
+        Self::new(None, Grant::workspace(role))
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct WorkspaceResponse {
     id: Uuid,
@@ -31,8 +82,8 @@ pub struct WorkspaceResponse {
     slug: String,
     description: Option<String>,
     is_active: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    role: Option<&'static str>,
+    #[serde(flatten)]
+    standing: Option<Standing>,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -46,7 +97,7 @@ impl From<workspaces::WorkspaceRow> for WorkspaceResponse {
             slug: row.slug,
             description: row.description,
             is_active: row.is_active.unwrap_or(true),
-            role: None,
+            standing: None,
             timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
@@ -54,20 +105,16 @@ impl From<workspaces::WorkspaceRow> for WorkspaceResponse {
 
 impl From<workspace_members::UserWorkspace> for WorkspaceResponse {
     fn from(membership: workspace_members::UserWorkspace) -> Self {
-        Self::from(membership.workspace).with_role(membership.role)
+        Self::from(membership.workspace)
+            .held(Standing::new(membership.custom_role, membership.grant))
     }
 }
 
 impl WorkspaceResponse {
-    fn with_role(mut self, role: workspace_members::WorkspaceRole) -> Self {
-        self.role = Some(role.as_str());
+    fn held(mut self, standing: Standing) -> Self {
+        self.standing = Some(standing);
         self
     }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct OrgIdPath {
-    org_id: Uuid,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,13 +127,17 @@ struct WorkspacesListResponse {
     workspaces: Vec<WorkspaceResponse>,
 }
 
-/// GET /api/organizations/:org_id/workspaces - List accessible workspaces
+/// GET /api/organizations/:org_id/workspaces - List the caller's workspaces
 pub async fn list_accessible_workspaces(
     State(state): State<AppState>,
-    member: OrgMember,
-) -> impl IntoResponse {
-    match workspace_members::list_user_workspaces_in_org(state.db(), member.user_id, member.org_id)
-        .await
+    member: OrganizationMember,
+) -> Response {
+    match workspace_members::list_user_workspaces_in_org(
+        state.db(),
+        member.user_id,
+        member.organization_id,
+    )
+    .await
     {
         Ok(workspaces) => Json(WorkspacesListResponse {
             workspaces: workspaces
@@ -95,40 +146,20 @@ pub async fn list_accessible_workspaces(
                 .collect(),
         })
         .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => internal(error),
     }
 }
 
-/// GET /api/workspaces/:workspace_id - Get workspace (requires member)
-pub async fn get_workspace(
-    State(state): State<AppState>,
-    member: WorkspaceMember,
-) -> impl IntoResponse {
+/// GET /api/workspaces/:workspace_id
+pub async fn get_workspace(State(state): State<AppState>, member: WorkspaceMember) -> Response {
     match workspaces::get_workspace(state.db(), member.workspace_id).await {
-        Ok(Some(ws)) => Json(SingleWorkspaceResponse {
-            workspace: WorkspaceResponse::from(ws).with_role(member.role),
+        Ok(Some(workspace)) => Json(SingleWorkspaceResponse {
+            workspace: WorkspaceResponse::from(workspace)
+                .held(Standing::new(member.custom_role, member.grant)),
         })
         .into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Workspace not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Ok(None) => refusal(StatusCode::NOT_FOUND, WORKSPACE_NOT_FOUND),
+        Err(error) => internal(error),
     }
 }
 
@@ -139,33 +170,33 @@ pub struct UpdateWorkspaceRequest {
     is_active: Option<bool>,
 }
 
-/// PATCH /api/workspaces/:workspace_id - Update workspace (requires admin)
+/// PATCH /api/workspaces/:workspace_id
 pub async fn update_workspace(
     State(state): State<AppState>,
-    admin: WorkspaceAdmin,
-    Json(req): Json<UpdateWorkspaceRequest>,
-) -> impl IntoResponse {
+    WorkspacePermit(member): WorkspacePermit<{ Permission::WorkspaceUpdate.index() }>,
+    Json(request): Json<UpdateWorkspaceRequest>,
+) -> Response {
     match workspaces::update_workspace(
         state.db(),
-        admin.workspace_id,
-        req.name.as_deref(),
-        req.description.as_deref(),
-        req.is_active,
+        member.workspace_id,
+        request.name.as_deref(),
+        request.description.as_deref(),
+        request.is_active,
     )
     .await
     {
-        Ok(Some(ws)) => {
-            let response = WorkspaceResponse::from(ws);
+        Ok(Some(workspace)) => {
+            let response = WorkspaceResponse::from(workspace);
             audit(
                 state.db(),
                 AuditEvent {
                     organization_id: Some(response.organization_id),
-                    workspace_id: Some(admin.workspace_id),
-                    actor_id: admin.user_id,
-                    actor_email: &admin.email,
+                    workspace_id: Some(member.workspace_id),
+                    actor_id: member.user_id,
+                    actor_email: &member.email,
                     action: actions::WORKSPACE_UPDATED,
                     resource_type: resources::WORKSPACE,
-                    resource_id: Some(admin.workspace_id),
+                    resource_id: Some(member.workspace_id),
                     old_values: None,
                     new_values: serde_json::to_value(&response).ok(),
                 },
@@ -176,67 +207,45 @@ pub async fn update_workspace(
             })
             .into_response()
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Workspace not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Ok(None) => refusal(StatusCode::NOT_FOUND, WORKSPACE_NOT_FOUND),
+        Err(error) => internal(error),
     }
 }
 
-/// DELETE /api/workspaces/:workspace_id - Delete workspace (requires owner)
+/// DELETE /api/workspaces/:workspace_id
 ///
-/// Deleting the workspace unseats every member at once, so it takes the role
-/// `remove_member` demands to unseat a single admin, and the one
-/// `organizations::delete` demands to destroy the organization above it.
+/// Deleting the workspace unseats every member at once, so it needs
+/// `workspace:delete`, which only built-in owners hold and no custom role can
+/// carry.
 pub async fn delete_workspace(
     State(state): State<AppState>,
-    owner: WorkspaceOwner,
-) -> impl IntoResponse {
-    let organization_id = match workspaces::get_workspace(state.db(), owner.workspace_id).await {
+    WorkspacePermit(member): WorkspacePermit<{ Permission::WorkspaceDelete.index() }>,
+) -> Response {
+    let organization_id = match workspaces::get_workspace(state.db(), member.workspace_id).await {
         Ok(workspace) => workspace.map(|workspace| workspace.organization_id),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+        Err(error) => return internal(error),
     };
 
-    let removal = match Removal::of_workspace(&state, owner.workspace_id).await {
+    let removal = match Removal::of_workspace(&state, member.workspace_id).await {
         Ok(removal) => removal,
         Err(error) => {
             tracing::error!(%error, "Failed to read the syncs whose webhooks the delete removes");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+            return refusal(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
         }
     };
-    match workspaces::delete_workspace(state.db(), owner.workspace_id).await {
+    match workspaces::delete_workspace(state.db(), member.workspace_id).await {
         Ok(true) => {
             removal.run(&state).await;
             audit(
                 state.db(),
                 AuditEvent {
                     organization_id,
-                    workspace_id: Some(owner.workspace_id),
-                    actor_id: owner.user_id,
-                    actor_email: &owner.email,
+                    workspace_id: Some(member.workspace_id),
+                    actor_id: member.user_id,
+                    actor_email: &member.email,
                     action: actions::WORKSPACE_DELETED,
                     resource_type: resources::WORKSPACE,
-                    resource_id: Some(owner.workspace_id),
+                    resource_id: Some(member.workspace_id),
                     old_values: None,
                     new_values: None,
                 },
@@ -244,33 +253,18 @@ pub async fn delete_workspace(
             .await;
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Workspace not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Ok(false) => refusal(StatusCode::NOT_FOUND, WORKSPACE_NOT_FOUND),
+        Err(error) => internal(error),
     }
 }
 
-// ============================================================================
-// Workspace Member Management
-// ============================================================================
-
-/// Workspace member response
 #[derive(Debug, Serialize)]
 pub struct WorkspaceMemberResponse {
     id: Uuid,
     workspace_id: Uuid,
     user_id: Uuid,
-    role: String,
+    #[serde(flatten)]
+    standing: Standing,
     is_active: bool,
     invited_by: Option<Uuid>,
     email: Option<String>,
@@ -279,19 +273,27 @@ pub struct WorkspaceMemberResponse {
     timestamps: Timestamps,
 }
 
-impl From<workspace_members::WorkspaceMemberRow> for WorkspaceMemberResponse {
-    fn from(row: workspace_members::WorkspaceMemberRow) -> Self {
+impl WorkspaceMemberResponse {
+    fn new(row: workspace_members::WorkspaceMemberRow, standing: Standing) -> Self {
         Self {
             id: row.id,
             workspace_id: row.workspace_id,
             user_id: row.user_id,
-            role: row.role.as_str().to_string(),
+            standing,
             is_active: row.is_active,
             invited_by: row.invited_by,
             email: None,
             display_name: None,
             timestamps: Timestamps::from_naive(Some(row.created_at), Some(row.updated_at)),
         }
+    }
+
+    fn audited(&self) -> Value {
+        json!({
+            "user_id": self.user_id,
+            "role": self.standing.role,
+            "custom_role": self.standing.custom_role,
+        })
     }
 }
 
@@ -300,22 +302,25 @@ impl From<workspace_members::MemberWithUser> for WorkspaceMemberResponse {
         Self {
             email: Some(member.email),
             display_name: member.display_name,
-            ..Self::from(member.member)
+            ..Self::new(
+                member.member,
+                Standing::new(member.custom_role, member.grant),
+            )
         }
     }
 }
 
-/// Add workspace member request
 #[derive(Debug, Deserialize)]
 pub struct AddWorkspaceMemberRequest {
     user_id: Uuid,
     role: String,
 }
 
-/// Update workspace member role request
+/// A built-in `role` or a `custom_role_id`, exactly one.
 #[derive(Debug, Deserialize)]
 pub struct UpdateWorkspaceMemberRoleRequest {
-    role: String,
+    role: Option<String>,
+    custom_role_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -323,11 +328,8 @@ struct WorkspaceMembersListResponse {
     members: Vec<WorkspaceMemberResponse>,
 }
 
-/// GET /api/workspaces/:workspace_id/members - List members (requires member)
-pub async fn list_members(
-    State(state): State<AppState>,
-    member: WorkspaceMember,
-) -> impl IntoResponse {
+/// GET /api/workspaces/:workspace_id/members
+pub async fn list_members(State(state): State<AppState>, member: WorkspaceMember) -> Response {
     match workspace_members::list_members_with_users(state.db(), member.workspace_id).await {
         Ok(members) => Json(WorkspaceMembersListResponse {
             members: members
@@ -336,207 +338,156 @@ pub async fn list_members(
                 .collect(),
         })
         .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => internal(error),
     }
 }
 
-/// POST /api/workspaces/:workspace_id/members - Add member (requires admin)
 async fn audit_member(
     state: &AppState,
-    admin: &WorkspaceAdmin,
+    actor: &WorkspaceMember,
     action: &str,
     user_id: Uuid,
-    role: Option<&str>,
+    new_values: Option<Value>,
 ) {
     audit(
         state.db(),
         AuditEvent {
             organization_id: None,
-            workspace_id: Some(admin.workspace_id),
-            actor_id: admin.user_id,
-            actor_email: &admin.email,
+            workspace_id: Some(actor.workspace_id),
+            actor_id: actor.user_id,
+            actor_email: &actor.email,
             action,
             resource_type: resources::MEMBER,
             resource_id: Some(user_id),
             old_values: None,
-            new_values: role.map(|role| serde_json::json!({ "user_id": user_id, "role": role })),
+            new_values,
         },
     )
     .await;
 }
 
+/// Why a member route refused before or while seating a member.
+#[derive(Debug)]
+enum Refusal {
+    Promotion,
+    Exceeds,
+    Seated,
+    Vanished,
+    Database(sqlx::Error),
+}
+
+impl From<sqlx::Error> for Refusal {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
+impl IntoResponse for Refusal {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Promotion => refusal(StatusCode::FORBIDDEN, PROMOTION_REFUSED),
+            Self::Exceeds => exceeds(),
+            Self::Seated => refusal(
+                StatusCode::CONFLICT,
+                "User is already an active member of this workspace",
+            ),
+            Self::Vanished => refusal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to retrieve the added member",
+            ),
+            Self::Database(error) => internal(error),
+        }
+    }
+}
+
+fn promotable(member: &WorkspaceMember, role: WorkspaceRole) -> Result<(), Refusal> {
+    if role >= WorkspaceRole::Admin && !member.allows(Permission::WorkspaceAdministratorsUpdate) {
+        return Err(Refusal::Promotion);
+    }
+    Ok(())
+}
+
+fn seatable(member: &WorkspaceMember, role: WorkspaceRole) -> Result<(), Refusal> {
+    promotable(member, role)?;
+    if !member.grant.covers(&Grant::workspace(role)) {
+        return Err(Refusal::Exceeds);
+    }
+    Ok(())
+}
+
+/// POST /api/workspaces/:workspace_id/members
+///
+/// A direct add seats a built-in role only, and never one that grants more
+/// than the caller holds.
 pub async fn add_member(
     State(state): State<AppState>,
-    admin: WorkspaceAdmin,
-    Json(req): Json<AddWorkspaceMemberRequest>,
-) -> impl IntoResponse {
-    let role = match req.role.parse::<workspace_members::WorkspaceRole>() {
-        Ok(r) => r,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "Invalid role. Must be one of: viewer, member, admin",
-                )),
-            )
-                .into_response();
-        }
+    WorkspacePermit(member): WorkspacePermit<{ Permission::WorkspaceMembersCreate.index() }>,
+    Json(request): Json<AddWorkspaceMemberRequest>,
+) -> Response {
+    let Ok(role) = request.role.parse::<WorkspaceRole>() else {
+        return refusal(
+            StatusCode::BAD_REQUEST,
+            "Invalid role. Must be one of: viewer, member, admin",
+        );
     };
-
-    if role >= workspace_members::WorkspaceRole::Admin
-        && admin.role != workspace_members::WorkspaceRole::Owner
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "Only workspace owners can promote users to admin or owner",
-            )),
-        )
-            .into_response();
+    let seated = match seatable(&member, role) {
+        Ok(()) => seat(&state, &member, request.user_id, role).await,
+        Err(refused) => Err(refused),
+    };
+    match seated {
+        Ok((status, response)) => (status, Json(response)).into_response(),
+        Err(refused) => refused.into_response(),
     }
+}
 
-    // CRITICAL-7: Check if member already exists (active or inactive)
-    match workspace_members::get_member(state.db(), admin.workspace_id, req.user_id).await {
-        Ok(Some(existing_member)) => {
-            if existing_member.is_active {
-                // Member is already active - return 409 CONFLICT
-                (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::new(
-                        "User is already an active member of this workspace",
-                    )),
-                )
-                    .into_response()
-            } else {
-                // Member exists but is inactive - reactivate
-                match workspace_members::reactivate_member(
+/// Adds the user, or reactivates them if they were removed; an active member
+/// is a conflict.
+async fn seat(
+    state: &AppState,
+    member: &WorkspaceMember,
+    user_id: Uuid,
+    role: WorkspaceRole,
+) -> Result<(StatusCode, WorkspaceMemberResponse), Refusal> {
+    let status =
+        match workspace_members::get_member(state.db(), member.workspace_id, user_id).await? {
+            Some(existing) if existing.is_active => return Err(Refusal::Seated),
+            Some(_) => {
+                workspace_members::reactivate_member(
                     state.db(),
-                    admin.workspace_id,
-                    req.user_id,
+                    member.workspace_id,
+                    user_id,
                     role,
-                    Some(admin.user_id),
+                    Some(member.user_id),
                 )
-                .await
-                {
-                    Ok(_) => {
-                        // Fetch the reactivated member to return
-                        match workspace_members::get_member(
-                            state.db(),
-                            admin.workspace_id,
-                            req.user_id,
-                        )
-                        .await
-                        {
-                            Ok(Some(member)) => {
-                                audit_member(
-                                    &state,
-                                    &admin,
-                                    actions::MEMBER_ADDED,
-                                    member.user_id,
-                                    Some(member.role.as_str()),
-                                )
-                                .await;
-                                (StatusCode::OK, Json(WorkspaceMemberResponse::from(member)))
-                                    .into_response()
-                            }
-                            Ok(None) => (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(ErrorResponse::new("Failed to retrieve reactivated member")),
-                            )
-                                .into_response(),
-                            Err(e) => {
-                                tracing::error!("Database error: {}", e);
-                                (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    Json(ErrorResponse::new("Internal server error")),
-                                )
-                                    .into_response()
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Database error reactivating member: {}", e);
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse::new("Internal server error")),
-                        )
-                            .into_response()
-                    }
-                }
+                .await?;
+                StatusCode::OK
             }
-        }
-        Ok(None) => {
-            // Member doesn't exist - add new member
-            match workspace_members::add_member(
-                state.db(),
-                admin.workspace_id,
-                req.user_id,
-                role,
-                Some(admin.user_id),
-            )
-            .await
-            {
-                Ok(_member_id) => {
-                    // Fetch the created member to return
-                    match workspace_members::get_member(state.db(), admin.workspace_id, req.user_id)
-                        .await
-                    {
-                        Ok(Some(member)) => {
-                            audit_member(
-                                &state,
-                                &admin,
-                                actions::MEMBER_ADDED,
-                                member.user_id,
-                                Some(member.role.as_str()),
-                            )
-                            .await;
-                            (
-                                StatusCode::CREATED,
-                                Json(WorkspaceMemberResponse::from(member)),
-                            )
-                                .into_response()
-                        }
-                        Ok(None) => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse::new("Failed to retrieve created member")),
-                        )
-                            .into_response(),
-                        Err(e) => {
-                            tracing::error!("Database error: {}", e);
-                            (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(ErrorResponse::new("Internal server error")),
-                            )
-                                .into_response()
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Database error adding member: {}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse::new("Internal server error")),
-                    )
-                        .into_response()
-                }
+            None => {
+                workspace_members::add_member(
+                    state.db(),
+                    member.workspace_id,
+                    user_id,
+                    role,
+                    Some(member.user_id),
+                )
+                .await?;
+                StatusCode::CREATED
             }
-        }
-        Err(e) => {
-            tracing::error!("Database error checking member: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
+        };
+
+    let row = workspace_members::get_member(state.db(), member.workspace_id, user_id)
+        .await?
+        .ok_or(Refusal::Vanished)?;
+    let response = WorkspaceMemberResponse::new(row, Standing::built_in(role));
+    audit_member(
+        state,
+        member,
+        actions::MEMBER_ADDED,
+        user_id,
+        Some(response.audited()),
+    )
+    .await;
+    Ok((status, response))
 }
 
 #[derive(Debug, Deserialize)]
@@ -545,160 +496,128 @@ pub struct WorkspaceMemberPath {
     user_id: Uuid,
 }
 
-/// PATCH /api/workspaces/:workspace_id/members/:user_id - Update role (requires admin)
+/// PATCH /api/workspaces/:workspace_id/members/:user_id
+///
+/// Assigning a custom role needs the Enterprise license; assigning a built-in
+/// role never does.
 pub async fn update_member_role(
     State(state): State<AppState>,
-    admin: WorkspaceAdmin,
+    WorkspacePermit(member): WorkspacePermit<{ Permission::WorkspaceMembersUpdate.index() }>,
     Path(path): Path<WorkspaceMemberPath>,
-    Json(req): Json<UpdateWorkspaceMemberRoleRequest>,
-) -> impl IntoResponse {
-    let role = match req.role.parse::<workspace_members::WorkspaceRole>() {
-        Ok(r) => r,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "Invalid role. Must be one of: viewer, member, admin, owner",
-                )),
-            )
-                .into_response();
+    Json(request): Json<UpdateWorkspaceMemberRoleRequest>,
+) -> Response {
+    let assignment =
+        match Assignment::<WorkspaceRole>::parse(request.role.as_deref(), request.custom_role_id) {
+            Ok(assignment) => assignment,
+            Err(message) => return refusal(StatusCode::BAD_REQUEST, message),
+        };
+    match assignment {
+        Assignment::BuiltIn(role) => {
+            if let Err(refused) = promotable(&member, role) {
+                return refused.into_response();
+            }
         }
-    };
-
-    // NEW-MAJOR-1: Prevent privilege escalation - only owners can grant admin or owner role
-    if role >= workspace_members::WorkspaceRole::Admin
-        && admin.role != workspace_members::WorkspaceRole::Owner
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "Only workspace owners can promote users to admin or owner",
-            )),
-        )
-            .into_response();
+        Assignment::Custom(_) => {
+            if let Err(unentitled) = entitlement::require(&state, Feature::CustomRoles).await {
+                return unentitled.into_response();
+            }
+        }
     }
 
-    match workspace_members::change_role(
+    let change = match workspace_members::change_role(
         state.db(),
-        admin.workspace_id,
+        member.workspace_id,
         path.user_id,
-        Assignment::BuiltIn(role),
-        &Grant::workspace(admin.role),
+        assignment,
+        &member.grant,
     )
     .await
     {
-        Ok(workspace_members::RoleChange::Applied(member)) => {
-            audit_member(
-                &state,
-                &admin,
-                actions::MEMBER_ROLE_CHANGED,
-                member.user_id,
-                Some(member.role.as_str()),
-            )
-            .await;
-            Json(WorkspaceMemberResponse::from(*member)).into_response()
-        }
-        Ok(workspace_members::RoleChange::Forbidden) => (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
+        Ok(change) => change,
+        Err(error) => return internal(error),
+    };
+    let row = match change {
+        RoleChange::Applied(row) => *row,
+        RoleChange::Forbidden => {
+            return refusal(
+                StatusCode::FORBIDDEN,
                 "Only workspace owners can change the role of an admin or owner",
-            )),
-        )
-            .into_response(),
-        Ok(workspace_members::RoleChange::Missing) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Member not found")),
-        )
-            .into_response(),
-        Ok(workspace_members::RoleChange::LastOwner) => (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "Cannot demote the last owner of the workspace",
-            )),
-        )
-            .into_response(),
-        Ok(workspace_members::RoleChange::LastAdmin) => (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "Cannot demote the last admin of the workspace",
-            )),
-        )
-            .into_response(),
-        Ok(workspace_members::RoleChange::Exceeds) => (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::with_code(
-                "This role grants permissions you do not hold",
-                custom_roles::EXCEEDS,
-            )),
-        )
-            .into_response(),
-        Ok(workspace_members::RoleChange::RoleMissing) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Role not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
+            );
         }
-    }
+        RoleChange::Missing => return refusal(StatusCode::NOT_FOUND, MEMBER_NOT_FOUND),
+        RoleChange::LastOwner => {
+            return refusal(
+                StatusCode::FORBIDDEN,
+                "Cannot demote the last owner of the workspace",
+            );
+        }
+        RoleChange::LastAdmin => {
+            return refusal(
+                StatusCode::FORBIDDEN,
+                "Cannot demote the last admin of the workspace",
+            );
+        }
+        RoleChange::Exceeds => return exceeds(),
+        RoleChange::RoleMissing => return refusal(StatusCode::NOT_FOUND, ROLE_NOT_FOUND),
+    };
+
+    let standing = match assignment {
+        Assignment::BuiltIn(role) => Standing::built_in(role),
+        Assignment::Custom(_) => {
+            match workspace_members::membership(state.db(), member.workspace_id, path.user_id).await
+            {
+                Ok(Some(held)) => Standing::new(held.custom_role, held.grant),
+                Ok(None) => Standing::built_in(row.role),
+                Err(error) => return internal(error),
+            }
+        }
+    };
+    let response = WorkspaceMemberResponse::new(row, standing);
+    audit_member(
+        &state,
+        &member,
+        actions::MEMBER_ROLE_CHANGED,
+        response.user_id,
+        Some(response.audited()),
+    )
+    .await;
+    Json(response).into_response()
 }
 
-/// DELETE /api/workspaces/:workspace_id/members/:user_id - Remove member (requires admin)
+/// DELETE /api/workspaces/:workspace_id/members/:user_id
 pub async fn remove_member(
     State(state): State<AppState>,
-    admin: WorkspaceAdmin,
+    WorkspacePermit(member): WorkspacePermit<{ Permission::WorkspaceMembersDelete.index() }>,
     Path(path): Path<WorkspaceMemberPath>,
-) -> impl IntoResponse {
+) -> Response {
     match workspace_members::remove_guarded(
         state.db(),
-        admin.workspace_id,
+        member.workspace_id,
         path.user_id,
-        &Grant::workspace(admin.role),
+        &member.grant,
     )
     .await
     {
         Ok(workspace_members::Removal::Removed) => {
-            audit_member(&state, &admin, actions::MEMBER_REMOVED, path.user_id, None).await;
+            audit_member(&state, &member, actions::MEMBER_REMOVED, path.user_id, None).await;
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(workspace_members::Removal::Forbidden) => (
+        Ok(workspace_members::Removal::Forbidden) => refusal(
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "Only workspace owners can remove admins or owners",
-            )),
-        )
-            .into_response(),
-        Ok(workspace_members::Removal::LastOwner) => (
+            "Only workspace owners can remove admins or owners",
+        ),
+        Ok(workspace_members::Removal::LastOwner) => refusal(
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "Cannot remove the last owner of the workspace",
-            )),
-        )
-            .into_response(),
-        Ok(workspace_members::Removal::LastAdmin) => (
+            "Cannot remove the last owner of the workspace",
+        ),
+        Ok(workspace_members::Removal::LastAdmin) => refusal(
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "Cannot remove the last admin from the workspace",
-            )),
-        )
-            .into_response(),
-        Ok(workspace_members::Removal::Missing) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Member not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+            "Cannot remove the last admin from the workspace",
+        ),
+        Ok(workspace_members::Removal::Missing) => refusal(StatusCode::NOT_FOUND, MEMBER_NOT_FOUND),
+        Err(error) => internal(error),
     }
 }
+
+#[cfg(test)]
+mod tests;

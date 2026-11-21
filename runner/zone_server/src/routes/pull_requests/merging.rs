@@ -1,10 +1,10 @@
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::auth::WorkspaceWriter;
+use crate::auth::Permission;
+use crate::auth::WorkspaceMember;
 use crate::db::audit::actions;
 use crate::db::audit::resources;
-use crate::db::workspace_members::WorkspaceRole;
 use crate::routes::common::AuditEvent;
 use crate::routes::common::audit;
 use crate::services::github::pull_requests;
@@ -15,7 +15,7 @@ use crate::services::github::readiness::CommitSha;
 use crate::state::AppState;
 
 pub struct Merging {
-    pub writer: WorkspaceWriter,
+    pub writer: WorkspaceMember,
     pub source_id: Uuid,
     pub number: u64,
     pub expected: CommitSha,
@@ -31,7 +31,7 @@ impl Merging {
             self.number,
             &self.expected,
             self.method,
-            self.writer.role >= WorkspaceRole::Admin,
+            self.writer.allows(Permission::PullRequestsOverride),
         )
         .await?;
         audit(

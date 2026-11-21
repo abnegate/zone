@@ -8,7 +8,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{AuthUser, WorkspaceMember, WorkspaceWriter};
+use crate::auth::{AuthUser, Permission, WorkspaceMember, WorkspacePermit};
 use crate::db::workspace_host_directories;
 use crate::error::ServerError;
 use crate::host_mounts::{HostMounts, MapError};
@@ -107,7 +107,7 @@ pub async fn get(
 /// PUT /api/workspaces/:workspace_id/host-directories
 pub async fn put(
     State(state): State<AppState>,
-    writer: WorkspaceWriter,
+    WorkspacePermit(writer): WorkspacePermit<{ Permission::WorkspaceWrite.index() }>,
     body: Result<Json<UpdateHostDirectoriesRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ServerError> {
     let Json(request) = body.map_err(|error| ServerError::BadRequest(error.to_string()))?;

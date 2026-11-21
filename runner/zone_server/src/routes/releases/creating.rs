@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use super::create_request::CreateRequest;
-use crate::auth::WorkspaceWriter;
+use crate::auth::WorkspaceMember;
 use crate::db::audit::actions;
 use crate::db::audit::resources;
 use crate::routes::common::AuditEvent;
@@ -12,7 +12,7 @@ use crate::services::github::releases::Failure;
 use crate::state::AppState;
 
 pub struct Creating {
-    pub writer: WorkspaceWriter,
+    pub writer: WorkspaceMember,
     pub request: CreateRequest,
 }
 
