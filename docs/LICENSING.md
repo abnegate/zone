@@ -27,10 +27,10 @@ install a license you bought, you only need
 Zone has two editions. **Community** is free and has no seat, workspace or
 usage caps. **Zone Enterprise** is the one paid edition: any valid license
 unlocks every Enterprise feature, such as [single sign-on](SSO.md),
-[agent and model policy](POLICY.md), and [audit export, streaming and
-retention](AUDIT.md). It's billed per seat, yearly, through Polar, which is the
-merchant of record and handles VAT, GST and US sales tax. Zone never handles
-money; it only verifies a key.
+[agent and model policy](POLICY.md), [custom roles](ROLES.md), and [audit
+export, streaming and retention](AUDIT.md). It's billed per seat, yearly,
+through Polar, which is the merchant of record and handles VAT, GST and US
+sales tax. Zone never handles money; it only verifies a key.
 
 ### How a license works
 
@@ -61,8 +61,10 @@ only the key and can be turned off.
   sign-in because of it. The difference is trued up at renewal.
 - **Expiry has a grace period.** For 30 days after `expires_at`, the license
   still unlocks everything. After that it has lapsed: single sign-on keeps
-  working and existing policies stay enforced, but changing Enterprise
-  settings, audit streaming and export stop until a new license is pasted. The
+  working, and existing policies and custom roles stay enforced, but changing
+  Enterprise settings, audit streaming and export stop until a new license is
+  pasted. Custom roles can't be created, edited or deleted, or given to
+  members, until then; built-in roles can still be given. The
   signer never adds the grace period itself; Zone adds it when it reads
   `expires_at`.
 - **A license can't be recalled.** Once a key is issued, it verifies until it

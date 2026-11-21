@@ -23,6 +23,7 @@ export const SettingsSection = {
   Folders: 'folders',
   Sources: 'sources',
   Members: 'members',
+  Roles: 'roles',
   Devices: 'devices',
   Audit: 'audit',
   AuditExport: 'audit-export',
@@ -155,6 +156,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     section: SettingsSection.Members,
     label: 'Members',
     visible: inOrganization,
+  },
+  {
+    group: SettingsGroup.Organization,
+    section: SettingsSection.Roles,
+    label: 'Roles',
+    visible: administersOrganization,
   },
   {
     group: SettingsGroup.Organization,

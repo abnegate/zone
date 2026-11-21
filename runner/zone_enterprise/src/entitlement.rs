@@ -12,15 +12,17 @@ pub enum Feature {
     AuditExport,
     AuditStreaming,
     AuditRetention,
+    CustomRoles,
 }
 
 impl Feature {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Sso,
         Self::Policy,
         Self::AuditExport,
         Self::AuditStreaming,
         Self::AuditRetention,
+        Self::CustomRoles,
     ];
 
     pub fn enforced(license: Option<&License>) -> bool {
@@ -34,6 +36,8 @@ impl Feature {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use chrono::TimeDelta;
 
     use super::*;
@@ -49,6 +53,13 @@ mod tests {
             (license.expires_at(), Status::Grace),
             (license.grace_ends_at() + TimeDelta::days(1), Status::Lapsed),
         ]
+    }
+
+    #[test]
+    fn every_feature_is_listed_once() {
+        let listed: HashSet<Feature> = Feature::ALL.into_iter().collect();
+        assert_eq!(listed.len(), Feature::ALL.len());
+        assert!(listed.contains(&Feature::CustomRoles));
     }
 
     #[test]

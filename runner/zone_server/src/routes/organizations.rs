@@ -9,9 +9,12 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::auth::{AuthUser, OrgAdmin, OrgMember, OrgOwner, WorkspaceAdmin, WorkspaceMember};
+use crate::auth::{
+    AuthUser, Grant, OrgAdmin, OrgMember, OrgOwner, WorkspaceAdmin, WorkspaceMember,
+};
 use crate::db::DbResult;
 use crate::db::audit::{actions, resources};
+use crate::db::custom_roles::{self, Assignment};
 use crate::db::{organization_members, organizations, workspaces};
 use crate::services::login::devices;
 use crate::state::AppState;
@@ -947,8 +950,8 @@ pub async fn update_member_role(
         state.db(),
         admin.org_id,
         path.user_id,
-        role,
-        admin.role,
+        Assignment::BuiltIn(role),
+        &Grant::organization(admin.role),
     )
     .await
     {
@@ -983,6 +986,19 @@ pub async fn update_member_role(
             )),
         )
             .into_response(),
+        Ok(organization_members::RoleChange::Exceeds) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::with_code(
+                "This role grants permissions you do not hold",
+                custom_roles::EXCEEDS,
+            )),
+        )
+            .into_response(),
+        Ok(organization_members::RoleChange::RoleMissing) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new("Role not found")),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (
@@ -1000,8 +1016,13 @@ pub async fn remove_member(
     admin: OrgAdmin,
     Path(path): Path<MemberPath>,
 ) -> impl IntoResponse {
-    match organization_members::remove_guarded(state.db(), admin.org_id, path.user_id, admin.role)
-        .await
+    match organization_members::remove_guarded(
+        state.db(),
+        admin.org_id,
+        path.user_id,
+        &Grant::organization(admin.role),
+    )
+    .await
     {
         Ok(organization_members::Removal::Removed) => {
             audit_member(&state, &admin, actions::MEMBER_REMOVED, path.user_id, None).await;
