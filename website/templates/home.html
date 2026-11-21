@@ -12,12 +12,12 @@
     </p>
     <div class="actions">
       <a class="button button-primary" href="#get-started">Get started free</a>
-      <a class="button button-secondary" href="{{ root }}pricing/">Zone Enterprise pricing</a>
+      <a class="button button-secondary" href="{{ root }}pricing/">Team and Enterprise pricing</a>
     </div>
     <ul class="facts" aria-label="At a glance">
       <li>MIT licensed</li>
       <li>Runs on your hardware</li>
-      <li>No seat, workspace or usage caps</li>
+      <li>Free for up to {{ communityMemberLimit }} active members</li>
       <li>No telemetry from Zone itself</li>
     </ul>
   </div>
@@ -99,20 +99,22 @@
 
 <section class="section" aria-labelledby="editions-heading">
   <div class="container">
-    <h2 id="editions-heading">Community and Enterprise</h2>
+    <h2 id="editions-heading">Community, Team and Enterprise</h2>
     <p class="section-lead">
-      Community is everything a person or a team needs to use Zone, free. Enterprise adds what a
-      company&rsquo;s admins, security and finance teams need. Both are the same image: pasting a
-      license key unlocks Enterprise in place.
+      Community has every product feature, free for up to {{ communityMemberLimit }} active members
+      per server. Team removes the member limit and adds spend reports and budgets. Enterprise adds
+      what a company&rsquo;s admins, security and finance teams need. All three are the same image:
+      pasting a license key unlocks a plan in place.
     </p>
     <div class="table-wrap">
       <table class="comparison">
-        <caption class="visually-hidden">Features in Zone Community and Zone Enterprise</caption>
+        <caption class="visually-hidden">Features in Zone Community, Zone Team and Zone Enterprise</caption>
         <thead>
           <tr>
             <th scope="col">Feature</th>
             <th scope="col">Community <span class="quiet">Free, MIT</span></th>
-            <th scope="col">Enterprise <span class="quiet">{{ seatMonthly }} / seat / month</span></th>
+            <th scope="col">Team <span class="quiet">{{ teamSeatMonthly }} / seat / month</span></th>
+            <th scope="col">Enterprise <span class="quiet">{{ enterpriseSeatMonthly }} / seat / month</span></th>
           </tr>
         </thead>
         <tbody>
@@ -120,9 +122,11 @@
               <th scope="row">Chats, agents, tasks, auto projects and reviews</th>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
             </tr>
             <tr>
               <th scope="row">Claude Code, Codex and API-key agents</th>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
             </tr>
@@ -130,9 +134,11 @@
               <th scope="row">Local models, ComfyUI, training, knowledge and search</th>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
             </tr>
             <tr>
               <th scope="row">GitHub pull requests and releases</th>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
             </tr>
@@ -140,9 +146,11 @@
               <th scope="row">Organizations, workspaces and the built-in roles</th>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
             </tr>
             <tr>
               <th scope="row">Audit log in the console</th>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
             </tr>
@@ -150,24 +158,47 @@
               <th scope="row">Single-node Compose and Helm installs</th>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
             </tr>
             <tr>
-              <th scope="row">No seat, workspace or usage caps</th>
+              <th scope="row">Active members per server</th>
+              <td class="mark">Up to {{ communityMemberLimit }}</td>
+              <td class="mark">Unlimited</td>
+              <td class="mark">Unlimited</td>
+            </tr>
+            <tr>
+              <th scope="row">Spend reports per organization, workspace, user and model</th>
+              <td class="mark"><span class="dash" aria-hidden="true">&mdash;</span><span class="visually-hidden">Not included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+            </tr>
+            <tr>
+              <th scope="row">Monthly budgets with alerts and hard limits</th>
+              <td class="mark"><span class="dash" aria-hidden="true">&mdash;</span><span class="visually-hidden">Not included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+              <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
+            </tr>
+            <tr>
+              <th scope="row">Email support</th>
+              <td class="mark"><span class="dash" aria-hidden="true">&mdash;</span><span class="visually-hidden">Not included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
             </tr>
             <tr>
               <th scope="row">SSO over OIDC, SSO-only login and a break-glass admin</th>
               <td class="mark"><span class="dash" aria-hidden="true">&mdash;</span><span class="visually-hidden">Not included</span></td>
+              <td class="mark"><span class="dash" aria-hidden="true">&mdash;</span><span class="visually-hidden">Not included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
             </tr>
             <tr>
               <th scope="row">Agent and model policy per organization and workspace</th>
               <td class="mark"><span class="dash" aria-hidden="true">&mdash;</span><span class="visually-hidden">Not included</span></td>
+              <td class="mark"><span class="dash" aria-hidden="true">&mdash;</span><span class="visually-hidden">Not included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
             </tr>
             <tr>
               <th scope="row">Audit export, streaming to a webhook, S3 or syslog, and retention</th>
+              <td class="mark"><span class="dash" aria-hidden="true">&mdash;</span><span class="visually-hidden">Not included</span></td>
               <td class="mark"><span class="dash" aria-hidden="true">&mdash;</span><span class="visually-hidden">Not included</span></td>
               <td class="mark"><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span class="visually-hidden">Included</span></td>
             </tr>
@@ -176,11 +207,11 @@
     </div>
     <p class="coming">
       <span class="badge">Coming</span>
-      SAML, SCIM, custom roles, spend reports, an HA reference architecture, LTS releases, an
+      To Enterprise: SAML, SCIM, custom roles, an HA reference architecture, LTS releases, an
       air-gapped install bundle and a support SLA.
     </p>
     <div class="actions">
-      <a class="button button-secondary" href="{{ root }}pricing/">See Enterprise pricing</a>
+      <a class="button button-secondary" href="{{ root }}pricing/">See pricing</a>
     </div>
   </div>
 </section>

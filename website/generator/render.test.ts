@@ -57,14 +57,29 @@ describe('price', () => {
     expect(formatMoney(24.5, 'USD')).toBe('$24.50');
   });
 
-  test('shows the yearly price and what it saves over twelve months', () => {
+  test('shows each plan with its yearly price and what it saves over twelve months', () => {
     const values = siteValues({
       ...site,
-      price: { currency: 'USD', seatMonthly: 20, seatYearly: 200 },
+      currency: 'USD',
+      plans: {
+        community: { memberLimit: 5 },
+        team: { seatMonthly: 12, seatYearly: 120, checkoutURL: 'https://example.com/team' },
+        enterprise: {
+          seatMonthly: 24.5,
+          seatYearly: 250,
+          checkoutURL: 'https://example.com/enterprise',
+        },
+      },
     });
-    expect(values.seatMonthly).toBe('$20');
-    expect(values.seatYearly).toBe('$200');
-    expect(values.yearlySaving).toBe('$40');
+    expect(values.communityMemberLimit).toBe('5');
+    expect(values.teamSeatMonthly).toBe('$12');
+    expect(values.teamSeatYearly).toBe('$120');
+    expect(values.teamYearlySaving).toBe('$24');
+    expect(values.teamCheckoutURL).toBe('https://example.com/team');
+    expect(values.enterpriseSeatMonthly).toBe('$24.50');
+    expect(values.enterpriseSeatYearly).toBe('$250');
+    expect(values.enterpriseYearlySaving).toBe('$44');
+    expect(values.enterpriseCheckoutURL).toBe('https://example.com/enterprise');
     expect(values.contactHref).toBe(`mailto:${site.contactEmail}`);
   });
 
@@ -112,16 +127,51 @@ describe('site', () => {
       test('is only indexed when public', () => {
         expect(html).toContain(page.indexed ? 'index, follow' : 'noindex');
       });
+
+      test('does not claim Community is uncapped', () => {
+        expect(html).not.toMatch(/no (seat|member)[^.<]*caps|no caps/i);
+      });
     });
   }
 
-  test('sends every buy button to the checkout', () => {
-    const pricing = rendered.get('pricing/index.html') ?? '';
-    const buttons = pricing.match(/<a [^>]*>Buy Zone Enterprise<\/a>/g) ?? [];
-    expect(buttons.length).toBeGreaterThan(0);
-    for (const button of buttons) {
-      expect(button).toContain(`href="${escapeHTML(site.checkoutURL)}"`);
-    }
+  const paidPlans = [
+    { label: 'Team', plan: site.plans.team, other: site.plans.enterprise },
+    { label: 'Enterprise', plan: site.plans.enterprise, other: site.plans.team },
+  ];
+
+  for (const { label, plan, other } of paidPlans) {
+    test(`sends every Buy Zone ${label} button to the ${label} checkout`, () => {
+      const pricing = rendered.get('pricing/index.html') ?? '';
+      const buttons = pricing.match(new RegExp(`<a [^>]*>Buy Zone ${label}</a>`, 'g')) ?? [];
+      expect(buttons.length).toBeGreaterThan(0);
+      for (const button of buttons) {
+        expect(button).toContain(`href="${escapeHTML(plan.checkoutURL)}"`);
+        expect(button).not.toContain(escapeHTML(other.checkoutURL));
+      }
+    });
+
+    test(`prices ${label} from the config`, () => {
+      const pricing = rendered.get('pricing/index.html') ?? '';
+      const card = pricing.match(
+        new RegExp(
+          `<article [^>]*aria-labelledby="${label.toLowerCase()}-heading"[\\s\\S]*?</article>`
+        )
+      )?.[0];
+      expect(card).toBeDefined();
+      const monthly = formatMoney(plan.seatMonthly, site.currency);
+      const yearly = formatMoney(plan.seatYearly, site.currency);
+      const saving = formatMoney(plan.seatMonthly * 12 - plan.seatYearly, site.currency);
+      expect(card).toContain(`<span class="amount">${monthly}</span>`);
+      expect(card).toContain(`${yearly} per seat per year`);
+      expect(card).toContain(`saving ${saving} a seat`);
+    });
+  }
+
+  test('states the Community member limit from the config', () => {
+    const limit = `up to ${site.plans.community.memberLimit} active members`;
+    expect(rendered.get('pricing/index.html')).toContain(limit);
+    expect(rendered.get('index.html')).toContain(limit);
+    expect(rendered.get('licensing/index.html')).toContain(limit);
   });
 
   test('marks the current page in the navigation', () => {
