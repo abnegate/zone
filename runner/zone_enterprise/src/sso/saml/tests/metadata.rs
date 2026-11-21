@@ -15,7 +15,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::sso::body::LIMIT;
 use crate::sso::error::Error;
-use crate::sso::saml::testing::{CERTIFICATE, OTHER_CERTIFICATE, metadata};
+use crate::sso::saml::testing::{
+    ACS_URL, CERTIFICATE, OTHER_CERTIFICATE, SERVICE_ENTITY_ID, metadata,
+};
 use crate::sso::saml::{
     Authorization, Certificate, Client, Document, EntityId, Fields, Metadata, MetadataUrl, NodeId,
     Provider, RELAY_STATE, SAML_REQUEST, ServiceProvider, service_metadata, uri,
@@ -27,8 +29,6 @@ const EC_CERTIFICATE: &str = "MIIBYzCCAQqgAwIBAgIUUYK7P4utphKYSu9UY0n65ZovQ5MwCg
 
 const ENTITY_ID: &str = "http://www.okta.com/exk1zone";
 const SSO_URL: &str = "https://acme.okta.com/app/zone/exk1zone/sso/saml";
-const SP_ENTITY_ID: &str = "https://zone.example.com/api/auth/sso/saml/metadata";
-const SP_ACS_URL: &str = "https://zone.example.com/api/auth/sso/saml/acs";
 const METADATA_PATH: &str = "/app/exk1zone/sso/saml/metadata";
 
 fn domains() -> Vec<String> {
@@ -104,8 +104,8 @@ fn with_keys(keys: &str) -> String {
 
 fn service() -> ServiceProvider {
     ServiceProvider {
-        entity_id: SP_ENTITY_ID.to_owned(),
-        acs_url: SP_ACS_URL.to_owned(),
+        entity_id: SERVICE_ENTITY_ID.to_owned(),
+        acs_url: ACS_URL.to_owned(),
     }
 }
 
@@ -671,7 +671,10 @@ fn service_metadata_renders_an_sp_descriptor() {
     let document = Document::parse(xml.as_bytes()).unwrap();
     let root = document.root();
     assert!(document.is(root, uri::METADATA, "EntityDescriptor"));
-    assert_eq!(attribute(&document, root, "entityID"), Some(SP_ENTITY_ID));
+    assert_eq!(
+        attribute(&document, root, "entityID"),
+        Some(SERVICE_ENTITY_ID)
+    );
     let descriptor = child(&document, root, uri::METADATA, "SPSSODescriptor");
     assert_eq!(
         attribute(&document, descriptor, "AuthnRequestsSigned"),
@@ -697,7 +700,7 @@ fn service_metadata_renders_an_sp_descriptor() {
         "AssertionConsumerService",
     );
     assert_eq!(attribute(&document, acs, "Binding"), Some(uri::HTTP_POST));
-    assert_eq!(attribute(&document, acs, "Location"), Some(SP_ACS_URL));
+    assert_eq!(attribute(&document, acs, "Location"), Some(ACS_URL));
     assert_eq!(attribute(&document, acs, "index"), Some("0"));
     assert_eq!(attribute(&document, acs, "isDefault"), Some("true"));
     assert_eq!(
@@ -764,7 +767,7 @@ fn an_authn_request_round_trips_through_the_redirect_binding() {
     assert_eq!(request.attribute("Destination"), Some(SSO_URL));
     assert_eq!(
         request.attribute("AssertionConsumerServiceURL"),
-        Some(SP_ACS_URL)
+        Some(ACS_URL)
     );
     assert_eq!(request.attribute("ProtocolBinding"), Some(uri::HTTP_POST));
     assert_eq!(request.attribute("ForceAuthn"), None);
@@ -772,7 +775,7 @@ fn an_authn_request_round_trips_through_the_redirect_binding() {
     assert_eq!(request.attributes().len(), 6);
 
     let issuer = child(&document, root, uri::ASSERTION, "Issuer");
-    assert_eq!(document.text(issuer).as_deref(), Some(SP_ENTITY_ID));
+    assert_eq!(document.text(issuer).as_deref(), Some(SERVICE_ENTITY_ID));
     let policy = child(&document, root, uri::PROTOCOL, "NameIDPolicy");
     let policy = document.element(policy).unwrap();
     assert_eq!(policy.attribute("AllowCreate"), Some("true"));
