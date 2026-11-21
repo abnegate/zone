@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
+use zone_enterprise::spend::Microdollars;
 
 use crate::db::DbResult;
 
@@ -11,7 +12,7 @@ pub struct Record {
     pub token: String,
     pub model: String,
     pub provider: String,
-    pub spend_microdollars: i64,
+    pub spend_microdollars: Microdollars,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub failed: bool,
@@ -39,7 +40,7 @@ pub async fn upsert(pool: &PgPool, records: &[Record]) -> DbResult<u64> {
         tokens.push(record.token.as_str());
         models.push(record.model.as_str());
         providers.push(record.provider.as_str());
-        spends.push(record.spend_microdollars);
+        spends.push(record.spend_microdollars.0);
         prompts.push(record.prompt_tokens);
         completions.push(record.completion_tokens);
         failures.push(record.failed);

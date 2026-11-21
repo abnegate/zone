@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+use zone_enterprise::spend::Microdollars;
 use zone_enterprise::{
     Edition, Error as LicenseError, Keyring, License, Payload, SigningKey, Status, TrustedKey, sign,
 };
@@ -657,7 +658,7 @@ fn spend_is_rounded_half_away_from_zero_and_never_negative() {
     ] {
         assert_eq!(
             log(json!({ "spend": spend })).microdollars(),
-            microdollars,
+            Microdollars(microdollars),
             "{spend}"
         );
     }
@@ -697,7 +698,7 @@ fn a_log_becomes_the_record_of_its_request() {
 
     assert_eq!(record.request_id, "request");
     assert_eq!(record.token, "token");
-    assert_eq!(record.spend_microdollars, 250_000);
+    assert_eq!(record.spend_microdollars, Microdollars(250_000));
     assert_eq!((record.prompt_tokens, record.completion_tokens), (120, 0));
     assert!(record.failed);
     assert_eq!(record.occurred_at, moment("2026-11-21T10:04:05.123Z"));

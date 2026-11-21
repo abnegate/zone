@@ -2,13 +2,13 @@
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Deserializer};
+use zone_enterprise::spend::Microdollars;
 
 use crate::db::spend::records::Record;
 
 pub const FAILURE: &str = "failure";
 pub const UNKNOWN: &str = "unknown";
 
-const MICRODOLLARS_PER_DOLLAR: f64 = 1_000_000.0;
 const NAIVE_FORMATS: [&str; 2] = ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"];
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -37,13 +37,8 @@ pub struct Log {
 }
 
 impl Log {
-    /// The spend rounded half away from zero to whole microdollars, none below zero.
-    pub fn microdollars(&self) -> i64 {
-        let spend = self.spend.unwrap_or_default();
-        if !spend.is_finite() {
-            return 0;
-        }
-        ((spend * MICRODOLLARS_PER_DOLLAR).round() as i64).max(0)
+    pub fn microdollars(&self) -> Microdollars {
+        Microdollars::from_dollars(self.spend.unwrap_or_default())
     }
 
     /// The model group the request asked for, or the model LiteLLM sent it to.
