@@ -21,6 +21,7 @@ use crate::http::{RENEW_BODY_LIMIT, RENEW_PATH, Renewer, router};
 use crate::license_id;
 use crate::polar::{self, AccessToken, Proxy, WebhookSecret};
 use crate::private_key::PrivateKey;
+use crate::renewal::SETTLEMENT;
 use crate::signer::Signer;
 
 const FIXTURE: &str = include_str!("../../../../tests/fixtures/polar/subscription.json");
@@ -40,6 +41,14 @@ const DELAY: Duration = Duration::from_secs(5);
 
 fn at(text: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(text).unwrap().to_utc()
+}
+
+fn settled() -> DateTime<Utc> {
+    at(PERIOD_START) + SETTLEMENT
+}
+
+fn settling() -> DateTime<Utc> {
+    at(PERIOD_START) + TimeDelta::hours(1)
 }
 
 fn signer() -> Signer {
@@ -155,8 +164,17 @@ async fn answer(app: Router, request: Request<Body>) -> (StatusCode, Option<Valu
 }
 
 async fn renewing(client: polar::Client, request: Request<Body>) -> (StatusCode, Option<Value>) {
+    renewing_at(client, request, settled).await
+}
+
+async fn renewing_at(
+    client: polar::Client,
+    request: Request<Body>,
+    clock: fn() -> DateTime<Utc>,
+) -> (StatusCode, Option<Value>) {
     let outbox = Arc::new(Recording::default());
-    let app = router(context(outbox.clone()).with_renewer(Renewer::new(keyring(), client)));
+    let renewer = Renewer::new(keyring(), client).with_clock(clock);
+    let app = router(context(outbox.clone()).with_renewer(renewer));
     let answered = answer(app, request).await;
     assert!(outbox.sent().is_empty(), "the renew route never emails");
     answered
@@ -240,6 +258,23 @@ async fn a_key_covering_the_current_period_is_current() {
     let (status, body) = renew(&server, asking(&key(at(PERIOD_END), 5))).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(body, None);
+}
+
+#[tokio::test]
+async fn a_new_period_is_current_until_it_settles() {
+    let server = polar(active()).await;
+    let (status, body) = renewing_at(client(&server), asking(&expiring()), settling).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(body, None);
+}
+
+#[tokio::test]
+async fn a_seat_change_in_the_same_period_renews_while_settling() {
+    let server = polar(active()).await;
+    let (status, body) =
+        renewing_at(client(&server), asking(&key(at(PERIOD_END), 3)), settling).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(renewed(body).seats(), 5);
 }
 
 #[tokio::test]
@@ -431,7 +466,13 @@ async fn polar_being_unreachable_is_unavailable() {
 #[tokio::test]
 async fn terms_the_signer_refuses_are_an_internal_error() {
     let empty = subscription(|value| value["current_period_start"] = json!(PERIOD_END));
-    assert_eq!(status_for(empty).await, StatusCode::INTERNAL_SERVER_ERROR);
+    let server = polar(empty).await;
+    let (status, body) = renewing_at(client(&server), asking(&expiring()), || {
+        at(PERIOD_END) + SETTLEMENT
+    })
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body, None);
 }
 
 #[tokio::test]
@@ -460,6 +501,15 @@ impl std::io::Write for Captured {
 }
 
 async fn logged(level: tracing::Level, response: ResponseTemplate, key: &str) -> String {
+    logged_at(level, response, key, settled).await
+}
+
+async fn logged_at(
+    level: tracing::Level,
+    response: ResponseTemplate,
+    key: &str,
+    clock: fn() -> DateTime<Utc>,
+) -> String {
     let captured = Captured::default();
     let writer = captured.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -470,7 +520,7 @@ async fn logged(level: tracing::Level, response: ResponseTemplate, key: &str) ->
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let server = polar(response).await;
-    renew(&server, asking(key)).await;
+    renewing_at(client(&server), asking(key), clock).await;
 
     String::from_utf8(captured.0.lock().unwrap().clone()).unwrap()
 }
@@ -505,6 +555,14 @@ async fn a_subscription_that_will_not_renew_logs_the_reason() {
     let logged = logged(tracing::Level::INFO, response, &expiring()).await;
     assert!(logged.contains("outcome=ended"), "{logged}");
     assert!(logged.contains("reason=product"), "{logged}");
+}
+
+#[tokio::test]
+async fn a_settling_period_logs_why_it_was_held() {
+    let logged = logged_at(tracing::Level::INFO, active(), &expiring(), settling).await;
+    assert!(logged.contains("outcome=current"), "{logged}");
+    assert!(logged.contains("reason=\"settling\""), "{logged}");
+    assert!(logged.contains("status=\"active\""), "{logged}");
 }
 
 #[tokio::test]

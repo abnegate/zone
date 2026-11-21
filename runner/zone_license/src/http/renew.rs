@@ -12,7 +12,7 @@ use crate::http::renew_request::RenewRequest;
 use crate::http::renewal_outcome::RenewalOutcome;
 use crate::http::renewed::Renewed;
 use crate::polar::ApiError;
-use crate::renewal::{Verdict, decide};
+use crate::renewal::{SETTLING, Verdict, decide};
 use crate::terms::Terms;
 
 /// Answers 404 whatever is posted while renewal is off, so a signer without
@@ -59,11 +59,24 @@ pub async fn respond(
         Err(error) => return unanswered(error, &license, subscription),
     };
     let status = found.as_ref().map(|found| found.status.as_str());
-    match decide(&license, found.as_ref(), &context.products) {
+    let now = (renewer.clock)();
+    match decide(&license, found.as_ref(), &context.products, now) {
         Verdict::Renew(terms) => sign(&context, &license, status, &terms),
         Verdict::Current => {
             let outcome = RenewalOutcome::Current;
             tracing::info!(%outcome, subscription, license = %license.id(), status, "Had no newer license to renew to");
+            outcome.status().into_response()
+        }
+        Verdict::Settling => {
+            let outcome = RenewalOutcome::Current;
+            tracing::info!(
+                %outcome,
+                subscription,
+                license = %license.id(),
+                status,
+                reason = SETTLING,
+                "Held a renewal until Polar has had time to collect the new period's payment"
+            );
             outcome.status().into_response()
         }
         Verdict::Ended(reason) => {
