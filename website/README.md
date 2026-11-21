@@ -4,7 +4,7 @@ The public site: home, pricing, licensing, the post-checkout thank-you page and 
 
 | Path | What |
 | --- | --- |
-| `config.ts` | Every value that may change: price, Polar checkout link, contact address, domain, repository |
+| `config.ts` | Every value that may change: the Community member limit, each paid plan's monthly and yearly seat price and Polar checkout link, contact address, domain, repository |
 | `templates/` | `layout.html` and one template per page; `{{ name }}` is a value from `config.ts` |
 | `static/` | Stylesheet, favicon and self-hosted fonts (SIL Open Font License) |
 | `generator/` | The build, a local preview server and their tests |
@@ -26,9 +26,9 @@ A template that uses a value `config.ts` does not have fails the build.
 
 `unconfirmed` in `config.ts` lists the values that are still placeholders or proposals. The build prints a warning for each one, and in GitHub Actions the warnings show on the run. Remove a key from the list once it is final.
 
-- **`price`**: if it changes, change the Polar product's price too. The two must match.
+- **`plans`**: if a plan's price changes, change its Polar products too. The two must match. `memberLimit` must match the Community limit the server enforces.
 - **`contactEmail`**: a mailbox that someone reads.
-- **`domain`**: the custom domain configured for GitHub Pages. Deployed builds take canonical links from the base URL Pages reports (`SITE_BASE_URL`), so until the custom domain is live they point at `https://abnegate.github.io/zone/`. Local builds and the preview server fall back to `https://<domain>/`. Once it is final, set the Polar checkout link's success URL to `https://<domain>/thanks/`.
+- **`domain`**: the custom domain configured for GitHub Pages. Deployed builds take canonical links from the base URL Pages reports (`SITE_BASE_URL`), so until the custom domain is live they point at `https://abnegate.github.io/zone/`. Local builds and the preview server fall back to `https://<domain>/`. Once it is final, set the success URL of both Polar checkout links to `https://<domain>/thanks/`.
 
 ## Deploying
 

@@ -1,11 +1,11 @@
 <section class="hero hero-compact">
   <div class="container hero-inner narrow">
     <p class="eyebrow">Licensing</p>
-    <h1>Open source, with a commercial license for Enterprise.</h1>
+    <h1>Open source, with a commercial license for the paid plans.</h1>
     <p class="lead">
-      All of Zone&rsquo;s code is public in one repository. Almost all of it is MIT. The Enterprise
-      features are source-available under the Zone Enterprise License, so you can read the code
-      that enforces your policies.
+      All of Zone&rsquo;s code is public in one repository. Almost all of it is MIT. The Team and
+      Enterprise features are source-available under the Zone Enterprise License, so you can read
+      the code that enforces your policies.
     </p>
   </div>
 </section>
@@ -16,12 +16,12 @@
     <ul class="license-list">
       <li>
         <h3><code>runner/zone_enterprise</code></h3>
-        <p>Enterprise features, the license payload and its offline verifier.</p>
+        <p>Team and Enterprise features, the license payload and its offline verifier.</p>
         <a href="{{ repository }}/blob/main/runner/zone_enterprise/LICENSE">Zone Enterprise License</a>
       </li>
       <li>
         <h3><code>manager/frontend/src/features/enterprise</code></h3>
-        <p>Enterprise console pages, including Settings &rarr; License.</p>
+        <p>Team and Enterprise console pages, including Settings &rarr; License.</p>
         <a href="{{ repository }}/blob/main/manager/frontend/src/features/enterprise/LICENSE">Zone Enterprise License</a>
       </li>
       <li>
@@ -40,15 +40,16 @@
       <p>
         You can use, modify and redistribute Zone Community under the
         <a href="{{ repository }}/blob/main/LICENSE">MIT License</a>, commercially or not. Without a
-        license key, Zone runs as Community, with no seat, workspace or usage caps and no expiry.
+        license key, Zone runs as Community, for up to {{ communityMemberLimit }} active members per
+        server and with no expiry.
       </p>
     </div>
     <div>
-      <h2 id="enterprise-license-heading">Zone Enterprise</h2>
+      <h2 id="enterprise-license-heading">Zone Team and Zone Enterprise</h2>
       <p>In short, while a license is in force, a customer may:</p>
       <ul class="list">
-        <li>run the Enterprise features on infrastructure it controls, for its licensed seats and its own internal use;</li>
-        <li>read, modify and patch the Enterprise source for its own use.</li>
+        <li>run the features of its plan on infrastructure it controls, for its licensed seats and its own internal use;</li>
+        <li>read, modify and patch the source under the Zone Enterprise License for its own use.</li>
       </ul>
       <p>It may not redistribute or sell that source, offer it as a hosted service, or remove or bypass the license check.</p>
       <p>

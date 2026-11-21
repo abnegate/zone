@@ -1,4 +1,5 @@
 import type { Page } from './Page.ts';
+import type { Plan } from './Plan.ts';
 import type { Site } from './Site.ts';
 
 const tokenPattern = /\{\{\s*([A-Za-z]+)\s*\}\}/g;
@@ -61,15 +62,23 @@ export function rootFor(page: Page, basePath: string): string {
   return depth === 0 ? './' : '../'.repeat(depth);
 }
 
+export function planValues(name: string, plan: Plan, currency: string): Record<string, string> {
+  return {
+    [`${name}SeatMonthly`]: formatMoney(plan.seatMonthly, currency),
+    [`${name}SeatYearly`]: formatMoney(plan.seatYearly, currency),
+    [`${name}YearlySaving`]: formatMoney(plan.seatMonthly * 12 - plan.seatYearly, currency),
+    [`${name}CheckoutURL`]: plan.checkoutURL,
+  };
+}
+
 export function siteValues(site: Site): Record<string, string> {
-  const { currency, seatMonthly, seatYearly } = site.price;
+  const { currency, plans } = site;
   return {
     siteName: site.name,
-    seatMonthly: formatMoney(seatMonthly, currency),
-    seatYearly: formatMoney(seatYearly, currency),
-    yearlySaving: formatMoney(seatMonthly * 12 - seatYearly, currency),
+    ...planValues('team', plans.team, currency),
+    ...planValues('enterprise', plans.enterprise, currency),
+    communityMemberLimit: String(plans.community.memberLimit),
     currency,
-    checkoutURL: site.checkoutURL,
     contactEmail: site.contactEmail,
     contactHref: `mailto:${site.contactEmail}`,
     repository: site.repository,
