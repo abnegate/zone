@@ -157,6 +157,28 @@ impl Licenses {
         Ok(Change { previous, current })
     }
 
+    /// Installs `text` in place of `expected` only while `expected` is still the stored key, so a
+    /// key an admin installs meanwhile is never overwritten. `None` when it no longer is.
+    pub async fn renew(
+        &self,
+        pool: &PgPool,
+        expected: &str,
+        text: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Change>, SetError> {
+        let current = self.keyring().verify(text)?;
+        if current.status(now) == Status::Lapsed {
+            return Err(SetError::Lapsed);
+        }
+        let _refresh = self.refresh.lock().await;
+        if !licenses::replace_if(pool, expected, current.text()).await? {
+            return Ok(None);
+        }
+        let previous = self.verify(Some(expected.to_owned()));
+        self.write().swap(Stored::Verified(current.clone()));
+        Ok(Some(Change { previous, current }))
+    }
+
     pub async fn remove(&self, pool: &PgPool) -> DbResult<Stored> {
         let _refresh = self.refresh.lock().await;
         let removed = self.verify(licenses::remove(pool).await?);
@@ -368,6 +390,78 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SetError::Database(_)), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_renewal_is_refused_before_the_database() {
+        let error = licenses()
+            .renew(
+                &unreachable_pool(),
+                &key(TimeDelta::days(3)),
+                "not a key",
+                Utc::now(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, SetError::Refused(zone_enterprise::Error::Malformed)),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_renewal_past_grace_is_refused_before_the_database() {
+        let error = licenses()
+            .renew(
+                &unreachable_pool(),
+                &key(TimeDelta::days(3)),
+                &key(-TimeDelta::days(31)),
+                Utc::now(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SetError::Lapsed), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_renewal_leaves_the_cache_as_it_was() {
+        let license = keyring().verify(&key(TimeDelta::days(3))).unwrap();
+        let licenses = licenses();
+        licenses.write().swap(Stored::Verified(license.clone()));
+
+        let error = licenses
+            .renew(
+                &unreachable_pool(),
+                license.text(),
+                &key(TimeDelta::days(365)),
+                Utc::now(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, SetError::Database(_)), "{error:?}");
+        assert_eq!(licenses.cached(), Some(Stored::Verified(license)));
+    }
+
+    #[tokio::test]
+    async fn a_renewal_waits_for_a_reload_in_flight() {
+        let licenses = licenses();
+        let reloading = licenses.refresh.lock().await;
+
+        assert!(
+            timeout(
+                BRIEFLY,
+                licenses.renew(
+                    &unreachable_pool(),
+                    &key(TimeDelta::days(3)),
+                    &key(TimeDelta::days(365)),
+                    Utc::now(),
+                )
+            )
+            .await
+            .is_err()
+        );
+        drop(reloading);
     }
 
     #[tokio::test]

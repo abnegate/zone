@@ -15,7 +15,7 @@ use crate::auth::ServerAdmin;
 use crate::db::DbResult;
 use crate::db::audit::{actions, resources};
 use crate::error::ServerError;
-use crate::services::license::{SetError, Stored};
+use crate::services::license::{SetError, Stored, summary};
 use crate::state::AppState;
 
 const STORE_FAILED: &str = "Could not store the license";
@@ -111,22 +111,10 @@ pub struct SetLicenseRequest {
     pub key: String,
 }
 
-/// What the audit log keeps of a license. Never the key itself: whoever can
-/// read the audit log could otherwise lift it onto another server.
-fn recorded(license: &License) -> Value {
-    json!({
-        "id": license.id(),
-        "customer": license.customer(),
-        "seats": license.seats(),
-        "expires_at": license.expires_at(),
-        "key_id": license.key_id(),
-    })
-}
-
 fn former(stored: &Stored) -> Option<Value> {
     match stored {
         Stored::Empty => None,
-        Stored::Verified(license) => Some(recorded(license)),
+        Stored::Verified(license) => Some(summary(license)),
         Stored::Unverified(_) => Some(json!({ VERIFIED: false })),
     }
 }
@@ -211,7 +199,7 @@ pub async fn set(
             resource_type: resources::LICENSE,
             resource_id: Some(change.current.id()),
             old_values: former(&change.previous),
-            new_values: Some(recorded(&change.current)),
+            new_values: Some(summary(&change.current)),
         },
     )
     .await;
@@ -389,32 +377,13 @@ mod tests {
     }
 
     #[test]
-    fn the_audit_record_keeps_the_license_but_never_its_key() {
-        let license = license();
-
-        let record = recorded(&license);
-
-        assert_eq!(
-            record,
-            json!({
-                "id": license.id(),
-                "customer": "Acme Ltd",
-                "seats": SEATS,
-                "expires_at": "2027-11-01T00:00:00Z",
-                "key_id": KEY_ID,
-            })
-        );
-        assert!(!record.to_string().contains(license.text()));
-    }
-
-    #[test]
     fn the_audit_keeps_what_a_change_replaced() {
         let license = license();
 
         assert_eq!(former(&Stored::Empty), None);
         assert_eq!(
             former(&Stored::Verified(license.clone())),
-            Some(recorded(&license))
+            Some(summary(&license))
         );
         assert_eq!(
             former(&Stored::Unverified(zone_enterprise::Error::Signature)),
