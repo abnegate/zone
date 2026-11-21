@@ -91,7 +91,13 @@ pub async fn receive(
         }
     };
 
-    let letter = Letter::license(&terms.customer, terms.seats, terms.expires_at, &key);
+    let letter = Letter::license(
+        &terms.customer,
+        terms.plan,
+        terms.seats,
+        terms.expires_at,
+        &key,
+    );
     if let Err(error) = context.outbox.send(&grant.email, &letter).await {
         let outcome = Outcome::from(&error);
         tracing::error!(
@@ -108,6 +114,6 @@ pub async fn receive(
     }
 
     let outcome = Outcome::Sent;
-    tracing::info!(webhook, order, subscription, %license, seats = terms.seats, %outcome, "Sent a license");
+    tracing::info!(webhook, order, subscription, %license, seats = terms.seats, plan = %terms.plan, %outcome, "Sent a license");
     (outcome.status(), Json(Issued { license })).into_response()
 }

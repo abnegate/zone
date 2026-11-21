@@ -7,7 +7,7 @@ use chrono::Utc;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use zone_enterprise::{Keyring, TrustedKey};
+use zone_enterprise::{Keyring, License, Plan, TrustedKey};
 
 use super::*;
 use crate::license_id;
@@ -15,6 +15,7 @@ use crate::logging;
 use crate::mail::{Letter, MailError, Outbox};
 use crate::polar::{ID_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, WebhookSecret, signature};
 use crate::private_key::PrivateKey;
+use crate::products::Products;
 use crate::signer::Signer;
 
 const CREATE: &[u8] =
@@ -33,6 +34,7 @@ const WEBHOOK: &str = "msg_router";
 const SUBSCRIPTION: &str = "b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c";
 const EMAIL: &str = "billing@acme.test";
 const PRODUCT: &str = "5f0c8a9e-6b1d-4c2e-9a3f-7d4e1b2c3a40";
+const TEAM_PRODUCT: &str = "8a2b6c1d-4e3f-4a5b-9c6d-7e8f9a0b1c2d";
 
 #[derive(Default)]
 pub(super) struct Recording {
@@ -76,8 +78,20 @@ impl Outbox for Unsendable {
     }
 }
 
-fn products() -> Vec<String> {
-    vec![PRODUCT.to_owned()]
+fn products() -> Products {
+    Products::parse(PRODUCT).unwrap()
+}
+
+fn listing(list: &str) -> Products {
+    Products::parse(list).unwrap()
+}
+
+fn verified(letter: &Letter) -> License {
+    letter
+        .text()
+        .lines()
+        .find_map(|line| keyring().verify(line).ok())
+        .expect("the letter carries a license that verifies")
 }
 
 fn signer() -> Signer {
@@ -88,7 +102,7 @@ fn keyring() -> Keyring {
     Keyring::new([TrustedKey::new(KEY_ID, signer().public()).unwrap()]).unwrap()
 }
 
-fn app(outbox: Arc<dyn Outbox>, products: Vec<String>) -> Router {
+fn app(outbox: Arc<dyn Outbox>, products: Products) -> Router {
     router(Context::new(
         signer(),
         WebhookSecret::new(SECRET),
@@ -134,7 +148,7 @@ async fn refused(request: Request<Body>) {
     assert!(outbox.sent().is_empty());
 }
 
-async fn ignored(body: &[u8], products: Vec<String>, reason: &str) {
+async fn ignored(body: &[u8], products: Products, reason: &str) {
     let outbox = Arc::new(Recording::default());
     let (status, answered) = answer(app(outbox.clone(), products), signed(body)).await;
     assert_eq!(status, StatusCode::ACCEPTED);
@@ -156,7 +170,7 @@ async fn a_paid_order_sends_a_license_and_names_it() {
     let (status, body) = answer(app(outbox.clone(), products()), signed(CREATE)).await;
 
     let period_end = "2027-11-18T11:59:58Z".parse().unwrap();
-    let id = license_id::derive(SUBSCRIPTION, period_end, 5);
+    let id = license_id::derive(SUBSCRIPTION, period_end, 5, Plan::Enterprise);
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(body, Some(json!({ "license": id.to_string() })));
 
@@ -164,15 +178,69 @@ async fn a_paid_order_sends_a_license_and_names_it() {
     assert_eq!(sent.len(), 1);
     let (recipient, letter) = &sent[0];
     assert_eq!(recipient, EMAIL);
-    let license = letter
-        .text()
-        .lines()
-        .find_map(|line| keyring().verify(line).ok())
-        .expect("the letter carries a license that verifies");
+    assert_eq!(letter.subject(), "Your Zone Enterprise license key");
+    let license = verified(letter);
     assert_eq!(license.payload().id, id);
     assert_eq!(license.payload().customer, "Acme Ltd");
     assert_eq!(license.payload().seats, 5);
+    assert_eq!(license.payload().plan, Some(Plan::Enterprise));
     assert_eq!(license.subscription(), Some(SUBSCRIPTION));
+}
+
+#[tokio::test]
+async fn a_team_product_sends_a_team_license() {
+    let outbox = Arc::new(Recording::default());
+    let (status, body) = answer(
+        app(outbox.clone(), listing(&format!("{PRODUCT}=team"))),
+        signed(CREATE),
+    )
+    .await;
+
+    let period_end = "2027-11-18T11:59:58Z".parse().unwrap();
+    let id = license_id::derive(SUBSCRIPTION, period_end, 5, Plan::Team);
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body, Some(json!({ "license": id.to_string() })));
+
+    let sent = outbox.sent();
+    assert_eq!(sent.len(), 1);
+    let (_, letter) = &sent[0];
+    assert_eq!(letter.subject(), "Your Zone Team license key");
+    let license = verified(letter);
+    assert_eq!(license.plan(), Plan::Team);
+    assert_eq!(license.payload().id, id);
+}
+
+#[tokio::test]
+async fn the_subscriptions_product_sets_the_plan_over_the_orders() {
+    let outbox = Arc::new(Recording::default());
+    let body = edited(CREATE, |value| {
+        value["data"]["product_id"] = json!(TEAM_PRODUCT);
+    });
+    let products = listing(&format!("{PRODUCT},{TEAM_PRODUCT}=team"));
+    let (status, _) = answer(app(outbox.clone(), products), signed(&body)).await;
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (_, letter) = &outbox.sent()[0];
+    assert_eq!(letter.subject(), "Your Zone Enterprise license key");
+    assert_eq!(verified(letter).plan(), Plan::Enterprise);
+}
+
+#[tokio::test]
+async fn an_unlisted_subscription_product_falls_back_to_the_orders_plan() {
+    let outbox = Arc::new(Recording::default());
+    let body = edited(CREATE, |value| {
+        value["data"]["product_id"] = json!(TEAM_PRODUCT);
+    });
+    let (status, _) = answer(
+        app(outbox.clone(), listing(&format!("{TEAM_PRODUCT}=team"))),
+        signed(&body),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (_, letter) = &outbox.sent()[0];
+    assert_eq!(letter.subject(), "Your Zone Team license key");
+    assert_eq!(verified(letter).plan(), Plan::Team);
 }
 
 #[tokio::test]
@@ -185,11 +253,7 @@ async fn the_license_and_the_letter_carry_the_same_normalised_name() {
     assert_eq!(status, StatusCode::ACCEPTED);
 
     let (_, letter) = &outbox.sent()[0];
-    let license = letter
-        .text()
-        .lines()
-        .find_map(|line| keyring().verify(line).ok())
-        .expect("the letter carries a license that verifies");
+    let license = verified(letter);
     assert_eq!(license.payload().customer, "Acme Ltd");
     assert!(
         letter.text().contains("Customer: Acme Ltd\n"),
@@ -271,7 +335,15 @@ async fn an_unpaid_order_is_ignored() {
 
 #[tokio::test]
 async fn an_unlisted_product_is_ignored() {
-    ignored(CREATE, vec!["another-product".to_owned()], "product").await;
+    ignored(CREATE, listing("another-product"), "product").await;
+}
+
+#[tokio::test]
+async fn a_listed_subscription_product_does_not_issue_for_an_unlisted_order() {
+    let body = edited(CREATE, |value| {
+        value["data"]["product_id"] = json!("another-product");
+    });
+    ignored(&body, products(), "product").await;
 }
 
 #[tokio::test]

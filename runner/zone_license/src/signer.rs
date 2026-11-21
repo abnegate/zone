@@ -38,7 +38,7 @@ impl Signer {
             expires_at: terms.expires_at,
             key_id: self.key_id.clone(),
             subscription: terms.subscription.clone(),
-            plan: None,
+            plan: Some(terms.plan),
         };
         payload.validate()?;
         Ok(zone_enterprise::sign(&payload, &self.key))
@@ -73,7 +73,7 @@ impl fmt::Debug for Signer {
 mod tests {
     use chrono::{DateTime, TimeDelta, Utc};
     use uuid::Uuid;
-    use zone_enterprise::TrustedKey;
+    use zone_enterprise::{Plan, TrustedKey};
 
     use super::*;
 
@@ -103,6 +103,7 @@ mod tests {
             issued_at: issued_at(),
             expires_at: issued_at() + TimeDelta::days(365),
             subscription: None,
+            plan: Plan::Enterprise,
         }
     }
 
@@ -127,8 +128,32 @@ mod tests {
         assert_eq!(payload.expires_at, terms.expires_at);
         assert_eq!(payload.key_id, KEY_ID);
         assert_eq!(payload.subscription, None);
+        assert_eq!(payload.plan, Some(Plan::Enterprise));
         assert_eq!(license.key_id(), KEY_ID);
         assert_eq!(license.text(), text);
+    }
+
+    #[test]
+    fn a_signed_license_carries_the_plan() {
+        let signer = signer();
+        for plan in Plan::ALL {
+            let text = signer.sign(&Terms { plan, ..terms() }).unwrap();
+            let license = keyring(KEY_ID, signer.public()).verify(&text).unwrap();
+            assert_eq!(license.payload().plan, Some(plan));
+            assert_eq!(license.plan(), plan);
+        }
+    }
+
+    #[test]
+    fn another_plan_signs_differently() {
+        let team = Terms {
+            plan: Plan::Team,
+            ..terms()
+        };
+        assert_ne!(
+            signer().sign(&terms()).unwrap(),
+            signer().sign(&team).unwrap()
+        );
     }
 
     #[test]

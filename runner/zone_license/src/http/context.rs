@@ -4,12 +4,13 @@ use std::sync::Arc;
 use crate::http::renewer::Renewer;
 use crate::mail::Outbox;
 use crate::polar::WebhookSecret;
+use crate::products::Products;
 use crate::signer::Signer;
 
 pub struct Context {
     pub(crate) signer: Signer,
     pub(crate) secret: WebhookSecret,
-    pub(crate) products: Vec<String>,
+    pub(crate) products: Products,
     pub(crate) outbox: Arc<dyn Outbox>,
     pub(crate) renewer: Option<Renewer>,
 }
@@ -18,7 +19,7 @@ impl Context {
     pub fn new(
         signer: Signer,
         secret: WebhookSecret,
-        products: Vec<String>,
+        products: Products,
         outbox: Arc<dyn Outbox>,
     ) -> Self {
         Self {
