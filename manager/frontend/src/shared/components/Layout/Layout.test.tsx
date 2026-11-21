@@ -1,5 +1,16 @@
-import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
-import { render, screen } from '@testing-library/react';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { render as renderElement, screen } from '@testing-library/react';
+import type { ReactElement } from 'react';
+import { COMMUNITY, COMMUNITY_OVER_CAP } from '../../../features/enterprise/fixtures';
+
+const getLicense = mock();
+
+mock.module('../../../features/enterprise/api', () => ({
+  licenseApi: { get: getLicense, set: mock(), remove: mock() },
+}));
+
+let admin = false;
 
 mock.module('../Sidebar/Sidebar', () => ({
   default: function MockSidebar() {
@@ -33,7 +44,7 @@ mock.module('react-router-dom', () => ({
 mock.module('../../../features/auth/context', () => ({
   useAuth: () => ({
     isAuthenticated: true,
-    user: { id: '1', email: 'test@test.com' },
+    user: { id: '1', email: 'test@test.com', is_admin: admin },
     roles: ['user'],
     permissions: ['models:read'],
     hasPermission: () => true,
@@ -55,7 +66,18 @@ afterAll(() => {
   mock.restore();
 });
 
+function render(element: ReactElement) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  return renderElement(<QueryClientProvider client={queryClient}>{element}</QueryClientProvider>);
+}
+
 describe('Layout', () => {
+  beforeEach(() => {
+    admin = false;
+    getLicense.mockReset();
+    getLicense.mockResolvedValue(COMMUNITY);
+  });
+
   it('renders sidebar', () => {
     render(<Layout />);
     expect(screen.getByTestId('sidebar')).toBeInTheDocument();
@@ -74,5 +96,27 @@ describe('Layout', () => {
   it('has layout class', () => {
     render(<Layout />);
     expect(document.querySelector('.layout')).toBeInTheDocument();
+  });
+
+  it('shows a server admin the over-cap banner above the page', async () => {
+    admin = true;
+    getLicense.mockResolvedValue(COMMUNITY_OVER_CAP);
+    render(<Layout />);
+
+    const banner = await screen.findByRole('status');
+    expect(banner).toHaveTextContent('Everyone keeps access');
+    expect(banner.parentElement).toHaveClass('main-content');
+    expect(banner.compareDocumentPosition(screen.getByTestId('outlet'))).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    );
+  });
+
+  it('shows no banner to someone who is not a server admin', async () => {
+    getLicense.mockResolvedValue(COMMUNITY_OVER_CAP);
+    render(<Layout />);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(getLicense).not.toHaveBeenCalled();
   });
 });

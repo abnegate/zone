@@ -17,6 +17,12 @@
   color: var(--ui-error-400);
 }
 
+.modal-error a {
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;

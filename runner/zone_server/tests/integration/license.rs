@@ -5,8 +5,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_enterprise::{
-    Edition, GRACE_DAYS, Keyring, MALFORMED, PAYLOAD_INVALID, Payload, SEPARATOR,
-    SIGNATURE_INVALID, SigningKey, TrustedKey, UNKNOWN_KEY, sign,
+    COMMUNITY_MEMBERS, Edition, GRACE_DAYS, Keyring, MALFORMED, PAYLOAD_INVALID, Payload, Plan,
+    SEPARATOR, SIGNATURE_INVALID, SigningKey, TrustedKey, UNKNOWN_KEY, sign,
 };
 use zone_server::auth::admin_guard::REQUIRED;
 use zone_server::db::audit::{actions, resources};
@@ -244,6 +244,7 @@ fn expiring(expires_in: TimeDelta) -> Payload {
         expires_at,
         key_id: TRUSTED.into(),
         subscription: None,
+        plan: None,
     }
 }
 
@@ -262,6 +263,13 @@ fn active() -> String {
 fn subscribed() -> Payload {
     Payload {
         subscription: Some(SUBSCRIPTION.into()),
+        ..current()
+    }
+}
+
+fn team() -> Payload {
+    Payload {
+        plan: Some(Plan::Team),
         ..current()
     }
 }
@@ -299,6 +307,7 @@ fn grace_end(expires_at: DateTime<Utc>) -> DateTime<Utc> {
 fn details(payload: &Payload) -> Value {
     json!({
         "id": payload.id,
+        "plan": payload.plan.unwrap_or(Plan::Enterprise),
         "customer": payload.customer,
         "seats": payload.seats,
         "issued_at": payload.issued_at,
@@ -323,6 +332,8 @@ fn assert_runs_as_community(body: &Value) {
     assert_eq!(body["license"], Value::Null, "{body}");
     assert_eq!(body["seats"]["licensed"], Value::Null, "{body}");
     assert_eq!(body["seats"]["over"], false, "{body}");
+    assert_eq!(body["members"]["cap"], COMMUNITY_MEMBERS, "{body}");
+    assert_eq!(body["members"]["active"], body["seats"]["used"], "{body}");
     assert!(body.get("license").is_some(), "license is omitted: {body}");
     assert!(
         body["seats"].get("licensed").is_some(),
@@ -452,6 +463,84 @@ async fn an_empty_server_reads_as_community() {
     let body = response.json_value();
     assert_community(&body);
     assert_eq!(body["seats"]["used"], 1, "{body}");
+    assert_eq!(
+        body["members"],
+        json!({ "active": 1, "cap": COMMUNITY_MEMBERS, "over": false })
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn community_reports_more_active_members_than_its_cap_as_over() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    for _ in 1..=COMMUNITY_MEMBERS {
+        fixture.register().await;
+    }
+
+    let response = fixture.get(&admin.token).await;
+
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    assert_community(&body);
+    assert_eq!(
+        body["members"],
+        json!({ "active": COMMUNITY_MEMBERS + 1, "cap": COMMUNITY_MEMBERS, "over": true })
+    );
+    assert_eq!(body["seats"]["used"], COMMUNITY_MEMBERS + 1, "{body}");
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_team_key_reports_its_plan_and_lifts_the_member_cap() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    for _ in 1..=COMMUNITY_MEMBERS {
+        fixture.register().await;
+    }
+    let payload = team();
+
+    let response = fixture.put(&admin.token, &issue(&payload)).await;
+
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    assert_eq!(body["edition"], "team", "{body}");
+    assert_eq!(body["status"], "active", "{body}");
+    assert_eq!(body["license"], details(&payload));
+    assert_eq!(body["license"]["plan"], "team", "{body}");
+    assert_eq!(
+        body["members"],
+        json!({ "active": COMMUNITY_MEMBERS + 1, "cap": null, "over": false })
+    );
+    assert_eq!(fixture.get(&admin.token).await.json_value(), body);
+    assert_eq!(fixture.client.state().edition().await, Edition::Team);
+    let audits = fixture.audits(actions::LICENSE_SET).await;
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].new_values.as_ref().unwrap()["plan"], "team");
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_lapsed_team_key_keeps_its_edition_under_the_community_cap() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    let payload = Payload {
+        plan: Some(Plan::Team),
+        ..expiring(-TimeDelta::days(GRACE_DAYS + 1))
+    };
+    licenses::replace(fixture.pool(), &issue(&payload))
+        .await
+        .unwrap();
+
+    let body = fixture.get(&admin.token).await.json_value();
+
+    assert_eq!(body["edition"], "team", "{body}");
+    assert_eq!(body["status"], "lapsed", "{body}");
+    assert_eq!(body["license"], details(&payload));
+    assert_eq!(
+        body["members"],
+        json!({ "active": 1, "cap": COMMUNITY_MEMBERS, "over": false })
+    );
     fixture.cleanup().await;
 }
 
@@ -473,6 +562,10 @@ async fn a_key_is_stored_shown_and_audited_without_its_text() {
         body["seats"],
         json!({ "used": 1, "licensed": SEATS, "over": false })
     );
+    assert_eq!(
+        body["members"],
+        json!({ "active": 1, "cap": null, "over": false })
+    );
     let read = fixture.get(&admin.token).await;
     read.assert_status(StatusCode::OK);
     assert_eq!(read.json_value(), body);
@@ -487,6 +580,7 @@ async fn a_key_is_stored_shown_and_audited_without_its_text() {
     assert_eq!(audit.old_values, None);
     let new_values = audit.new_values.as_ref().unwrap();
     assert_eq!(new_values["id"], json!(payload.id));
+    assert_eq!(new_values["plan"], "enterprise", "{new_values}");
     assert!(new_values.get("tier").is_none(), "{new_values}");
     assert!(!audit.row.contains(&key), "the audit row holds the key");
     let (encoded_payload, signature) = key.split_once(SEPARATOR).unwrap();
@@ -809,7 +903,7 @@ async fn seats_over_the_license_are_reported_but_never_block_sign_in() {
     fixture.cleanup().await;
 }
 
-fn assert_uncounted(body: &Value, licensed: Value) {
+fn assert_uncounted(body: &Value, licensed: Value, cap: Value) {
     assert_eq!(
         body["seats"],
         json!({ "used": null, "licensed": licensed, "over": false })
@@ -817,6 +911,14 @@ fn assert_uncounted(body: &Value, licensed: Value) {
     assert!(
         body["seats"].get("used").is_some(),
         "seats.used is omitted: {body}"
+    );
+    assert_eq!(
+        body["members"],
+        json!({ "active": null, "cap": cap, "over": false })
+    );
+    assert!(
+        body["members"].get("active").is_some(),
+        "members.active is omitted: {body}"
     );
 }
 
@@ -838,7 +940,7 @@ async fn setting_a_key_whose_seats_cannot_be_counted_reports_usage_as_unknown() 
     let body = response.json_value();
     assert_eq!(body["edition"], "enterprise", "{body}");
     assert_eq!(body["license"], details(&payload));
-    assert_uncounted(&body, json!(1));
+    assert_uncounted(&body, json!(1), Value::Null);
     assert_eq!(fixture.stored().await.as_deref(), Some(key.as_str()));
     assert_eq!(fixture.audits(actions::LICENSE_SET).await.len(), 1);
     fixture.cleanup().await;
@@ -859,7 +961,7 @@ async fn removing_a_key_whose_seats_cannot_be_counted_reports_usage_as_unknown()
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
     assert_community(&body);
-    assert_uncounted(&body, Value::Null);
+    assert_uncounted(&body, Value::Null, json!(COMMUNITY_MEMBERS));
     assert_eq!(fixture.rows().await, 0);
     assert_eq!(fixture.audits(actions::LICENSE_REMOVED).await.len(), 1);
     fixture.cleanup().await;
@@ -883,7 +985,7 @@ async fn reading_a_license_whose_seats_cannot_be_counted_reports_usage_as_unknow
     assert_eq!(body["edition"], "enterprise", "{body}");
     assert_eq!(body["status"], "active", "{body}");
     assert_eq!(body["license"], details(&payload));
-    assert_uncounted(&body, json!(SEATS));
+    assert_uncounted(&body, json!(SEATS), Value::Null);
     fixture.cleanup().await;
 }
 

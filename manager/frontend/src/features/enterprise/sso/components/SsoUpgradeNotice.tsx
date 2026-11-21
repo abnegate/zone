@@ -1,15 +1,9 @@
 import { buttonVariants } from '@zone/ui';
 import { Link } from 'react-router-dom';
-import {
-  SettingsGroup,
-  SettingsSection,
-  settingsPath,
-} from '../../../settings/navigation/sections';
+import { LICENSE_PATH } from '../../licensePath';
 
 export const UPGRADE_NOTICE =
   'Single sign-on is part of Zone Enterprise. Add a license to let people sign in with Okta, Microsoft Entra ID or Google Workspace.';
-
-export const LICENSE_PATH = settingsPath(SettingsGroup.Server, SettingsSection.License);
 
 export function SsoUpgradeNotice() {
   return (

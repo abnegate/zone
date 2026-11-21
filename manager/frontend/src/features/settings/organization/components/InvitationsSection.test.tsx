@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { AuthRequestError } from '../../../../api/auth';
 import { clientModule } from '../../../../test/client';
 import { chooseSelect } from '../../../../test/select';
+import { memberCapMessage } from '../../../enterprise/members';
+import { PRICING_URL } from '../../../enterprise/pricing';
 import type { Invitation, Workspace } from '../types';
 
 const mockGetInvitations = mock();
@@ -231,6 +234,55 @@ describe('InvitationsSection', () => {
 
     // Modal should stay open
     expect(screen.getByRole('heading', { name: /invite member/i })).toBeInTheDocument();
+  });
+
+  async function invite() {
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    fireEvent.click(await screen.findByRole('button', { name: /invite member/i }));
+    fireEvent.change(screen.getByLabelText(/email address/i), {
+      target: { value: 'fourth@test.com' },
+    });
+    fireEvent.submit(screen.getByRole('button', { name: /send invitation/i }).closest('form')!);
+  }
+
+  it('explains the member cap inside the invite form, with a link to the plans', async () => {
+    mockCreateInvitation.mockRejectedValue(
+      new AuthRequestError('Server text', 'member_cap_reached')
+    );
+
+    await invite();
+
+    const dialog = screen.getByRole('dialog', { name: /invite member/i });
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent(memberCapMessage());
+    expect(alert).not.toHaveTextContent('Server text');
+    expect(within(alert).getByRole('link', { name: /Compare plans/ })).toHaveAttribute(
+      'href',
+      PRICING_URL
+    );
+    expect(screen.queryByText('Server text')).not.toBeInTheDocument();
+  });
+
+  it('clears the member cap explanation when the form is closed and opened again', async () => {
+    mockCreateInvitation.mockRejectedValue(
+      new AuthRequestError('Server text', 'member_cap_reached')
+    );
+    await invite();
+    await screen.findByText(memberCapMessage(), { exact: false });
+
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    fireEvent.click(screen.getByRole('button', { name: /invite member/i }));
+
+    expect(screen.queryByText(memberCapMessage(), { exact: false })).not.toBeInTheDocument();
+  });
+
+  it('shows the plain message for a refusal that is not the cap', async () => {
+    mockCreateInvitation.mockRejectedValue(new AuthRequestError('Not allowed', 'forbidden'));
+
+    await invite();
+
+    expect(await screen.findByText('Not allowed')).toBeInTheDocument();
+    expect(screen.queryByText(memberCapMessage(), { exact: false })).not.toBeInTheDocument();
   });
 
   it('revokes invitation when revoke button clicked', async () => {

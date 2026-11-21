@@ -27,6 +27,7 @@ pub mod login;
 pub mod mail;
 pub mod mcp_servers;
 pub mod media_source;
+pub mod members;
 pub mod model;
 pub mod network_denial;
 pub mod policy;

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { AuthRequestError } from '../../api/auth';
+import { memberCapMessage } from '../enterprise/members';
 import { SsoCode } from './SsoCode';
 import { messageOf, SSO_INCOMPLETE, SSO_MESSAGES, ssoMessage } from './ssoMessages';
 
@@ -71,6 +72,16 @@ describe('ssoMessages', () => {
     it("keeps the server's message for a code it does not know", () => {
       const error = new AuthRequestError('This device is waiting for an admin', 'device_pending');
       expect(messageOf(error, 'Login failed')).toBe('This device is waiting for an admin');
+    });
+
+    it('explains the member cap for its refusal code instead of the server text', () => {
+      const error = new AuthRequestError('Server text', 'member_cap_reached');
+      expect(messageOf(error, 'Registration failed')).toBe(memberCapMessage());
+    });
+
+    it('keeps the member cap out of the single sign-on messages', () => {
+      expect(ssoMessage('member_cap_reached')).toBeNull();
+      expect(Object.values(SSO_MESSAGES)).not.toContain(memberCapMessage());
     });
 
     it('uses the message of a plain error', () => {

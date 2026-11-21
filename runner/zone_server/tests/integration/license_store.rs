@@ -77,6 +77,7 @@ fn payload(expires_at: DateTime<Utc>) -> Payload {
         expires_at,
         key_id: TRUSTED.into(),
         subscription: None,
+        plan: None,
     }
 }
 

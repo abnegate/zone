@@ -16,6 +16,8 @@ import {
   OKTA,
   REDIRECT_URI,
   SERVICE_PROVIDER,
+  TEAM_ACTIVE,
+  TEAM_LAPSED,
 } from '../fixtures';
 import { refusalMessage } from '../messages';
 import { SsoRefusal } from '../SsoRefusal';
@@ -157,6 +159,23 @@ describe('SsoSection', () => {
       expect(screen.queryByRole('button', { name: /Edit|Delete|Add provider/ })).toBeNull();
       expect(screen.queryByText(REDIRECT_URI)).not.toBeInTheDocument();
       expect(screen.queryByText(SERVICE_PROVIDER_TITLE)).not.toBeInTheDocument();
+    });
+
+    it('shows a Team server the Enterprise upgrade notice, since Team does not include single sign-on', async () => {
+      await loaded(TEAM_ACTIVE);
+
+      expect(screen.getByText(UPGRADE_NOTICE)).toBeInTheDocument();
+      expect(UPGRADE_NOTICE).toContain('Zone Enterprise');
+      expect(screen.queryByText(LAPSED_NOTICE)).not.toBeInTheDocument();
+      expect(screen.queryByRole('switch')).not.toBeInTheDocument();
+    });
+
+    it('shows a lapsed Team license the upgrade notice instead of asking it to renew', async () => {
+      await loaded(TEAM_LAPSED);
+
+      expect(screen.getByText(UPGRADE_NOTICE)).toBeInTheDocument();
+      expect(screen.queryByText(LAPSED_NOTICE)).not.toBeInTheDocument();
+      expect(providerNames()).toEqual(['Okta']);
     });
 
     it('treats a grace period as entitled', async () => {

@@ -5,6 +5,7 @@ import { SsoCode } from '../src/features/auth/SsoCode';
 import { SSO_ATTEMPT_KEY, type SsoAttempt } from '../src/features/auth/ssoAttempt';
 import { atOrigin, SSO_OFFERED, SSO_REQUIRED } from '../src/features/auth/ssoFixtures';
 import type { SsoCallbackRequest, SsoPublicProviders } from '../src/features/auth/types';
+import { LICENSE_PATH } from '../src/features/enterprise/licensePath';
 import {
   COMMUNITY_EMPTY,
   ENTITLED,
@@ -32,7 +33,6 @@ import {
 } from './test-utils';
 
 const SSO_PATH = '/settings/server/sso';
-const LICENSE_PATH = '/settings/server/license';
 const CALLBACK_PATH = '/sso/callback';
 
 const SETTINGS_API = /\/api\/sso$/;

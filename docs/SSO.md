@@ -13,15 +13,17 @@ see that section.
 
 ## Licensing
 
-Single sign-on is part of Zone Enterprise. To add or change a provider, or
-to turn enforcement on, the server needs a Zone Enterprise license that
-verifies and is either active or in its 30-day grace period after expiry. You
-install the license under **Settings → This server → License**.
+Single sign-on is part of Zone Enterprise; a Zone Team license doesn't
+include it. To add or change a provider, or to turn enforcement on, the
+server needs a Zone Enterprise license that verifies and is either active or
+in its 30-day grace period after expiry. You install the license under
+**Settings → This server → License**.
 
 | License state | Sign-in with SSO | Enforcement | Settings |
 |---|---|---|---|
 | Enterprise, active or in grace | Works | Works | Editable |
-| Lapsed (past grace) | Keeps working | Keeps working | Read-only, with a renewal warning |
+| Enterprise, lapsed (past grace) | Keeps working | Keeps working | Read-only, with a renewal warning |
+| Team, in any state | Keeps working for providers already set up | Keeps working if it was on | Read-only, with an upgrade notice |
 | Removed, or never installed (Community) | Keeps working for providers already set up | Keeps working if it was on | Read-only, with an upgrade notice |
 
 The table applies to OIDC and SAML providers alike.
@@ -50,8 +52,14 @@ a new entity ID unlinks every account (see
 [Changing the entity ID](#changing-the-entity-id)). See
 [Certificate rotation](#certificate-rotation-and-refreshing-metadata).
 
-On Community, the section shows an upgrade notice that links to the License
-section, and lists any providers that already exist as read-only.
+On Community and Team, the section shows an upgrade notice that links to the
+License section, and lists any providers that already exist as read-only.
+
+On Community, the [member cap](LICENSING.md#the-community-member-cap) also
+applies to single sign-on, OIDC and SAML alike: once the server has 3 active
+members, a first sign-in that would create an account is refused with
+`member_cap_reached`. People who already have an account, including one
+linked by email, keep signing in.
 
 An SSO user who signs in counts toward licensed seats in the same way as a
 user who signs in with a password.
@@ -1152,6 +1160,7 @@ each one.
 | `sso_required` | Password sign-in, registration or reset was refused because SSO is required. | Sign in with SSO, or as a server admin. |
 | `account_disabled` | The Zone account is disabled. | Disabled accounts can't sign in by any method. |
 | `license_required` | A change was refused because there's no Zone Enterprise license that is active or in its grace period. | **Settings → This server → License**. |
+| `member_cap_reached` | A first sign-in would create an account, but the server runs Community and already has 3 active members. See [the member cap](LICENSING.md#the-community-member-cap). | A Zone Team or Enterprise license under **Settings → This server → License**. |
 
 Zone accepts ID tokens signed with RS256, RS384, RS512, PS256, PS384,
 PS512, ES256, ES384 or EdDSA. When the discovery document lists

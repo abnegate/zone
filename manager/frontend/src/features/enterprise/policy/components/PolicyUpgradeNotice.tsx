@@ -1,13 +1,7 @@
 import { buttonVariants } from '@zone/ui';
 import { Link } from 'react-router-dom';
-import {
-  SettingsGroup,
-  SettingsSection,
-  settingsPath,
-} from '../../../settings/navigation/sections';
+import { LICENSE_PATH } from '../../licensePath';
 import { UPGRADE_NOTICE } from '../labels';
-
-export const LICENSE_PATH = settingsPath(SettingsGroup.Server, SettingsSection.License);
 
 export function PolicyUpgradeNotice() {
   return (

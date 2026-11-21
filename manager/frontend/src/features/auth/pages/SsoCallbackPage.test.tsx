@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { render, screen, waitFor } from '@testing-library/react';
 import { AuthRequestError } from '../../../api/auth';
+import { memberCapMessage } from '../../enterprise/members';
 import { SsoCode } from '../SsoCode';
 import { SSO_ATTEMPT_KEY } from '../ssoAttempt';
 import { SSO_INCOMPLETE, SSO_MESSAGES } from '../ssoMessages';
@@ -242,6 +243,16 @@ describe('SsoCallbackPage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'This device is waiting for an admin to allow it'
     );
+  });
+
+  it('explains the member cap when the sign-in would add a member past it', async () => {
+    mockCompleteSso.mockRejectedValue(new AuthRequestError('Server text', 'member_cap_reached'));
+    arrive('?code=code-1&state=state-1', { state: 'state-1', next: '/' });
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(memberCapMessage());
+    expect(alert).not.toHaveTextContent('Server text');
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 
   it('links back to sign in after a failure', async () => {
