@@ -1,6 +1,6 @@
 import { buttonVariants } from '@zone/ui';
 import { Link } from 'react-router-dom';
-import { LICENSE_PATH } from '../../audit/components';
+import { LICENSE_PATH } from '../../licensePath';
 import {
   LAPSED_ACTION,
   LAPSED_NOTICE,

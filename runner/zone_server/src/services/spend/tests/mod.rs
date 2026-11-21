@@ -617,6 +617,7 @@ fn license() -> License {
             expires_at: moment("2027-01-01T00:00:00Z"),
             key_id: KEY_ID.into(),
             subscription: None,
+            plan: None,
         },
         &signing,
     );

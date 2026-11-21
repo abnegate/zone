@@ -1428,6 +1428,7 @@ mod tests {
                 expires_at: now + TimeDelta::days(365),
                 key_id: KEY_ID.into(),
                 subscription: None,
+                plan: None,
             },
             &signing,
         );
