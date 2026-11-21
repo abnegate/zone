@@ -1101,13 +1101,13 @@ The panel uses these routes, where `{agent}` is `claude` or `codex`:
 |-------|-----|------|
 | `GET /api/organizations/{org_id}/agents` | Any member | Both agents' status and models. Each status's `logins` lists every sign-in of the agent, oldest first, with its `id`, `label`, `plan`, `state`, `expires_at`, `exhausted_until` (set even when no usage was ever read), `last_used_at` and `usage` (its `windows`, `headroom` and `fetched_at`), read again first when older than `ZONE_AGENT_USAGE_TTL_SECONDS`; the agent's own `state` and `label` are its best sign-in's |
 | `GET /api/organizations/{org_id}/agents/{agent}` | Any member | One agent's status, with its `logins` as above. With `?attempt={attempt}`, a Claude status's `error` says why that sign-in failed, to the admin who started it |
-| `POST /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Start a sign-in; `{"scope":"full"}` asks claude for full access, and `{"flow":"paste"}` asks for a code to paste even with a callback. A claude answer's `flow` says how its code comes back, `loopback` or `paste`, and its `attempt` names the sign-in. The callback is used only when the request's `Origin` is a localhost address `ZONE_CONSOLE_ORIGINS` lists; `{"flow":"loopback"}` from anywhere else is refused |
+| `POST /api/organizations/{org_id}/agents/{agent}/login` | Holders of `agent_logins:update` | Start a sign-in; `{"scope":"full"}` asks claude for full access, and `{"flow":"paste"}` asks for a code to paste even with a callback. A claude answer's `flow` says how its code comes back, `loopback` or `paste`, and its `attempt` names the sign-in. The callback is used only when the request's `Origin` is a localhost address `ZONE_CONSOLE_ORIGINS` lists; `{"flow":"loopback"}` from anywhere else is refused |
 | `POST /api/organizations/{org_id}/agents/claude/login/code` | The admin who started | Finish a Claude sign-in with `{"code":"..."}`; a code that fails carries a `kind`, `invalid_code` (paste again) or `start_again` |
 | `POST /api/organizations/{org_id}/agents/claude/login/receipt` | The admin who started, in the session that started it | Finish a Claude sign-in claude.com sent back to the callback, with `{"receipt":"..."}` from the fragment of the address the callback sent the browser to. Anyone else's spends the receipt and discards the code |
 | `DELETE /api/organizations/{org_id}/agents/claude/login/attempt` | Any member, for their own | End the caller's Claude sign-in, wherever its code is |
-| `DELETE /api/organizations/{org_id}/agents/codex/login/attempt` | Admins and owners | Stop the organization's codex sign-in in progress, keeping every login it already holds. This used to answer `400` |
-| `DELETE /api/organizations/{org_id}/agents/{agent}/logins/{login_id}` | Admins and owners | Sign out of that one account, leaving the agent's others signed in. `204`, or `404` "The organization holds no such sign-in" |
-| `DELETE /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Sign out of every account of the agent |
+| `DELETE /api/organizations/{org_id}/agents/codex/login/attempt` | Holders of `agent_logins:update` | Stop the organization's codex sign-in in progress, keeping every login it already holds. This used to answer `400` |
+| `DELETE /api/organizations/{org_id}/agents/{agent}/logins/{login_id}` | Holders of `agent_logins:update` | Sign out of that one account, leaving the agent's others signed in. `204`, or `404` "The organization holds no such sign-in" |
+| `DELETE /api/organizations/{org_id}/agents/{agent}/login` | Holders of `agent_logins:update` | Sign out of every account of the agent |
 
 The callback, `GET /callback`, is served by the callback listener on the port
 `ZONE_AGENT_CALLBACK` names, not by the API. It answers an approved sign-in
@@ -2261,11 +2261,11 @@ The Helm chart passes each value under `server.env` to zone-server as written, s
 
 ### Organization-managed servers
 
-Organization admins and owners add, edit, reconnect and delete servers in **Settings → Organization → MCP servers**; members see the list read-only. A server is `stdio`, a `command` with `arguments` that needs `ZONE_MCP_COMMANDS`, or `http`, streamable HTTP at a `url`, which needs no flag. `sse` is refused; use streamable HTTP. A name is at most 32 letters, digits, `-` and `_`, with no `__` and no trailing `_`. 32 is the half of a 64-character tool name that abnegate-agent keeps for the server in `server__tool`: it cuts a longer server name, so two servers sharing their first 32 characters would offer their tools under one prefix. It must be unique in the organization and must not match an instance server: a clash returns 409. `tools` limits which of the server's tools are offered; `null` offers them all.
+Holders of `mcp_servers:update`, which organization admins and owners hold and a custom role can include (see [ROLES.md](ROLES.md)), add, edit, reconnect and delete servers in **Settings → Organization → MCP servers**; other members see the list read-only. A server is `stdio`, a `command` with `arguments` that needs `ZONE_MCP_COMMANDS`, or `http`, streamable HTTP at a `url`, which needs no flag. `sse` is refused; use streamable HTTP. A name is at most 32 letters, digits, `-` and `_`, with no `__` and no trailing `_`. 32 is the half of a 64-character tool name that abnegate-agent keeps for the server in `server__tool`: it cuts a longer server name, so two servers sharing their first 32 characters would offer their tools under one prefix. It must be unique in the organization and must not match an instance server: a clash returns 409. `tools` limits which of the server's tools are offered; `null` offers them all.
 
 The API's field names are its own, not the `mcpServers` ones: a server's variables are `environment` and its arguments are `arguments`, where an instance document says `env` and `args`. A create, update or workspace body that names a key the route does not read, `env` and `args` included, is refused with 400 and nothing is stored; `error` is axum's account of the body, which names the key: ``Failed to deserialize the JSON body into the target type: unknown field `env`, …``. Any other body the route cannot read, malformed JSON or a value of the wrong type, is a 400 the same way.
 
-In **Settings → Workspace → MCP servers**, a workspace admin or owner sets each organization server to Inherit, On or Off. A workspace can only turn a server off: On does not enable a server the organization has turned off. `effective` is the outcome: the server is enabled and the workspace has not turned it off. Instance servers can't be overridden per workspace.
+In **Settings → Workspace → MCP servers**, a holder of `workspace_mcp_servers:update` (a workspace admin or owner, or a custom role that includes it) sets each organization server to Inherit, On or Off. A workspace can only turn a server off: On does not enable a server the organization has turned off. `effective` is the outcome: the server is enabled and the workspace has not turned it off. Instance servers can't be overridden per workspace.
 
 Each server shows one status:
 
@@ -2328,14 +2328,14 @@ Rules for every organization server:
 
 | Method | Path | Who |
 |---|---|---|
-| GET | `/api/organizations/{org_id}/mcp-servers` | org member |
-| POST | `/api/organizations/{org_id}/mcp-servers` | org admin/owner |
-| GET | `/api/organizations/{org_id}/mcp-servers/{server_id}` | org member |
-| PUT | `/api/organizations/{org_id}/mcp-servers/{server_id}` | org admin/owner |
-| DELETE | `/api/organizations/{org_id}/mcp-servers/{server_id}` | org admin/owner |
-| POST | `/api/organizations/{org_id}/mcp-servers/{server_id}/connection` | org admin/owner |
-| GET | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | workspace member |
-| PUT | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | workspace admin/owner |
+| GET | `/api/organizations/{org_id}/mcp-servers` | `organization:read` |
+| POST | `/api/organizations/{org_id}/mcp-servers` | `mcp_servers:update` |
+| GET | `/api/organizations/{org_id}/mcp-servers/{server_id}` | `organization:read` |
+| PUT | `/api/organizations/{org_id}/mcp-servers/{server_id}` | `mcp_servers:update` |
+| DELETE | `/api/organizations/{org_id}/mcp-servers/{server_id}` | `mcp_servers:update` |
+| POST | `/api/organizations/{org_id}/mcp-servers/{server_id}/connection` | `mcp_servers:update` |
+| GET | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | `workspace:read` |
+| PUT | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | `workspace_mcp_servers:update` |
 
 Every route checks that the caller belongs to the organization before it looks up the server or workspace in its path, so a caller outside the organization gets 404 "Organization not found" whether or not either exists.
 

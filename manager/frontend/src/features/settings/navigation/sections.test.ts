@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { ORGANIZATION_PERMISSIONS, Permission } from '../../enterprise/roles/schemas';
 import {
-  administersOrganization,
   COMPACT_QUERY,
   findSection,
   GROUP_LABELS,
@@ -694,16 +693,5 @@ describe('permission-gated organization sections', () => {
       (name) => name !== Permission.OrganizationDelete && name !== Permission.AdministratorsUpdate
     );
     expect(organizationPaths(holding(admin))).toEqual(pathsOf(SettingsGroup.Organization));
-  });
-
-  it('administers the organization with roles:update, or with the admin rank when no permissions are sent', () => {
-    expect(administersOrganization(holding([Permission.OrganizationRead]))).toBe(false);
-    expect(
-      administersOrganization(holding([Permission.OrganizationRead, Permission.RolesUpdate]))
-    ).toBe(true);
-    expect(administersOrganization({ organization: true, organizationRole: 'admin' })).toBe(true);
-    expect(administersOrganization({ organization: true, organizationRole: 'member' })).toBe(false);
-    expect(administersOrganization({ organization: true, organizationRole: undefined })).toBe(true);
-    expect(administersOrganization({ organization: false, organizationRole: 'owner' })).toBe(false);
   });
 });

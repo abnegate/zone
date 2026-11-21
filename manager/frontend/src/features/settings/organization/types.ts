@@ -125,6 +125,8 @@ export interface InvitationAccess {
   read: boolean;
   create: boolean;
   revoke: boolean;
+  role?: OrgRole | undefined;
+  permissions?: readonly string[] | undefined;
 }
 
 // The server names actions and resources with dotted strings (member.added,

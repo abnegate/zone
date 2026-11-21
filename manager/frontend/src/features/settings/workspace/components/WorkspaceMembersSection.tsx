@@ -2,14 +2,20 @@ import { Button, EmptyState, Modal, Select, type SelectOption } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useAuth } from '../../../auth';
-import { RoleScope, useRoles } from '../../../enterprise';
+import { useRoles } from '../../../enterprise';
 import {
   type Assignment,
   assignmentFailure,
   assignmentOf,
   assignsCustomRole,
   customRoleOptions,
+  grantableRoles,
   heldRole,
+  reaches,
+  roleBadgeClass,
+  roleLabel,
+  type Standing,
+  WORKSPACE_LADDER,
 } from '../../assignment';
 import { memberLabel } from '../../memberLabel';
 import type {
@@ -25,15 +31,12 @@ interface WorkspaceMembersSectionProps {
   orgId: string;
 }
 
-const roleOptions: Array<{ value: WorkspaceRole; label: string }> = [
-  { value: 'viewer', label: 'Viewer' },
-  { value: 'member', label: 'Member' },
-  { value: 'admin', label: 'Admin' },
-  { value: 'owner', label: 'Owner' },
-];
+const UNSEATED: Standing<WorkspaceRole> = { role: 'viewer', permissions: undefined };
 
-const toUserMessage = (err: unknown, fallback: string) => {
-  const message = err instanceof Error ? err.message : fallback;
+const DEFAULT_ROLE: WorkspaceRole = 'member';
+
+const toUserMessage = (error: unknown, fallback: string) => {
+  const message = error instanceof Error ? error.message : fallback;
   return message.startsWith('Validation failed') ? fallback : message;
 };
 
@@ -48,14 +51,14 @@ export default function WorkspaceMembersSection({
   const [success, setSuccess] = useState<string | undefined>(undefined);
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [orgMembers, setOrgMembers] = useState<OrganizationMember[]>([]);
-  const [currentUserRole, setCurrentUserRole] = useState<WorkspaceRole>('viewer');
+  const [standing, setStanding] = useState<Standing<WorkspaceRole>>(UNSEATED);
 
   const [updatingMemberId, setUpdatingMemberId] = useState<string | null>(null);
 
   const [showAddModal, setShowAddModal] = useState(false);
   const [addUserId, setAddUserId] = useState('');
   const [addUserIdError, setAddUserIdError] = useState<string | undefined>(undefined);
-  const [addRole, setAddRole] = useState<WorkspaceRole>('member');
+  const [addRole, setAddRole] = useState<WorkspaceRole>(DEFAULT_ROLE);
   const [adding, setAdding] = useState(false);
 
   const [showRemoveModal, setShowRemoveModal] = useState(false);
@@ -80,12 +83,12 @@ export default function WorkspaceMembersSection({
       setMembers(workspaceMembersResponse.members);
       setOrgMembers(orgMembersResponse.members);
 
-      const currentMember = workspaceMembersResponse.members.find((m) => m.user_id === user?.id);
-      if (currentMember) {
-        setCurrentUserRole(currentMember.role);
+      const caller = workspaceMembersResponse.members.find((member) => member.user_id === user?.id);
+      if (caller) {
+        setStanding({ role: caller.role, permissions: caller.permissions });
       }
-    } catch (err) {
-      setError(toUserMessage(err, 'Couldn’t load members'));
+    } catch (error) {
+      setError(toUserMessage(error, 'Couldn’t load members'));
     } finally {
       setLoading(false);
     }
@@ -101,12 +104,12 @@ export default function WorkspaceMembersSection({
   };
 
   const getAvailableOrgMembers = (): OrganizationMember[] => {
-    const workspaceMemberUserIds = new Set(members.map((m) => m.user_id));
+    const workspaceMemberUserIds = new Set(members.map((member) => member.user_id));
     return orgMembers.filter((orgMember) => !workspaceMemberUserIds.has(orgMember.user_id));
   };
 
-  const handleAddMember = async (e: FormEvent) => {
-    e.preventDefault();
+  const handleAddMember = async (event: FormEvent) => {
+    event.preventDefault();
     setAddUserIdError(undefined);
 
     if (!addUserId.trim()) {
@@ -126,11 +129,11 @@ export default function WorkspaceMembersSection({
       showSuccessMessage('Member added successfully');
       setShowAddModal(false);
       setAddUserId('');
-      setAddRole('member');
+      setAddRole(DEFAULT_ROLE);
       setAddUserIdError(undefined);
       await loadMembers();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to add member');
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Failed to add member');
     } finally {
       setAdding(false);
     }
@@ -163,7 +166,7 @@ export default function WorkspaceMembersSection({
   };
 
   const handleRoleChange = async (userId: string, assignment: Assignment<WorkspaceRole>) => {
-    const member = members.find((m) => m.user_id === userId);
+    const member = members.find((candidate) => candidate.user_id === userId);
     if (!member) return;
 
     setUpdatingMemberId(member.id);
@@ -171,10 +174,13 @@ export default function WorkspaceMembersSection({
 
     try {
       await client.updateWorkspaceMemberRole(workspaceId, userId, assignment);
+      if (assignsCustomRole(assignment) || member.custom_role !== null) {
+        void refreshRoles();
+      }
       showSuccessMessage('Role updated successfully');
       await loadMembers();
-    } catch (err) {
-      setError(assignmentFailure(err, 'Failed to update role'));
+    } catch (error) {
+      setError(assignmentFailure(error, 'Failed to update role'));
     } finally {
       setUpdatingMemberId(null);
     }
@@ -201,20 +207,12 @@ export default function WorkspaceMembersSection({
       setShowRemoveModal(false);
       setMemberToRemove(null);
       await loadMembers();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to remove member');
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Failed to remove member');
     } finally {
       setRemoving(false);
     }
   };
-
-  const getRoleBadgeClass = (member: WorkspaceMember): string =>
-    member.custom_role === null
-      ? `role-badge role-badge-${member.role}`
-      : 'role-badge role-badge-custom';
-
-  const getRoleLabel = (member: WorkspaceMember): string =>
-    member.custom_role?.name ?? member.role.charAt(0).toUpperCase() + member.role.slice(1);
 
   const formatDate = (dateString: string): string => {
     if (!dateString) return '—';
@@ -228,49 +226,35 @@ export default function WorkspaceMembersSection({
   };
 
   const countOwners = (): number => {
-    return members.filter((m) => m.role === 'owner').length;
+    return members.filter((member) => member.role === 'owner').length;
   };
 
-  const canManageMembers = currentUserRole === 'admin' || currentUserRole === 'owner';
+  const adds = WORKSPACE_LADDER.grants(standing, WORKSPACE_LADDER.create);
+  const updates = WORKSPACE_LADDER.grants(standing, WORKSPACE_LADDER.update);
+  const removes = WORKSPACE_LADDER.grants(standing, WORKSPACE_LADDER.remove);
+  const manages = updates || removes;
+  const grantable = grantableRoles(WORKSPACE_LADDER, standing);
 
-  const { response: customRoles } = useRoles(canManageMembers ? orgId : null);
+  const { response: customRoles, refresh: refreshRoles } = useRoles(updates ? orgId : null);
 
   const canModifyMember = (member: WorkspaceMember): boolean => {
-    if (!canManageMembers) return false;
     if (member.user_id === user?.id) return false;
     if (member.role === 'owner' && countOwners() === 1) return false;
-    if (currentUserRole !== 'owner' && (member.role === 'admin' || member.role === 'owner')) {
-      return false;
-    }
-    return true;
-  };
-
-  // Both the add route and the role route refuse anyone but an owner granting
-  // admin or owner, so one list serves the form and the rows alike.
-  const grantableRoles = (): SelectOption[] => {
-    if (!canManageMembers) return [];
-    if (currentUserRole === 'admin') {
-      return roleOptions.filter((r) => r.value !== 'owner' && r.value !== 'admin');
-    }
-    return roleOptions;
-  };
-
-  const getAssignableRoles = (member: WorkspaceMember): SelectOption[] => {
-    if (!canManageMembers) return [];
-    // Only an owner may re-seat someone already holding admin or owner.
-    if (currentUserRole === 'admin' && (member.role === 'admin' || member.role === 'owner')) {
-      return roleOptions.filter((r) => r.value === member.role);
-    }
-    return [
-      ...grantableRoles(),
-      ...customRoleOptions(customRoles, RoleScope.Workspace, member.custom_role),
-    ];
+    return reaches(WORKSPACE_LADDER, standing, member);
   };
 
   const getAvailableRoles = (member: WorkspaceMember): SelectOption[] =>
-    canManageMembers
-      ? getAssignableRoles(member)
-      : roleOptions.filter((r) => r.value === member.role);
+    updates && canModifyMember(member)
+      ? [
+          ...grantable,
+          ...customRoleOptions(
+            customRoles,
+            WORKSPACE_LADDER.scope,
+            member.custom_role,
+            standing.permissions
+          ),
+        ]
+      : [];
 
   if (loading) {
     return <div className="loading-state">Loading members...</div>;
@@ -285,9 +269,19 @@ export default function WorkspaceMembersSection({
           <h2 className="section-title">Workspace Members</h2>
           <p className="section-description">Manage members and their roles in this workspace.</p>
         </div>
-        {canManageMembers && (
+        {adds && (
           <div className="section-row-actions">
-            <Button size="sm" onClick={() => setShowAddModal(true)}>
+            <Button
+              size="sm"
+              onClick={() => {
+                setAddRole(
+                  grantable.some(({ value }) => value === DEFAULT_ROLE)
+                    ? DEFAULT_ROLE
+                    : UNSEATED.role
+                );
+                setShowAddModal(true);
+              }}
+            >
               Add Member
             </Button>
           </div>
@@ -313,7 +307,7 @@ export default function WorkspaceMembersSection({
                 <th>Member</th>
                 <th>Role</th>
                 <th>Joined</th>
-                {canManageMembers && <th className="members-actions-head">Actions</th>}
+                {manages && <th className="members-actions-head">Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -321,7 +315,7 @@ export default function WorkspaceMembersSection({
                 const isUpdating = updatingMemberId === member.id;
                 const canModify = canModifyMember(member);
                 const availableRoles = getAvailableRoles(member);
-                const editable = canModify && availableRoles.length > 1;
+                const editable = availableRoles.length > 1;
                 return (
                   <tr key={member.id}>
                     <td>
@@ -349,11 +343,11 @@ export default function WorkspaceMembersSection({
                           options={availableRoles}
                         />
                       ) : (
-                        <span className={getRoleBadgeClass(member)}>{getRoleLabel(member)}</span>
+                        <span className={roleBadgeClass(member)}>{roleLabel(member)}</span>
                       )}
                     </td>
                     <td className="member-joined">{formatDate(member.joined_at)}</td>
-                    {canManageMembers && (
+                    {manages && (
                       <td>
                         <div className="member-actions">
                           {isUpdating && (
@@ -361,18 +355,20 @@ export default function WorkspaceMembersSection({
                               Updating...
                             </span>
                           )}
-                          <Button
-                            className="member-remove"
-                            onClick={() => {
-                              setMemberToRemove(member);
-                              setShowRemoveModal(true);
-                            }}
-                            disabled={!canModify || isUpdating}
-                            variant="ghost"
-                            size="sm"
-                          >
-                            Remove
-                          </Button>
+                          {removes && (
+                            <Button
+                              className="member-remove"
+                              onClick={() => {
+                                setMemberToRemove(member);
+                                setShowRemoveModal(true);
+                              }}
+                              disabled={!canModify || isUpdating}
+                              variant="ghost"
+                              size="sm"
+                            >
+                              Remove
+                            </Button>
+                          )}
                         </div>
                       </td>
                     )}
@@ -395,8 +391,8 @@ export default function WorkspaceMembersSection({
           <Select
             label="User"
             value={addUserId}
-            onChange={(e) => {
-              setAddUserId(e.target.value);
+            onChange={(event) => {
+              setAddUserId(event.target.value);
               setAddUserIdError(undefined);
             }}
             options={[
@@ -411,8 +407,8 @@ export default function WorkspaceMembersSection({
           <Select
             label="Role"
             value={addRole}
-            onChange={(e) => setAddRole(e.target.value as WorkspaceRole)}
-            options={grantableRoles()}
+            onChange={(event) => setAddRole(event.target.value as WorkspaceRole)}
+            options={grantable}
           />
           <div className="modal-actions">
             <Button

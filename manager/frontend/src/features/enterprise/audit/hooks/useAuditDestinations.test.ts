@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
 import { ApiError } from '../../../../api/ApiError';
+import { RETRY_LIMIT, retryLoad } from '../../retry';
 import { AuditRefusal } from '../AuditRefusal';
 import {
   DELIVERED_TEST,
@@ -18,7 +19,6 @@ import { auditQueryKeys } from '../queryKeys';
 import { AuditCode, AuditKind } from '../schemas';
 import { SERVER_SCOPE } from '../scope';
 import type { DestinationsResponse } from '../types';
-import { AUDIT_RETRY_LIMIT, retryLoad } from './retry';
 
 const destinations = mock();
 const createDestination = mock();
@@ -155,7 +155,7 @@ describe('useAuditDestinations', () => {
 describe('retryLoad', () => {
   it('retries a server failure a few times and never a refusal', () => {
     expect(retryLoad(0, new ApiError('Bad gateway', 502))).toBe(true);
-    expect(retryLoad(AUDIT_RETRY_LIMIT, new ApiError('Bad gateway', 502))).toBe(false);
+    expect(retryLoad(RETRY_LIMIT, new ApiError('Bad gateway', 502))).toBe(false);
     expect(retryLoad(0, new Error('offline'))).toBe(true);
     expect(retryLoad(0, new ApiError('Not found', 404))).toBe(false);
     expect(

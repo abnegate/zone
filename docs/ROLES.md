@@ -10,11 +10,16 @@ members.
 Zone reads a person's roles from the database on every request; sign-in
 tokens don't carry them. Background work, such as task runs, auto projects,
 source indexing and agent tools, checks again as the person it runs for, so a
-change to a role or an assignment applies from the next check.
+change to a role or an assignment applies from the next check. Checks made
+inside a database statement, through the `workspace_permits` and
+`check_workspace_membership` SQL functions, are `STABLE`: they read the
+statement's snapshot, so a change committed while a statement runs applies
+from the next statement, not partway through one.
 
 An organization admin or owner manages custom roles under **Settings →
-Organization → Roles**, and assigns them under **Settings → Organization →
-Members** and **Settings → Workspace → Members**.
+Organization → Roles**. Anyone who may change members' roles assigns them
+under **Settings → Organization → Members** and **Settings → Workspace →
+Members**.
 
 ## Licensing
 
@@ -42,8 +47,10 @@ and assigning built-in roles always work, so on any license an admin can move
 people off a custom role. Deleting a role needs the license, but a role
 nobody holds grants nothing.
 
-A stored license key that no longer verifies is treated like a lapsed one:
-roles stay enforced, and edits are refused with `license_required`.
+A stored license key that doesn't verify counts as no license at all: the
+server reports the Community edition and status, roles stay enforced, the
+Roles page shows the upgrade notice, and edits and custom assignments are
+refused with `license_required`.
 
 ## Built-in roles
 
@@ -65,7 +72,8 @@ into its workspaces in four places only:
 - `policies:update` changes every workspace's agent policy too;
 - workspace AI and MCP settings also need organization membership;
 - `workspaces:create` creates a workspace, and its creator becomes the
-  workspace's owner;
+  workspace's owner, with every workspace permission there, including its
+  members, AI settings, MCP servers and agent policy;
 - `invitations:create` seats invitees in the organization's workspaces (see
   [Invitations](#invitations)).
 
@@ -94,7 +102,7 @@ composable, and neither is deleting the organization or a workspace.
 | `invitations:create` | Invite people by email, including into the organization's workspaces | admin, owner | Yes |
 | `invitations:read` | List pending invitations | admin, owner | Yes |
 | `invitations:delete` | Revoke an invitation | admin, owner | Yes |
-| `workspaces:create` | Create a workspace, and become its owner | admin, owner | Yes |
+| `workspaces:create` | Create a workspace, and become its owner with every workspace permission in it | admin, owner | Yes |
 | `devices:read` | List the organization's devices and read the device policy | admin, owner | Yes |
 | `devices:update` | Allow, block or rename a device, and change the device policy | admin, owner | Yes |
 | `github:update` | Register and delete the organization's GitHub App, and add, sync and remove its installations | admin, owner | Yes |
@@ -153,6 +161,14 @@ its scope, and nothing else. Zone stores such a member's built-in role as
 `member` in an organization or `viewer` in a workspace, so a custom-role
 holder never counts as an admin or owner, whatever permissions the role holds.
 
+The `role` the API reports is a rank, not the stored role (see
+[What people see in the console](#what-people-see-in-the-console)). A
+workspace role holding every composable workspace permission ranks as
+`admin`, yet its holders are still stored as viewers: they don't count
+towards the admin floor, and changing their role needs no administrators
+permission. No organization role can rank as `admin`, because `roles:update`
+isn't composable.
+
 Names are trimmed, must not be empty, and are unique within the organization,
 ignoring case. A name can't be `owner`, `admin`, `member` or `viewer`. There
 are no length limits.
@@ -186,18 +202,24 @@ former member, and inviting someone.
 Changing a member's role needs `members:update` in the organization, or
 `workspace_members:update` in the workspace. For a workspace member, your
 permissions in that workspace are what count, not your organization role.
-Zone then checks, in order:
+A body that names both a role and a custom role, or neither, is refused with
+400. Before it looks at the member, Zone checks what you're giving:
 
-1. If the member holds the built-in admin or owner role, you need
-   `administrators:update` (organization) or `workspace_administrators:update`
-   (workspace). Only owners hold these. Otherwise: 403.
+- a custom role needs the license, otherwise 403 `license_required`;
+- the organization owner role, or the workspace admin or owner role, needs
+  `administrators:update` (organization) or `workspace_administrators:update`
+  (workspace). Only owners hold these. Otherwise: 403.
+
+Zone then locks the membership and checks, in order:
+
+1. If the member holds the built-in admin or owner role, you need the same
+   administrators permission. Otherwise: 403.
 2. Your permissions must include every permission the member holds now.
    Otherwise: 403.
 3. Giving the organization owner role, or the workspace admin or owner role,
-   needs the same administrators permission. Otherwise: 403.
+   is checked again under the lock. Otherwise: 403.
 4. A custom role must belong to this organization and match the membership's
-   scope, otherwise 404 `Role not found`. A custom role also needs the
-   license, otherwise 403 `license_required`.
+   scope, otherwise 404 `Role not found`.
 5. Your permissions must include every permission of the role you're giving.
    Otherwise: 403 `role_exceeds`.
 6. The [owner and admin floors](#owners-and-the-last-owner) apply.
@@ -281,20 +303,42 @@ The API reports two things about each membership:
   higher one in full. A custom role with `workspace:write`, for example,
   ranks as a workspace member.
 
-The settings pages use `permissions` where the response carries them, and the
-rank where it doesn't. For example, a workspace role with
-`workspace_ai_settings:update` can edit the workspace's AI settings.
+The console gates each control on the permission the server checks for it,
+read from `permissions`:
 
-Some controls outside the settings pages still use the rank: whether a
-workspace accepts your writes, adding sources, and the controls in the
-members sections. The rank never claims more than the permissions hold, so a
-custom-role holder may find a control hidden that the server would allow,
-but is never offered one the server refuses. The server checks every request
-either way.
+| Control | Permission |
+|---|---|
+| Settings sections and their edit controls | The read or update permission of each section, such as `devices:read` and `devices:update` |
+| Adding, changing and removing organization members | `members:create`, `members:update` and `members:delete` |
+| Adding, changing and removing workspace members | `workspace_members:create`, `workspace_members:update` and `workspace_members:delete` |
+| Changing or removing a built-in admin or owner, and giving an admin or owner role | `administrators:update`, or `workspace_administrators:update` in a workspace |
+| The roles offered when changing or adding a member | Only roles, built-in or custom, whose permissions you hold in full |
+| The organization role offered in an invitation | Member always; Admin from the admin rank; Owner with `administrators:update` |
+| The workspace role offered in an invitation | Viewer and Member always; Admin and Owner with `administrators:update` |
+| Signing coding agents in and out | `agent_logins:update`, even where the AI settings are read-only |
+| The **Connect GitHub** link | `github:update` |
+
+So the members sections and the invitation form offer only roles the server
+accepts. They're stricter in one place: in an organization, only owners are
+offered the admin role, when adding a member and when changing one, although
+the server lets an admin promote a member to admin.
+
+A workspace member whose custom role ranks as `admin` is treated as a
+custom-role holder, not as an admin: anyone who may change workspace roles
+and holds that role's permissions can change it.
+
+Two app-wide controls still use the rank: whether a workspace accepts your
+writes, and adding sources. Both need the workspace member rank, and a
+membership ranks as a member or higher exactly when it holds
+`workspace:write`, so the rank and the permission always agree there.
+
+Where the console doesn't know a membership's permissions, every control
+falls back to the rank, which is how it behaved before custom roles. The
+server checks every request either way.
 
 The **Roles** page appears to holders of `roles:update`. Any organization
-member can read the roles API, because workspace admins need the list to
-give workspace roles.
+member can read the roles API, because whoever changes workspace roles needs
+the list to give them.
 
 ## Audit log
 
@@ -450,8 +494,11 @@ Adding a member and inviting someone take built-in roles only, as before.
   admins have always had.
 - **The license gates editing, never enforcement.** Community and lapsed
   servers keep enforcing existing custom roles.
-- **The rank is conservative.** The console gates the settings pages on
-  permissions, and everything else on the rank, which never overstates
-  access. The server is authoritative everywhere.
+- **The console gates on permissions.** Settings sections, member and
+  invitation controls, agent sign-in and the Connect GitHub link follow the
+  permission the server checks. Only whether a workspace accepts writes and
+  adding sources still use the rank, where member rank and
+  `workspace:write` are the same test. The server is authoritative
+  everywhere.
 - **Enforcement is Community code.** Permission checks are part of every
   edition. Only the license gate on editing belongs to Zone Enterprise.

@@ -3,13 +3,12 @@ import type { RoleCode } from './schemas';
 import type { RoleRefusalBody } from './types';
 
 export class RoleRefusal extends ApiError {
-  readonly code: RoleCode;
+  declare readonly code: RoleCode;
   readonly members: number | undefined;
 
   constructor(refusal: RoleRefusalBody, status: number) {
-    super(refusal.error, status);
+    super(refusal.error, status, refusal.code);
     this.name = 'RoleRefusal';
-    this.code = refusal.code;
     this.members = refusal.members;
   }
 }

@@ -1,9 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
 import { useCallback } from 'react';
+import { retryLoad } from '../../retry';
 import { policyApi } from '../api';
 import { policyQueryKeys } from '../queryKeys';
 import type { WorkspacePolicyResponse } from '../types';
-import { retryLoad } from './retry';
 
 export interface WorkspacePolicyState {
   policy: WorkspacePolicyResponse | undefined;

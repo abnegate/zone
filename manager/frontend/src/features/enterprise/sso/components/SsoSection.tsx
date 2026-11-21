@@ -1,15 +1,16 @@
 import { Button } from '@zone/ui';
 import { useId, useState } from 'react';
+import { LapsedNotice } from '../../components/LapsedNotice';
+import { UpgradeNotice } from '../../components/UpgradeNotice';
 import { LicenseStatus } from '../../schemas';
 import { useSso } from '../hooks';
+import { LAPSED_NOTICE, UPGRADE_NOTICE } from '../messages';
 import type { ProviderResponse, SettingsResponse } from '../types';
 import { DeleteSsoProviderDialog } from './DeleteSsoProviderDialog';
 import { RedirectUri } from './RedirectUri';
 import { SsoEnforcement } from './SsoEnforcement';
-import { SsoLapsedNotice } from './SsoLapsedNotice';
 import { SsoProviderForm } from './SsoProviderForm';
 import { SsoProviderList } from './SsoProviderList';
-import { SsoUpgradeNotice } from './SsoUpgradeNotice';
 import './SsoSection.css';
 
 function lapsed(settings: SettingsResponse): boolean {
@@ -24,7 +25,12 @@ function SsoSettings({ settings }: { settings: SettingsResponse }) {
 
   return (
     <>
-      {!entitled && (lapsed(settings) ? <SsoLapsedNotice /> : <SsoUpgradeNotice />)}
+      {!entitled &&
+        (lapsed(settings) ? (
+          <LapsedNotice message={LAPSED_NOTICE} className="sso-lapsed" />
+        ) : (
+          <UpgradeNotice message={UPGRADE_NOTICE} className="sso-notice" />
+        ))}
       {entitled && <RedirectUri uri={settings.redirect_uri} />}
       <SsoEnforcement settings={settings} editable={entitled} />
       {(entitled || providers.length > 0) && (

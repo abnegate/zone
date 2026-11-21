@@ -23,6 +23,7 @@ import {
   selectOptionValues,
 } from '../../../../test/select';
 import { ACTIVE_ORGANIZATION, COMMUNITY_ORGANIZATION } from '../../../enterprise/policy/fixtures';
+import { Permission } from '../../../enterprise/roles/schemas';
 import type { AiSettings, OrgRole } from '../types';
 
 const mockClient = {
@@ -97,7 +98,9 @@ const mockCurrentOrganization = {
 };
 
 const mockWorkspaceContext: {
-  currentOrganization: (typeof mockCurrentOrganization & { role?: OrgRole }) | null;
+  currentOrganization:
+    | (typeof mockCurrentOrganization & { role?: OrgRole; permissions?: readonly string[] })
+    | null;
   [key: string]: unknown;
 } = {
   currentOrganization: mockCurrentOrganization,
@@ -583,6 +586,59 @@ describe('OrganizationAiSection', () => {
 
       mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'member' };
       render(<OrganizationAiSection editable />, { wrapper: Providers });
+      expect(await screen.findByText('Ask an organization admin to sign in.')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Sign in with Claude' })).toBeNull();
+    });
+  });
+
+  describe('Agent sign-in for a custom role holder', () => {
+    const signedOut = () => {
+      mockClient.getOrgAiSettings.mockResolvedValue({
+        ...mockAiSettings,
+        provider: 'claude_code',
+        model_fast: null,
+        model_reasoning: 'opus',
+        model_embedding: null,
+      });
+      agentsApi.list.mockResolvedValue([
+        {
+          ...fixture.agents[0],
+          state: 'signed_out',
+          source: null,
+          label: null,
+          expires_at: null,
+          logins: [],
+        },
+        fixture.agents[1],
+      ]);
+    };
+
+    it('lets a holder of agent_logins:update sign in from defaults they cannot edit', async () => {
+      signedOut();
+      mockWorkspaceContext.currentOrganization = {
+        ...mockCurrentOrganization,
+        role: 'member',
+        permissions: [
+          Permission.OrganizationRead,
+          Permission.AiSettingsRead,
+          Permission.AgentLoginsUpdate,
+        ],
+      };
+      render(<OrganizationAiSection editable={false} />, { wrapper: Providers });
+
+      expect(await screen.findByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
+      expect(screen.getByLabelText('AI Provider').closest('fieldset')).toBeDisabled();
+    });
+
+    it('keeps a holder without agent_logins:update to the status', async () => {
+      signedOut();
+      mockWorkspaceContext.currentOrganization = {
+        ...mockCurrentOrganization,
+        role: 'member',
+        permissions: [Permission.OrganizationRead, Permission.AiSettingsRead],
+      };
+      render(<OrganizationAiSection editable={false} />, { wrapper: Providers });
+
       expect(await screen.findByText('Ask an organization admin to sign in.')).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Sign in with Claude' })).toBeNull();
     });

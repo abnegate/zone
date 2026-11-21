@@ -1,6 +1,7 @@
 import { Button, Input, Modal } from '@zone/ui';
 import { type FormEvent, useId, useState } from 'react';
 import { Switch } from '../../components/Switch';
+import { UpgradeNotice } from '../../components/UpgradeNotice';
 import {
   changed,
   createRequest,
@@ -13,10 +14,9 @@ import {
   updateRequest,
 } from '../draft';
 import { useCreateSsoProvider, useUpdateSsoProvider } from '../hooks';
-import { ProviderField, refusalField, refusalMessage } from '../messages';
+import { ProviderField, refusalField, refusalMessage, UPGRADE_NOTICE } from '../messages';
 import { SsoAdminCode } from '../schemas';
 import type { ProviderResponse } from '../types';
-import { SsoUpgradeNotice } from './SsoUpgradeNotice';
 
 export const KEEP_SECRET_PLACEHOLDER = 'Leave blank to keep the current secret';
 
@@ -172,7 +172,7 @@ export function SsoProviderForm({ provider, onClose }: SsoProviderFormProps) {
             onChange={(checked) => change('enabled', checked)}
           />
         </fieldset>
-        {licenseRequired && <SsoUpgradeNotice />}
+        {licenseRequired && <UpgradeNotice message={UPGRADE_NOTICE} className="sso-notice" />}
         {formError && (
           <div className="modal-error" role="alert">
             {formError}

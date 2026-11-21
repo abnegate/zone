@@ -1,5 +1,6 @@
 import { Button, Checkbox, Input, Modal } from '@zone/ui';
 import { type FormEvent, useId, useState } from 'react';
+import { UpgradeNotice } from '../../components/UpgradeNotice';
 import {
   changed,
   choices,
@@ -17,9 +18,13 @@ import {
   BASE_HINT,
   CANCEL_LABEL,
   CREATE_LABEL,
+  CREATE_TITLE,
   DESCRIPTION_HINT,
   DESCRIPTION_LABEL,
+  DONE_LABEL,
+  FIXED_SCOPE_HINT,
   NAME_LABEL,
+  NAME_PLACEHOLDER,
   PERMISSIONS_LABEL,
   permissionDescription,
   permissionLabel,
@@ -27,17 +32,11 @@ import {
   SCOPE_DESCRIPTIONS,
   SCOPE_LABEL,
   SCOPE_LABELS,
+  UPGRADE_NOTICE,
 } from '../labels';
 import { NAME_REQUIRED, RoleField, refusalField, refusalMessage } from '../messages';
 import { type PermissionName, ROLE_BASE, ROLE_SCOPES, RoleCode, type RoleScope } from '../schemas';
 import type { CustomRole, PermissionDefinition } from '../types';
-import { RolesUpgradeNotice } from './RolesUpgradeNotice';
-
-export const CREATE_TITLE = 'Create role';
-
-export const DONE_LABEL = 'Done';
-
-export const FIXED_SCOPE_HINT = "A role's scope can't change after it is created.";
 
 interface RoleEditorProps {
   organizationId: string;
@@ -138,7 +137,7 @@ export function RoleEditor({
             label={NAME_LABEL}
             value={draft.name}
             autoComplete="off"
-            placeholder="Release manager"
+            placeholder={NAME_PLACEHOLDER}
             disabled={disabled}
             error={nameError}
             onChange={(event) => change({ ...draft, name: event.target.value })}
@@ -198,7 +197,9 @@ export function RoleEditor({
             )}
           </fieldset>
         </fieldset>
-        {licenseRequired && <RolesUpgradeNotice />}
+        {licenseRequired && (
+          <UpgradeNotice message={UPGRADE_NOTICE} className="roles-notice" announced />
+        )}
         {formError && (
           <div className="modal-error" role="alert">
             {formError}

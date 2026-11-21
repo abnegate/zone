@@ -288,7 +288,7 @@ describe('SettingsContent', () => {
       it(`${invitations ? 'offers' : 'hides'} invitations for an organization ${role}`, () => {
         renderSection(SettingsGroup.Organization, SettingsSection.Members, access('member', role));
         expect(propsOf('organization-members-section')).toEqual({
-          invitations: { read: invitations, create: invitations, revoke: invitations },
+          invitations: { read: invitations, create: invitations, revoke: invitations, role },
         });
       });
     }
@@ -731,7 +731,13 @@ describe('SettingsContent', () => {
         holding([...BASE, Permission.InvitationsRead, Permission.InvitationsDelete], undefined)
       );
       expect(propsOf('organization-members-section')).toEqual({
-        invitations: { read: true, create: false, revoke: true },
+        invitations: {
+          read: true,
+          create: false,
+          revoke: true,
+          role: 'member',
+          permissions: [...BASE, Permission.InvitationsRead, Permission.InvitationsDelete],
+        },
       });
     });
 

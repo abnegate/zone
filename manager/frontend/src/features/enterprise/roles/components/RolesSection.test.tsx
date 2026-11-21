@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../../../api/ApiError';
+import { LICENSE_PATH } from '../../components/UpgradeNotice';
 import {
   ACTIVE,
   ACTIVE_EMPTY,
@@ -20,6 +21,7 @@ import {
   DESCRIPTION,
   EMPTY_EDITABLE,
   EMPTY_READ_ONLY,
+  FIXED_SCOPE_HINT,
   LAPSED_NOTICE,
   permissionLabel,
   READ_ONLY_HINT,
@@ -30,8 +32,6 @@ import { RoleRefusal } from '../RoleRefusal';
 import { Permission, RoleCode, RoleScope } from '../schemas';
 import type { RolesResponse } from '../types';
 import { deleteWarning } from './DeleteRoleDialog';
-import { FIXED_SCOPE_HINT } from './RoleEditor';
-import { LICENSE_PATH } from './RolesUpgradeNotice';
 
 const list = mock();
 const create = mock();
@@ -70,7 +70,11 @@ async function loaded(response: RolesResponse) {
 }
 
 function role(name: string): HTMLElement {
-  return screen.getByRole('listitem', { name });
+  const item = screen
+    .getAllByRole('listitem')
+    .find((candidate) => within(candidate).queryByText(name, { selector: '.roles-item-name' }));
+  if (!item) throw new Error(`no role listed as ${name}`);
+  return item;
 }
 
 function dialog(): HTMLElement {
@@ -114,7 +118,7 @@ describe('RolesSection', () => {
       expect(alert).toHaveTextContent('Failed to load the roles: Forbidden');
       fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
 
-      await screen.findByRole('listitem', { name: 'Auditor' });
+      await screen.findByText('Auditor', { selector: '.roles-item-name' });
       expect(list).toHaveBeenCalledTimes(2);
     });
 
@@ -122,6 +126,14 @@ describe('RolesSection', () => {
       await loaded(ACTIVE);
 
       expect(screen.getByText(DESCRIPTION)).toBeInTheDocument();
+    });
+
+    it('lets a screen reader read every listed role in full instead of naming it alone', async () => {
+      await loaded(ACTIVE);
+
+      const item = role(RELEASE_MANAGER.name);
+      expect(item).not.toHaveAttribute('aria-label');
+      expect(item).toHaveTextContent(RELEASE_MANAGER.description ?? '');
     });
 
     it('shows Community the upgrade notice with a way to the License page and no list', async () => {
@@ -327,7 +339,7 @@ describe('RolesSection', () => {
       type('Name', 'Writer');
       submit('Create role');
 
-      expect(await within(dialog()).findByRole('note')).toHaveTextContent(UPGRADE_NOTICE);
+      expect(await within(dialog()).findByRole('alert')).toHaveTextContent(UPGRADE_NOTICE);
     });
 
     it('opens a role with its saved values and a fixed scope', async () => {

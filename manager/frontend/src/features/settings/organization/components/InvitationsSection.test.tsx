@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { clientModule } from '../../../../test/client';
-import { chooseSelect } from '../../../../test/select';
+import { chooseSelect, openSelect } from '../../../../test/select';
+import { Permission } from '../../../enterprise/roles/schemas';
 import type { Invitation, InvitationAccess, Workspace } from '../types';
 
 const mockGetInvitations = mock();
@@ -16,7 +17,19 @@ mock.module('../../../../api/client', () =>
   })
 );
 
-const MANAGER: Pick<InvitationAccess, 'create' | 'revoke'> = { create: true, revoke: true };
+const MANAGER: Omit<InvitationAccess, 'read'> = { create: true, revoke: true };
+
+const ADMIN_PERMISSIONS = [
+  Permission.OrganizationRead,
+  Permission.OrganizationUpdate,
+  Permission.MembersCreate,
+  Permission.MembersUpdate,
+  Permission.MembersDelete,
+  Permission.InvitationsCreate,
+  Permission.InvitationsRead,
+  Permission.InvitationsDelete,
+  Permission.RolesUpdate,
+];
 
 let InvitationsSection: typeof import('./InvitationsSection').InvitationsSection;
 
@@ -390,6 +403,77 @@ describe('InvitationsSection', () => {
     await waitFor(() => {
       expect(screen.queryByRole('heading', { name: /invite member/i })).not.toBeInTheDocument();
     });
+  });
+
+  describe('roles on offer', () => {
+    const openForm = async (access: Omit<InvitationAccess, 'read'>) => {
+      render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={access} />);
+      fireEvent.click(await screen.findByRole('button', { name: /invite member/i }));
+      chooseSelect(/^workspace\s+optional$/i, 'Engineering');
+      await screen.findByRole('combobox', { name: /workspace role/i });
+    };
+
+    const labelsOf = (label: RegExp): string[] => {
+      const trigger = openSelect(label);
+      const labels = screen.getAllByRole('option').map((option) => option.textContent ?? '');
+      fireEvent.keyDown(trigger, { key: 'Escape' });
+      return labels;
+    };
+
+    it('offers a custom holder of invitations:create only the roles their grant covers', async () => {
+      await openForm({
+        create: true,
+        revoke: false,
+        role: 'member',
+        permissions: [
+          Permission.OrganizationRead,
+          Permission.InvitationsRead,
+          Permission.InvitationsCreate,
+        ],
+      });
+
+      expect(labelsOf(/organization role/i)).toEqual(['Member']);
+      expect(labelsOf(/workspace role/i)).toEqual(['Viewer', 'Member']);
+    });
+
+    it('offers an admin the admin role but no owner and no workspace administrator', async () => {
+      await openForm({
+        create: true,
+        revoke: true,
+        role: 'admin',
+        permissions: ADMIN_PERMISSIONS,
+      });
+
+      expect(labelsOf(/organization role/i)).toEqual(['Member', 'Admin']);
+      expect(labelsOf(/workspace role/i)).toEqual(['Viewer', 'Member']);
+    });
+
+    it('offers an owner every role', async () => {
+      await openForm({
+        create: true,
+        revoke: true,
+        role: 'owner',
+        permissions: [...ADMIN_PERMISSIONS, Permission.AdministratorsUpdate],
+      });
+
+      expect(labelsOf(/organization role/i)).toEqual(['Member', 'Admin', 'Owner']);
+      expect(labelsOf(/workspace role/i)).toEqual(['Viewer', 'Member', 'Admin', 'Owner']);
+    });
+
+    it('falls back to the rank when the permissions are unknown', async () => {
+      await openForm({ create: true, revoke: true, role: 'admin', permissions: undefined });
+
+      expect(labelsOf(/organization role/i)).toEqual(['Member', 'Admin']);
+      expect(labelsOf(/workspace role/i)).toEqual(['Viewer', 'Member']);
+    });
+  });
+
+  it('announces a failure as an alert', async () => {
+    mockGetInvitations.mockRejectedValue(new Error('Network error'));
+
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Network error');
   });
 
   it('displays role badges with correct styling', async () => {

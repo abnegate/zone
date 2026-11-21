@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../../../api/ApiError';
 import { ENTITLED, ENTRA, OKTA } from '../fixtures';
-import { refusalField, refusalMessage } from '../messages';
+import { refusalField, refusalMessage, UPGRADE_NOTICE } from '../messages';
 import { SsoRefusal } from '../SsoRefusal';
 import { SSO_ADMIN_CODES, SsoAdminCode } from '../schemas';
 import type { ProviderResponse, SsoAdminCode as SsoAdminCodeValue } from '../types';
@@ -14,7 +14,6 @@ import {
   KEEP_SECRET_PLACEHOLDER,
   VERIFIED_EMAIL_DESCRIPTION,
 } from './SsoProviderForm';
-import { UPGRADE_NOTICE } from './SsoUpgradeNotice';
 
 const get = mock();
 const createProvider = mock();

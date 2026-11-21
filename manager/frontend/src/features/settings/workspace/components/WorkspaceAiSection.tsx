@@ -389,7 +389,11 @@ export default function WorkspaceAiSection({
             key={`${organizationId}:${providerAgent}`}
             organizationId={organizationId}
             agent={providerAgent}
-            access={agentAccess(currentOrganization?.role, resolvingRole)}
+            access={agentAccess(
+              currentOrganization?.permissions,
+              currentOrganization?.role,
+              resolvingRole
+            )}
             heading="h3"
             level="workspace"
             unsaved={draftProvider !== current}

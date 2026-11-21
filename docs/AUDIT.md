@@ -11,8 +11,9 @@ Enterprise license you can also:
   has delivered them.
 
 Each organization has its own destinations, retention period and downloads,
-managed by its owners and admins under **Settings → Organization → Audit
-export**. Events that belong to no organization, such as sign-ins, license
+managed by holders of `audit:update`, which organization owners and admins
+hold and a custom role can include (see [ROLES.md](ROLES.md)), under
+**Settings → Organization → Audit export**. Events that belong to no organization, such as sign-ins, license
 changes and SSO changes, form the server scope, which server admins manage
 under **Settings → This server → Audit export**.
 
@@ -578,8 +579,8 @@ destination.
 | `PUT /api/organizations/{org_id}/audit-retention` | Set or clear the period. |
 | `GET /api/organizations/{org_id}/audit-exports` | [Download](#downloading-the-audit-log) the audit log. |
 
-Organization owners and admins can use these. A member gets 403, and someone
-outside the organization 404. Server admins use the same routes without
+Holders of `audit:update` can use these (see [ROLES.md](ROLES.md)). A member
+without it gets 403, and someone outside the organization 404. Server admins use the same routes without
 `/organizations/{org_id}` for the server scope: `/api/audit-destinations`,
 `/api/audit-destinations/{destination_id}`,
 `/api/audit-destinations/{destination_id}/tests`, `/api/audit-retention` and

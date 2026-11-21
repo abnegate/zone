@@ -20,15 +20,13 @@ function roleUrl(organizationId: string, roleId: string): string {
 }
 
 async function failure(response: Response, action: string): Promise<ApiError> {
-  const body: unknown = await response
-    .clone()
-    .json()
-    .catch(() => undefined);
+  const body = await ApiError.body(response);
   const refusal = RoleRefusalSchema.safeParse(body);
   if (refusal.success) {
     return new RoleRefusal(refusal.data, response.status);
   }
-  return ApiError.from(response, action);
+  const { reason } = ApiError.refusal(body);
+  return new ApiError(`${action}: ${reason ?? response.status}`, response.status);
 }
 
 async function send(url: string, init: RequestInit, action: string): Promise<Response> {

@@ -162,9 +162,9 @@ export function OrganizationAiSection({ editable }: OrganizationAiSectionProps) 
           </div>
         </div>
 
-        <fieldset disabled={!editable} className="settings-fieldset">
-          <div className="settings-card">
-            <h3 className="card-title">Provider</h3>
+        <div className="settings-card">
+          <h3 className="card-title">Provider</h3>
+          <fieldset disabled={!editable} className="settings-fieldset">
             <AiProviderFields
               level="organization"
               provider={provider}
@@ -180,27 +180,33 @@ export function OrganizationAiSection({ editable }: OrganizationAiSectionProps) 
               saved={saved}
               policy={policy?.enforced ? policy.policy : null}
             />
-            {agent && (
-              <AgentSignIn
-                key={`${currentOrganization.id}:${agent}`}
-                organizationId={currentOrganization.id}
-                agent={agent}
-                access={agentAccess(currentOrganization.role, resolvingRole)}
-                heading="h4"
-                level="organization"
-                unsaved={provider !== savedProvider}
-                saveLabel={SAVE_LABEL}
-                status={agents.statuses[agent]}
-                attempt={agents.attempts[agent]}
-                loadError={agents.error}
-                onStatusChange={agents.update}
-                onAttemptChange={agents.setAttempt}
-              />
-            )}
-          </div>
+          </fieldset>
+          {agent && (
+            <AgentSignIn
+              key={`${currentOrganization.id}:${agent}`}
+              organizationId={currentOrganization.id}
+              agent={agent}
+              access={agentAccess(
+                currentOrganization.permissions,
+                currentOrganization.role,
+                resolvingRole
+              )}
+              heading="h4"
+              level="organization"
+              unsaved={provider !== savedProvider}
+              saveLabel={SAVE_LABEL}
+              status={agents.statuses[agent]}
+              attempt={agents.attempts[agent]}
+              loadError={agents.error}
+              onStatusChange={agents.update}
+              onAttemptChange={agents.setAttempt}
+            />
+          )}
+        </div>
 
-          <div className="settings-card">
-            <h3 className="card-title">Default Models</h3>
+        <div className="settings-card">
+          <h3 className="card-title">Default Models</h3>
+          <fieldset disabled={!editable} className="settings-fieldset">
             <AiModelFields
               provider={provider}
               models={models}
@@ -211,8 +217,8 @@ export function OrganizationAiSection({ editable }: OrganizationAiSectionProps) 
               installedModels={installedModels}
               inheritedLabel="Use server default"
             />
-          </div>
-        </fieldset>
+          </fieldset>
+        </div>
 
         {editable ? (
           <div className="settings-actions">

@@ -4,6 +4,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
 import { ApiError } from '../../../../api/ApiError';
 import { HttpStatus } from '../../../../api/HttpStatus';
+import { RETRY_LIMIT } from '../../retry';
 import { COMMUNITY_EMPTY, ENTITLED } from '../fixtures';
 
 const get = mock();
@@ -19,10 +20,9 @@ mock.module('../api', () => ({
 }));
 
 let useSso: typeof import('./useSso').useSso;
-let SSO_RETRY_LIMIT: number;
 
 beforeAll(async () => {
-  ({ useSso, SSO_RETRY_LIMIT } = await import('./useSso'));
+  ({ useSso } = await import('./useSso'));
 });
 
 afterAll(() => {
@@ -81,7 +81,7 @@ describe('useSso', () => {
     const { result } = render();
 
     await waitFor(() => expect(result.current.error).toBe('Failed to load single sign-on: 502'));
-    expect(get).toHaveBeenCalledTimes(SSO_RETRY_LIMIT + 1);
+    expect(get).toHaveBeenCalledTimes(RETRY_LIMIT + 1);
   });
 
   it('retries a network failure that never reached the server', async () => {

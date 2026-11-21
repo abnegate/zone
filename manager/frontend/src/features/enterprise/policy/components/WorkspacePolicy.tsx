@@ -1,10 +1,11 @@
+import { UpgradeNotice } from '../../components/UpgradeNotice';
 import { useUpdateWorkspacePolicy } from '../hooks';
+import { UPGRADE_NOTICE } from '../labels';
 import { community } from '../license';
 import { PolicyScope } from '../source';
 import type { WorkspacePolicyResponse } from '../types';
 import { PolicyEditor } from './PolicyEditor';
 import { PolicyStatus } from './PolicyStatus';
-import { PolicyUpgradeNotice } from './PolicyUpgradeNotice';
 
 export const WORKSPACE_READ_ONLY =
   "Only workspace admins and organization admins can change this workspace's agent policy.";
@@ -19,7 +20,7 @@ export function WorkspacePolicy({ organizationId, workspaceId, policy }: Workspa
   const update = useUpdateWorkspacePolicy(organizationId, workspaceId);
 
   if (community(policy)) {
-    return <PolicyUpgradeNotice />;
+    return <UpgradeNotice message={UPGRADE_NOTICE} className="policy-notice" />;
   }
 
   return (

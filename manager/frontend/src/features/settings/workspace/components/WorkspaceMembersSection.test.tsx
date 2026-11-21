@@ -5,7 +5,7 @@ import { clientModule } from '../../../../test/client';
 import { chooseSelectElement } from '../../../../test/select';
 import { ACTIVE, AUDITOR, LAPSED, RELEASE_MANAGER } from '../../../enterprise/roles/fixtures';
 import { RoleRefusal } from '../../../enterprise/roles/RoleRefusal';
-import { RoleCode } from '../../../enterprise/roles/schemas';
+import { Permission, RoleCode } from '../../../enterprise/roles/schemas';
 import type { RolesResponse } from '../../../enterprise/roles/types';
 import { customRoleValue } from '../../assignment';
 import type { OrganizationMember, WorkspaceMember, WorkspaceRole } from '../types';
@@ -31,11 +31,13 @@ mock.module('../../../auth', () => ({
 
 let rolesResponse: RolesResponse | null = null;
 
+const mockRefreshRoles = mock(async () => {});
+
 const mockUseRoles = mock((_organizationId: string | null) => ({
   response: rolesResponse,
   loading: false,
   error: null,
-  refresh: async () => {},
+  refresh: mockRefreshRoles,
 }));
 
 mock.module('../../../enterprise/roles/hooks/useRoles', () => ({ useRoles: mockUseRoles }));
@@ -814,6 +816,7 @@ describe('WorkspaceMembersSection custom roles', () => {
       });
     });
     expect(screen.queryByText('Confirm Role Change')).not.toBeInTheDocument();
+    await waitFor(() => expect(mockRefreshRoles).toHaveBeenCalledTimes(1));
   });
 
   it('asks to confirm promoting a custom role holder to admin', async () => {
@@ -838,7 +841,7 @@ describe('WorkspaceMembersSection custom roles', () => {
   });
 
   const refusals: [RoleCode, RegExp][] = [
-    [RoleCode.Exceeds, /permissions you don’t hold/],
+    [RoleCode.Exceeds, /permissions you don't hold/],
     [RoleCode.LicenseRequired, /Zone Enterprise license/],
   ];
 
@@ -860,5 +863,153 @@ describe('WorkspaceMembersSection custom roles', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
 
     expect(rolesOfferedForNewMember()).toEqual(['viewer', 'member', 'admin', 'owner']);
+  });
+});
+
+describe('WorkspaceMembersSection for a custom role holder', () => {
+  const MEMBERS = [
+    Permission.WorkspaceRead,
+    Permission.WorkspaceMembersCreate,
+    Permission.WorkspaceMembersUpdate,
+    Permission.WorkspaceMembersDelete,
+  ];
+
+  const ADMIN_GRANT = [
+    Permission.WorkspaceRead,
+    Permission.WorkspaceWrite,
+    Permission.WorkspaceUpdate,
+    Permission.WorkspaceMembersCreate,
+    Permission.WorkspaceMembersUpdate,
+    Permission.WorkspaceMembersDelete,
+    Permission.WorkspaceAiSettingsUpdate,
+    Permission.WorkspaceMcpServersUpdate,
+    Permission.WorkspacePoliciesUpdate,
+    Permission.ProjectSyncsUpdate,
+    Permission.PullRequestsOverride,
+  ];
+
+  const steward = (permissions: readonly string[]): WorkspaceMember => ({
+    ...mockViewer,
+    id: 'ws-member-9',
+    user_id: 'user-1',
+    email: 'self@test.com',
+    display_name: 'Signed In User',
+    custom_role: { id: 'role-steward', name: 'Steward' },
+    permissions,
+  });
+
+  const otherOwner: WorkspaceMember = { ...mockOwner, id: 'ws-member-0', user_id: 'user-0' };
+
+  const plainViewer: WorkspaceMember = { ...mockViewer, permissions: [Permission.WorkspaceRead] };
+
+  const plainMember: WorkspaceMember = {
+    ...mockMember,
+    permissions: [Permission.WorkspaceRead, Permission.WorkspaceWrite],
+  };
+
+  const renderAs = async (caller: WorkspaceMember, others: WorkspaceMember[]) => {
+    mockClient.getWorkspaceMembers.mockResolvedValue({ members: [otherOwner, ...others, caller] });
+    mockClient.getOrgMembers.mockResolvedValue({ members: [mockOrgMember1] });
+    render(<WorkspaceMembersSection workspaceId="ws-123" orgId="org-123" />);
+    await waitFor(() => {
+      expect(screen.getByText('self@test.com')).toBeInTheDocument();
+    });
+  };
+
+  const optionsOf = (email: string): string[] => {
+    const trigger = roleSelectFor(email);
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    const values = screen
+      .getAllByRole('option')
+      .map((option) => option.getAttribute('data-value') ?? '');
+    fireEvent.keyDown(trigger, { key: 'Escape' });
+    return values;
+  };
+
+  beforeEach(() => {
+    mock.clearAllMocks();
+    rolesResponse = ACTIVE;
+    mockUseAuth.mockReturnValue({
+      isAuthenticated: true,
+      user: { id: 'user-1', email: 'self@test.com' },
+    });
+  });
+
+  it('lets a holder of workspace_members:create add a viewer, and a member only with write', async () => {
+    await renderAs(steward(MEMBERS), [plainViewer]);
+    fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
+    await waitFor(() => {
+      expect(screen.getByText('Add Workspace Member')).toBeInTheDocument();
+    });
+
+    expect(rolesOfferedForNewMember()).toEqual(['viewer']);
+  });
+
+  it('offers a writer the member role and the workspace roles their grant covers', async () => {
+    await renderAs(
+      steward([
+        ...MEMBERS,
+        Permission.WorkspaceWrite,
+        Permission.ProjectSyncsUpdate,
+        Permission.PullRequestsOverride,
+      ]),
+      [plainViewer]
+    );
+
+    expect(optionsOf('viewer@test.com')).toEqual([
+      'viewer',
+      'member',
+      customRoleValue(RELEASE_MANAGER.id),
+    ]);
+  });
+
+  it('leaves a member alone when the holder lacks workspace:write', async () => {
+    await renderAs(steward(MEMBERS), [plainMember]);
+
+    expect(roleBadgeFor('member@test.com')).toHaveTextContent('Member');
+    expect(removeButtonFor('member@test.com')).toBeDisabled();
+  });
+
+  it('never lets a holder touch a built-in admin', async () => {
+    await renderAs(steward(ADMIN_GRANT), [{ ...mockAdmin, permissions: ADMIN_GRANT }]);
+
+    expect(roleBadgeFor('admin@test.com')).toHaveTextContent('Admin');
+    expect(removeButtonFor('admin@test.com')).toBeDisabled();
+  });
+
+  it('lets a holder re-seat a custom holder ranked admin whose grant they cover', async () => {
+    await renderAs(steward(ADMIN_GRANT), [
+      {
+        ...mockViewer,
+        role: 'admin',
+        custom_role: { id: 'role-full', name: 'Everything' },
+        permissions: ADMIN_GRANT,
+      },
+    ]);
+
+    expect(optionsOf('viewer@test.com')).toContain('viewer');
+    expect(removeButtonFor('viewer@test.com')).toBeEnabled();
+  });
+
+  it('lets a built-in workspace admin re-seat a custom holder the API ranks admin', async () => {
+    await renderAs({ ...mockAdmin, user_id: 'user-1', email: 'self@test.com' }, [
+      {
+        ...mockViewer,
+        role: 'admin',
+        custom_role: { id: 'role-full', name: 'Everything' },
+        permissions: ADMIN_GRANT,
+      },
+    ]);
+
+    expect(roleSelectFor('viewer@test.com')).toHaveTextContent('Everything');
+    expect(removeButtonFor('viewer@test.com')).toBeEnabled();
+  });
+
+  it('gives a holder without the workspace members permissions no control', async () => {
+    await renderAs(steward([Permission.WorkspaceRead, Permission.WorkspaceWrite]), [plainViewer]);
+
+    expect(screen.queryByRole('button', { name: /Add Member/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'Actions' })).not.toBeInTheDocument();
+    expect(roleBadgeFor('viewer@test.com')).toHaveTextContent('Viewer');
   });
 });

@@ -1,14 +1,21 @@
 import { Button } from '@zone/ui';
 import { useId, useState } from 'react';
+import { LapsedNotice } from '../../components/LapsedNotice';
+import { UpgradeNotice } from '../../components/UpgradeNotice';
 import { community, lapsed } from '../../policy/license';
 import { useRoles } from '../hooks';
-import { DESCRIPTION, LOADING, READ_ONLY_HINT, TITLE } from '../labels';
+import {
+  DESCRIPTION,
+  LAPSED_NOTICE,
+  LOADING,
+  READ_ONLY_HINT,
+  TITLE,
+  UPGRADE_NOTICE,
+} from '../labels';
 import type { CustomRole, RolesResponse } from '../types';
 import { DeleteRoleDialog } from './DeleteRoleDialog';
 import { RoleEditor } from './RoleEditor';
 import { RoleList } from './RoleList';
-import { RolesLapsedNotice } from './RolesLapsedNotice';
-import { RolesUpgradeNotice } from './RolesUpgradeNotice';
 import './RolesSection.css';
 
 interface RolesProps {
@@ -26,8 +33,8 @@ function Roles({ organizationId, response }: RolesProps) {
 
   return (
     <>
-      {upgrade && <RolesUpgradeNotice />}
-      {lapsed(response) && <RolesLapsedNotice />}
+      {upgrade && <UpgradeNotice message={UPGRADE_NOTICE} className="roles-notice" />}
+      {lapsed(response) && <LapsedNotice message={LAPSED_NOTICE} className="roles-lapsed" />}
       {response.entitled && !response.editable && <p className="roles-hint">{READ_ONLY_HINT}</p>}
       {listed && (
         <RoleList

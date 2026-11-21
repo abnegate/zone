@@ -40,7 +40,11 @@ export function OrganizationMembersSection({ invitations }: OrganizationMembersS
       <OrgMembersSection orgId={orgId} />
       {invitations.read && (
         <>
-          {error && <div className="alert alert-error">{error}</div>}
+          {error && (
+            <div className="alert alert-error" role="alert">
+              {error}
+            </div>
+          )}
           <InvitationsSection orgId={orgId} workspaces={workspaces} access={invitations} />
         </>
       )}

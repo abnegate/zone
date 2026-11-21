@@ -96,9 +96,6 @@ const grantedInOrganization =
     access.organization &&
     grantsOrganization(access.organizationPermissions, access.organizationRole, name);
 
-export const administersOrganization: (access: OrganizationAccess) => boolean =
-  grantedInOrganization(Permission.RolesUpdate);
-
 const installsModels = (access: SettingsAccess): boolean => access.installsModels;
 
 const readsWorkspaceSources = (access: SettingsAccess): boolean =>

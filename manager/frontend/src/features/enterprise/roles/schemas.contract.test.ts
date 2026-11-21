@@ -4,10 +4,19 @@ import { join } from 'node:path';
 import type { z } from 'zod';
 
 import { type RustField, rustVariants, structFields } from '../../../test/rust';
+import {
+  OrganizationMemberSchema,
+  UpdateOrgMemberRequestSchema,
+} from '../../settings/organization/schemas';
+import {
+  UpdateWorkspaceMemberRequestSchema,
+  WorkspaceMemberSchema,
+} from '../../settings/workspace/schemas';
 import { CATALOGUE } from './fixtures';
 import {
   COMPOSITION_CODES,
   CreateRoleRequestSchema,
+  CustomRoleReferenceSchema,
   CustomRoleSchema,
   ORGANIZATION_PERMISSIONS,
   PERMISSIONS,
@@ -34,6 +43,11 @@ const ROUTES_RS = join(SERVER, 'routes/mod.rs');
 const ROLES_ROUTES = join(SERVER, 'routes/roles');
 const ENTITLEMENT_RS = join(ENTERPRISE, 'entitlement.rs');
 const MIGRATION_SQL = join(RUNNER, 'zone_server/migrations/0001_v1.sql');
+const ORGANIZATIONS_RS = join(SERVER, 'routes/organizations.rs');
+const WORKSPACES_RS = join(SERVER, 'routes/workspaces.rs');
+const ASSIGNMENT_FIELDS = ['custom_role_id', 'role'];
+const STANDING_FIELDS = ['custom_role', 'permissions', 'role'];
+const SUMMARY = 'Summary';
 
 const NAME_ARM = /Self::([A-Za-z]+) => "([^"]+)"/g;
 const SCOPE_ARM = /((?:\|?\s*Self::[A-Za-z]+\s*)+)=>\s*Scope::([A-Za-z]+)/g;
@@ -121,14 +135,39 @@ function carrying(source: string, schema: Shaped): string[] {
     .map(([structName]) => structName);
 }
 
-const SHAPES: [string, Shaped][] = [
-  ['the roles response', RolesResponseSchema],
-  ['a role', CustomRoleSchema],
-  ['a catalogue entry', PermissionDefinitionSchema],
-  ['the response to a create or update', RoleResponseSchema],
-  ['a create request', CreateRoleRequestSchema],
-  ['an update request', UpdateRoleRequestSchema],
-  ['the refusal of a role in use', RoleRefusalSchema],
+function exactly(source: string, fields: readonly string[]): RustField[] {
+  const expected = sorted(fields).join();
+  const found = [...shapes(source).values()].filter(
+    (candidate) => sorted(candidate.map((field) => field.name)).join() === expected
+  );
+  if (found.length !== 1) throw new Error(`expected one struct carrying ${expected}`);
+  return found[0];
+}
+
+function acceptsNull(schema: Shaped, key: string): boolean {
+  return schema.shape[key].safeParse(null).success;
+}
+
+const Direction = {
+  Response: 'response',
+  Request: 'request',
+} as const;
+
+type Direction = (typeof Direction)[keyof typeof Direction];
+
+const SHAPES: [string, Shaped, Direction][] = [
+  ['the roles response', RolesResponseSchema, Direction.Response],
+  ['a role', CustomRoleSchema, Direction.Response],
+  ['a catalogue entry', PermissionDefinitionSchema, Direction.Response],
+  ['the response to a create or update', RoleResponseSchema, Direction.Response],
+  ['a create request', CreateRoleRequestSchema, Direction.Request],
+  ['an update request', UpdateRoleRequestSchema, Direction.Request],
+  ['the refusal of a role in use', RoleRefusalSchema, Direction.Response],
+];
+
+const MEMBER_ROUTES: [string, string, z.ZodType, z.ZodType][] = [
+  ['organization', ORGANIZATIONS_RS, UpdateOrgMemberRequestSchema, OrganizationMemberSchema],
+  ['workspace', WORKSPACES_RS, UpdateWorkspaceMemberRequestSchema, WorkspaceMemberSchema],
 ];
 
 describe('the permission names match the catalogue the server declares', () => {
@@ -206,4 +245,69 @@ describe('the roles routes read and write what the console models', () => {
   test.each(SHAPES)('a server struct carries exactly the fields of %s', (_, schema) => {
     expect(carrying(routeSources(), schema).length).toBeGreaterThan(0);
   });
+
+  test.each(SHAPES)('%s is nullable exactly where the server is', (_, schema, direction) => {
+    const structs = shapes(routeSources());
+    for (const structName of carrying(routeSources(), schema)) {
+      for (const field of structs.get(structName) ?? []) {
+        const nullable = acceptsNull(schema, field.name);
+        if (direction === Direction.Response) {
+          expect({ field: field.name, nullable }).toEqual({
+            field: field.name,
+            nullable: field.nullable,
+          });
+        } else if (nullable) {
+          expect({ field: field.name, nullable: field.nullable }).toEqual({
+            field: field.name,
+            nullable: true,
+          });
+        }
+      }
+    }
+  });
+});
+
+describe('the member routes take and send what the console models', () => {
+  test('a custom role reference is the summary the server sends', () => {
+    expect(sorted(structFields(read(CUSTOM_ROLES_RS), SUMMARY).map((field) => field.name))).toEqual(
+      keys(CustomRoleReferenceSchema)
+    );
+  });
+
+  test.each(MEMBER_ROUTES)(
+    'the %s member PATCH takes a role or a custom role, never both',
+    (_, path, request) => {
+      const fields = exactly(read(path), ASSIGNMENT_FIELDS);
+      expect(fields.every((field) => field.nullable)).toBe(true);
+      expect(request.safeParse({ role: 'member' }).success).toBe(true);
+      expect(request.safeParse({ custom_role_id: 'role-1' }).success).toBe(true);
+      expect(request.safeParse({ role: 'member', custom_role_id: 'role-1' }).success).toBe(false);
+      expect(request.safeParse({}).success).toBe(false);
+    }
+  );
+
+  test.each(MEMBER_ROUTES)(
+    'a %s member row carries a nullable custom role and a permission list',
+    (scope, path, _, row) => {
+      const fields = Object.fromEntries(
+        exactly(read(path), STANDING_FIELDS).map((field) => [field.name, field.nullable])
+      );
+      expect(fields).toEqual({ role: false, custom_role: true, permissions: false });
+
+      const sent = {
+        id: 'member-1',
+        user_id: 'user-1',
+        [`${scope}_id`]: `${scope}-1`,
+        role: 'member',
+        custom_role: null,
+        permissions: ['organization:read'],
+      };
+      expect(row.safeParse(sent).success).toBe(true);
+      expect(
+        row.safeParse({ ...sent, custom_role: { id: 'role-1', name: 'Auditor' } }).success
+      ).toBe(true);
+      expect(row.safeParse({ ...sent, permissions: null }).success).toBe(false);
+      expect(row.parse(sent)).toMatchObject({ custom_role: null, permissions: sent.permissions });
+    }
+  );
 });

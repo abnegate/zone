@@ -1,5 +1,3 @@
-import { RoleRefusal } from '../features/enterprise/roles/RoleRefusal';
-import { RoleRefusalSchema } from '../features/enterprise/roles/schemas';
 import type {
   CreateKnowledgeRequest,
   GatherContextRequest,
@@ -90,6 +88,8 @@ import {
   ResendVerificationResponseSchema,
   ResetPasswordResponseSchema,
   SessionsResponseSchema,
+  UpdateOrgMemberRequestSchema,
+  UpdateWorkspaceMemberRequestSchema,
   VerifyEmailResponseSchema,
   WorkspaceAiSettingsResponseSchema,
   WorkspaceMemberSchema,
@@ -737,35 +737,11 @@ class Client {
     return parse(ResetPasswordResponseSchema, await response.json());
   }
 
-  private async roleChangeFailure(response: Response, action: string): Promise<Error> {
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
-      body = undefined;
-    }
-    const refusal = RoleRefusalSchema.safeParse(body);
-    if (refusal.success) {
-      return new RoleRefusal(refusal.data, response.status);
-    }
-    const details: { message?: unknown; error?: unknown; detail?: unknown } =
-      typeof body === 'object' && body !== null ? body : {};
-    const reason = [details.message, details.error, details.detail].find(
-      (value): value is string => typeof value === 'string' && value.length > 0
-    );
-    return new Error(reason ?? `${action}: ${response.status}`);
-  }
-
   private async parseErrorResponse(
     response: Response
   ): Promise<{ message?: string; code?: string }> {
-    try {
-      const data = await response.json();
-      const code = typeof data?.code === 'string' && data.code ? data.code : undefined;
-      return { message: data.message || data.error || data.detail, code };
-    } catch {
-      return {};
-    }
+    const { reason, code } = ApiError.refusal(await ApiError.body(response));
+    return { message: reason, code };
   }
 
   // Session Management API
@@ -908,11 +884,11 @@ class Client {
       {
         method: 'PATCH',
         headers: this.getHeaders(),
-        body: JSON.stringify(request),
+        body: JSON.stringify(parse(UpdateOrgMemberRequestSchema, request)),
       }
     );
     if (!response.ok) {
-      throw await this.roleChangeFailure(response, 'Failed to update organization member role');
+      throw await ApiError.refused(response, 'Failed to update organization member role');
     }
     return parse(OrganizationMemberSchema, await response.json());
   }
@@ -978,11 +954,11 @@ class Client {
       {
         method: 'PATCH',
         headers: this.getHeaders(),
-        body: JSON.stringify(request),
+        body: JSON.stringify(parse(UpdateWorkspaceMemberRequestSchema, request)),
       }
     );
     if (!response.ok) {
-      throw await this.roleChangeFailure(response, 'Failed to update workspace member role');
+      throw await ApiError.refused(response, 'Failed to update workspace member role');
     }
     return parse(WorkspaceMemberSchema, await response.json());
   }
