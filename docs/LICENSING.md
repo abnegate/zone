@@ -37,9 +37,9 @@ Zone has three editions:
 
 A server with no license runs Community. A Team or Enterprise license unlocks
 its plan's features while it's active and through its grace period. Both paid
-editions are billed per seat, yearly, through Polar, which is the merchant of
-record and handles VAT, GST and US sales tax. Zone never handles money; it
-only verifies a key.
+editions are billed per seat, monthly or yearly, through Polar, which is the
+merchant of record and handles VAT, GST and US sales tax. Zone never handles
+money; it only verifies a key.
 
 ### The Community member cap
 
@@ -61,22 +61,29 @@ person:
 - accepting an invitation, for an account with no membership;
 - adding an account with no membership to an organization, including someone
   whose only membership was removed;
-- creating an organization, for an account with no membership.
+- creating an organization, for an account with no membership;
+- reactivating an organization, when its members who have no other
+  membership would take the count past 3.
 
 Each refusal answers `403`:
 
 ```json
-{"error": "This server runs Zone Community, which allows 3 active members. Add a Zone Team or Enterprise license to add more people.", "code": "member_cap_reached"}
+{"error": "This server allows 3 active members without an active Zone Team or Enterprise license. Add a license to add more people.", "code": "member_cap_reached"}
 ```
+
+Adding someone to a workspace never adds a member: only an active member of
+the workspace's organization can be added, on any edition, and anyone else is
+refused with `409` and the code `outside_organization`. Add them to the
+organization first.
 
 The cap never signs anyone out and never refuses an existing member. Signing
 in and refreshing a session are never checked, including through single
 sign-on, and anyone with an active membership of an active organization can
 still be invited, accept invitations, join another organization and create
 one. A server can therefore be over the cap, for example after a paid license
-lapses. Server admins then
-see a banner that says so and that everyone keeps access, and new people are
-refused until a Team or Enterprise license is installed.
+lapses. Server admins then see a banner that says so and that everyone keeps
+access, and new people are refused until a Team or Enterprise license is
+installed.
 
 The count follows the calendar month, so someone who hasn't signed in this
 month doesn't count until they do. A place is checked when the person is
@@ -239,16 +246,16 @@ ask Polar to enable seat-based pricing for the organization.
 
 ### 2. The product and price
 
-Create one product per paid plan you sell:
+Create one product per paid plan and billing cycle you sell:
 
 | Setting | Value |
 |---|---|
 | Name | `Zone Team` or `Zone Enterprise` |
 | Product type | Subscription |
-| Billing cycle | Yearly |
+| Billing cycle | Monthly or yearly |
 | Pricing type | Seat-based (`amount_type: seat_based`) |
 | Tiering model | Fixed price per seat, unless you want volume discounts |
-| Price per seat | The yearly price for one seat |
+| Price per seat | The price of one seat for the cycle |
 | Benefits | None |
 
 Don't add Polar's **License Keys** benefit. Its keys are validated by calling
@@ -266,7 +273,8 @@ Polar caps a subscription at 1,000 seats. Sell larger deals by invoice and
 
 Copy each product's ID into `POLAR_PRODUCT_IDS`, which the signer requires,
 with the plan its keys carry: `<team product id>=team,<enterprise product id>`.
-A bare ID issues Enterprise keys, as before. See [Environment](#environment).
+Selling both cycles means two IDs per plan. A bare ID issues Enterprise keys,
+as before. See [Environment](#environment).
 
 ### 3. The minimum seat count
 
