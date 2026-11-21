@@ -8,6 +8,8 @@ use sqlx::{Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use super::DbResult;
+use super::custom_roles::{self, Assignment, Membership, Reference, Summary};
+use crate::auth::{Grant, Permission, Scope};
 
 /// Organization role hierarchy
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -173,10 +175,10 @@ async fn lock_member(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     organization_id: Uuid,
     user_id: Uuid,
-) -> DbResult<Option<OrgRole>> {
-    let role: Option<String> = sqlx::query_scalar(
+) -> DbResult<Option<Membership<OrgRole>>> {
+    let row: Option<(String, Option<Uuid>)> = sqlx::query_as(
         r#"
-        SELECT role FROM organization_members
+        SELECT role, custom_role_id FROM organization_members
         WHERE organization_id = $1 AND user_id = $2 AND is_active = TRUE
         FOR UPDATE
         "#,
@@ -186,12 +188,31 @@ async fn lock_member(
     .fetch_optional(&mut **transaction)
     .await?;
 
-    Ok(role.map(|role| role.parse().unwrap_or(OrgRole::Member)))
+    let Some((role, assigned)) = row else {
+        return Ok(None);
+    };
+    let role = role.parse().unwrap_or(OrgRole::Member);
+    let (custom_role, grant) = custom_roles::held(
+        transaction,
+        organization_id,
+        assigned,
+        Scope::Organization,
+        Grant::organization(role),
+    )
+    .await?;
+    Ok(Some(Membership {
+        role,
+        custom_role,
+        grant,
+    }))
 }
 
-/// Whether `caller` outranks what `target` currently holds.
-fn outranks(caller: OrgRole, target: OrgRole) -> bool {
-    target < OrgRole::Admin || caller == OrgRole::Owner
+/// Whether `caller` may touch a member holding `target`: admins and owners
+/// only through the administrators permission, and anyone only when the
+/// caller already holds everything the target does.
+fn reaches(caller: &Grant, target: &Membership<OrgRole>) -> bool {
+    (target.role < OrgRole::Admin || caller.allows(Permission::AdministratorsUpdate))
+        && caller.covers(&target.grant)
 }
 
 /// Outcome of a removal that must leave an owner seated.
@@ -213,7 +234,7 @@ pub async fn remove_guarded(
     pool: &PgPool,
     organization_id: Uuid,
     user_id: Uuid,
-    caller: OrgRole,
+    caller: &Grant,
 ) -> DbResult<Removal> {
     let mut transaction = pool.begin().await?;
 
@@ -232,7 +253,7 @@ pub async fn remove_guarded(
     let Some(target) = lock_member(&mut transaction, organization_id, user_id).await? else {
         return Ok(Removal::Missing);
     };
-    if !outranks(caller, target) {
+    if !reaches(caller, &target) {
         return Ok(Removal::Forbidden);
     }
 
@@ -341,65 +362,58 @@ pub struct MemberWithUser {
     pub member: OrganizationMemberRow,
     pub email: String,
     pub display_name: Option<String>,
+    pub custom_role: Option<Summary>,
+    pub grant: Grant,
 }
 
 #[derive(Debug, sqlx::FromRow)]
 struct MemberWithUserRow {
-    id: Uuid,
-    organization_id: Uuid,
-    user_id: Uuid,
-    role: String,
-    is_active: bool,
-    invited_by: Option<Uuid>,
-    invited_at: Option<NaiveDateTime>,
-    accepted_at: Option<NaiveDateTime>,
-    created_at: Option<NaiveDateTime>,
-    updated_at: Option<NaiveDateTime>,
+    #[sqlx(flatten)]
+    member: MemberRow,
     email: String,
     display_name: Option<String>,
+    #[sqlx(flatten)]
+    reference: Reference,
 }
 
 impl From<MemberWithUserRow> for MemberWithUser {
     fn from(row: MemberWithUserRow) -> Self {
-        let now = chrono::Utc::now().naive_utc();
+        let member = OrganizationMemberRow::from(row.member);
+        let (custom_role, grant) = row
+            .reference
+            .resolve(Scope::Organization, Grant::organization(member.role));
         Self {
-            member: OrganizationMemberRow {
-                id: row.id,
-                organization_id: row.organization_id,
-                user_id: row.user_id,
-                role: row.role.parse().unwrap_or(OrgRole::Member),
-                is_active: row.is_active,
-                invited_by: row.invited_by,
-                invited_at: row.invited_at,
-                accepted_at: row.accepted_at,
-                created_at: row.created_at.unwrap_or(now),
-                updated_at: row.updated_at.unwrap_or(now),
-            },
+            member,
             email: row.email,
             display_name: row.display_name,
+            custom_role,
+            grant,
         }
     }
 }
 
-const MEMBER_WITH_USER_COLUMNS: &str = r#"
-    om.id, om.organization_id, om.user_id, om.role, om.is_active,
-    om.invited_by, om.invited_at, om.accepted_at, om.created_at, om.updated_at,
-    u.email, u.display_name
-"#;
+fn member_with_user_query(filter: &str) -> String {
+    let (columns, join) = Reference::sql("om", "om.organization_id", Scope::Organization);
+    format!(
+        r#"
+        SELECT om.id, om.organization_id, om.user_id, om.role, om.is_active,
+               om.invited_by, om.invited_at, om.accepted_at, om.created_at, om.updated_at,
+               u.email, u.display_name, {columns}
+        FROM organization_members om
+        INNER JOIN users u ON u.id = om.user_id
+        {join}
+        WHERE {filter}
+        "#
+    )
+}
 
 /// List the active members of an organization with their emails and names.
 pub async fn list_members_with_users(
     pool: &PgPool,
     organization_id: Uuid,
 ) -> DbResult<Vec<MemberWithUser>> {
-    let rows: Vec<MemberWithUserRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        r#"
-        SELECT {MEMBER_WITH_USER_COLUMNS}
-        FROM organization_members om
-        INNER JOIN users u ON u.id = om.user_id
-        WHERE om.organization_id = $1 AND om.is_active = TRUE
-        ORDER BY om.created_at ASC
-        "#
+    let rows: Vec<MemberWithUserRow> = sqlx::query_as(sqlx::AssertSqlSafe(member_with_user_query(
+        "om.organization_id = $1 AND om.is_active = TRUE ORDER BY om.created_at ASC",
     )))
     .bind(organization_id)
     .fetch_all(pool)
@@ -414,14 +428,9 @@ pub async fn get_member_with_user(
     organization_id: Uuid,
     user_id: Uuid,
 ) -> DbResult<Option<MemberWithUser>> {
-    let row: Option<MemberWithUserRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        r#"
-        SELECT {MEMBER_WITH_USER_COLUMNS}
-        FROM organization_members om
-        INNER JOIN users u ON u.id = om.user_id
-        WHERE om.organization_id = $1 AND om.user_id = $2
-        "#
-    )))
+    let row: Option<MemberWithUserRow> = sqlx::query_as(sqlx::AssertSqlSafe(
+        member_with_user_query("om.organization_id = $1 AND om.user_id = $2"),
+    ))
     .bind(organization_id)
     .bind(user_id)
     .fetch_optional(pool)
@@ -435,6 +444,8 @@ pub async fn get_member_with_user(
 pub struct UserOrganization {
     pub organization: super::organizations::OrganizationRow,
     pub role: OrgRole,
+    pub custom_role: Option<Summary>,
+    pub grant: Grant,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -447,6 +458,8 @@ struct UserOrganizationRow {
     created_at: Option<NaiveDateTime>,
     updated_at: Option<NaiveDateTime>,
     role: String,
+    #[sqlx(flatten)]
+    reference: Reference,
 }
 
 /// List the organizations a user is an active member of, with their role.
@@ -454,33 +467,43 @@ pub async fn list_user_organizations_with_role(
     pool: &PgPool,
     user_id: Uuid,
 ) -> DbResult<Vec<UserOrganization>> {
-    let rows: Vec<UserOrganizationRow> = sqlx::query_as(
+    let (columns, join) = Reference::sql("om", "om.organization_id", Scope::Organization);
+    let rows: Vec<UserOrganizationRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         r#"
         SELECT o.id, o.name, o.slug, o.description, o.is_active, o.created_at, o.updated_at,
-               om.role
+               om.role, {columns}
         FROM organizations o
         INNER JOIN organization_members om ON o.id = om.organization_id
+        {join}
         WHERE om.user_id = $1 AND om.is_active = TRUE
         ORDER BY o.created_at DESC
-        "#,
-    )
+        "#
+    )))
     .bind(user_id)
     .fetch_all(pool)
     .await?;
 
     Ok(rows
         .into_iter()
-        .map(|row| UserOrganization {
-            organization: super::organizations::OrganizationRow {
-                id: row.id,
-                name: row.name,
-                slug: row.slug,
-                description: row.description,
-                is_active: row.is_active,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-            },
-            role: row.role.parse().unwrap_or(OrgRole::Member),
+        .map(|row| {
+            let role = row.role.parse().unwrap_or(OrgRole::Member);
+            let (custom_role, grant) = row
+                .reference
+                .resolve(Scope::Organization, Grant::organization(role));
+            UserOrganization {
+                organization: super::organizations::OrganizationRow {
+                    id: row.id,
+                    name: row.name,
+                    slug: row.slug,
+                    description: row.description,
+                    is_active: row.is_active,
+                    created_at: row.created_at,
+                    updated_at: row.updated_at,
+                },
+                role,
+                custom_role,
+                grant,
+            }
         })
         .collect())
 }
@@ -561,6 +584,8 @@ pub enum RoleChange {
     Forbidden,
     Missing,
     LastOwner,
+    Exceeds,
+    RoleMissing,
 }
 
 /// Change a member's role, refusing to unseat the organization's last owner.
@@ -569,12 +594,18 @@ pub enum RoleChange {
 /// demotions racing each other both read a safe count and between them leave
 /// none. Lock the owner rows for the length of the transaction: the second
 /// demotion waits, then counts what the first actually left.
+///
+/// The caller must hold everything the target holds now and everything the
+/// assignment grants. Only the administrators permission touches an admin or
+/// owner, or seats an owner; an admin seating an admin is this organization's
+/// policy, deliberately. A custom role is read under a share lock, so an edit
+/// to it waits for the assignment and counts the new holder.
 pub async fn change_role(
     pool: &PgPool,
     organization_id: Uuid,
     user_id: Uuid,
-    role: OrgRole,
-    caller: OrgRole,
+    assignment: Assignment<OrgRole>,
+    caller: &Grant,
 ) -> DbResult<RoleChange> {
     let mut transaction = pool.begin().await?;
 
@@ -593,54 +624,182 @@ pub async fn change_role(
     let Some(target) = lock_member(&mut transaction, organization_id, user_id).await? else {
         return Ok(RoleChange::Missing);
     };
-    if !outranks(caller, target) {
+    if !reaches(caller, &target) {
         return Ok(RoleChange::Forbidden);
     }
 
-    // The rank being granted is the other half of the same question, and the
-    // route asks it too. Ask it here as well: this is the guarded entry point,
-    // and a caller reaching it should not be able to acquire one guard without
-    // the other. Only an owner seats an owner; an admin seating an admin is
-    // this organization's policy, deliberately, and the route it goes through
-    // says the same.
-    if role == OrgRole::Owner && caller != OrgRole::Owner {
-        return Ok(RoleChange::Forbidden);
+    let (role, custom_role_id, granted) = match assignment {
+        Assignment::BuiltIn(role) => {
+            if role == OrgRole::Owner && !caller.allows(Permission::AdministratorsUpdate) {
+                return Ok(RoleChange::Forbidden);
+            }
+            (role, None, Grant::organization(role))
+        }
+        Assignment::Custom(role_id) => {
+            let Some((summary, grant)) = custom_roles::lock(
+                &mut transaction,
+                organization_id,
+                role_id,
+                Scope::Organization,
+            )
+            .await?
+            else {
+                return Ok(RoleChange::RoleMissing);
+            };
+            (OrgRole::Member, Some(summary.id), grant)
+        }
+    };
+    if !caller.covers(&granted) {
+        return Ok(RoleChange::Exceeds);
     }
 
     if role != OrgRole::Owner && owners.len() <= 1 && owners.contains(&user_id) {
         return Ok(RoleChange::LastOwner);
     }
 
-    let row = sqlx::query!(
+    let row: MemberRow = sqlx::query_as(
         r#"
         UPDATE organization_members
-        SET role = $3, updated_at = NOW()
+        SET role = $3, custom_role_id = $4, updated_at = NOW()
         WHERE organization_id = $1 AND user_id = $2
         RETURNING id, organization_id, user_id, role, is_active,
                   invited_by, invited_at, accepted_at, created_at, updated_at
         "#,
-        organization_id,
-        user_id,
-        role.as_str()
     )
+    .bind(organization_id)
+    .bind(user_id)
+    .bind(role.as_str())
+    .bind(custom_role_id)
     .fetch_one(&mut *transaction)
     .await?;
 
     transaction.commit().await?;
 
-    let now = chrono::Utc::now().naive_utc();
-    Ok(RoleChange::Applied(Box::new(OrganizationMemberRow {
-        id: row.id,
-        organization_id: row.organization_id,
-        user_id: row.user_id,
-        role: row.role.parse().unwrap_or(OrgRole::Member),
-        is_active: row.is_active,
-        invited_by: row.invited_by,
-        invited_at: row.invited_at,
-        accepted_at: row.accepted_at,
-        created_at: row.created_at.unwrap_or(now),
-        updated_at: row.updated_at.unwrap_or(now),
-    })))
+    Ok(RoleChange::Applied(Box::new(row.into())))
+}
+
+/// What a member holds in their organization, or `None` unless they are an
+/// active member.
+pub async fn membership(
+    pool: &PgPool,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<Membership<OrgRole>>> {
+    let (columns, join) = Reference::sql("om", "om.organization_id", Scope::Organization);
+    let row: Option<MembershipRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        r#"
+        SELECT om.role, {columns}
+        FROM organization_members om
+        {join}
+        WHERE om.organization_id = $1 AND om.user_id = $2 AND om.is_active = TRUE
+        "#
+    )))
+    .bind(organization_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|row| {
+        let role = row.role.parse().unwrap_or(OrgRole::Member);
+        let (custom_role, grant) = row
+            .reference
+            .resolve(Scope::Organization, Grant::organization(role));
+        Membership {
+            role,
+            custom_role,
+            grant,
+        }
+    }))
+}
+
+/// What a member holds, read and share-locked for the caller's transaction:
+/// the member row first, then the custom role it points at.
+pub async fn lock_membership(
+    connection: &mut PgConnection,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<Membership<OrgRole>>> {
+    let row: Option<(String, Option<Uuid>)> = sqlx::query_as(
+        r#"
+        SELECT role, custom_role_id
+        FROM organization_members
+        WHERE organization_id = $1 AND user_id = $2 AND is_active = TRUE
+        FOR SHARE
+        "#,
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+
+    let Some((role, assigned)) = row else {
+        return Ok(None);
+    };
+    let role = role.parse().unwrap_or(OrgRole::Member);
+    let (custom_role, grant) = custom_roles::held(
+        connection,
+        organization_id,
+        assigned,
+        Scope::Organization,
+        Grant::organization(role),
+    )
+    .await?;
+    Ok(Some(Membership {
+        role,
+        custom_role,
+        grant,
+    }))
+}
+
+/// Whether an active member holds `permission` in their organization.
+pub async fn permits(
+    pool: &PgPool,
+    organization_id: Uuid,
+    user_id: Uuid,
+    permission: Permission,
+) -> DbResult<bool> {
+    Ok(membership(pool, organization_id, user_id)
+        .await?
+        .is_some_and(|membership| membership.grant.allows(permission)))
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct MembershipRow {
+    role: String,
+    #[sqlx(flatten)]
+    reference: Reference,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct MemberRow {
+    id: Uuid,
+    organization_id: Uuid,
+    user_id: Uuid,
+    role: String,
+    is_active: bool,
+    invited_by: Option<Uuid>,
+    invited_at: Option<NaiveDateTime>,
+    accepted_at: Option<NaiveDateTime>,
+    created_at: Option<NaiveDateTime>,
+    updated_at: Option<NaiveDateTime>,
+}
+
+impl From<MemberRow> for OrganizationMemberRow {
+    fn from(row: MemberRow) -> Self {
+        let now = chrono::Utc::now().naive_utc();
+        Self {
+            id: row.id,
+            organization_id: row.organization_id,
+            user_id: row.user_id,
+            role: row.role.parse().unwrap_or(OrgRole::Member),
+            is_active: row.is_active,
+            invited_by: row.invited_by,
+            invited_at: row.invited_at,
+            accepted_at: row.accepted_at,
+            created_at: row.created_at.unwrap_or(now),
+            updated_at: row.updated_at.unwrap_or(now),
+        }
+    }
 }
 
 /// Check if user is an active member of organization

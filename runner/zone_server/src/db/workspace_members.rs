@@ -6,6 +6,8 @@ use sqlx::{Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use super::DbResult;
+use super::custom_roles::{self, Assignment, Membership, Reference, Summary};
+use crate::auth::{Grant, Permission, Scope};
 
 /// Workspace role hierarchy
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -217,7 +219,7 @@ pub async fn remove_guarded(
     pool: &PgPool,
     workspace_id: Uuid,
     user_id: Uuid,
-    caller: WorkspaceRole,
+    caller: &Grant,
 ) -> DbResult<Removal> {
     let mut transaction = pool.begin().await?;
 
@@ -225,7 +227,7 @@ pub async fn remove_guarded(
     let Some(target) = lock_member(&mut transaction, workspace_id, user_id).await? else {
         return Ok(Removal::Missing);
     };
-    if !outranks(caller, target) {
+    if !reaches(caller, &target.membership) {
         return Ok(Removal::Forbidden);
     }
 
@@ -367,10 +369,12 @@ pub struct MemberWithUser {
     pub member: WorkspaceMemberRow,
     pub email: String,
     pub display_name: Option<String>,
+    pub custom_role: Option<Summary>,
+    pub grant: Grant,
 }
 
 #[derive(Debug, sqlx::FromRow)]
-struct MemberWithUserRow {
+struct MemberRow {
     id: Uuid,
     workspace_id: Uuid,
     user_id: Uuid,
@@ -381,28 +385,48 @@ struct MemberWithUserRow {
     accepted_at: Option<chrono::NaiveDateTime>,
     created_at: Option<chrono::NaiveDateTime>,
     updated_at: Option<chrono::NaiveDateTime>,
+}
+
+impl From<MemberRow> for WorkspaceMemberRow {
+    fn from(row: MemberRow) -> Self {
+        let now = chrono::Utc::now().naive_utc();
+        Self {
+            id: row.id,
+            workspace_id: row.workspace_id,
+            user_id: row.user_id,
+            role: row.role.parse().unwrap_or(WorkspaceRole::Member),
+            is_active: row.is_active,
+            invited_by: row.invited_by,
+            invited_at: row.invited_at,
+            accepted_at: row.accepted_at,
+            created_at: row.created_at.unwrap_or(now),
+            updated_at: row.updated_at.unwrap_or(now),
+        }
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct MemberWithUserRow {
+    #[sqlx(flatten)]
+    member: MemberRow,
     email: String,
     display_name: Option<String>,
+    #[sqlx(flatten)]
+    reference: Reference,
 }
 
 impl From<MemberWithUserRow> for MemberWithUser {
     fn from(row: MemberWithUserRow) -> Self {
-        let now = chrono::Utc::now().naive_utc();
+        let member = WorkspaceMemberRow::from(row.member);
+        let (custom_role, grant) = row
+            .reference
+            .resolve(Scope::Workspace, Grant::workspace(member.role));
         Self {
-            member: WorkspaceMemberRow {
-                id: row.id,
-                workspace_id: row.workspace_id,
-                user_id: row.user_id,
-                role: row.role.parse().unwrap_or(WorkspaceRole::Member),
-                is_active: row.is_active,
-                invited_by: row.invited_by,
-                invited_at: row.invited_at,
-                accepted_at: row.accepted_at,
-                created_at: row.created_at.unwrap_or(now),
-                updated_at: row.updated_at.unwrap_or(now),
-            },
+            member,
             email: row.email,
             display_name: row.display_name,
+            custom_role,
+            grant,
         }
     }
 }
@@ -412,17 +436,20 @@ pub async fn list_members_with_users(
     pool: &PgPool,
     workspace_id: Uuid,
 ) -> DbResult<Vec<MemberWithUser>> {
-    let rows: Vec<MemberWithUserRow> = sqlx::query_as(sqlx::AssertSqlSafe(
+    let (columns, join) = Reference::sql("wm", "w.organization_id", Scope::Workspace);
+    let rows: Vec<MemberWithUserRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         r#"
         SELECT wm.id, wm.workspace_id, wm.user_id, wm.role, wm.is_active,
                wm.invited_by, wm.invited_at, wm.accepted_at, wm.created_at, wm.updated_at,
-               u.email, u.display_name
+               u.email, u.display_name, {columns}
         FROM workspace_members wm
         INNER JOIN users u ON u.id = wm.user_id
+        INNER JOIN workspaces w ON w.id = wm.workspace_id
+        {join}
         WHERE wm.workspace_id = $1 AND wm.is_active = TRUE
         ORDER BY wm.created_at ASC
-        "#,
-    ))
+        "#
+    )))
     .bind(workspace_id)
     .fetch_all(pool)
     .await?;
@@ -469,6 +496,8 @@ pub async fn list_user_workspaces(
 pub struct UserWorkspace {
     pub workspace: super::workspaces::WorkspaceRow,
     pub role: WorkspaceRole,
+    pub custom_role: Option<Summary>,
+    pub grant: Grant,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -482,6 +511,8 @@ struct UserWorkspaceRow {
     created_at: Option<chrono::NaiveDateTime>,
     updated_at: Option<chrono::NaiveDateTime>,
     role: String,
+    #[sqlx(flatten)]
+    reference: Reference,
 }
 
 /// List the workspaces of an organization a user is an active member of, with their role.
@@ -490,18 +521,20 @@ pub async fn list_user_workspaces_in_org(
     user_id: Uuid,
     organization_id: Uuid,
 ) -> DbResult<Vec<UserWorkspace>> {
-    let rows: Vec<UserWorkspaceRow> = sqlx::query_as(
+    let (columns, join) = Reference::sql("wm", "w.organization_id", Scope::Workspace);
+    let rows: Vec<UserWorkspaceRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         r#"
         SELECT w.id, w.organization_id, w.name, w.slug, w.description,
-               w.is_active, w.created_at, w.updated_at, wm.role
+               w.is_active, w.created_at, w.updated_at, wm.role, {columns}
         FROM workspaces w
         INNER JOIN workspace_members wm ON w.id = wm.workspace_id
+        {join}
         WHERE wm.user_id = $1
           AND w.organization_id = $2
           AND wm.is_active = TRUE
         ORDER BY w.created_at DESC
-        "#,
-    )
+        "#
+    )))
     .bind(user_id)
     .bind(organization_id)
     .fetch_all(pool)
@@ -509,18 +542,26 @@ pub async fn list_user_workspaces_in_org(
 
     Ok(rows
         .into_iter()
-        .map(|row| UserWorkspace {
-            workspace: super::workspaces::WorkspaceRow {
-                id: row.id,
-                organization_id: row.organization_id,
-                name: row.name,
-                slug: row.slug,
-                description: row.description,
-                is_active: row.is_active,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-            },
-            role: row.role.parse().unwrap_or(WorkspaceRole::Viewer),
+        .map(|row| {
+            let role = row.role.parse().unwrap_or(WorkspaceRole::Viewer);
+            let (custom_role, grant) = row
+                .reference
+                .resolve(Scope::Workspace, Grant::workspace(role));
+            UserWorkspace {
+                workspace: super::workspaces::WorkspaceRow {
+                    id: row.id,
+                    organization_id: row.organization_id,
+                    name: row.name,
+                    slug: row.slug,
+                    description: row.description,
+                    is_active: row.is_active,
+                    created_at: row.created_at,
+                    updated_at: row.updated_at,
+                },
+                role,
+                custom_role,
+                grant,
+            }
         })
         .collect())
 }
@@ -562,14 +603,113 @@ pub async fn update_member_role(
     })
 }
 
-/// Check if user can read workspace resources (viewer or higher)
 pub async fn can_read(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<bool> {
-    has_role_or_higher(pool, user_id, workspace_id, WorkspaceRole::Viewer).await
+    permits(pool, workspace_id, user_id, Permission::WorkspaceRead).await
 }
 
-/// Check if user can write/modify workspace resources (member or higher)
 pub async fn can_write(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<bool> {
-    has_role_or_higher(pool, user_id, workspace_id, WorkspaceRole::Member).await
+    permits(pool, workspace_id, user_id, Permission::WorkspaceWrite).await
+}
+
+/// Whether an active member holds `permission` in the workspace. Only
+/// workspace permissions are granted through a workspace membership.
+pub async fn permits(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    permission: Permission,
+) -> DbResult<bool> {
+    if permission.scope() != Scope::Workspace {
+        return Ok(false);
+    }
+    sqlx::query_scalar("SELECT workspace_permits($1, $2, $3)")
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(permission.name())
+        .fetch_one(pool)
+        .await
+}
+
+/// What a member holds in the workspace, or `None` unless they are an active
+/// member.
+pub async fn membership(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<Membership<WorkspaceRole>>> {
+    let (columns, join) = Reference::sql("wm", "w.organization_id", Scope::Workspace);
+    let row: Option<MembershipRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        r#"
+        SELECT wm.role, {columns}
+        FROM workspace_members wm
+        INNER JOIN workspaces w ON w.id = wm.workspace_id
+        {join}
+        WHERE wm.workspace_id = $1 AND wm.user_id = $2 AND wm.is_active = TRUE
+        "#
+    )))
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|row| {
+        let role = row.role.parse().unwrap_or(WorkspaceRole::Viewer);
+        let (custom_role, grant) = row
+            .reference
+            .resolve(Scope::Workspace, Grant::workspace(role));
+        Membership {
+            role,
+            custom_role,
+            grant,
+        }
+    }))
+}
+
+/// What a member holds, read and share-locked for the caller's transaction:
+/// the member row first, then the custom role it points at.
+pub async fn lock_membership(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<Membership<WorkspaceRole>>> {
+    let row: Option<(String, Option<Uuid>, Uuid)> = sqlx::query_as(
+        r#"
+        SELECT wm.role, wm.custom_role_id, w.organization_id
+        FROM workspace_members wm
+        INNER JOIN workspaces w ON w.id = wm.workspace_id
+        WHERE wm.workspace_id = $1 AND wm.user_id = $2 AND wm.is_active = TRUE
+        FOR SHARE OF wm
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+
+    let Some((role, assigned, organization_id)) = row else {
+        return Ok(None);
+    };
+    let role = role.parse().unwrap_or(WorkspaceRole::Viewer);
+    let (custom_role, grant) = custom_roles::held(
+        connection,
+        organization_id,
+        assigned,
+        Scope::Workspace,
+        Grant::workspace(role),
+    )
+    .await?;
+    Ok(Some(Membership {
+        role,
+        custom_role,
+        grant,
+    }))
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct MembershipRow {
+    role: String,
+    #[sqlx(flatten)]
+    reference: Reference,
 }
 
 /// Check if user can administrate workspace (admin or higher)
@@ -607,12 +747,14 @@ async fn lock_member(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     workspace_id: Uuid,
     user_id: Uuid,
-) -> DbResult<Option<WorkspaceRole>> {
-    let role: Option<String> = sqlx::query_scalar(
+) -> DbResult<Option<Target>> {
+    let row: Option<(String, Option<Uuid>, Uuid)> = sqlx::query_as(
         r#"
-        SELECT role FROM workspace_members
-        WHERE workspace_id = $1 AND user_id = $2 AND is_active = TRUE
-        FOR UPDATE
+        SELECT wm.role, wm.custom_role_id, w.organization_id
+        FROM workspace_members wm
+        INNER JOIN workspaces w ON w.id = wm.workspace_id
+        WHERE wm.workspace_id = $1 AND wm.user_id = $2 AND wm.is_active = TRUE
+        FOR UPDATE OF wm
         "#,
     )
     .bind(workspace_id)
@@ -620,12 +762,39 @@ async fn lock_member(
     .fetch_optional(&mut **transaction)
     .await?;
 
-    Ok(role.map(|role| role.parse().unwrap_or(WorkspaceRole::Viewer)))
+    let Some((role, assigned, organization_id)) = row else {
+        return Ok(None);
+    };
+    let role = role.parse().unwrap_or(WorkspaceRole::Viewer);
+    let (custom_role, grant) = custom_roles::held(
+        transaction,
+        organization_id,
+        assigned,
+        Scope::Workspace,
+        Grant::workspace(role),
+    )
+    .await?;
+    Ok(Some(Target {
+        organization_id,
+        membership: Membership {
+            role,
+            custom_role,
+            grant,
+        },
+    }))
 }
 
-/// Whether `caller` outranks what `target` currently holds.
-fn outranks(caller: WorkspaceRole, target: WorkspaceRole) -> bool {
-    target < WorkspaceRole::Admin || caller == WorkspaceRole::Owner
+struct Target {
+    organization_id: Uuid,
+    membership: Membership<WorkspaceRole>,
+}
+
+/// Whether `caller` may touch a member holding `target`: admins and owners
+/// only through the workspace administrators permission, and anyone only when
+/// the caller already holds everything the target does.
+fn reaches(caller: &Grant, target: &Membership<WorkspaceRole>) -> bool {
+    (target.role < WorkspaceRole::Admin || caller.allows(Permission::WorkspaceAdministratorsUpdate))
+        && caller.covers(&target.grant)
 }
 
 async fn lock_privileged(
@@ -663,6 +832,8 @@ pub enum RoleChange {
     Missing,
     LastAdmin,
     LastOwner,
+    Exceeds,
+    RoleMissing,
 }
 
 /// Change a member's role, refusing to unseat the last admin or owner.
@@ -673,12 +844,18 @@ pub enum RoleChange {
 /// membership guard, so nobody can repair that. Lock the privileged rows for
 /// the length of the transaction: the second demotion waits, then counts what
 /// the first actually left.
+///
+/// The caller must hold everything the target holds now and everything the
+/// assignment grants. A workspace is stricter than an organization: only the
+/// administrators permission grants admin, not just owner. A custom role is
+/// read under a share lock, so an edit to it waits for the assignment and
+/// counts the new holder.
 pub async fn change_role(
     pool: &PgPool,
     workspace_id: Uuid,
     user_id: Uuid,
-    role: WorkspaceRole,
-    caller: WorkspaceRole,
+    assignment: Assignment<WorkspaceRole>,
+    caller: &Grant,
 ) -> DbResult<RoleChange> {
     let mut transaction = pool.begin().await?;
 
@@ -686,16 +863,35 @@ pub async fn change_role(
     let Some(target) = lock_member(&mut transaction, workspace_id, user_id).await? else {
         return Ok(RoleChange::Missing);
     };
-    if !outranks(caller, target) {
+    if !reaches(caller, &target.membership) {
         return Ok(RoleChange::Forbidden);
     }
 
-    // The rank being granted, asked here as well as in the route, so a caller
-    // reaching this entry point cannot acquire one guard without the other. A
-    // workspace is stricter than an organization: only an owner grants admin,
-    // not just owner.
-    if role >= WorkspaceRole::Admin && caller != WorkspaceRole::Owner {
-        return Ok(RoleChange::Forbidden);
+    let (role, custom_role_id, granted) = match assignment {
+        Assignment::BuiltIn(role) => {
+            if role >= WorkspaceRole::Admin
+                && !caller.allows(Permission::WorkspaceAdministratorsUpdate)
+            {
+                return Ok(RoleChange::Forbidden);
+            }
+            (role, None, Grant::workspace(role))
+        }
+        Assignment::Custom(role_id) => {
+            let Some((summary, grant)) = custom_roles::lock(
+                &mut transaction,
+                target.organization_id,
+                role_id,
+                Scope::Workspace,
+            )
+            .await?
+            else {
+                return Ok(RoleChange::RoleMissing);
+            };
+            (WorkspaceRole::Viewer, Some(summary.id), grant)
+        }
+    };
+    if !caller.covers(&granted) {
+        return Ok(RoleChange::Exceeds);
     }
 
     // An owner is not interchangeable with an admin here: only an owner may
@@ -711,36 +907,25 @@ pub async fn change_role(
         return Ok(RoleChange::LastAdmin);
     }
 
-    let row = sqlx::query!(
+    let row: MemberRow = sqlx::query_as(
         r#"
         UPDATE workspace_members
-        SET role = $3, updated_at = NOW()
+        SET role = $3, custom_role_id = $4, updated_at = NOW()
         WHERE workspace_id = $1 AND user_id = $2
         RETURNING id, workspace_id, user_id, role, is_active,
                   invited_by, invited_at, accepted_at, created_at, updated_at
         "#,
-        workspace_id,
-        user_id,
-        role.as_str()
     )
+    .bind(workspace_id)
+    .bind(user_id)
+    .bind(role.as_str())
+    .bind(custom_role_id)
     .fetch_one(&mut *transaction)
     .await?;
 
     transaction.commit().await?;
 
-    let now = chrono::Utc::now().naive_utc();
-    Ok(RoleChange::Applied(Box::new(WorkspaceMemberRow {
-        id: row.id,
-        workspace_id: row.workspace_id,
-        user_id: row.user_id,
-        role: row.role.parse().unwrap_or(WorkspaceRole::Member),
-        is_active: row.is_active,
-        invited_by: row.invited_by,
-        invited_at: row.invited_at,
-        accepted_at: row.accepted_at,
-        created_at: row.created_at.unwrap_or(now),
-        updated_at: row.updated_at.unwrap_or(now),
-    })))
+    Ok(RoleChange::Applied(Box::new(row.into())))
 }
 
 pub async fn count_admins(pool: &PgPool, workspace_id: Uuid) -> DbResult<i64> {
@@ -1039,20 +1224,6 @@ mod tests {
 
         assert!(result, "Empty source list should return true");
     }
-
-    // Note: verify_sources_in_workspace tests require workspace_id column on sources table
-    // These tests are commented out until the schema is updated
-    // TODO: Uncomment when workspace_id is added to sources table
-
-    // #[tokio::test]
-    // async fn test_verify_sources_in_workspace_returns_true_for_valid_sources() {
-    //     // Test implementation pending workspace_id on sources
-    // }
-
-    // #[tokio::test]
-    // async fn test_verify_sources_in_workspace_returns_false_for_invalid_sources() {
-    //     // Test implementation pending workspace_id on sources
-    // }
 
     #[tokio::test]
     #[cfg_attr(

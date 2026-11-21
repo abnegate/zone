@@ -8,6 +8,8 @@ use std::time::Duration;
 use crate::common::create_test_pool;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
+use zone_server::auth::Grant;
+use zone_server::db::custom_roles::Assignment;
 use zone_server::db::organization_members::{
     OrgRole, Removal, RoleChange, change_role, remove_guarded,
 };
@@ -79,7 +81,16 @@ async fn a_demotion_waits_for_one_already_in_flight_and_then_sees_it() {
 
     let racing = tokio::spawn({
         let pool = pool.clone();
-        async move { change_role(&pool, organization, second, OrgRole::Member, OrgRole::Owner).await }
+        async move {
+            change_role(
+                &pool,
+                organization,
+                second,
+                Assignment::BuiltIn(OrgRole::Member),
+                &Grant::organization(OrgRole::Owner),
+            )
+            .await
+        }
     });
 
     tokio::time::sleep(Duration::from_millis(750)).await;
@@ -137,7 +148,15 @@ async fn a_removal_waits_for_a_demotion_already_in_flight_and_then_sees_it() {
 
     let racing = tokio::spawn({
         let pool = pool.clone();
-        async move { remove_guarded(&pool, organization, second, OrgRole::Owner).await }
+        async move {
+            remove_guarded(
+                &pool,
+                organization,
+                second,
+                &Grant::organization(OrgRole::Owner),
+            )
+            .await
+        }
     });
 
     tokio::time::sleep(Duration::from_millis(750)).await;
@@ -208,7 +227,16 @@ async fn a_demotion_sees_the_rank_the_target_holds_when_it_lands() {
     // An admin re-seating a member: allowed, on the rank the target holds now.
     let racing = tokio::spawn({
         let pool = pool.clone();
-        async move { change_role(&pool, organization, target, OrgRole::Member, OrgRole::Admin).await }
+        async move {
+            change_role(
+                &pool,
+                organization,
+                target,
+                Assignment::BuiltIn(OrgRole::Member),
+                &Grant::organization(OrgRole::Admin),
+            )
+            .await
+        }
     });
 
     tokio::time::sleep(Duration::from_millis(750)).await;
