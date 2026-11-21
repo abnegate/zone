@@ -3,15 +3,16 @@
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
+use chrono::{SubsecRound, TimeDelta, Utc};
 use serde_json::{Value, json};
 use uuid::Uuid;
-use zone_enterprise::LICENSE_REQUIRED;
 use zone_enterprise::sso::{
     CLIENT_ID_INVALID, CLIENT_SECRET_INVALID, DISCOVERY_FAILED, DISPLAY_NAME_INVALID,
     DOMAIN_INVALID, ISSUER_INVALID, PROVIDER_DUPLICATE, PROVIDER_NOT_FOUND,
 };
+use zone_enterprise::{LICENSE_REQUIRED, Payload, Plan, SigningKey, sign};
 use zone_server::auth::admin_guard::REQUIRED;
-use zone_server::auth::entitlement::MESSAGE;
+use zone_server::auth::entitlement::ENTERPRISE_MESSAGE;
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::sso::providers;
 
@@ -23,6 +24,25 @@ use crate::common::{REFUSED_URL, TestResponse};
 
 const PREFIX: &str = "sso_providers";
 const REPLACED_SECRET: &str = "r0tated:secret+value";
+const KEY_ID: &str = "test-1";
+const SEED: [u8; 32] = [0x11; 32];
+
+fn team() -> String {
+    let expires_at = Utc::now().trunc_subsecs(0) + TimeDelta::days(365);
+    sign(
+        &Payload {
+            id: Uuid::new_v4(),
+            customer: "Acme Ltd".into(),
+            seats: 25,
+            issued_at: expires_at - TimeDelta::days(365),
+            expires_at,
+            key_id: KEY_ID.into(),
+            subscription: None,
+            plan: Some(Plan::Team),
+        },
+        &SigningKey::from_bytes(&SEED),
+    )
+}
 
 fn assert_code(response: &TestResponse, status: StatusCode, code: &str) {
     response.assert_status(status);
@@ -38,7 +58,7 @@ fn assert_code(response: &TestResponse, status: StatusCode, code: &str) {
 
 fn assert_license_required(response: &TestResponse) {
     assert_code(response, StatusCode::FORBIDDEN, LICENSE_REQUIRED);
-    assert_eq!(response.json_value()["error"], MESSAGE);
+    assert_eq!(response.json_value()["error"], ENTERPRISE_MESSAGE);
 }
 
 async fn licensed(fixture: &Fixture) -> Account {
@@ -212,6 +232,24 @@ async fn a_lapsed_license_still_takes_a_provider_out_of_service() {
         .update(&admin.token, Uuid::new_v4(), &json!({ "enabled": false }))
         .await;
     assert_code(&missing, StatusCode::NOT_FOUND, PROVIDER_NOT_FOUND);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_team_license_can_read_but_not_change_anything() {
+    let fixture = Fixture::new(PREFIX).await;
+    let admin = fixture.register().await;
+    fixture.install(&admin, &team()).await;
+
+    let body = fixture.settings(&admin.token).await.json_value();
+    assert_eq!(body["entitled"], false, "{body}");
+    assert_eq!(body["edition"], "team", "{body}");
+    assert_eq!(body["status"], "active", "{body}");
+
+    for response in licensed_writes(&fixture, &admin.token, Uuid::new_v4()).await {
+        assert_license_required(&response);
+    }
+    assert_eq!(fixture.providers().await, 0);
     fixture.cleanup().await;
 }
 

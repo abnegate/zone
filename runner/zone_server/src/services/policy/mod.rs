@@ -284,6 +284,7 @@ mod tests {
     use abnegate_agent_cli::CliSettings;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+    use zone_enterprise::{Keyring, License, Payload, Plan, SigningKey, TrustedKey, sign};
 
     use super::*;
     use crate::services::endpoint::testing::{endpoint, saved};
@@ -291,6 +292,29 @@ mod tests {
 
     const KEY: &str = "sk-policy-test";
     const MODEL: &str = "claude-sonnet-4-5";
+    const KEY_ID: &str = "test-1";
+    const SEED: [u8; 32] = [0x11; 32];
+
+    fn license(plan: Option<Plan>) -> License {
+        let signing = SigningKey::from_bytes(&SEED);
+        let keyring =
+            Keyring::new([TrustedKey::new(KEY_ID, signing.verifying_key().to_bytes()).unwrap()])
+                .unwrap();
+        let text = sign(
+            &Payload {
+                id: Uuid::new_v4(),
+                customer: "Acme Ltd".into(),
+                seats: 5,
+                issued_at: "2026-11-01T00:00:00Z".parse().unwrap(),
+                expires_at: "2027-11-01T00:00:00Z".parse().unwrap(),
+                key_id: KEY_ID.into(),
+                subscription: None,
+                plan,
+            },
+            &signing,
+        );
+        keyring.verify(&text).unwrap()
+    }
 
     fn effective(rules: Rules) -> Effective {
         Effective::new(rules, Rules::default())
@@ -618,6 +642,20 @@ mod tests {
             json!("rules"),
         ] {
             assert!(rules(Some(stored.clone())).is_err(), "{stored}");
+        }
+    }
+
+    #[test]
+    fn only_an_enterprise_license_or_a_key_that_stopped_verifying_enforces_policies() {
+        let cases = [
+            (Stored::Empty, false),
+            (Stored::Verified(license(Some(Plan::Team))), false),
+            (Stored::Verified(license(Some(Plan::Enterprise))), true),
+            (Stored::Verified(license(None)), true),
+            (Stored::Unverified(zone_enterprise::Error::Signature), true),
+        ];
+        for (stored, expected) in cases {
+            assert_eq!(enforces(&stored), expected, "{stored:?}");
         }
     }
 

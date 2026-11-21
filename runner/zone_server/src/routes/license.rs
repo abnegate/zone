@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
-use zone_enterprise::{Edition, License, Seats, Status, status};
+use zone_enterprise::{Edition, License, Members, Plan, Seats, Status, status};
 
 use super::common::{AuditEvent, ErrorResponse, audit};
 use crate::auth::ServerAdmin;
@@ -29,6 +29,7 @@ pub struct LicenseResponse {
     pub status: Status,
     pub license: Option<LicenseDetails>,
     pub seats: SeatsResponse,
+    pub members: MembersResponse,
     pub unverified: Option<UnverifiedResponse>,
     pub renewal: Option<RenewalResponse>,
 }
@@ -45,6 +46,7 @@ impl LicenseResponse {
             edition: Edition::from(license),
             status: status(license, now),
             license: license.map(LicenseDetails::from),
+            members: MembersResponse::new(seats.used, Members::cap(license, now)),
             seats,
             unverified: stored.refusal().map(UnverifiedResponse::from),
             renewal: license.and(renewal),
@@ -55,6 +57,7 @@ impl LicenseResponse {
 #[derive(Debug, Serialize)]
 pub struct LicenseDetails {
     pub id: Uuid,
+    pub plan: Plan,
     pub customer: String,
     pub seats: u32,
     pub issued_at: DateTime<Utc>,
@@ -67,6 +70,7 @@ impl From<&License> for LicenseDetails {
     fn from(license: &License) -> Self {
         Self {
             id: license.id(),
+            plan: license.plan(),
             customer: license.customer().to_owned(),
             seats: license.seats(),
             issued_at: license.issued_at(),
@@ -100,6 +104,23 @@ impl From<Seats> for SeatsResponse {
             used: Some(seats.used),
             licensed: seats.licensed,
             over: seats.over(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct MembersResponse {
+    pub active: Option<u32>,
+    pub cap: Option<u32>,
+    pub over: bool,
+}
+
+impl MembersResponse {
+    fn new(active: Option<u32>, cap: Option<u32>) -> Self {
+        Self {
+            active,
+            cap,
+            over: active.is_some_and(|active| Members { active, cap }.over()),
         }
     }
 }
@@ -302,7 +323,8 @@ mod tests {
     use axum::body::to_bytes;
     use chrono::TimeDelta;
     use zone_enterprise::{
-        GRACE_DAYS, Keyring, MALFORMED, Payload, SigningKey, TrustedKey, UNKNOWN_KEY, sign,
+        COMMUNITY_MEMBERS, GRACE_DAYS, Keyring, MALFORMED, Payload, SigningKey, TrustedKey,
+        UNKNOWN_KEY, sign,
     };
 
     use super::*;
@@ -315,14 +337,22 @@ mod tests {
     const SUBSCRIPTION: &str = "4f6c1a2e-8b3d-4c5e-9f70-1a2b3c4d5e6f";
 
     fn license() -> License {
-        issued(None)
+        issued(None, None)
     }
 
     fn subscribed() -> License {
-        issued(Some(SUBSCRIPTION))
+        issued(Some(SUBSCRIPTION), None)
     }
 
-    fn issued(subscription: Option<&str>) -> License {
+    fn team() -> License {
+        issued(None, Some(Plan::Team))
+    }
+
+    fn lapsed(license: &License) -> DateTime<Utc> {
+        license.grace_ends_at() + TimeDelta::days(1)
+    }
+
+    fn issued(subscription: Option<&str>, plan: Option<Plan>) -> License {
         let signing = SigningKey::from_bytes(&SEED);
         let keyring =
             Keyring::new([TrustedKey::new(KEY_ID, signing.verifying_key().to_bytes()).unwrap()])
@@ -337,7 +367,7 @@ mod tests {
                 expires_at,
                 key_id: KEY_ID.into(),
                 subscription: subscription.map(str::to_owned),
-                plan: None,
+                plan,
             },
             &signing,
         );
@@ -379,6 +409,7 @@ mod tests {
                 "status": "community",
                 "license": null,
                 "seats": { "used": 4, "licensed": null, "over": false },
+                "members": { "active": 4, "cap": COMMUNITY_MEMBERS, "over": true },
                 "unverified": null,
                 "renewal": null,
             })
@@ -386,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn a_license_is_sent_with_every_detail_and_its_grace_end() {
+    fn a_legacy_license_is_sent_as_enterprise_with_every_detail_and_its_grace_end() {
         let license = license();
         let response = LicenseResponse::new(
             &Stored::Verified(license.clone()),
@@ -402,6 +433,7 @@ mod tests {
                 "status": "active",
                 "license": {
                     "id": license.id(),
+                    "plan": "enterprise",
                     "customer": "Acme Ltd",
                     "seats": SEATS,
                     "issued_at": "2026-11-01T00:00:00Z",
@@ -410,10 +442,104 @@ mod tests {
                     "key_id": KEY_ID,
                 },
                 "seats": { "used": 2, "licensed": SEATS, "over": false },
+                "members": { "active": 2, "cap": null, "over": false },
                 "unverified": null,
                 "renewal": { "mode": "manual", "attempted_at": null, "outcome": null },
             })
         );
+    }
+
+    #[test]
+    fn a_team_license_is_sent_as_the_team_edition_without_a_member_cap() {
+        let license = team();
+        let response = LicenseResponse::new(
+            &Stored::Verified(license.clone()),
+            seats(COMMUNITY_MEMBERS + 2, Some(SEATS)).into(),
+            unattempted(&license),
+            license.issued_at(),
+        );
+
+        assert_eq!(
+            serialized(&response),
+            json!({
+                "edition": "team",
+                "status": "active",
+                "license": {
+                    "id": license.id(),
+                    "plan": "team",
+                    "customer": "Acme Ltd",
+                    "seats": SEATS,
+                    "issued_at": "2026-11-01T00:00:00Z",
+                    "expires_at": "2027-11-01T00:00:00Z",
+                    "grace_ends_at": "2027-12-01T00:00:00Z",
+                    "key_id": KEY_ID,
+                },
+                "seats": { "used": COMMUNITY_MEMBERS + 2, "licensed": SEATS, "over": true },
+                "members": { "active": COMMUNITY_MEMBERS + 2, "cap": null, "over": false },
+                "unverified": null,
+                "renewal": { "mode": "manual", "attempted_at": null, "outcome": null },
+            })
+        );
+    }
+
+    #[test]
+    fn a_license_has_no_member_cap_until_it_lapses() {
+        for license in [license(), team()] {
+            let moments = [
+                (license.issued_at(), None),
+                (license.expires_at(), None),
+                (lapsed(&license), Some(COMMUNITY_MEMBERS)),
+            ];
+            for (now, cap) in moments {
+                let response = LicenseResponse::new(
+                    &Stored::Verified(license.clone()),
+                    seats(COMMUNITY_MEMBERS, Some(SEATS)).into(),
+                    unattempted(&license),
+                    now,
+                );
+
+                assert_eq!(
+                    serde_json::to_value(&response.members).unwrap(),
+                    json!({ "active": COMMUNITY_MEMBERS, "cap": cap, "over": false }),
+                    "{:?} at {now}",
+                    license.plan()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_lapsed_team_license_stays_the_team_edition_with_the_community_cap() {
+        let license = team();
+        let response = LicenseResponse::new(
+            &Stored::Verified(license.clone()),
+            seats(COMMUNITY_MEMBERS + 1, Some(SEATS)).into(),
+            unattempted(&license),
+            lapsed(&license),
+        );
+
+        let body = serialized(&response);
+        assert_eq!(body["edition"], "team", "{body}");
+        assert_eq!(body["status"], "lapsed", "{body}");
+        assert_eq!(body["license"]["plan"], "team", "{body}");
+        assert_eq!(
+            body["members"],
+            json!({ "active": COMMUNITY_MEMBERS + 1, "cap": COMMUNITY_MEMBERS, "over": true })
+        );
+    }
+
+    #[test]
+    fn members_at_the_cap_are_not_over_it() {
+        let cases = [
+            (COMMUNITY_MEMBERS - 1, false),
+            (COMMUNITY_MEMBERS, false),
+            (COMMUNITY_MEMBERS + 1, true),
+        ];
+        for (active, over) in cases {
+            let response =
+                LicenseResponse::new(&Stored::Empty, seats(active, None).into(), None, Utc::now());
+            assert_eq!(response.members.over, over, "{active} active");
+        }
     }
 
     #[test]
@@ -456,6 +582,7 @@ mod tests {
                 "status": "community",
                 "license": null,
                 "seats": { "used": 4, "licensed": null, "over": false },
+                "members": { "active": 4, "cap": COMMUNITY_MEMBERS, "over": true },
                 "unverified": { "code": UNKNOWN_KEY },
                 "renewal": null,
             })
@@ -530,6 +657,46 @@ mod tests {
             body["seats"],
             json!({ "used": null, "licensed": SEATS, "over": false })
         );
+        assert_eq!(
+            body["members"],
+            json!({ "active": null, "cap": null, "over": false })
+        );
+    }
+
+    #[test]
+    fn members_that_could_not_be_counted_are_reported_as_unknown_and_never_over() {
+        let license = license();
+        let cases = [
+            (Stored::Empty, Utc::now(), json!(COMMUNITY_MEMBERS)),
+            (
+                Stored::Unverified(zone_enterprise::Error::Signature),
+                Utc::now(),
+                json!(COMMUNITY_MEMBERS),
+            ),
+            (
+                Stored::Verified(license.clone()),
+                license.issued_at(),
+                Value::Null,
+            ),
+            (
+                Stored::Verified(license.clone()),
+                lapsed(&license),
+                json!(COMMUNITY_MEMBERS),
+            ),
+        ];
+        for (stored, now, cap) in cases {
+            let body = serialized(&answer(&stored, Err(sqlx::Error::PoolClosed), None, now));
+
+            assert_eq!(
+                body["members"],
+                json!({ "active": null, "cap": cap, "over": false }),
+                "{stored:?}"
+            );
+            assert!(
+                body["members"].get("active").is_some(),
+                "members.active is omitted: {body}"
+            );
+        }
     }
 
     #[test]
@@ -568,6 +735,10 @@ mod tests {
         assert_eq!(
             body["seats"],
             json!({ "used": SEATS + 1, "licensed": SEATS, "over": true })
+        );
+        assert_eq!(
+            body["members"],
+            json!({ "active": SEATS + 1, "cap": null, "over": false })
         );
     }
 
