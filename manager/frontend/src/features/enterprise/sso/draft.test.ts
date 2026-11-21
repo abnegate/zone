@@ -8,12 +8,13 @@ import {
   draftOf,
   emptyDraft,
   enabledCount,
+  MetadataSource,
   parseDomains,
   updateRequest,
 } from './draft';
-import { ENTRA, OKTA } from './fixtures';
-import { ProviderField, refusalMessage } from './messages';
-import { SsoAdminCode } from './schemas';
+import { ENTRA, KEYCLOAK, OKTA, PASTED_SAML } from './fixtures';
+import { METADATA_REQUIRED, ProviderField, refusalMessage } from './messages';
+import { Protocol, SsoAdminCode } from './schemas';
 
 const FILLED = {
   ...emptyDraft(),
@@ -21,6 +22,13 @@ const FILLED = {
   issuer: ' https://acme.okta.com ',
   clientId: ' 0oa1 ',
   clientSecret: 's3cret',
+};
+
+const SAML = {
+  ...emptyDraft(Protocol.Saml),
+  displayName: ' Keycloak ',
+  metadataUrl: ` ${KEYCLOAK.metadata_url} `,
+  domains: 'Acme.com',
 };
 
 describe('parseDomains', () => {
@@ -39,7 +47,42 @@ describe('parseDomains', () => {
 
 describe('emptyDraft', () => {
   it('requires verified emails and enables the provider by default', () => {
-    expect(emptyDraft()).toMatchObject({ requireVerifiedEmail: true, enabled: true, domains: '' });
+    expect(emptyDraft()).toMatchObject({
+      protocol: Protocol.Oidc,
+      requireVerifiedEmail: true,
+      enabled: true,
+      domains: '',
+    });
+  });
+
+  it('starts SAML on a metadata URL without verified emails', () => {
+    expect(emptyDraft(Protocol.Saml)).toMatchObject({
+      protocol: Protocol.Saml,
+      metadataSource: MetadataSource.Url,
+      metadataUrl: '',
+      metadata: '',
+      requireVerifiedEmail: false,
+    });
+  });
+});
+
+describe('draftOf', () => {
+  it('prefills the metadata URL of a SAML provider and leaves the XML empty', () => {
+    expect(draftOf(KEYCLOAK)).toMatchObject({
+      protocol: Protocol.Saml,
+      clientId: '',
+      metadataSource: MetadataSource.Url,
+      metadataUrl: KEYCLOAK.metadata_url,
+      metadata: '',
+      refreshMetadata: false,
+    });
+  });
+
+  it('opens a provider created from pasted XML on the XML source', () => {
+    expect(draftOf(PASTED_SAML)).toMatchObject({
+      metadataSource: MetadataSource.Xml,
+      metadataUrl: '',
+    });
   });
 });
 
@@ -54,6 +97,79 @@ describe('createRequest', () => {
       require_verified_email: true,
       enabled: false,
     });
+  });
+});
+
+describe('createRequest for SAML', () => {
+  it('sends the metadata URL, the domains and the protocol, and nothing for OpenID Connect', () => {
+    expect(createRequest(SAML)).toEqual({
+      protocol: Protocol.Saml,
+      display_name: 'Keycloak',
+      metadata_url: KEYCLOAK.metadata_url,
+      allowed_domains: ['acme.com'],
+      enabled: true,
+    });
+  });
+
+  it('sends the pasted XML instead when that is the source', () => {
+    expect(
+      createRequest({
+        ...SAML,
+        metadataSource: MetadataSource.Xml,
+        metadata: ' <EntityDescriptor/> ',
+      })
+    ).toEqual({
+      protocol: Protocol.Saml,
+      display_name: 'Keycloak',
+      metadata: '<EntityDescriptor/>',
+      allowed_domains: ['acme.com'],
+      enabled: true,
+    });
+  });
+
+  it('never sends the source that is not chosen', () => {
+    const request = createRequest({ ...SAML, metadata: '<EntityDescriptor/>' });
+    expect(request).not.toHaveProperty('metadata');
+    expect(request).toHaveProperty('metadata_url');
+  });
+});
+
+describe('updateRequest for SAML', () => {
+  it('sends nothing when nothing changed', () => {
+    expect(updateRequest(KEYCLOAK, draftOf(KEYCLOAK))).toEqual({});
+    expect(updateRequest(PASTED_SAML, draftOf(PASTED_SAML))).toEqual({});
+  });
+
+  it('sends only a changed metadata URL', () => {
+    expect(
+      updateRequest(KEYCLOAK, { ...draftOf(KEYCLOAK), metadataUrl: ' https://sso.acme.com/new ' })
+    ).toEqual({ metadata_url: 'https://sso.acme.com/new' });
+  });
+
+  it('reads the same metadata URL again when asked to', () => {
+    expect(updateRequest(KEYCLOAK, { ...draftOf(KEYCLOAK), refreshMetadata: true })).toEqual({
+      metadata_url: KEYCLOAK.metadata_url,
+    });
+  });
+
+  it('sends pasted XML alone, and keeps the metadata while the box is blank', () => {
+    const xml = { ...draftOf(KEYCLOAK), metadataSource: MetadataSource.Xml };
+    expect(updateRequest(KEYCLOAK, xml)).toEqual({});
+    expect(updateRequest(KEYCLOAK, { ...xml, metadata: '<EntityDescriptor/>' })).toEqual({
+      metadata: '<EntityDescriptor/>',
+    });
+  });
+
+  it('never sends OpenID Connect fields', () => {
+    expect(
+      updateRequest(KEYCLOAK, {
+        ...draftOf(KEYCLOAK),
+        issuer: 'https://elsewhere.test',
+        clientSecret: 's3cret',
+        requireVerifiedEmail: true,
+        enabled: false,
+      })
+    ).toEqual({ enabled: false });
   });
 });
 
@@ -129,6 +245,39 @@ describe('draftErrors', () => {
 
   it('counts characters, not code units, against the display name limit', () => {
     expect(draftErrors({ ...FILLED, displayName: '🔐'.repeat(DISPLAY_NAME_LIMIT) })).toEqual({});
+  });
+});
+
+describe('draftErrors for SAML', () => {
+  it('accepts a complete new provider', () => {
+    expect(draftErrors(SAML)).toEqual({});
+  });
+
+  it('needs a metadata source and a domain for a new provider, and no client fields', () => {
+    expect(draftErrors(emptyDraft(Protocol.Saml))).toEqual({
+      [ProviderField.DisplayName]: refusalMessage(SsoAdminCode.DisplayNameInvalid),
+      [ProviderField.Metadata]: METADATA_REQUIRED,
+      [ProviderField.AllowedDomains]: refusalMessage(SsoAdminCode.DomainRequired),
+    });
+  });
+
+  it('checks only the chosen source', () => {
+    expect(
+      draftErrors({ ...SAML, metadataSource: MetadataSource.Xml, metadata: '' })
+    ).toHaveProperty(ProviderField.Metadata);
+    expect(
+      draftErrors({ ...SAML, metadataSource: MetadataSource.Xml, metadata: '<EntityDescriptor/>' })
+    ).toEqual({});
+  });
+
+  it('keeps the stored metadata when editing with a blank box', () => {
+    expect(draftErrors({ ...draftOf(PASTED_SAML), metadata: '' }, PASTED_SAML)).toEqual({});
+  });
+
+  it('keeps requiring a domain when editing', () => {
+    expect(draftErrors({ ...draftOf(KEYCLOAK), domains: ' , ' }, KEYCLOAK)).toEqual({
+      [ProviderField.AllowedDomains]: refusalMessage(SsoAdminCode.DomainRequired),
+    });
   });
 });
 

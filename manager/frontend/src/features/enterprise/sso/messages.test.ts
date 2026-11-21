@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'bun:test';
-import { ProviderField, refusalField, refusalMessage } from './messages';
-import { SSO_ADMIN_CODES, SsoAdminCode } from './schemas';
+import {
+  ProviderField,
+  protocolBadge,
+  protocolName,
+  refusalField,
+  refusalMessage,
+} from './messages';
+import { PROTOCOLS, Protocol, SSO_ADMIN_CODES, SsoAdminCode } from './schemas';
 
 describe('refusalMessage', () => {
   for (const code of SSO_ADMIN_CODES) {
@@ -22,6 +28,19 @@ describe('refusalMessage', () => {
     ).toBe(
       "Zone couldn't read this issuer's OpenID Connect configuration. The issuer in the document does not match."
     );
+  });
+
+  it('adds the server reason to a metadata failure', () => {
+    expect(
+      refusalMessage(SsoAdminCode.MetadataInvalid, 'The metadata has no signing certificate.')
+    ).toBe(
+      "Zone couldn't read this identity provider's SAML metadata. The metadata has no signing certificate."
+    );
+  });
+
+  it('explains why SAML needs a domain and never a verified email', () => {
+    expect(refusalMessage(SsoAdminCode.DomainRequired)).toContain('allowed domain');
+    expect(refusalMessage(SsoAdminCode.VerifiedEmailUnsupported)).toContain('verified email');
   });
 
   it('keeps a discovery failure on its own message without a reason', () => {
@@ -55,11 +74,37 @@ describe('refusalField', () => {
     [SsoAdminCode.ClientSecretInvalid]: ProviderField.ClientSecret,
     [SsoAdminCode.DomainInvalid]: ProviderField.AllowedDomains,
     [SsoAdminCode.DiscoveryFailed]: ProviderField.Issuer,
+    [SsoAdminCode.MetadataInvalid]: null,
+    [SsoAdminCode.DomainRequired]: ProviderField.AllowedDomains,
+    [SsoAdminCode.VerifiedEmailUnsupported]: null,
+    [SsoAdminCode.ProtocolMismatch]: null,
+  };
+
+  const saml = {
+    ...expected,
+    [SsoAdminCode.ProviderDuplicate]: ProviderField.Metadata,
+    [SsoAdminCode.IssuerInvalid]: null,
+    [SsoAdminCode.ClientIdInvalid]: null,
+    [SsoAdminCode.ClientSecretInvalid]: null,
+    [SsoAdminCode.DiscoveryFailed]: null,
+    [SsoAdminCode.MetadataInvalid]: ProviderField.Metadata,
   };
 
   for (const code of SSO_ADMIN_CODES) {
-    it(`puts ${code} on ${expected[code] ?? 'the whole form'}`, () => {
+    it(`puts ${code} on ${expected[code] ?? 'the whole form'} for OpenID Connect`, () => {
       expect(refusalField(code)).toBe(expected[code]);
+      expect(refusalField(code, Protocol.Oidc)).toBe(expected[code]);
+    });
+
+    it(`puts ${code} on ${saml[code] ?? 'the whole form'} for SAML`, () => {
+      expect(refusalField(code, Protocol.Saml)).toBe(saml[code]);
     });
   }
+});
+
+describe('protocol names', () => {
+  it('names each protocol in full and as a badge', () => {
+    expect(PROTOCOLS.map(protocolName)).toEqual(['OpenID Connect', 'SAML 2.0']);
+    expect(PROTOCOLS.map(protocolBadge)).toEqual(['OIDC', 'SAML']);
+  });
 });

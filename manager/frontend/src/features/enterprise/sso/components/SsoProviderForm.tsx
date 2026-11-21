@@ -13,10 +13,15 @@ import {
   updateRequest,
 } from '../draft';
 import { useCreateSsoProvider, useUpdateSsoProvider } from '../hooks';
-import { ProviderField, refusalField, refusalMessage } from '../messages';
-import { SsoAdminCode } from '../schemas';
+import { ProviderField, protocolName, refusalField, refusalMessage } from '../messages';
+import { PROTOCOLS, Protocol, SsoAdminCode } from '../schemas';
 import type { ProviderResponse } from '../types';
+import { ProviderFacts } from './ProviderFacts';
+import { SamlFields } from './SamlFields';
+import { SsoChoice } from './SsoChoice';
 import { SsoUpgradeNotice } from './SsoUpgradeNotice';
+
+export const PROTOCOL_LABEL = 'Protocol';
 
 export const KEEP_SECRET_PLACEHOLDER = 'Leave blank to keep the current secret';
 
@@ -24,6 +29,12 @@ export const EMPTY_DOMAINS_HINT =
   'Anyone your identity provider lets sign in gets a Zone account. Set allowed domains to limit this.';
 
 export const DOMAINS_HINT = 'Only people with an email on these domains can sign in.';
+
+export const SAML_DOMAINS_HINT =
+  "Required for SAML, which doesn't say whether an email is verified. Only people with an email on these domains can sign in.";
+
+export const SAML_LINKING_NOTE =
+  "Zone never joins a SAML sign-in to an existing Zone account by email, so a SAML provider can't take an account over.";
 
 export const VERIFIED_EMAIL_LABEL = 'Require verified email';
 
@@ -35,6 +46,11 @@ export const ENABLED_LABEL = 'Enabled';
 export const ENABLED_DESCRIPTION = 'Show this provider on the sign-in page.';
 
 const NO_ERRORS: DraftErrors = {};
+
+const PROTOCOL_CHOICES = PROTOCOLS.map((protocol) => ({
+  value: protocol,
+  label: protocolName(protocol),
+}));
 
 interface SsoProviderFormProps {
   provider?: ProviderResponse;
@@ -52,9 +68,10 @@ export function SsoProviderForm({ provider, onClose }: SsoProviderFormProps) {
 
   const mutation = provider ? update : creation;
   const { pending, refusal, error } = mutation;
+  const saml = draft.protocol === Protocol.Saml;
   const errors = attempted ? draftErrors(draft, provider) : NO_ERRORS;
   const unchanged = provider !== undefined && !changed(updateRequest(provider, draft));
-  const refusedField = refusal ? refusalField(refusal.code) : null;
+  const refusedField = refusal ? refusalField(refusal.code, draft.protocol) : null;
   const licenseRequired = refusal?.code === SsoAdminCode.LicenseRequired;
   const formError =
     licenseRequired || refusedField !== null
@@ -94,6 +111,7 @@ export function SsoProviderForm({ provider, onClose }: SsoProviderFormProps) {
   };
 
   const domainsEmpty = parseDomains(draft.domains).length === 0;
+  const domainsHint = saml ? SAML_DOMAINS_HINT : domainsEmpty ? EMPTY_DOMAINS_HINT : DOMAINS_HINT;
 
   return (
     <Modal
@@ -104,6 +122,16 @@ export function SsoProviderForm({ provider, onClose }: SsoProviderFormProps) {
     >
       <form className="ui-form sso-provider-form" onSubmit={submit} noValidate>
         <fieldset className="sso-provider-fields" disabled={pending}>
+          {provider ? (
+            <ProviderFacts provider={provider} />
+          ) : (
+            <SsoChoice
+              legend={PROTOCOL_LABEL}
+              value={draft.protocol}
+              choices={PROTOCOL_CHOICES}
+              onChange={(protocol) => change('protocol', protocol)}
+            />
+          )}
           <Input
             id={`${base}-display-name`}
             label="Display name"
@@ -114,38 +142,51 @@ export function SsoProviderForm({ provider, onClose }: SsoProviderFormProps) {
             error={fieldError(ProviderField.DisplayName)}
             onChange={(event) => change('displayName', event.target.value)}
           />
-          <Input
-            id={`${base}-issuer`}
-            label="Issuer URL"
-            type="url"
-            inputMode="url"
-            value={draft.issuer}
-            autoComplete="off"
-            spellCheck={false}
-            placeholder="https://acme.okta.com"
-            error={fieldError(ProviderField.Issuer)}
-            onChange={(event) => change('issuer', event.target.value)}
-          />
-          <Input
-            id={`${base}-client-id`}
-            label="Client ID"
-            value={draft.clientId}
-            autoComplete="off"
-            spellCheck={false}
-            error={fieldError(ProviderField.ClientId)}
-            onChange={(event) => change('clientId', event.target.value)}
-          />
-          <Input
-            id={`${base}-client-secret`}
-            label="Client secret"
-            type="password"
-            value={draft.clientSecret}
-            autoComplete="new-password"
-            spellCheck={false}
-            placeholder={provider ? KEEP_SECRET_PLACEHOLDER : undefined}
-            error={fieldError(ProviderField.ClientSecret)}
-            onChange={(event) => change('clientSecret', event.target.value)}
-          />
+          {saml ? (
+            <SamlFields
+              base={base}
+              draft={draft}
+              provider={provider}
+              pending={pending}
+              error={fieldError(ProviderField.Metadata)}
+              onChange={change}
+            />
+          ) : (
+            <>
+              <Input
+                id={`${base}-issuer`}
+                label="Issuer URL"
+                type="url"
+                inputMode="url"
+                value={draft.issuer}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="https://acme.okta.com"
+                error={fieldError(ProviderField.Issuer)}
+                onChange={(event) => change('issuer', event.target.value)}
+              />
+              <Input
+                id={`${base}-client-id`}
+                label="Client ID"
+                value={draft.clientId}
+                autoComplete="off"
+                spellCheck={false}
+                error={fieldError(ProviderField.ClientId)}
+                onChange={(event) => change('clientId', event.target.value)}
+              />
+              <Input
+                id={`${base}-client-secret`}
+                label="Client secret"
+                type="password"
+                value={draft.clientSecret}
+                autoComplete="new-password"
+                spellCheck={false}
+                placeholder={provider ? KEEP_SECRET_PLACEHOLDER : undefined}
+                error={fieldError(ProviderField.ClientSecret)}
+                onChange={(event) => change('clientSecret', event.target.value)}
+              />
+            </>
+          )}
           <Input
             id={`${base}-domains`}
             label="Allowed domains"
@@ -153,17 +194,21 @@ export function SsoProviderForm({ provider, onClose }: SsoProviderFormProps) {
             autoComplete="off"
             spellCheck={false}
             placeholder="acme.com, acme.co.uk"
-            helpText={domainsEmpty ? EMPTY_DOMAINS_HINT : DOMAINS_HINT}
+            helpText={domainsHint}
             error={fieldError(ProviderField.AllowedDomains)}
             onChange={(event) => change('domains', event.target.value)}
           />
-          <Switch
-            label={VERIFIED_EMAIL_LABEL}
-            description={VERIFIED_EMAIL_DESCRIPTION}
-            checked={draft.requireVerifiedEmail}
-            disabled={pending}
-            onChange={(checked) => change('requireVerifiedEmail', checked)}
-          />
+          {saml ? (
+            <p className="sso-hint">{SAML_LINKING_NOTE}</p>
+          ) : (
+            <Switch
+              label={VERIFIED_EMAIL_LABEL}
+              description={VERIFIED_EMAIL_DESCRIPTION}
+              checked={draft.requireVerifiedEmail}
+              disabled={pending}
+              onChange={(checked) => change('requireVerifiedEmail', checked)}
+            />
+          )}
           <Switch
             label={ENABLED_LABEL}
             description={ENABLED_DESCRIPTION}
