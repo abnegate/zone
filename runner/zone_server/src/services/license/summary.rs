@@ -6,6 +6,7 @@ use zone_enterprise::License;
 pub fn summary(license: &License) -> Value {
     json!({
         "id": license.id(),
+        "plan": license.plan(),
         "customer": license.customer(),
         "seats": license.seats(),
         "expires_at": license.expires_at(),

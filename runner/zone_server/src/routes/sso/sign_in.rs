@@ -15,6 +15,7 @@ use super::unreadable;
 use crate::db::sso::{Listing, providers, settings};
 use crate::error::ServerError;
 use crate::routes::common::ErrorResponse;
+use crate::services::members::AdmissionError;
 use crate::services::sso::console::callback_origin;
 use crate::services::sso::{Callback, SignInFailure, sign_in};
 use crate::state::AppState;
@@ -140,6 +141,7 @@ fn failed(failure: SignInFailure) -> Response {
     match failure {
         SignInFailure::Refused(error) => refusal::respond(&error, Stage::SignIn),
         SignInFailure::Session(refusal) => refusal.into_response(),
+        SignInFailure::Full { cap } => AdmissionError::Full { cap }.into_response(),
         SignInFailure::Busy => {
             tracing::warn!("Refused a single sign-on start: too many are waiting for a callback");
             (
@@ -162,9 +164,25 @@ fn unavailable(error: &sqlx::Error) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use http_body_util::BodyExt;
+    use serde_json::{Value, json};
+    use zone_enterprise::MEMBER_CAP_REACHED;
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_full_server_refuses_the_callback_with_the_member_cap_code() {
+        let response = failed(SignInFailure::Full { cap: 3 });
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], json!(MEMBER_CAP_REACHED));
+        assert_eq!(
+            body["error"],
+            json!(AdmissionError::Full { cap: 3 }.to_string())
+        );
+    }
 
     #[test]
     fn the_public_listing_carries_the_contract_fields() {

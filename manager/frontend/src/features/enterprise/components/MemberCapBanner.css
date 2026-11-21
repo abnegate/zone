@@ -1,0 +1,49 @@
+.member-cap-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ui-space-2) var(--ui-space-4);
+  flex-shrink: 0;
+  min-width: 0;
+  margin-bottom: var(--ui-space-4);
+  padding: var(--ui-space-2) var(--ui-space-3);
+  border: 1px solid var(--ui-warning);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-warning-muted);
+  color: var(--ui-text-primary);
+}
+
+.member-cap-banner-text {
+  flex: 1 1 20rem;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
+}
+
+.member-cap-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-2);
+  min-width: 0;
+}
+
+.main-content:has(.page--workspace) > .member-cap-banner {
+  margin-bottom: 0;
+  border-width: 0 0 1px;
+  border-radius: 0;
+}
+
+.main-content:has(> .member-cap-banner) .page--workspace {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}
+
+@media (max-width: 768px) {
+  .member-cap-banner-text {
+    flex-basis: 100%;
+  }
+}

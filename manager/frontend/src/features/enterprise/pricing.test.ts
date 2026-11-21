@@ -9,8 +9,8 @@ const PURCHASABLE: ReadonlySet<LicenseStatusValue> = new Set([
 ]);
 
 describe('pricing', () => {
-  it('points at an https pricing page', () => {
-    expect(new URL(PRICING_URL).protocol).toBe('https:');
+  it('points at the Zone pricing page', () => {
+    expect(PRICING_URL).toBe('https://zone.bitecode.ltd/pricing/');
   });
 
   for (const status of LICENSE_STATUSES) {

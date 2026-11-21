@@ -3,6 +3,8 @@ import {
   ACME_LICENSE,
   ACTIVE,
   COMMUNITY,
+  COMMUNITY_AT_CAP,
+  COMMUNITY_OVER_CAP,
   GRACE,
   LAPSED,
   MANUAL_RENEWAL,
@@ -10,15 +12,24 @@ import {
   RENEWAL_DISABLED,
   RENEWAL_UNREACHABLE,
   RENEWED,
+  TEAM,
+  TEAM_LAPSED,
   UNCOUNTED,
   UNCOUNTED_COMMUNITY,
   UNVERIFIED,
 } from './fixtures';
 import {
+  EDITIONS,
+  Edition,
   LICENSE_REFUSAL_CODES,
   LicenseRefusalCode,
   LicenseRefusalSchema,
   LicenseResponseSchema,
+  MemberCapCode,
+  MembersSchema,
+  PLANS,
+  Plan,
+  PlanSchema,
   RENEWAL_MODES,
   RENEWAL_OUTCOMES,
   RenewalMode,
@@ -41,6 +52,10 @@ describe('LicenseResponseSchema', () => {
     ['renewal-unreachable', RENEWAL_UNREACHABLE],
     ['renewal-off', RENEWAL_DISABLED],
     ['manual-renewal', MANUAL_RENEWAL],
+    ['Community at the cap', COMMUNITY_AT_CAP],
+    ['Community over the cap', COMMUNITY_OVER_CAP],
+    ['Team', TEAM],
+    ['lapsed Team', TEAM_LAPSED],
   ] as const) {
     it(`reads the ${name} response`, () => {
       expect(LicenseResponseSchema.parse(response)).toEqual(response);
@@ -54,8 +69,34 @@ describe('LicenseResponseSchema', () => {
     expect(parsed.license).toEqual(ACME_LICENSE);
   });
 
-  it('rejects the Team edition, which Zone no longer sells', () => {
-    expect(LicenseResponseSchema.safeParse({ ...ACTIVE, edition: 'team' }).success).toBe(false);
+  it('reads a Team license with its plan and no member cap', () => {
+    const parsed = LicenseResponseSchema.parse(TEAM);
+    expect(parsed.edition).toBe(Edition.Team);
+    expect(parsed.license?.plan).toBe(Plan.Team);
+    expect(parsed.members).toEqual({ active: 12, cap: null, over: false });
+  });
+
+  it('rejects an edition the contract does not define', () => {
+    expect(LicenseResponseSchema.safeParse({ ...ACTIVE, edition: 'business' }).success).toBe(false);
+  });
+
+  it('rejects a license whose plan the contract does not define', () => {
+    expect(
+      LicenseResponseSchema.safeParse({
+        ...ACTIVE,
+        license: { ...ACME_LICENSE, plan: 'business' },
+      }).success
+    ).toBe(false);
+  });
+
+  it('rejects a license that leaves its plan out', () => {
+    const { plan: _plan, ...missing } = ACME_LICENSE;
+    expect(LicenseResponseSchema.safeParse({ ...ACTIVE, license: missing }).success).toBe(false);
+  });
+
+  it('rejects a response that leaves the members out', () => {
+    const { members: _members, ...missing } = COMMUNITY;
+    expect(LicenseResponseSchema.safeParse(missing).success).toBe(false);
   });
 
   for (const code of UNVERIFIED_CODES) {
@@ -109,6 +150,53 @@ describe('LicenseResponseSchema', () => {
     expect(
       LicenseResponseSchema.safeParse({ ...COMMUNITY, seats: { used: 1, over: false } }).success
     ).toBe(false);
+  });
+});
+
+describe('plans and editions', () => {
+  it('names the three editions and the two plans a license can carry', () => {
+    expect(EDITIONS).toEqual(['community', 'team', 'enterprise']);
+    expect(PLANS).toEqual(['team', 'enterprise']);
+  });
+
+  it('reads each plan and rejects Community, which no license carries', () => {
+    for (const plan of PLANS) {
+      expect(PlanSchema.parse(plan)).toBe(plan);
+    }
+    expect(PlanSchema.safeParse(Edition.Community).success).toBe(false);
+  });
+
+  it('names the code the server refuses a member with at the cap', () => {
+    expect(MemberCapCode).toBe('member_cap_reached');
+  });
+});
+
+describe('MembersSchema', () => {
+  it('reads a capped count and an uncapped one', () => {
+    expect(MembersSchema.parse({ active: 3, cap: 3, over: false })).toEqual({
+      active: 3,
+      cap: 3,
+      over: false,
+    });
+    expect(MembersSchema.parse({ active: 40, cap: null, over: false }).cap).toBeNull();
+  });
+
+  it('reads a count the server could not make as null', () => {
+    expect(LicenseResponseSchema.parse(UNCOUNTED_COMMUNITY).members.active).toBeNull();
+  });
+
+  it('rejects members that leave the active count or the cap out instead of sending null', () => {
+    expect(MembersSchema.safeParse({ cap: 3, over: false }).success).toBe(false);
+    expect(MembersSchema.safeParse({ active: 1, over: false }).success).toBe(false);
+  });
+
+  it('rejects a negative count and a cap of zero', () => {
+    expect(MembersSchema.safeParse({ active: -1, cap: 3, over: false }).success).toBe(false);
+    expect(MembersSchema.safeParse({ active: 1, cap: 0, over: false }).success).toBe(false);
+  });
+
+  it('rejects members that leave over out', () => {
+    expect(MembersSchema.safeParse({ active: 1, cap: 3 }).success).toBe(false);
   });
 });
 

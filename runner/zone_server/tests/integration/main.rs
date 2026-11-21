@@ -101,6 +101,7 @@ mod mcp_fixtures;
 mod mcp_parity;
 mod mcp_servers;
 mod mcp_task_tools;
+mod member_cap;
 mod memory;
 mod memory_isolation;
 mod memory_store;

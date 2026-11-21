@@ -3,6 +3,7 @@ mod support;
 use abnegate_notify::{Sender, SmtpConfig, SmtpSecurity};
 use chrono::{TimeZone, Utc};
 use tokio::net::TcpListener;
+use zone_enterprise::Plan;
 use zone_license::mail::{Failure, Letter, MailError, Outbox, Relay};
 
 use crate::support::smtp::{SENDER, SmtpSink};
@@ -19,6 +20,7 @@ const KEY: &str = concat!(
 fn letter() -> Letter {
     Letter::license(
         CUSTOMER,
+        Plan::Enterprise,
         5,
         Utc.with_ymd_and_hms(2027, 11, 18, 11, 59, 58).unwrap(),
         KEY,
@@ -72,6 +74,30 @@ async fn a_license_reaches_the_relay_as_text_and_html_with_the_key_intact() {
         html.contains("<td>Acme &lt;Ltd&gt; &amp; Sons</td>"),
         "{html}"
     );
+}
+
+#[tokio::test]
+async fn a_team_license_reaches_the_relay_under_a_team_subject() {
+    let sink = SmtpSink::start().await;
+    let relay = Relay::new(&sink.config()).expect("relay");
+    let letter = Letter::license(
+        CUSTOMER,
+        Plan::Team,
+        5,
+        Utc.with_ymd_and_hms(2027, 11, 18, 11, 59, 58).unwrap(),
+        KEY,
+    );
+
+    relay.send(RECIPIENT, &letter).await.expect("sent");
+
+    let messages = sink.messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].header("Subject"),
+        Some("Your Zone Team license key")
+    );
+    let text = messages[0].part("text/plain").expect("text part");
+    assert!(text.lines().any(|line| line == "Plan: Team"), "{text}");
 }
 
 #[tokio::test]

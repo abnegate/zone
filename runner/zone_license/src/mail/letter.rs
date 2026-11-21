@@ -1,15 +1,11 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use zone_enterprise::GRACE_DAYS;
+use zone_enterprise::{GRACE_DAYS, Plan};
 
 use crate::mail::escape;
 
-pub const SUBJECT: &str = "Your Zone Enterprise license key";
-
 const DATE_FORMAT: &str = "%-d %B %Y";
-
-const THANKS: &str = "Thank you for buying Zone Enterprise.";
 
 const OFFLINE: &str = "Zone verifies the key offline, so your server never needs to reach us.";
 
@@ -28,12 +24,18 @@ pub struct Letter {
 }
 
 impl Letter {
-    pub fn license(customer: &str, seats: u32, expires_at: DateTime<Utc>, key: &str) -> Self {
+    pub fn license(
+        customer: &str,
+        plan: Plan,
+        seats: u32,
+        expires_at: DateTime<Utc>,
+        key: &str,
+    ) -> Self {
         let date = expires_at.format(DATE_FORMAT).to_string();
         Self {
-            subject: SUBJECT.to_string(),
-            text: text(customer, seats, &date, key),
-            html: html(customer, seats, &date, key),
+            subject: subject(plan),
+            text: text(customer, plan, seats, &date, key),
+            html: html(customer, plan, seats, &date, key),
         }
     }
 
@@ -59,21 +61,39 @@ impl fmt::Debug for Letter {
     }
 }
 
+pub fn subject(plan: Plan) -> String {
+    format!("Your Zone {} license key", name(plan))
+}
+
+fn name(plan: Plan) -> &'static str {
+    match plan {
+        Plan::Team => "Team",
+        Plan::Enterprise => "Enterprise",
+    }
+}
+
+fn thanks(plan: Plan) -> String {
+    format!("Thank you for buying Zone {}.", name(plan))
+}
+
 fn grace() -> String {
     format!(
-        "When the license expires, Enterprise features keep working for a \
+        "When the license expires, its features keep working for a \
          {GRACE_DAYS}-day grace period."
     )
 }
 
-fn text(customer: &str, seats: u32, date: &str, key: &str) -> String {
+fn text(customer: &str, plan: Plan, seats: u32, date: &str, key: &str) -> String {
+    let thanks = thanks(plan);
+    let name = name(plan);
     let grace = grace();
     format!(
         "Hello,\n\
          \n\
-         {THANKS} Here is your license key.\n\
+         {thanks} Here is your license key.\n\
          \n\
          Customer: {customer}\n\
+         Plan: {name}\n\
          Seats: {seats}\n\
          Paid through: {date}\n\
          \n\
@@ -94,20 +114,24 @@ fn text(customer: &str, seats: u32, date: &str, key: &str) -> String {
     )
 }
 
-fn html(customer: &str, seats: u32, date: &str, key: &str) -> String {
+fn html(customer: &str, plan: Plan, seats: u32, date: &str, key: &str) -> String {
     let customer = escape::html(customer);
     let date = escape::html(date);
     let key = escape::html(key);
+    let subject = subject(plan);
+    let thanks = thanks(plan);
+    let name = name(plan);
     let grace = grace();
     format!(
         "<!doctype html>\n\
          <html lang=\"en\">\n\
-         <head><meta charset=\"utf-8\"><title>{SUBJECT}</title></head>\n\
+         <head><meta charset=\"utf-8\"><title>{subject}</title></head>\n\
          <body style=\"font-family: sans-serif; line-height: 1.5; color: #1a1a1a;\">\n\
          <p>Hello,</p>\n\
-         <p>{THANKS} Here is your license key.</p>\n\
+         <p>{thanks} Here is your license key.</p>\n\
          <table role=\"presentation\">\n\
          <tr><th align=\"left\">Customer</th><td>{customer}</td></tr>\n\
+         <tr><th align=\"left\">Plan</th><td>{name}</td></tr>\n\
          <tr><th align=\"left\">Seats</th><td>{seats}</td></tr>\n\
          <tr><th align=\"left\">Paid through</th><td>{date}</td></tr>\n\
          </table>\n\
@@ -142,15 +166,49 @@ mod tests {
     }
 
     fn letter(customer: &str) -> Letter {
-        Letter::license(customer, 5, expires_at(), KEY)
+        Letter::license(customer, Plan::Enterprise, 5, expires_at(), KEY)
+    }
+
+    fn team() -> Letter {
+        Letter::license("Acme Ltd", Plan::Team, 5, expires_at(), KEY)
     }
 
     #[test]
-    fn the_subject_names_the_product() {
+    fn the_subject_names_the_plan() {
         assert_eq!(
             letter("Acme Ltd").subject(),
             "Your Zone Enterprise license key"
         );
+        assert_eq!(team().subject(), "Your Zone Team license key");
+        for plan in Plan::ALL {
+            assert_eq!(
+                Letter::license("Acme Ltd", plan, 5, expires_at(), KEY).subject(),
+                subject(plan)
+            );
+        }
+    }
+
+    #[test]
+    fn both_bodies_thank_the_customer_for_the_plan_they_bought() {
+        for (letter, plan) in [(letter("Acme Ltd"), "Enterprise"), (team(), "Team")] {
+            let thanks = format!("Thank you for buying Zone {plan}.");
+            assert!(letter.text().contains(&thanks), "{}", letter.text());
+            assert!(letter.html().contains(&thanks), "{}", letter.html());
+            assert!(
+                letter
+                    .html()
+                    .contains(&format!("<title>Your Zone {plan} license key</title>")),
+                "{}",
+                letter.html()
+            );
+        }
+    }
+
+    #[test]
+    fn a_team_letter_never_mentions_enterprise() {
+        let letter = team();
+        assert!(!letter.text().contains("Enterprise"), "{}", letter.text());
+        assert!(!letter.html().contains("Enterprise"), "{}", letter.html());
     }
 
     #[test]
@@ -176,21 +234,25 @@ mod tests {
     }
 
     #[test]
-    fn both_bodies_state_the_customer_seats_and_paid_through_date() {
+    fn both_bodies_state_the_customer_plan_seats_and_paid_through_date() {
         let letter = letter("Acme Ltd");
         let text: Vec<&str> = letter.text().lines().collect();
         assert!(text.contains(&"Customer: Acme Ltd"));
+        assert!(text.contains(&"Plan: Enterprise"));
         assert!(text.contains(&"Seats: 5"));
         assert!(text.contains(&"Paid through: 18 November 2027"));
         assert!(letter.html().contains("<td>Acme Ltd</td>"));
+        assert!(letter.html().contains("<td>Enterprise</td>"));
         assert!(letter.html().contains("<td>5</td>"));
         assert!(letter.html().contains("<td>18 November 2027</td>"));
+        assert!(team().text().lines().any(|line| line == "Plan: Team"));
+        assert!(team().html().contains("<td>Team</td>"));
     }
 
     #[test]
     fn a_single_digit_day_is_not_padded() {
         let expires_at = Utc.with_ymd_and_hms(2027, 3, 4, 0, 0, 0).unwrap();
-        let letter = Letter::license("Acme Ltd", 1, expires_at, KEY);
+        let letter = Letter::license("Acme Ltd", Plan::Enterprise, 1, expires_at, KEY);
         assert!(letter.text().contains("Paid through: 4 March 2027\n"));
     }
 
@@ -229,10 +291,13 @@ mod tests {
 
     #[test]
     fn both_bodies_explain_offline_verification_and_the_grace_period() {
-        let letter = letter("Acme Ltd");
-        for body in [letter.text(), letter.html()] {
-            assert!(body.contains("verifies the key offline"));
-            assert!(body.contains(&format!("{GRACE_DAYS}-day grace period")));
+        for letter in [letter("Acme Ltd"), team()] {
+            for body in [letter.text(), letter.html()] {
+                assert!(body.contains("verifies the key offline"));
+                assert!(body.contains(&format!(
+                    "its features keep working for a {GRACE_DAYS}-day grace period"
+                )));
+            }
         }
     }
 
@@ -240,6 +305,6 @@ mod tests {
     fn debug_leaves_out_the_key() {
         let rendered = format!("{:?}", letter("Acme Ltd"));
         assert!(!rendered.contains(KEY), "{rendered}");
-        assert!(rendered.contains(SUBJECT));
+        assert!(rendered.contains(&subject(Plan::Enterprise)));
     }
 }
