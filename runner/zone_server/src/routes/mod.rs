@@ -111,7 +111,10 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/auth/sso/callbacks", post(sso::sign_in::callback))
         .route("/api/auth/sso/saml/metadata", get(sso::saml::metadata))
-        .route("/api/auth/sso/saml/acs", post(sso::saml::acs))
+        .route(
+            "/api/auth/sso/saml/acs",
+            post(sso::saml::acs).layer(DefaultBodyLimit::max(sso::saml::BODY_LIMIT)),
+        )
         // Public invitation route (to view invitation details)
         .route("/api/invitations/{token}", get(invitations::get_invitation))
         // Artifact reads (public - a bearer header or an HMAC-signed URL, checked

@@ -138,12 +138,24 @@ pub async fn assert(
     Ok(result.rows_affected() == 1)
 }
 
+/// Leaves an asserted attempt alone: a second post for the same request is refused, and must not
+/// take the first post's handoff with it.
 pub async fn discard(executor: impl PgExecutor<'_>, id: Uuid) -> DbResult<bool> {
-    let result = sqlx::query("DELETE FROM sso_attempts WHERE id = $1")
+    let result = sqlx::query("DELETE FROM sso_attempts WHERE id = $1 AND code_hash IS NULL")
         .bind(id)
         .execute(executor)
         .await?;
     Ok(result.rows_affected() == 1)
+}
+
+/// Every attempt still open for a provider, asserted or not, checked against settings the
+/// provider no longer has.
+pub async fn clear(executor: impl PgExecutor<'_>, provider_id: Uuid) -> DbResult<u64> {
+    let result = sqlx::query("DELETE FROM sso_attempts WHERE provider_id = $1")
+        .bind(provider_id)
+        .execute(executor)
+        .await?;
+    Ok(result.rows_affected())
 }
 
 pub async fn consume(executor: impl PgExecutor<'_>, state: &str) -> DbResult<Option<Attempt>> {

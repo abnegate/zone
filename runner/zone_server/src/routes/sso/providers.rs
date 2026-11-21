@@ -103,14 +103,18 @@ impl CreateProviderRequest {
         }
     }
 
-    /// Whether the request sets a field the chosen protocol doesn't have.
+    /// Whether the request gives a value to a field the chosen protocol doesn't have, by the rule
+    /// an update follows.
     fn mismatches(&self) -> bool {
-        match self.protocol {
-            Protocol::Oidc => self.metadata_url.is_some() || self.metadata.is_some(),
-            Protocol::Saml => [&self.issuer, &self.client_id, &self.client_secret]
-                .into_iter()
-                .any(|field| !field.is_empty()),
+        Revision {
+            issuer: Some(&self.issuer),
+            client_id: Some(&self.client_id),
+            client_secret: Some(&self.client_secret),
+            metadata_url: self.metadata_url.as_deref(),
+            metadata: self.metadata.as_deref(),
+            ..Revision::default()
         }
+        .mismatches(self.protocol)
     }
 }
 
@@ -410,11 +414,18 @@ mod tests {
         ] {
             assert!(created(body.clone()).mismatches(), "{body}");
         }
-        let empty = created(json!({
-            "protocol": "saml", "metadata_url": METADATA_URL,
-            "issuer": "", "client_id": "", "client_secret": ""
-        }));
-        assert!(!empty.mismatches());
+        for empty in [
+            json!({
+                "protocol": "saml", "metadata_url": METADATA_URL,
+                "issuer": "", "client_id": "", "client_secret": ""
+            }),
+            json!({
+                "issuer": "https://acme.okta.com", "client_id": "0oa1", "client_secret": "s3cret",
+                "metadata_url": "", "metadata": ""
+            }),
+        ] {
+            assert!(!created(empty.clone()).mismatches(), "{empty}");
+        }
     }
 
     #[test]

@@ -21,11 +21,12 @@ use zone_enterprise::sso::saml::testing::{self, Key, Options};
 use zone_enterprise::sso::saml::{Certificate, Document, ServiceProvider, service_metadata, uri};
 use zone_enterprise::sso::testing::{EMAIL, SUBJECT};
 use zone_enterprise::sso::{
-    ASSERTION_INVALID, DOMAIN_NOT_ALLOWED, DOMAIN_REQUIRED, EMAIL_CONFLICT, METADATA_INVALID,
-    PROTOCOL_MISMATCH, PROVIDER_DUPLICATE, PROVIDER_NOT_FOUND, SIGN_IN_REFUSED, SSO_REQUIRED,
-    STATE_INVALID, VERIFIED_EMAIL_UNSUPPORTED,
+    ASSERTION_INVALID, DISPLAY_NAME_INVALID, DOMAIN_NOT_ALLOWED, DOMAIN_REQUIRED, EMAIL_CONFLICT,
+    METADATA_INVALID, PROTOCOL_MISMATCH, PROVIDER_DUPLICATE, PROVIDER_NOT_FOUND, SIGN_IN_REFUSED,
+    SSO_REQUIRED, STATE_INVALID, VERIFIED_EMAIL_UNSUPPORTED,
 };
 use zone_server::db::audit::actions;
+use zone_server::routes::sso::saml::{BODY_LIMIT, RELAY_STATE_LIMIT};
 use zone_server::utils::crypto::hash_token;
 
 use crate::common::identity_provider::IdentityProvider;
@@ -648,12 +649,63 @@ async fn a_saml_provider_is_refused_with_the_code_of_what_is_wrong() {
 }
 
 #[tokio::test]
+async fn settings_that_cannot_work_are_refused_before_the_metadata_is_fetched() {
+    let server = Server::new().await;
+    let identity_provider = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&identity_provider)
+        .await;
+    let metadata_url = format!("{}{IDP_METADATA_PATH}", identity_provider.uri());
+    let cases = [
+        (
+            "no domains",
+            json!({ "allowed_domains": [] }),
+            DOMAIN_REQUIRED,
+        ),
+        (
+            "verified email",
+            json!({ "require_verified_email": true }),
+            VERIFIED_EMAIL_UNSUPPORTED,
+        ),
+        (
+            "no display name",
+            json!({ "display_name": " " }),
+            DISPLAY_NAME_INVALID,
+        ),
+    ];
+
+    for (case, overrides, code) in &cases {
+        let mut body = with(json!({ "metadata": null, "metadata_url": metadata_url }));
+        for (key, value) in overrides.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        let created = server.fixture.create(&server.admin.token, &body).await;
+        assert_eq!(created.status, StatusCode::BAD_REQUEST, "{case}");
+        assert_eq!(created.json_value()["code"], *code, "{case}");
+
+        let mut revision = overrides.clone();
+        revision["metadata_url"] = json!(metadata_url);
+        let updated = server.update(&revision).await;
+        assert_eq!(updated.status, StatusCode::BAD_REQUEST, "{case}");
+        assert_eq!(updated.json_value()["code"], *code, "{case}");
+    }
+    assert_eq!(server.fixture.providers().await, 1);
+    identity_provider.verify().await;
+    server.cleanup().await;
+}
+
+#[tokio::test]
 async fn an_update_cannot_cross_protocols() {
     let server = Server::new().await;
     let identity_provider = IdentityProvider::start().await;
+    let mut empty_saml_fields = identity_provider.provider();
+    empty_saml_fields["metadata_url"] = json!("");
+    empty_saml_fields["metadata"] = json!("");
     let oidc = server
         .fixture
-        .created(&server.admin.token, &identity_provider.provider())
+        .created(&server.admin.token, &empty_saml_fields)
         .await;
 
     for body in [
@@ -687,6 +739,20 @@ async fn an_update_cannot_cross_protocols() {
             PROTOCOL_MISMATCH,
         );
     }
+
+    server
+        .update(&json!({ "issuer": "", "client_id": "", "client_secret": "" }))
+        .await
+        .assert_status(StatusCode::OK);
+    server
+        .fixture
+        .update(
+            &server.admin.token,
+            oidc,
+            &json!({ "metadata_url": "", "metadata": "", "display_name": "Okta OIDC" }),
+        )
+        .await
+        .assert_status(StatusCode::OK);
     server.cleanup().await;
 }
 
@@ -966,6 +1032,71 @@ async fn a_relay_state_is_asserted_only_once() {
 }
 
 #[tokio::test]
+async fn a_new_identity_provider_voids_the_sign_ins_already_asserted() {
+    let server = Server::new().await;
+
+    let rotated = server.start().await;
+    let code = server.asserted(&rotated, unchanged).await;
+    server
+        .update(&json!({
+            "metadata": testing::metadata(
+                testing::ENTITY_ID,
+                testing::SSO_URL,
+                &[testing::OTHER_CERTIFICATE],
+            ),
+        }))
+        .await
+        .assert_status(StatusCode::OK);
+    refused(
+        &server.callback(&rotated.state, &code).await,
+        StatusCode::BAD_REQUEST,
+        STATE_INVALID,
+    );
+
+    let moved = server.start().await;
+    let code = server
+        .asserted(&moved, |options| Options {
+            signing_key: Key::Other,
+            ..options
+        })
+        .await;
+    server
+        .update(&json!({
+            "metadata": testing::metadata(
+                OTHER_ENTITY_ID,
+                testing::SSO_URL,
+                &[testing::OTHER_CERTIFICATE],
+            ),
+        }))
+        .await
+        .assert_status(StatusCode::OK);
+    refused(
+        &server.callback(&moved.state, &code).await,
+        StatusCode::BAD_REQUEST,
+        STATE_INVALID,
+    );
+    assert_eq!(server.users_with_email(EMAIL).await, 0);
+
+    let renamed = server.start().await;
+    let code = server
+        .asserted(&renamed, |options| Options {
+            issuer: OTHER_ENTITY_ID.to_owned(),
+            signing_key: Key::Other,
+            ..options
+        })
+        .await;
+    server
+        .update(&json!({ "display_name": "Okta SAML renamed" }))
+        .await
+        .assert_status(StatusCode::OK);
+    server
+        .callback(&renamed.state, &code)
+        .await
+        .assert_status(StatusCode::OK);
+    server.cleanup().await;
+}
+
+#[tokio::test]
 async fn a_wrong_handoff_code_is_refused_and_spends_the_sign_in() {
     let server = Server::new().await;
     let started = server.start().await;
@@ -1098,6 +1229,27 @@ async fn a_response_zone_did_not_ask_for_is_refused() {
 
     let unknown = redirected(&server.acs(Some("never-issued"), &response).await);
     assert_failed(&unknown, "never-issued", STATE_INVALID);
+
+    server.asserted(&started, unchanged).await;
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_oversized_post_or_relay_state_is_refused_without_a_state() {
+    let server = Server::new().await;
+    let started = server.start().await;
+    let state_less = HashMap::from([(ERROR.to_owned(), STATE_INVALID.to_owned())]);
+
+    let padding = "A".repeat(BODY_LIMIT);
+    let oversized = redirected(&server.acs(Some(&started.state), &padding).await);
+    assert_eq!(oversized.target, CALLBACK_URL);
+    assert_eq!(oversized.parameters, state_less);
+
+    let long = format!("{}{}", started.state, "s".repeat(RELAY_STATE_LIMIT));
+    let response = testing::response(&options(&started));
+    let unbounded = redirected(&server.acs(Some(&long), &response).await);
+    assert_eq!(unbounded.target, CALLBACK_URL);
+    assert_eq!(unbounded.parameters, state_less);
 
     server.asserted(&started, unchanged).await;
     server.cleanup().await;
