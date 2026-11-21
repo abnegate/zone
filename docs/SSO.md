@@ -58,8 +58,8 @@ License section, and lists any providers that already exist as read-only.
 On Community, the [member cap](LICENSING.md#the-community-member-cap) also
 applies to single sign-on, OIDC and SAML alike: once the server has 3 active
 members, a first sign-in that would create an account is refused with
-`member_cap_reached`. People who already have an account, including one
-linked by email, keep signing in.
+`member_cap_reached`. People who already have an account keep signing in,
+including, for OIDC, one linked by email.
 
 An SSO user who signs in counts toward licensed seats in the same way as a
 user who signs in with a password.
