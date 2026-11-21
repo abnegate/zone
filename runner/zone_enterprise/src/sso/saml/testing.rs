@@ -9,10 +9,9 @@ use aws_lc_rs::signature::{
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, SecondsFormat, Utc};
-use rustls_pki_types::CertificateDer;
-use webpki::EndEntityCert;
 
 use crate::sso::saml::canonical::{self, DEFAULT_PREFIX, escape_attribute, escape_text};
+use crate::sso::saml::certificate::Certificate;
 use crate::sso::saml::digest_method::DigestMethod;
 use crate::sso::saml::document::Document;
 use crate::sso::saml::identifiers;
@@ -122,15 +121,9 @@ pub fn metadata(entity_id: &str, sso_url: &str, certificates: &[&str]) -> String
 }
 
 pub fn public_key(certificate: &str) -> Vec<u8> {
-    let der = CertificateDer::from(
-        STANDARD
-            .decode(certificate)
-            .expect("a test certificate is base64 DER"),
-    );
-    EndEntityCert::try_from(&der)
+    Certificate::parse(certificate)
         .expect("a test certificate parses")
-        .subject_public_key_info()
-        .as_ref()
+        .public_key()
         .to_vec()
 }
 
