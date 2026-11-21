@@ -472,6 +472,51 @@ mod tests {
     }
 
     #[test]
+    fn verifies_a_legacy_six_key_license_without_a_subscription() {
+        let bytes = br#"{"id":"0193a8e2-7c4b-7d10-8f00-4d2c5a9b1e01","customer":"Acme Ltd","seats":25,"issued_at":"2026-11-01T00:00:00Z","expires_at":"2027-11-01T00:00:00Z","key_id":"test-1"}"#;
+        let text = sign_bytes(bytes, &fixtures::first());
+        let license = fixtures::keyring().verify(&text).unwrap();
+        assert_eq!(license.subscription(), None);
+        assert_eq!(license.payload(), &fixtures::payload());
+        assert_eq!(
+            text,
+            signed(),
+            "a legacy key no longer re-signs identically"
+        );
+    }
+
+    #[test]
+    fn verifies_a_license_with_a_subscription_and_exposes_it() {
+        let payload = Payload {
+            subscription: Some("b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c".into()),
+            ..fixtures::payload()
+        };
+        let license = fixtures::keyring()
+            .verify(&sign(&payload, &fixtures::first()))
+            .unwrap();
+        assert_eq!(
+            license.subscription(),
+            Some("b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c")
+        );
+        assert_eq!(license.payload(), &payload);
+    }
+
+    #[test]
+    fn refuses_a_signed_blank_subscription() {
+        let text = sign(
+            &Payload {
+                subscription: Some(" ".into()),
+                ..fixtures::payload()
+            },
+            &fixtures::first(),
+        );
+        assert!(matches!(
+            fixtures::keyring().verify(&text),
+            Err(Error::Payload(_))
+        ));
+    }
+
+    #[test]
     fn an_empty_keyring_trusts_nothing() {
         let keyring = Keyring::new([]).unwrap();
         assert_eq!(keyring.ids().count(), 0);

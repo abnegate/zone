@@ -26,6 +26,7 @@ impl Grant {
             seats: self.seats,
             issued_at: self.period_start.trunc_subsecs(0),
             expires_at,
+            subscription: Some(self.subscription.clone()),
         }
     }
 }
@@ -61,6 +62,11 @@ mod tests {
         assert_eq!(terms.seats, 5);
         assert_eq!(terms.issued_at, at("2026-11-18T11:59:58Z"));
         assert_eq!(terms.expires_at, at("2027-11-18T11:59:58Z"));
+    }
+
+    #[test]
+    fn the_terms_carry_the_subscription() {
+        assert_eq!(grant().terms().subscription.as_deref(), Some("sub_1"));
     }
 
     #[test]

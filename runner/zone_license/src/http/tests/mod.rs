@@ -11,6 +11,7 @@ use zone_enterprise::{Keyring, TrustedKey};
 
 use super::*;
 use crate::license_id;
+use crate::logging;
 use crate::mail::{Letter, MailError, Outbox};
 use crate::polar::{ID_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, WebhookSecret, signature};
 use crate::private_key::PrivateKey;
@@ -34,7 +35,7 @@ const EMAIL: &str = "billing@acme.test";
 const PRODUCT: &str = "5f0c8a9e-6b1d-4c2e-9a3f-7d4e1b2c3a40";
 
 #[derive(Default)]
-struct Recording {
+pub(super) struct Recording {
     sent: Mutex<Vec<(String, Letter)>>,
 }
 
@@ -50,7 +51,7 @@ impl Outbox for Recording {
 }
 
 impl Recording {
-    fn sent(&self) -> Vec<(String, Letter)> {
+    pub(super) fn sent(&self) -> Vec<(String, Letter)> {
         self.sent.lock().unwrap().clone()
     }
 }
@@ -171,6 +172,7 @@ async fn a_paid_order_sends_a_license_and_names_it() {
     assert_eq!(license.payload().id, id);
     assert_eq!(license.payload().customer, "Acme Ltd");
     assert_eq!(license.payload().seats, 5);
+    assert_eq!(license.subscription(), Some(SUBSCRIPTION));
 }
 
 #[tokio::test]
@@ -223,38 +225,17 @@ async fn a_body_changed_after_signing_is_refused() {
     refused(request).await;
 }
 
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn an_unsigned_delivery_is_not_a_warning() {
-    let captured = Captured::default();
-    let writer = captured.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .with_writer(move || writer.clone())
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
-    refused(delivery(
-        CREATE,
-        Utc::now().timestamp(),
-        b"whsec_another-secret",
-    ))
+    let logged = logging::capture(
+        tracing::Level::WARN,
+        refused(delivery(
+            CREATE,
+            Utc::now().timestamp(),
+            b"whsec_another-secret",
+        )),
+    )
     .await;
-
-    let logged = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
     assert_eq!(logged, "");
 }
 

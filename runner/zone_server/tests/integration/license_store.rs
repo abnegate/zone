@@ -76,6 +76,7 @@ fn payload(expires_at: DateTime<Utc>) -> Payload {
         issued_at: expires_at - TimeDelta::days(365),
         expires_at,
         key_id: TRUSTED.into(),
+        subscription: None,
     }
 }
 

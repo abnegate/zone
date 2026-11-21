@@ -9790,6 +9790,7 @@ dependencies = [
 name = "zone_license"
 version = "0.1.0"
 dependencies = [
+ "abnegate-http",
  "abnegate-notify",
  "abnegate-secret",
  "async-trait",
@@ -9812,6 +9813,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
  "zone_enterprise",
 ]
 

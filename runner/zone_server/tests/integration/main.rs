@@ -92,6 +92,8 @@ mod knowledge_vector_search;
 mod layout;
 mod learning_thresholds;
 mod license;
+mod license_renewal;
+mod license_renewal_store;
 mod license_store;
 mod lora_flows;
 mod mcp_agent;

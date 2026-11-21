@@ -71,6 +71,8 @@ mod tests {
             "2026-11-01T00:00:00Z",
             "--id",
             "0193a8e2-7c4b-7d10-8f00-4d2c5a9b1e01",
+            "--subscription",
+            "b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c",
         ])
         .unwrap();
         let Command::Sign(arguments) = cli.command else {
@@ -91,6 +93,29 @@ mod tests {
             Some("2026-11-01T00:00:00+00:00")
         );
         assert!(arguments.id.is_some());
+        assert_eq!(
+            arguments.subscription.as_deref(),
+            Some("b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c")
+        );
+    }
+
+    #[test]
+    fn a_sign_command_needs_no_subscription() {
+        let cli = Cli::try_parse_from([
+            "zone-license",
+            "sign",
+            "--customer",
+            "Acme Ltd",
+            "--seats",
+            "25",
+            "--expires-at",
+            "2027-11-01",
+        ])
+        .unwrap();
+        let Command::Sign(arguments) = cli.command else {
+            panic!("parsed {:?}", cli.command);
+        };
+        assert_eq!(arguments.subscription, None);
     }
 
     #[test]

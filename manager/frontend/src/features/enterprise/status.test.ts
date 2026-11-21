@@ -10,14 +10,27 @@ import {
   UNCOUNTED_COMMUNITY,
   UNVERIFIED,
 } from './fixtures';
-import { LICENSE_REFUSAL_CODES, LicenseRefusalCode, UNVERIFIED_CODES } from './schemas';
+import {
+  LICENSE_REFUSAL_CODES,
+  LicenseRefusalCode,
+  RENEWAL_MODES,
+  RENEWAL_OUTCOMES,
+  RenewalMode,
+  RenewalOutcome,
+  UNVERIFIED_CODES,
+} from './schemas';
 import {
   editionLabel,
   expiryLabel,
   licenseDate,
   overSeatNotice,
   refusalMessage,
+  renewalAttemptDate,
+  renewalModeLabel,
+  renewalOutcomeLabel,
+  renewalOutcomeTone,
   seatText,
+  showsRenewalAttempt,
   statusLabel,
   statusNotice,
   statusTone,
@@ -169,5 +182,94 @@ describe('storesLicense', () => {
 
   it('is false when no license is stored', () => {
     expect(storesLicense(COMMUNITY)).toBe(false);
+  });
+});
+
+describe('renewalModeLabel', () => {
+  it('says how each license renews', () => {
+    expect(renewalModeLabel(RenewalMode.Automatic)).toBe('Renews automatically');
+    expect(renewalModeLabel(RenewalMode.Disabled)).toBe('Automatic renewal is off on this server');
+    expect(renewalModeLabel(RenewalMode.Manual)).toBe(
+      'Renew by pasting a new key before it expires'
+    );
+  });
+
+  it('claims no enforcement for any mode', () => {
+    for (const mode of RENEWAL_MODES) {
+      expect(renewalModeLabel(mode)).not.toMatch(ENFORCEMENT_CLAIM);
+    }
+  });
+});
+
+describe('renewalOutcomeLabel and renewalOutcomeTone', () => {
+  it('labels and tones each outcome', () => {
+    expect(
+      RENEWAL_OUTCOMES.map((outcome) => [renewalOutcomeLabel(outcome), renewalOutcomeTone(outcome)])
+    ).toEqual([
+      ['Renewed', Tone.Success],
+      ['Up to date', Tone.Success],
+      ['Subscription not renewable', Tone.Warning],
+      ['Refused by the license server', Tone.Warning],
+      ['Renewed key not accepted', Tone.Warning],
+      ['License server unreachable', Tone.Warning],
+    ]);
+  });
+
+  it('gives every outcome its own label', () => {
+    expect(new Set(RENEWAL_OUTCOMES.map(renewalOutcomeLabel)).size).toBe(RENEWAL_OUTCOMES.length);
+  });
+
+  it('claims no enforcement for any outcome', () => {
+    for (const outcome of RENEWAL_OUTCOMES) {
+      expect(renewalOutcomeLabel(outcome)).not.toMatch(ENFORCEMENT_CLAIM);
+    }
+  });
+});
+
+describe('showsRenewalAttempt', () => {
+  it('shows the attempt for automatic renewal even before the first check', () => {
+    expect(
+      showsRenewalAttempt({ mode: RenewalMode.Automatic, attempted_at: null, outcome: null })
+    ).toBe(true);
+  });
+
+  it('hides it for a license that never renews by itself and was never checked', () => {
+    for (const mode of [RenewalMode.Disabled, RenewalMode.Manual]) {
+      expect(showsRenewalAttempt({ mode, attempted_at: null, outcome: null })).toBe(false);
+    }
+  });
+
+  it('keeps showing an attempt made before automatic renewal was turned off', () => {
+    expect(
+      showsRenewalAttempt({
+        mode: RenewalMode.Disabled,
+        attempted_at: '2027-10-20T03:00:00Z',
+        outcome: RenewalOutcome.Current,
+      })
+    ).toBe(true);
+  });
+});
+
+describe('renewalAttemptDate', () => {
+  it('says no check is recorded yet rather than claiming none was made', () => {
+    expect(
+      renewalAttemptDate({ mode: RenewalMode.Automatic, attempted_at: null, outcome: null })
+    ).toBe('No check recorded yet');
+  });
+
+  it('shows the calendar date of the last attempt in UTC', () => {
+    expect(
+      renewalAttemptDate({
+        mode: RenewalMode.Automatic,
+        attempted_at: '2027-10-20T23:30:00Z',
+        outcome: RenewalOutcome.Renewed,
+      })
+    ).toBe('Oct 20, 2027');
+  });
+
+  it('claims no enforcement while no check is recorded', () => {
+    expect(
+      renewalAttemptDate({ mode: RenewalMode.Automatic, attempted_at: null, outcome: null })
+    ).not.toMatch(ENFORCEMENT_CLAIM);
   });
 });

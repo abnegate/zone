@@ -85,6 +85,13 @@
   overflow-wrap: anywhere;
 }
 
+.license-renewal-attempt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-2);
+}
+
 .license-key-form {
   display: flex;
   flex-direction: column;

@@ -12,12 +12,15 @@ pub mod keygen;
 mod keygen_arguments;
 mod keygen_error;
 pub mod license_id;
+#[cfg(test)]
+mod logging;
 pub mod mail;
 pub mod order_error;
 pub mod polar;
 pub mod private_key;
 mod private_key_error;
 mod problem;
+pub mod renewal;
 pub mod serve;
 mod serve_error;
 pub mod sign;

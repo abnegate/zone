@@ -20,6 +20,21 @@ export const LicenseRefusalCode = {
   Lapsed: 'license_lapsed',
 } as const;
 
+export const RenewalMode = {
+  Automatic: 'automatic',
+  Disabled: 'disabled',
+  Manual: 'manual',
+} as const;
+
+export const RenewalOutcome = {
+  Renewed: 'renewed',
+  Current: 'current',
+  Ended: 'ended',
+  Refused: 'refused',
+  Rejected: 'rejected',
+  Unreachable: 'unreachable',
+} as const;
+
 export const EDITIONS = [Edition.Community, Edition.Enterprise] as const;
 
 export const LICENSE_STATUSES = [
@@ -42,6 +57,21 @@ export const UNVERIFIED_CODES = [
   LicenseRefusalCode.UnknownKey,
   LicenseRefusalCode.SignatureInvalid,
   LicenseRefusalCode.PayloadInvalid,
+] as const;
+
+export const RENEWAL_MODES = [
+  RenewalMode.Automatic,
+  RenewalMode.Disabled,
+  RenewalMode.Manual,
+] as const;
+
+export const RENEWAL_OUTCOMES = [
+  RenewalOutcome.Renewed,
+  RenewalOutcome.Current,
+  RenewalOutcome.Ended,
+  RenewalOutcome.Refused,
+  RenewalOutcome.Rejected,
+  RenewalOutcome.Unreachable,
 ] as const;
 
 export const EditionSchema = z.enum(EDITIONS);
@@ -68,12 +98,19 @@ export const UnverifiedSchema = z.object({
   code: z.enum(UNVERIFIED_CODES),
 });
 
+export const RenewalSchema = z.object({
+  mode: z.enum(RENEWAL_MODES),
+  attempted_at: z.string().nullable(),
+  outcome: z.enum(RENEWAL_OUTCOMES).nullable(),
+});
+
 export const LicenseResponseSchema = z.object({
   edition: EditionSchema,
   status: LicenseStatusSchema,
   license: LicenseDetailsSchema.nullable(),
   seats: SeatsSchema,
   unverified: UnverifiedSchema.nullable(),
+  renewal: RenewalSchema.nullable(),
 });
 
 export const SetLicenseRequestSchema = z.object({

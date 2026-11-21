@@ -5,8 +5,9 @@ use std::sync::Arc;
 use zone_enterprise::Keyring;
 
 use crate::config::Config;
-use crate::http::{Context, Server, router};
+use crate::http::{Context, Renewer, Server, router};
 use crate::mail::Relay;
+use crate::polar::{self, Proxy};
 use crate::serve_error::ServeError;
 
 /// Checks the whole configuration before listening, so a bad setting stops the
@@ -33,9 +34,18 @@ pub async fn serve(
     Ok(())
 }
 
-/// Builds the relay and binds the listener, without serving yet.
+/// Builds the relay and the Polar client and binds the listener, without
+/// serving yet. Renewal is on only when `POLAR_ACCESS_TOKEN` is set.
 pub async fn start(config: Config) -> Result<Server, ServeError> {
     let relay = Relay::new(&config.smtp)?;
+    let renewer = match config.access_token {
+        Some(token) => Some(Renewer::new(
+            config.keyring,
+            polar::Client::new(token, polar::API, Proxy::System)?,
+        )),
+        None => None,
+    };
+    let renewal = renewer.is_some();
     let key_id = config.signer.key_id().to_owned();
     let products = config.products.len();
     let context = Context::new(
@@ -44,12 +54,17 @@ pub async fn start(config: Config) -> Result<Server, ServeError> {
         config.products,
         Arc::new(relay),
     );
+    let context = match renewer {
+        Some(renewer) => context.with_renewer(renewer),
+        None => context,
+    };
     let server = Server::bind(config.listen, router(context)).await?;
     tracing::info!(
         address = %config.listen,
         key_id,
         products,
         relay = %config.smtp.host,
+        renewal,
         "Listening for Polar webhooks"
     );
     Ok(server)

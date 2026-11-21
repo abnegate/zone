@@ -16,6 +16,7 @@ name = "zone-license"
 path = "src/main.rs"
 
 [dependencies]
+abnegate-http = { workspace = true }
 abnegate-notify = { workspace = true, features = ["smtp"] }
 abnegate-secret = { workspace = true }
 async-trait = { workspace = true }
@@ -26,6 +27,7 @@ clap = { workspace = true }
 getrandom = { workspace = true, features = ["std"] }
 hmac = "=0.13.0"
 lettre = { version = "=0.11.24", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1-native-tls"] }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "=0.11.0"
@@ -38,6 +40,6 @@ zone_enterprise = { path = "../zone_enterprise", features = ["signing"] }
 
 [dev-dependencies]
 http-body-util = "=0.1.5"
-reqwest = { workspace = true }
 tempfile = "=3.27.0"
 tower = { workspace = true, features = ["util"] }
+wiremock = "=0.6.5"

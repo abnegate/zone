@@ -100,6 +100,7 @@ pub mod actions {
 
     pub const LICENSE_SET: &str = "license.set";
     pub const LICENSE_REMOVED: &str = "license.removed";
+    pub const LICENSE_RENEWED: &str = "license.renewed";
 
     pub const AGENT_SIGNED_IN: &str = "agent.signed_in";
     pub const AGENT_SIGNED_OUT: &str = "agent.signed_out";

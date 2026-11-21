@@ -54,6 +54,10 @@ impl License {
         self.payload.expires_at
     }
 
+    pub fn subscription(&self) -> Option<&str> {
+        self.payload.subscription.as_deref()
+    }
+
     pub fn grace_ends_at(&self) -> DateTime<Utc> {
         self.payload
             .expires_at
@@ -93,6 +97,20 @@ mod tests {
         assert_eq!(license.issued_at(), payload.issued_at);
         assert_eq!(license.expires_at(), payload.expires_at);
         assert_eq!(license.key_id(), payload.key_id);
+        assert_eq!(license.subscription(), None);
+    }
+
+    #[test]
+    fn exposes_the_subscription() {
+        let payload = Payload {
+            subscription: Some("b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c".into()),
+            ..fixtures::payload()
+        };
+        let license = fixtures::license(&payload);
+        assert_eq!(
+            license.subscription(),
+            Some("b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c")
+        );
     }
 
     #[test]
