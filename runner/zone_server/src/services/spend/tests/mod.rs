@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use abnegate_agent_cli::AgentKind;
+use abnegate_notify::{Fanout, Severity};
 use abnegate_secret::{MasterKey, SecretValue};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -11,7 +12,7 @@ use uuid::Uuid;
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
-use zone_enterprise::spend::{Microdollars, Uncounted};
+use zone_enterprise::spend::{Budget, Microdollars, Target, Uncounted};
 use zone_enterprise::{
     Edition, Error as LicenseError, Keyring, License, Payload, SigningKey, Status, TrustedKey, sign,
 };
@@ -22,15 +23,19 @@ use super::error::Error;
 use super::ingest::{self, OVERLAP};
 use super::key::{Key, PREFIX};
 use super::log::Log;
+use super::notice::{Notice, SPEND_PATH, delivered, label};
 use super::page::Page;
 use super::registry::{self, COOLDOWN, Entry};
 use super::standing::{Standing, standing};
 use super::subject::Subject;
+use super::sweep::{INTERVAL_SECONDS, NOTICE_LOCK, Sweep, VERIFY_EVERY};
 use super::unlicensed::{MESSAGE, Unlicensed};
 use crate::config::{Config, ModelBackend};
 use crate::db::ai_settings::{EffectiveAiSettings, PROVIDER_ANTHROPIC, PROVIDER_CLAUDE_CODE};
+use crate::db::spend::budgets::{Announcement, BudgetRow};
 use crate::services::endpoint::testing::settings;
 use crate::services::license::Stored;
+use crate::services::mail::Template;
 use crate::state::{AppState, test_config, unreachable_pool};
 
 const MASTER: &str = "sk-master-0123456789abcdef";
@@ -828,6 +833,123 @@ fn a_provider_key_sends_straight_to_the_provider() {
     }
 }
 
+fn budget_row(target: Target) -> BudgetRow {
+    BudgetRow {
+        id: Uuid::nil(),
+        organization_id: ORGANIZATION,
+        target,
+        budget: Budget {
+            limit: Microdollars(50_000_000),
+            threshold_percent: 80,
+            hard: false,
+        },
+        workspace_name: target.workspace.map(|_| "Design".to_string()),
+        user_name: None,
+        user_email: target.user.map(|_| "sam@zone.test".to_string()),
+        spent: Microdollars(40_000_000),
+        updated_at: moment("2026-11-21T10:00:00Z"),
+    }
+}
+
+fn notice(announcement: Announcement, hard: bool) -> Notice {
+    Notice {
+        announcement,
+        budget: "the Acme organization".to_string(),
+        spent: "$40.00".to_string(),
+        limit: "$50.00".to_string(),
+        link: format!("https://zone.test{SPEND_PATH}"),
+        hard,
+    }
+}
+
+#[test]
+fn a_notice_names_its_budget_by_whose_it_is() {
+    let organization = budget_row(Target::of(None, None));
+    let workspace = budget_row(Target::of(Some(WORKSPACE), None));
+    let member = budget_row(Target::of(None, Some(USER)));
+    let named = BudgetRow {
+        user_name: Some("Sam".to_string()),
+        ..member.clone()
+    };
+
+    assert_eq!(label(&organization, "Acme"), "the Acme organization");
+    assert_eq!(label(&workspace, "Acme"), "the Design workspace in Acme");
+    assert_eq!(label(&member, "Acme"), "sam@zone.test in Acme");
+    assert_eq!(label(&named, "Acme"), "Sam (sam@zone.test) in Acme");
+}
+
+#[test]
+fn a_threshold_warns_and_a_used_up_budget_says_whether_it_is_hard() {
+    let warning = notice(Announcement::Warning, true);
+
+    assert!(matches!(
+        warning.template("Sam"),
+        Template::BudgetWarning {
+            name: "Sam",
+            budget: "the Acme organization",
+            spent: "$40.00",
+            limit: "$50.00",
+            ..
+        }
+    ));
+    assert!(matches!(
+        notice(Announcement::Exhaustion, true).template("Sam"),
+        Template::BudgetExhausted { hard: true, .. }
+    ));
+    assert!(matches!(
+        notice(Announcement::Exhaustion, false).template("Sam"),
+        Template::BudgetExhausted { hard: false, .. }
+    ));
+}
+
+#[test]
+fn a_notification_names_the_budget_and_links_to_spend() {
+    let warning = notice(Announcement::Warning, false).notification();
+    let exhausted = notice(Announcement::Exhaustion, true).notification();
+
+    assert_eq!(warning.title(), "AI budget alert: the Acme organization");
+    assert_eq!(warning.kind(), Severity::Warning);
+    assert_eq!(
+        warning.body(),
+        "$40.00 of the $50.00 monthly limit is spent this month."
+    );
+    assert_eq!(
+        warning.url(),
+        Some("https://zone.test/settings/organization/spend")
+    );
+    assert_eq!(
+        exhausted.title(),
+        "AI budget used up: the Acme organization"
+    );
+    assert_eq!(exhausted.kind(), Severity::Error);
+    let fields: Vec<(&str, &str)> = exhausted
+        .fields()
+        .iter()
+        .map(|field| (field.name(), field.value()))
+        .collect();
+    assert_eq!(fields, [("Hard limit", "Yes")]);
+}
+
+#[test]
+fn a_notice_counts_as_sent_once_any_channel_took_it_or_none_is_configured() {
+    for (mailed, broadcast, sent) in [
+        (None, None, true),
+        (Some(true), None, true),
+        (None, Some(true), true),
+        (Some(false), Some(true), true),
+        (Some(true), Some(false), true),
+        (Some(false), None, false),
+        (None, Some(false), false),
+        (Some(false), Some(false), false),
+    ] {
+        assert_eq!(
+            delivered(mailed, broadcast),
+            sent,
+            "mailed {mailed:?}, broadcast {broadcast:?}"
+        );
+    }
+}
+
 #[test]
 fn a_litellm_saved_for_another_host_is_another_endpoint() {
     assert_eq!(
@@ -892,4 +1014,52 @@ fn every_workspace_reason_is_named_once_in_order() {
         ]
     );
     assert_eq!(merged(&config, &[]), []);
+}
+
+#[test]
+fn the_sweep_runs_every_minute_and_checks_keys_every_quarter_hour() {
+    assert_eq!(INTERVAL_SECONDS, 60);
+    assert_eq!(VERIFY_EVERY, Duration::from_secs(15 * 60));
+    assert_ne!(NOTICE_LOCK, ingest::SPEND_LOCK);
+}
+
+#[test]
+fn keys_are_checked_on_the_first_sweep_and_then_once_a_quarter_hour() {
+    let sweep = Sweep::default();
+    assert!(sweep.due(), "a starting server never checked its keys");
+
+    sweep.verified_at(Instant::now());
+    assert!(!sweep.due());
+
+    sweep.verified_at(
+        Instant::now()
+            .checked_sub(VERIFY_EVERY)
+            .expect("the clock is past a quarter hour"),
+    );
+    assert!(sweep.due());
+}
+
+#[tokio::test]
+async fn a_sweep_without_enforcement_asks_litellm_nothing() {
+    let server = MockServer::start().await;
+    let state = AppState::new(
+        Config {
+            litellm_host: server.uri(),
+            litellm_key: MASTER.to_string(),
+            ..test_config()
+        },
+        unreachable_pool(),
+        None,
+    );
+
+    let swept = Sweep::default().run(&state, &Fanout::new()).await;
+
+    assert!(swept.is_ok(), "{swept:?}");
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
 }
