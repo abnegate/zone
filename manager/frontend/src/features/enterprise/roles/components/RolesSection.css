@@ -190,14 +190,35 @@
 }
 
 .roles-scope-copy,
-.roles-scope-fixed {
+.roles-scope-fixed,
+.roles-description-fixed {
   display: flex;
   flex-direction: column;
   min-width: 0;
 }
 
-.roles-scope-fixed .roles-group-title {
+.roles-scope-fixed .roles-group-title,
+.roles-description-fixed .roles-group-title {
   margin-bottom: var(--ui-space-1);
+}
+
+.roles-description-text {
+  min-width: 0;
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.roles-description-input {
+  min-width: 0;
+}
+
+.roles-description-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .roles-scope-label {

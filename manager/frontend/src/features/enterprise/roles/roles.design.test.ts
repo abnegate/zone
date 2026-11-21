@@ -37,7 +37,9 @@ describe('roles section surfaces', () => {
       '.roles-group',
       '.roles-scopes',
       '.roles-scope-option',
-      '.roles-scope-copy, .roles-scope-fixed',
+      '.roles-scope-copy, .roles-scope-fixed, .roles-description-fixed',
+      '.roles-description-text',
+      '.roles-description-input',
       '.roles-permissions',
       '.roles-permission',
     ]) {
@@ -47,10 +49,15 @@ describe('roles section surfaces', () => {
   });
 
   it('breaks long names and descriptions instead of scrolling sideways', () => {
-    for (const selector of ['.roles-item-name', '.roles-item-description']) {
+    for (const selector of [
+      '.roles-item-name',
+      '.roles-item-description',
+      '.roles-description-text',
+    ]) {
       expect(rule(css, selector), selector).toContain('overflow-wrap: anywhere');
     }
     expect(rule(css, '.roles-item-heading')).toContain('flex-wrap: wrap');
+    expect(rule(css, '.roles-description-text')).toContain('white-space: pre-wrap');
   });
 
   it('flows permissions and scopes into as many columns as fit, down to one', () => {

@@ -22,6 +22,7 @@ import {
 import {
   BASE_HINT,
   DESCRIPTION,
+  DESCRIPTION_LABEL,
   EMPTY_EDITABLE,
   EMPTY_READ_ONLY,
   FIXED_SCOPE_HINT,
@@ -435,6 +436,38 @@ describe('RolesSection', () => {
 
       fireEvent.click(within(dialog()).getByRole('button', { name: 'Done' }));
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    });
+
+    it('edits the description in a multi-line field so a long one is never cut off', async () => {
+      await loaded(ACTIVE);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Edit Release manager' }));
+
+      const description = within(dialog()).getByRole('textbox', { name: DESCRIPTION_LABEL });
+      expect(description.tagName).toBe('TEXTAREA');
+      expect(description).toHaveValue(RELEASE_MANAGER.description ?? '');
+    });
+
+    it('shows a read-only description as text that wraps instead of a clipped field', async () => {
+      const description =
+        'Merges pull requests, syncs projects with their remotes, and overrides the merge gate when an incident needs it.';
+      await loaded({ ...LAPSED, roles: [{ ...RELEASE_MANAGER, description }] });
+
+      fireEvent.click(screen.getByRole('button', { name: `View ${RELEASE_MANAGER.name}` }));
+
+      expect(
+        within(dialog()).queryByRole('textbox', { name: DESCRIPTION_LABEL })
+      ).not.toBeInTheDocument();
+      expect(within(dialog()).getByText(DESCRIPTION_LABEL)).toBeInTheDocument();
+      expect(within(dialog()).getByText(description).tagName).toBe('P');
+    });
+
+    it('leaves the description out of a read-only role that has none', async () => {
+      await loaded(LAPSED);
+
+      fireEvent.click(screen.getByRole('button', { name: 'View Auditor' }));
+
+      expect(within(dialog()).queryByText(DESCRIPTION_LABEL)).not.toBeInTheDocument();
     });
 
     it('closes on cancel without saving', async () => {

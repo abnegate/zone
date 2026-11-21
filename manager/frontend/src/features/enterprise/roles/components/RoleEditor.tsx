@@ -19,8 +19,6 @@ import {
   CANCEL_LABEL,
   CREATE_LABEL,
   CREATE_TITLE,
-  DESCRIPTION_HINT,
-  DESCRIPTION_LABEL,
   DONE_LABEL,
   FIXED_SCOPE_HINT,
   NAME_LABEL,
@@ -37,6 +35,7 @@ import {
 import { NAME_REQUIRED, RoleField, refusalField, refusalMessage } from '../messages';
 import { type PermissionName, ROLE_BASE, ROLE_SCOPES, RoleCode, type RoleScope } from '../schemas';
 import type { CustomRole, PermissionDefinition } from '../types';
+import { RoleDescription } from './RoleDescription';
 
 interface RoleEditorProps {
   organizationId: string;
@@ -142,14 +141,12 @@ export function RoleEditor({
             error={nameError}
             onChange={(event) => change({ ...draft, name: event.target.value })}
           />
-          <Input
+          <RoleDescription
             id={`${base}-description`}
-            label={DESCRIPTION_LABEL}
             value={draft.description}
-            autoComplete="off"
+            editable={editable}
             disabled={disabled}
-            helpText={DESCRIPTION_HINT}
-            onChange={(event) => change({ ...draft, description: event.target.value })}
+            onChange={(description) => change({ ...draft, description })}
           />
           {role ? (
             <div className="roles-scope-fixed">
