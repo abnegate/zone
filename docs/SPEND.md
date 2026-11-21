@@ -80,7 +80,7 @@ Zone counts a request when all of these hold:
 
 | Request | Counted as |
 |---|---|
-| A member's chat turn, over the WebSocket or sent through the REST API | That member, in the chat's workspace |
+| A member's chat turn over the WebSocket | That member, in the chat's workspace |
 | Everything else Zone sends through LiteLLM for a workspace, such as task runs, chat titles, pull request subjects and repairs, and auto-project reviews | **Automation**, in that workspace |
 
 A pull request repair that falls back from a coding agent to the instance's
@@ -243,14 +243,16 @@ Zone doesn't need them.
 
 ## Ingestion and lag
 
-Every 60 seconds, the `spend-ingest` sweep copies new spend from LiteLLM. It
-runs when:
+Every 60 seconds, the `spend-ingest` sweep copies new spend from LiteLLM.
+Zone schedules it only when `ZONE_LLM_BACKEND` is `litellm`, the default; with
+`claude` or `codex` there is no sweep at all. Each run then does nothing
+unless:
 
-- `ZONE_LLM_BACKEND` is `litellm`, the default;
 - the server enforces spend;
 - `LITELLM_HOST` and `LITELLM_KEY` are both set.
 
-One instance ingests at a time, under a database advisory lock. Each run
+One instance ingests at a time, under the database advisory lock
+`SPEND_LOCK`. Each run
 reads `GET /spend/logs/v2` 1,000 rows a page, oldest first, until a page comes
 back short. LiteLLM stops counting its `total` at 10,000, so Zone never
 relies on it. Zone stores only the rows sent under one of its keys, by
@@ -287,8 +289,12 @@ and the next run reads it: usually within about a minute. The report's
 successful run ended.
 
 Hard limits work from the same figures, so a budget can go over its limit.
-After each run the sweep marks every budget whose spend has reached its
-limit, and Zone checks that mark when a request starts. Requests already
+After each run the sweep settles every budget for the month: it marks every
+budget whose spend has reached its limit, and sends the notices that are due.
+One instance settles at a time, under a second advisory lock, `NOTICE_LOCK`,
+so each notice goes out once. A run whose ingestion fails still settles the
+budgets from the spend already counted and sends their notices, then reports
+the failure. Zone checks the mark when a request starts. Requests already
 running when the budget runs out finish. New ones keep starting until a run
 has counted the spend that used it up: up to about 70 seconds after those
 requests finish, the 60-second cadence plus LiteLLM's 10-second batching.
@@ -374,8 +380,9 @@ next run.
 
 | Where | What happens |
 |---|---|
-| Chat turn, over the WebSocket | The turn doesn't start, and ends with `{"type": "error", "message": "…"}`. |
-| Sending a message through the REST API | `409` with `{"error": "…"}`. |
+| Chat turn, over the WebSocket | The turn doesn't start, and the socket sends a plain error frame, `{"type": "error", "message": "…"}`. |
+| A draft's context preview, `POST /api/chats/{id}/context` | `409` with `{"error": "…"}`. Held to the same budgets as the member's turn. |
+| Creating a chat on the workspace's AI settings (`POST /api/chats`), changing a chat's model (`PUT /api/chats/{id}`), or starting an auto project (`POST /api/workspaces/{workspace_id}/projects/auto`) | `409` with `{"error": "…"}`, while an organization or workspace hard budget is used up. A chat that picks its own provider isn't refused. |
 | Task runs and other automation | The run fails with the message. |
 
 The message says whose budget is used up:
@@ -400,14 +407,15 @@ Zone writes these entries to the organization's audit log.
 
 | Action | When | Resource | Recorded values |
 |---|---|---|---|
-| `budget.created` | A budget is created | `budget` | The new budget |
-| `budget.updated` | A budget is changed | `budget` | The budget before and after |
-| `budget.deleted` | A budget is deleted | `budget` | The budget before |
+| `budget.created` | A budget is created | `budget` | New values: `scope`, `workspace_id`, `user_id`, `limit_microdollars`, `threshold_percent` and `hard` |
+| `budget.updated` | A budget is changed | `budget` | The same fields, before as old values and after as new values |
+| `budget.deleted` | A budget is deleted | `budget` | The same fields, before, as old values |
 | `spend_export.downloaded` | Someone downloads the CSV | `spend_export`, with the organization's ID | `from`, `to`, `workspace_id` and `user_id` |
 | `budget.threshold_reached` | A warning notice goes out; recorded by Zone, with no actor | `budget` | `month`, `spent_microdollars`, `limit_microdollars` and `hard` |
 | `budget.exhausted` | An exhaustion notice goes out; recorded by Zone, with no actor | `budget` | `month`, `spent_microdollars`, `limit_microdollars` and `hard` |
 
-Saving a budget without changing it writes no entry. Refused requests aren't
+Every `budget` entry names the budget's ID as its resource, and an entry about
+a workspace budget carries that workspace. Saving a budget without changing it writes no entry. Refused requests aren't
 audited.
 
 ## Codes
@@ -416,7 +424,7 @@ audited.
 |---|---|---|
 | `license_required` | 403 | This needs a Zone Team license that is active or in its grace period. See [Licensing](#licensing). |
 | `spend_body_invalid` | 400 | The request body can't be read: it isn't valid JSON, has a key that isn't a budget field, or has a value of the wrong type. |
-| `spend_range_invalid` | 400 | `from` or `to` isn't a `YYYY-MM-DD` date, or `from` is after `to`. |
+| `spend_range_invalid` | 400 | `from` or `to` isn't a `YYYY-MM-DD` date, `from` is after `to`, `workspace_id` or `user_id` isn't a UUID, or one of these parameters is given twice. |
 | `budget_limit_invalid` | 400 | The limit is $0 or less. |
 | `budget_threshold_invalid` | 400 | The threshold isn't a whole percentage from 1 to 100. |
 | `budget_scope_invalid` | 400 | The scope doesn't carry exactly the ID it needs, or names a workspace or person outside the organization. |
@@ -442,12 +450,26 @@ These responses carry no code:
 | `PATCH /api/organizations/{org_id}/budgets/{budget_id}` | Change a budget. |
 | `DELETE /api/organizations/{org_id}/budgets/{budget_id}` | Delete a budget. |
 
-A read is checked in this order: membership (404), the caller's role (403),
-then the range (400 `spend_range_invalid`). A change is checked in this
-order: membership (404), the caller's role (403), the license (403
-`license_required`), the body (400), the target (400
-`budget_scope_invalid`), then whether the target already has a budget (409
-`budget_exists`).
+A report is checked in this order: membership (404), the caller's role (403),
+then the query (400 `spend_range_invalid`). A CSV export checks the license
+(403 `license_required`) after the role and before the query.
+
+Creating a budget is checked in this order:
+
+1. membership (404);
+2. the caller's role (403);
+3. the license (403 `license_required`);
+4. whether the body can be read (400 `spend_body_invalid`);
+5. the limit, then the threshold, then whether the scope carries the IDs it
+   needs (400 `budget_limit_invalid`, `budget_threshold_invalid`,
+   `budget_scope_invalid`);
+6. whether the workspace or person is in the organization (400
+   `budget_scope_invalid`);
+7. whether the target already has a budget (409 `budget_exists`).
+
+Changing a budget checks the first four, then that the budget exists in the
+organization (404 "Budget not found"), then the limit and the threshold.
+Deleting one checks the first three, then that the budget exists.
 
 Every `GET` that answers JSON carries the licensing state:
 
