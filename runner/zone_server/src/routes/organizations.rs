@@ -26,7 +26,6 @@ use crate::sync::hook::Removal;
 
 use super::common::{AuditEvent, ErrorResponse, Timestamps, audit};
 
-pub const EXCEEDS_MESSAGE: &str = "This role grants permissions you do not hold";
 const INVALID_ROLE: &str = "Invalid role. Must be one of: member, admin, owner";
 const INTERNAL_ERROR: &str = "Internal server error";
 const ORGANIZATION_NOT_FOUND: &str = "Organization not found";
@@ -44,7 +43,7 @@ fn exceeds() -> Response {
     (
         StatusCode::FORBIDDEN,
         Json(ErrorResponse::with_code(
-            EXCEEDS_MESSAGE,
+            custom_roles::EXCEEDS_MESSAGE,
             custom_roles::EXCEEDS,
         )),
     )

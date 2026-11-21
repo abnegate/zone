@@ -15,6 +15,7 @@ use super::DbResult;
 use crate::auth::{Grant, Permission, Scope};
 
 pub const EXCEEDS: &str = "role_exceeds";
+pub const EXCEEDS_MESSAGE: &str = "This role grants permissions you do not hold";
 pub const UNKNOWN_ROLE: &str = "Unknown role";
 pub const AMBIGUOUS_ASSIGNMENT: &str = "Set exactly one of role or custom_role_id";
 

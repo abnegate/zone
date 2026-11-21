@@ -29,7 +29,6 @@ const WORKSPACE_NOT_FOUND: &str = "Workspace not found";
 const MEMBER_NOT_FOUND: &str = "Member not found";
 const ROLE_NOT_FOUND: &str = "Role not found";
 const PROMOTION_REFUSED: &str = "Only workspace owners can promote users to admin or owner";
-const EXCEEDS_REFUSAL: &str = "This role grants permissions you do not hold";
 
 fn refusal(status: StatusCode, message: &str) -> Response {
     (status, Json(ErrorResponse::new(message))).into_response()
@@ -39,7 +38,7 @@ fn exceeds() -> Response {
     (
         StatusCode::FORBIDDEN,
         Json(ErrorResponse::with_code(
-            EXCEEDS_REFUSAL,
+            custom_roles::EXCEEDS_MESSAGE,
             custom_roles::EXCEEDS,
         )),
     )

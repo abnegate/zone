@@ -21,7 +21,6 @@ use crate::db::{invitations, organization_members, organizations, users, workspa
 use crate::state::AppState;
 
 use super::common::{AuditEvent, ErrorResponse, Timestamps, audit};
-use super::organizations::EXCEEDS_MESSAGE;
 
 const INVALID_ORGANIZATION_ROLE: &str = "Invalid org_role. Must be one of: member, admin, owner";
 const INVALID_WORKSPACE_ROLE: &str =
@@ -194,7 +193,7 @@ pub async fn create_invitation(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::with_code(
-                EXCEEDS_MESSAGE,
+                custom_roles::EXCEEDS_MESSAGE,
                 custom_roles::EXCEEDS,
             )),
         ));
