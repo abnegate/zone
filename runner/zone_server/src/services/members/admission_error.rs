@@ -10,7 +10,7 @@ const UNAVAILABLE: &str = "Internal server error";
 #[derive(Debug, thiserror::Error)]
 pub enum AdmissionError {
     #[error(
-        "This server runs Zone Community, which allows {cap} active members. Add a Zone Team or Enterprise license to add more people."
+        "This server allows {cap} active members without an active Zone Team or Enterprise license. Add a license to add more people."
     )]
     Full { cap: u32 },
     #[error(transparent)]

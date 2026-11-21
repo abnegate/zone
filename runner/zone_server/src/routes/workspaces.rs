@@ -17,9 +17,7 @@ use crate::sync::hook::Removal;
 
 use super::common::{AuditEvent, ErrorResponse, Timestamps, audit};
 
-// ============================================================================
-// Workspace Endpoints
-// ============================================================================
+pub const OUTSIDE_ORGANIZATION: &str = "outside_organization";
 
 /// Workspace response
 #[derive(Debug, Serialize)]
@@ -259,10 +257,6 @@ pub async fn delete_workspace(
     }
 }
 
-// ============================================================================
-// Workspace Member Management
-// ============================================================================
-
 /// Workspace member response
 #[derive(Debug, Serialize)]
 pub struct WorkspaceMemberResponse {
@@ -346,7 +340,6 @@ pub async fn list_members(
     }
 }
 
-/// POST /api/workspaces/:workspace_id/members - Add member (requires admin)
 async fn audit_member(
     state: &AppState,
     admin: &WorkspaceAdmin,
@@ -371,13 +364,14 @@ async fn audit_member(
     .await;
 }
 
+/// POST /api/workspaces/:workspace_id/members - Add member (requires admin)
 pub async fn add_member(
     State(state): State<AppState>,
     admin: WorkspaceAdmin,
-    Json(req): Json<AddWorkspaceMemberRequest>,
+    Json(request): Json<AddWorkspaceMemberRequest>,
 ) -> impl IntoResponse {
-    let role = match req.role.parse::<workspace_members::WorkspaceRole>() {
-        Ok(r) => r,
+    let role = match request.role.parse::<workspace_members::WorkspaceRole>() {
+        Ok(role) => role,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -401,11 +395,32 @@ pub async fn add_member(
             .into_response();
     }
 
-    // CRITICAL-7: Check if member already exists (active or inactive)
-    match workspace_members::get_member(state.db(), admin.workspace_id, req.user_id).await {
+    match workspace_members::in_organization(state.db(), admin.workspace_id, request.user_id).await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::with_code(
+                    "Only members of this workspace's organization can join it. Add them to the organization first.",
+                    OUTSIDE_ORGANIZATION,
+                )),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            tracing::error!(%error, "Failed to read the organization membership of a workspace member");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    }
+
+    match workspace_members::get_member(state.db(), admin.workspace_id, request.user_id).await {
         Ok(Some(existing_member)) => {
             if existing_member.is_active {
-                // Member is already active - return 409 CONFLICT
                 (
                     StatusCode::CONFLICT,
                     Json(ErrorResponse::new(
@@ -414,22 +429,20 @@ pub async fn add_member(
                 )
                     .into_response()
             } else {
-                // Member exists but is inactive - reactivate
                 match workspace_members::reactivate_member(
                     state.db(),
                     admin.workspace_id,
-                    req.user_id,
+                    request.user_id,
                     role,
                     Some(admin.user_id),
                 )
                 .await
                 {
                     Ok(_) => {
-                        // Fetch the reactivated member to return
                         match workspace_members::get_member(
                             state.db(),
                             admin.workspace_id,
-                            req.user_id,
+                            request.user_id,
                         )
                         .await
                         {
@@ -450,8 +463,8 @@ pub async fn add_member(
                                 Json(ErrorResponse::new("Failed to retrieve reactivated member")),
                             )
                                 .into_response(),
-                            Err(e) => {
-                                tracing::error!("Database error: {}", e);
+                            Err(error) => {
+                                tracing::error!("Database error: {}", error);
                                 (
                                     StatusCode::INTERNAL_SERVER_ERROR,
                                     Json(ErrorResponse::new("Internal server error")),
@@ -460,8 +473,8 @@ pub async fn add_member(
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::error!("Database error reactivating member: {}", e);
+                    Err(error) => {
+                        tracing::error!("Database error reactivating member: {}", error);
                         (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(ErrorResponse::new("Internal server error")),
@@ -472,20 +485,22 @@ pub async fn add_member(
             }
         }
         Ok(None) => {
-            // Member doesn't exist - add new member
             match workspace_members::add_member(
                 state.db(),
                 admin.workspace_id,
-                req.user_id,
+                request.user_id,
                 role,
                 Some(admin.user_id),
             )
             .await
             {
                 Ok(_member_id) => {
-                    // Fetch the created member to return
-                    match workspace_members::get_member(state.db(), admin.workspace_id, req.user_id)
-                        .await
+                    match workspace_members::get_member(
+                        state.db(),
+                        admin.workspace_id,
+                        request.user_id,
+                    )
+                    .await
                     {
                         Ok(Some(member)) => {
                             audit_member(
@@ -507,8 +522,8 @@ pub async fn add_member(
                             Json(ErrorResponse::new("Failed to retrieve created member")),
                         )
                             .into_response(),
-                        Err(e) => {
-                            tracing::error!("Database error: {}", e);
+                        Err(error) => {
+                            tracing::error!("Database error: {}", error);
                             (
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 Json(ErrorResponse::new("Internal server error")),
@@ -517,8 +532,8 @@ pub async fn add_member(
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::error!("Database error adding member: {}", e);
+                Err(error) => {
+                    tracing::error!("Database error adding member: {}", error);
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(ErrorResponse::new("Internal server error")),
@@ -527,8 +542,8 @@ pub async fn add_member(
                 }
             }
         }
-        Err(e) => {
-            tracing::error!("Database error checking member: {}", e);
+        Err(error) => {
+            tracing::error!("Database error checking member: {}", error);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Internal server error")),

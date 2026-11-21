@@ -34,8 +34,6 @@ where
     Ok(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
-/// Whether `user` is an active user with an active membership of an active
-/// organization, whenever they last signed in.
 pub async fn member<'e, E>(executor: E, user: Uuid) -> DbResult<bool>
 where
     E: Executor<'e, Database = Postgres>,
@@ -48,4 +46,26 @@ where
     .bind(user)
     .fetch_one(executor)
     .await
+}
+
+/// The active users with an active membership of `organization` who would become members if it
+/// were active: none of their other memberships already makes them one.
+pub async fn returning<'e, E>(executor: E, organization: Uuid) -> DbResult<u32>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let count: i64 = sqlx::query_scalar(concat!(
+        "SELECT COUNT(*) FROM users u
+         WHERE u.is_active IS NOT FALSE
+           AND EXISTS (
+               SELECT 1 FROM organization_members m
+               WHERE m.user_id = u.id AND m.organization_id = $1 AND m.is_active)
+           AND NOT (",
+        membership!(),
+        ")"
+    ))
+    .bind(organization)
+    .fetch_one(executor)
+    .await?;
+    Ok(u32::try_from(count).unwrap_or(u32::MAX))
 }
