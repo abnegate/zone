@@ -1,11 +1,13 @@
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use super::{DEEP, nested};
-use crate::sso::saml::{Document, Malformed, Node, uri};
+use super::{DEEP, WIDE, nested};
+use crate::sso::saml::{Attribute, Document, Malformed, Node, uri};
 
 const OKTA: &[u8] = include_bytes!("fixtures/canonical/okta.xml");
 const ENTRA: &[u8] = include_bytes!("fixtures/canonical/entra.xml");
 const BOUND: Duration = Duration::from_secs(10);
+const LONG_NAMESPACE_LENGTH: usize = 100_000;
 
 fn parse(xml: &str) -> Result<Document, Malformed> {
     Document::parse(xml.as_bytes())
@@ -358,4 +360,72 @@ fn parses_a_hundred_thousand_levels_without_recursion() {
     assert_eq!(depth, DEEP);
     drop(document);
     assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
+}
+
+fn long_namespace() -> String {
+    format!("urn:{}", "n".repeat(LONG_NAMESPACE_LENGTH))
+}
+
+fn namespace_copies(document: &Document) -> usize {
+    let mut copies = HashSet::new();
+    for id in document.descendants(document.root()) {
+        let Some(element) = document.element(id) else {
+            continue;
+        };
+        copies.extend(element.namespace().map(str::as_ptr));
+        copies.extend(
+            element
+                .attributes()
+                .iter()
+                .filter_map(Attribute::namespace)
+                .map(str::as_ptr),
+        );
+        copies.extend(
+            element
+                .declarations()
+                .iter()
+                .map(|declaration| declaration.uri().as_ptr()),
+        );
+    }
+    copies.len()
+}
+
+#[test]
+fn a_node_is_at_most_sixty_four_bytes() {
+    assert!(size_of::<Node>() <= 64, "{}", size_of::<Node>());
+}
+
+#[test]
+fn a_default_namespace_is_stored_once_for_a_hundred_thousand_elements() {
+    let namespace = long_namespace();
+    let xml = format!(r#"<r xmlns="{namespace}">{}</r>"#, "<a/>".repeat(WIDE));
+    let started = Instant::now();
+    let document = parse(&xml).unwrap();
+    assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
+    assert_eq!(document.child_elements(document.root()).count(), WIDE);
+    assert!(
+        document
+            .child_elements(document.root())
+            .all(|id| document.is(id, &namespace, "a"))
+    );
+    assert_eq!(namespace_copies(&document), 1);
+}
+
+#[test]
+fn a_prefixed_namespace_is_stored_once_for_a_hundred_thousand_elements_and_attributes() {
+    let namespace = long_namespace();
+    let xml = format!(
+        r#"<p:r xmlns:p="{namespace}" xmlns:q="{namespace}">{}</p:r>"#,
+        r#"<p:a q:b="1"/>"#.repeat(WIDE)
+    );
+    let started = Instant::now();
+    let document = parse(&xml).unwrap();
+    assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
+    assert_eq!(document.child_elements(document.root()).count(), WIDE);
+    assert!(document.child_elements(document.root()).all(|id| {
+        document
+            .element(id)
+            .is_some_and(|element| element.attribute_in(&namespace, "b") == Some("1"))
+    }));
+    assert_eq!(namespace_copies(&document), 1);
 }

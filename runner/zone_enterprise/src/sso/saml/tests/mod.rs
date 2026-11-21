@@ -8,6 +8,7 @@ mod testing;
 use crate::sso::saml::{Malformed, Refusal};
 
 const DEEP: usize = 100_000;
+const WIDE: usize = 100_000;
 
 fn nested(depth: usize) -> String {
     let mut xml = String::with_capacity(depth * 8);
