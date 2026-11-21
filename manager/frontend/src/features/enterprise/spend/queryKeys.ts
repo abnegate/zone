@@ -1,7 +1,6 @@
 import type { SpendQuery } from './schemas';
 
 export const spendQueryKeys = {
-  all: ['spend'] as const,
   reports: (organizationId: string) => ['spend', 'reports', organizationId] as const,
   report: (organizationId: string, query: SpendQuery) =>
     ['spend', 'reports', organizationId, query] as const,

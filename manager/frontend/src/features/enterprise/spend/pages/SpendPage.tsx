@@ -1,32 +1,16 @@
-import { Button } from '@zone/ui';
 import { useId, useState } from 'react';
+import { LoadFailure } from '../components/LoadFailure';
 import { SpendBudgets } from '../components/SpendBudgets';
 import { SpendNotice, SpendNoticeVariant } from '../components/SpendNotice';
 import { SpendOverview } from '../components/SpendOverview';
 import { SpendRange } from '../components/SpendRange';
 import { useBudgets, useSpendReport, useSpendTargets } from '../hooks';
-import { LOADING_LABEL, PAGE_DESCRIPTION, PAGE_TITLE, RETRY_LABEL } from '../labels';
+import { LOADING_LABEL, PAGE_DESCRIPTION, PAGE_TITLE } from '../labels';
 import { lapsed, unlicensed } from '../license';
 import { monthToDate } from '../range';
 import type { SpendQuery } from '../schemas';
 import '../../../analytics/pages/AnalyticsPage.css';
 import './SpendPage.css';
-
-interface LoadFailureProps {
-  error: string;
-  onRetry(): void;
-}
-
-function LoadFailure({ error, onRetry }: LoadFailureProps) {
-  return (
-    <div className="alert alert-error alert-inline" role="alert">
-      <span>{error}</span>
-      <Button type="button" variant="ghost" size="sm" onClick={onRetry}>
-        {RETRY_LABEL}
-      </Button>
-    </div>
-  );
-}
 
 export interface SpendPageProps {
   organizationId: string;

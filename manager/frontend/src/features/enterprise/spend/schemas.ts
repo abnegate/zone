@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { EditionSchema, LicenseStatusSchema } from '../schemas';
+import { LicenseStatusSchema } from '../schemas';
 
 export const SpendCode = {
   BodyInvalid: 'spend_body_invalid',
@@ -93,7 +93,7 @@ const Limit = z.number().int().positive();
 const LicenseFields = {
   entitled: z.boolean(),
   enforced: z.boolean(),
-  edition: EditionSchema,
+  edition: z.string(),
   status: LicenseStatusSchema,
   editable: z.boolean(),
 };

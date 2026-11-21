@@ -94,13 +94,17 @@ LiteLLM logged:
 |---|---|
 | Spend | `spend`, in US dollars, as LiteLLM priced it |
 | Prompt and completion tokens | `prompt_tokens` and `completion_tokens` |
-| Model | `model_group`, the name Zone asked for, or `model` when there's none |
-| Provider | `custom_llm_provider`, or `unknown` |
+| Model | `model_group`, the name Zone asked for; else `model`; else `unknown` |
+| Provider | `custom_llm_provider`; else `unknown` |
 | Time | `startTime`, when the request started |
+
+A blank model or provider name counts as missing.
 
 Zone stores money as whole microdollars, millionths of a US dollar. It rounds
 LiteLLM's figure half away from zero and counts a negative one as $0. The
-console shows dollars and cents; the CSV shows six decimal places.
+console rounds to the cent, except that it shows an amount under a cent in
+full, so a fraction of a cent never reads as $0.00; the CSV shows six decimal
+places.
 
 Spend for a workspace that's deleted keeps counting toward the organization's
 totals and shows as **Deleted workspace**. Spend for a member who's deleted
@@ -134,8 +138,8 @@ A request is also sent uncounted while its key can't be registered with
 LiteLLM (see [Registration](#registration)), and everything is while the
 server runs as Community.
 
-For coding-agent subscription usage, the Spend page links to AI settings
-instead.
+For coding-agent subscription usage, the Spend page links to **Settings →
+Organization → AI defaults** instead.
 
 ### Local models at $0
 
@@ -260,9 +264,8 @@ unless:
 - `LITELLM_HOST` and `LITELLM_KEY` are both set.
 
 One instance ingests at a time, under the database advisory lock
-`SPEND_LOCK`. Each run
-reads `GET /spend/logs/v2` 1,000 rows a page, oldest first, until a page comes
-back short. LiteLLM stops counting its `total` at 10,000, so Zone never
+`SPEND_LOCK`. Each run reads `GET /spend/logs/v2` 1,000 rows a page, oldest
+first, until a page comes back short. LiteLLM stops counting its `total` at 10,000, so Zone never
 relies on it. Zone stores only the rows sent under one of its keys, by
 `request_id`, and drops the rest.
 
@@ -273,8 +276,8 @@ each full page it stores, the cursor moves to that page's last request; once
 a page comes back short, it moves to the moment the run started. When a page
 fails, the run stops there and the next run reads from 35 minutes before the
 last request it stored, so a backlog too deep to read in one run still drains
-over the following runs. The cursor never moves back. The first run starts 35 minutes before Zone
-derived its first key. With no keys, a run does nothing.
+over the following runs. The cursor never moves back. The first run starts 35
+minutes before Zone registered its first key. With no keys, a run does nothing.
 
 The overlap exists because LiteLLM logs a request once it finishes, under the
 time it started, and writes logs in batches about every 10 seconds. Zone gives
@@ -434,8 +437,8 @@ Zone writes these entries to the organization's audit log.
 | `budget.exhausted` | An exhaustion notice goes out; recorded by Zone, with no actor | `budget` | `month`, `spent_microdollars`, `limit_microdollars` and `hard` |
 
 Every `budget` entry names the budget's ID as its resource, and an entry about
-a workspace budget carries that workspace. Saving a budget without changing it writes no entry. Refused requests aren't
-audited.
+a workspace budget carries that workspace. Saving a budget without changing it
+writes no entry. Refused requests aren't audited.
 
 ## Codes
 

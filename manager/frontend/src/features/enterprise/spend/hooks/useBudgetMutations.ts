@@ -48,18 +48,18 @@ export function useBudgetMutations(organizationId: string): BudgetMutations {
 
   const create = useMutation({
     mutationFn: (request: CreateBudgetRequest) => spendApi.createBudget(organizationId, request),
-    onSuccess: refresh,
+    onSettled: refresh,
   });
 
   const update = useMutation({
     mutationFn: ({ budgetId, request }: UpdateVariables) =>
       spendApi.updateBudget(organizationId, budgetId, request),
-    onSuccess: refresh,
+    onSettled: refresh,
   });
 
   const remove = useMutation({
     mutationFn: (budgetId: string) => spendApi.deleteBudget(organizationId, budgetId),
-    onSuccess: refresh,
+    onSettled: refresh,
   });
 
   return {

@@ -12,9 +12,9 @@ import {
   TO_LABEL,
   WORKSPACE_FILTER_LABEL,
 } from '../labels';
-import { refusalMessage } from '../messages';
-import { validRange } from '../range';
-import { SpendCode, type SpendQuery } from '../schemas';
+import { rangeMessage, refusalMessage } from '../messages';
+import { rangeProblem, validRange } from '../range';
+import type { SpendQuery } from '../schemas';
 
 const ALL = '';
 
@@ -46,8 +46,9 @@ export function SpendRange({
   const [to, setTo] = useState(query.to);
   const [downloaded, setDownloaded] = useState<string | null>(null);
   const exporter = useSpendExport(organizationId);
-  const valid = validRange({ from, to });
-  const rangeError = valid ? undefined : refusalMessage(SpendCode.RangeInvalid);
+  const problem = rangeProblem({ from, to });
+  const valid = problem === null;
+  const rangeError = problem === null ? undefined : rangeMessage(problem);
   const failure = exporter.refusal ? refusalMessage(exporter.refusal.code) : exporter.error;
 
   const touch = () => {

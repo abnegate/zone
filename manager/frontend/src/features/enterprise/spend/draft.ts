@@ -1,5 +1,6 @@
+import { LIMIT_TOO_LARGE } from './labels';
 import { BudgetField, refusalMessage } from './messages';
-import { dollarsInput, parseDollars } from './money';
+import { dollarsInput, exceedsMaximum, parseDollars } from './money';
 import {
   type Budget,
   BudgetScope,
@@ -57,6 +58,11 @@ function limit(text: string): number | null {
   return value !== null && value > 0 ? value : null;
 }
 
+function limitProblem(text: string): string | null {
+  if (exceedsMaximum(text)) return LIMIT_TOO_LARGE;
+  return limit(text) === null ? refusalMessage(SpendCode.LimitInvalid) : null;
+}
+
 function targetMissing(draft: BudgetDraft): boolean {
   switch (draft.scope) {
     case BudgetScope.Organization:
@@ -71,8 +77,8 @@ function targetMissing(draft: BudgetDraft): boolean {
 export function errorsOf(draft: BudgetDraft): BudgetErrors {
   const errors: BudgetErrors = {};
   if (targetMissing(draft)) errors[BudgetField.Target] = refusalMessage(SpendCode.ScopeInvalid);
-  if (limit(draft.limit) === null)
-    errors[BudgetField.Limit] = refusalMessage(SpendCode.LimitInvalid);
+  const limitError = limitProblem(draft.limit);
+  if (limitError !== null) errors[BudgetField.Limit] = limitError;
   if (threshold(draft.threshold) === null) {
     errors[BudgetField.Threshold] = refusalMessage(SpendCode.ThresholdInvalid);
   }

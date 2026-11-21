@@ -3,11 +3,13 @@ import {
   AUTOMATION_LABEL,
   DELETED_WORKSPACE,
   ORGANIZATION_TARGET,
+  RANGE_TOO_LONG,
   UNKNOWN_PERSON,
   UNKNOWN_PROVIDER,
   UNKNOWN_WORKSPACE,
 } from './labels';
 import { money } from './money';
+import { MAXIMUM_DAYS, RangeProblem, type RangeProblem as RangeProblemValue } from './range';
 import {
   type Budget,
   BudgetScope,
@@ -30,7 +32,7 @@ const REFUSALS: Readonly<Record<SpendRefusalCode, string>> = {
   [SpendCode.LicenseRequired]:
     'Changing budgets needs a Zone Team license that is active or in its grace period.',
   [SpendCode.BodyInvalid]: "Zone couldn't read this change. Reload the page and try again.",
-  [SpendCode.RangeInvalid]: 'Choose real dates, with the start on or before the end.',
+  [SpendCode.RangeInvalid]: `Choose real dates, with the start on or before the end and ${MAXIMUM_DAYS} days at most.`,
   [SpendCode.LimitInvalid]: 'Enter a monthly limit above $0, like 50 or 12.50.',
   [SpendCode.ThresholdInvalid]: 'Enter a warning threshold from 1 to 100 percent.',
   [SpendCode.ScopeInvalid]: 'Choose a workspace or person that belongs to this organization.',
@@ -76,6 +78,15 @@ const ERROR_FIELDS: Readonly<Partial<Record<SpendRefusalCode, BudgetField>>> = {
 
 export function refusalMessage(code: SpendRefusalCode): string {
   return REFUSALS[code];
+}
+
+export function rangeMessage(problem: RangeProblemValue): string {
+  switch (problem) {
+    case RangeProblem.Invalid:
+      return refusalMessage(SpendCode.RangeInvalid);
+    case RangeProblem.TooLong:
+      return RANGE_TOO_LONG;
+  }
 }
 
 export function refusalField(code: SpendRefusalCode): BudgetField | null {

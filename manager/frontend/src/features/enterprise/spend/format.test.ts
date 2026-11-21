@@ -1,7 +1,25 @@
 import { describe, expect, it } from 'bun:test';
 import { dateLabel, dayLabel, momentLabel, monthLabel } from './calendar';
-import { axisMoney, count, dollarsInput, exactMoney, money, parseDollars } from './money';
-import { monthToDate, validDate, validRange } from './range';
+import { RANGE_TOO_LONG } from './labels';
+import { rangeMessage, refusalMessage } from './messages';
+import {
+  axisMoney,
+  count,
+  dollarsInput,
+  exactMoney,
+  exceedsMaximum,
+  money,
+  parseDollars,
+} from './money';
+import {
+  MAXIMUM_DAYS,
+  monthToDate,
+  RangeProblem,
+  rangeProblem,
+  validDate,
+  validRange,
+} from './range';
+import { SpendCode } from './schemas';
 
 describe('money', () => {
   it('shows dollars and cents in en-US USD', () => {
@@ -66,7 +84,21 @@ describe('parseDollars', () => {
 
   it('refuses an amount past what a number holds exactly', () => {
     expect(parseDollars('9007199254')).toBe(9_007_199_254_000_000);
+    expect(parseDollars('9007199254.740991')).toBe(Number.MAX_SAFE_INTEGER);
+    expect(parseDollars('9007199254.740992')).toBeNull();
     expect(parseDollars('9007199255')).toBeNull();
+  });
+});
+
+describe('exceedsMaximum', () => {
+  it('tells an amount too large to hold apart from one that is not an amount', () => {
+    expect(exceedsMaximum('9007199254.740991')).toBe(false);
+    expect(exceedsMaximum('9007199254.740992')).toBe(true);
+    expect(exceedsMaximum('$99,999,999,999')).toBe(true);
+    expect(exceedsMaximum('9'.repeat(400))).toBe(true);
+    for (const text of ['', 'ten', '-5', '50']) {
+      expect(exceedsMaximum(text), text).toBe(false);
+    }
   });
 });
 
@@ -105,6 +137,29 @@ describe('validDate and validRange', () => {
     expect(validRange({ from: '2026-11-01', to: '2026-11-21' })).toBe(true);
     expect(validRange({ from: '2026-11-22', to: '2026-11-21' })).toBe(false);
     expect(validRange({ from: '', to: '2026-11-21' })).toBe(false);
+  });
+
+  it(`accepts at most ${MAXIMUM_DAYS} days, counting both ends, like the server`, () => {
+    expect(MAXIMUM_DAYS).toBe(366);
+    expect(validRange({ from: '2024-01-01', to: '2024-12-31' })).toBe(true);
+    expect(validRange({ from: '2025-01-01', to: '2026-01-01' })).toBe(true);
+    expect(validRange({ from: '2025-01-01', to: '2026-01-02' })).toBe(false);
+    expect(validRange({ from: '2020-01-01', to: '2026-11-21' })).toBe(false);
+  });
+});
+
+describe('rangeProblem', () => {
+  it('names what is wrong with a range', () => {
+    expect(rangeProblem({ from: '2026-11-01', to: '2026-11-21' })).toBeNull();
+    expect(rangeProblem({ from: '2026-11-22', to: '2026-11-21' })).toBe(RangeProblem.Invalid);
+    expect(rangeProblem({ from: '2026-02-30', to: '2026-03-01' })).toBe(RangeProblem.Invalid);
+    expect(rangeProblem({ from: '2025-01-01', to: '2026-01-02' })).toBe(RangeProblem.TooLong);
+  });
+
+  it('explains each problem in its own words', () => {
+    expect(rangeMessage(RangeProblem.Invalid)).toBe(refusalMessage(SpendCode.RangeInvalid));
+    expect(rangeMessage(RangeProblem.TooLong)).toBe(RANGE_TOO_LONG);
+    expect(RANGE_TOO_LONG).toContain(String(MAXIMUM_DAYS));
   });
 });
 
