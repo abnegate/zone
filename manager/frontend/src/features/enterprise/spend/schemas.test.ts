@@ -102,11 +102,11 @@ describe('SpendReportResponseSchema', () => {
     expect(SpendReportResponseSchema.safeParse(rest).success).toBe(false);
   });
 
-  it('accepts an edition the console does not know yet, since it never reads one', () => {
-    expect(SpendReportResponseSchema.safeParse({ ...ACTIVE_REPORT, edition: 'team' }).success).toBe(
-      true
-    );
-    expect(BudgetsResponseSchema.safeParse({ ...ACTIVE_BUDGETS, edition: 'team' }).success).toBe(
+  it('accepts an edition outside the known ones, since it never reads one', () => {
+    expect(
+      SpendReportResponseSchema.safeParse({ ...ACTIVE_REPORT, edition: 'galaxy' }).success
+    ).toBe(true);
+    expect(BudgetsResponseSchema.safeParse({ ...ACTIVE_BUDGETS, edition: 'galaxy' }).success).toBe(
       true
     );
   });

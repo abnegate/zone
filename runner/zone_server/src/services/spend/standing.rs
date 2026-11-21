@@ -1,5 +1,3 @@
-//! The one place spend reads the license: everything else asks a [`Standing`].
-
 use chrono::{DateTime, Utc};
 use zone_enterprise::{Edition, Feature, Status, status};
 
@@ -17,15 +15,11 @@ pub struct Standing {
     pub status: Status,
 }
 
-/// The gate for every spend feature.
 pub fn standing(stored: &Stored, now: DateTime<Utc>) -> Standing {
     let license = stored.license();
     Standing {
         entitled: Feature::Spend.entitled(license, now),
-        enforced: match stored {
-            Stored::Unverified(_) => true,
-            Stored::Empty | Stored::Verified(_) => Feature::Spend.enforced(license),
-        },
+        enforced: stored.enforces(Feature::Spend),
         edition: Edition::from(license),
         status: status(license, now),
     }

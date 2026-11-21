@@ -54,7 +54,7 @@ export const COMMUNITY_LICENSE: SpendLicense = {
 export const ACTIVE_LICENSE: SpendLicense = {
   entitled: true,
   enforced: true,
-  edition: Edition.Enterprise,
+  edition: Edition.Team,
   status: LicenseStatus.Active,
   editable: true,
 };
@@ -62,7 +62,7 @@ export const ACTIVE_LICENSE: SpendLicense = {
 export const LAPSED_LICENSE: SpendLicense = {
   entitled: false,
   enforced: true,
-  edition: Edition.Enterprise,
+  edition: Edition.Team,
   status: LicenseStatus.Lapsed,
   editable: false,
 };

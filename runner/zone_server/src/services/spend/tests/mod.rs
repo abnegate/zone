@@ -683,9 +683,15 @@ fn the_standing_of_each_license_state() {
         ),
         (
             "no plan grace",
-            Stored::Verified(unplanned),
+            Stored::Verified(unplanned.clone()),
             grace,
             (true, true, Edition::Enterprise, Status::Grace),
+        ),
+        (
+            "no plan lapsed",
+            Stored::Verified(unplanned),
+            lapsed,
+            (false, true, Edition::Enterprise, Status::Lapsed),
         ),
         (
             "unverified",
