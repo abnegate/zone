@@ -19,6 +19,8 @@ pub mod chats;
 pub mod context;
 pub mod context_gatherings;
 pub mod devices;
+#[cfg(test)]
+pub(crate) mod disposable;
 pub mod email_verification;
 pub mod gathering_events;
 pub mod github_apps;

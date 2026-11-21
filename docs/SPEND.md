@@ -382,8 +382,13 @@ next run.
 |---|---|
 | Chat turn, over the WebSocket | The turn doesn't start, and the socket sends a plain error frame, `{"type": "error", "message": "…"}`. |
 | A draft's context preview, `POST /api/chats/{id}/context` | `409` with `{"error": "…"}`. Held to the same budgets as the member's turn. |
-| Creating a chat on the workspace's AI settings (`POST /api/chats`), changing a chat's model (`PUT /api/chats/{id}`), or starting an auto project (`POST /api/workspaces/{workspace_id}/projects/auto`) | `409` with `{"error": "…"}`, while an organization or workspace hard budget is used up. A chat that picks its own provider isn't refused. |
+| Starting an auto project (`POST /api/workspaces/{workspace_id}/projects/auto`) | `409` with `{"error": "…"}`, while an organization or workspace hard budget is used up. |
 | Task runs and other automation | The run fails with the message. |
+
+Requests that send nothing to LiteLLM aren't refused: creating a chat
+(`POST /api/chats`), changing its model (`PUT /api/chats/{id}`) and opening it
+(`GET /api/chats/{id}`) work as usual, with the chat's context, while a budget
+is used up.
 
 The message says whose budget is used up:
 
@@ -393,7 +398,9 @@ The message says whose budget is used up:
 | Workspace | This workspace's monthly AI budget is used up, so this request wasn't sent. An organization admin can raise it under Settings › Spend; it resets on the 1st (UTC). |
 | Member | Your monthly AI budget is used up, so this request wasn't sent. An organization admin can raise it under Settings › Spend; it resets on the 1st (UTC). |
 
-The refusal's code is `budget_exhausted`. Zone logs each refused request but
+Responses carry only the message. Zone names the refusal `budget_exhausted`
+internally, but doesn't send that code to clients. Zone logs each refused
+request at info level, with its workspace, member and budget scope, but
 doesn't audit it.
 
 The Spend page shows month to date by default, with a range, workspace and
@@ -429,7 +436,7 @@ audited.
 | `budget_threshold_invalid` | 400 | The threshold isn't a whole percentage from 1 to 100. |
 | `budget_scope_invalid` | 400 | The scope doesn't carry exactly the ID it needs, or names a workspace or person outside the organization. |
 | `budget_exists` | 409 | The target already has a budget. |
-| `budget_exhausted` | | A request was stopped by a used-up hard budget. See [What people see](#what-people-see). |
+| `budget_exhausted` | | Internal: Zone's name for a request stopped by a used-up hard budget. Responses don't carry it, only the message. See [What people see](#what-people-see). |
 
 These responses carry no code:
 

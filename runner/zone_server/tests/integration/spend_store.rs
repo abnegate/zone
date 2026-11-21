@@ -15,7 +15,7 @@ use zone_server::db::spend::{cursor, keys};
 use zone_server::services::spend::attribution::attribute;
 use zone_server::services::spend::client::DATE_FORMAT;
 use zone_server::services::spend::ingest::{self, Ingested, OVERLAP, SPEND_LOCK};
-use zone_server::services::spend::{Key, registry, upkeep};
+use zone_server::services::spend::{Key, Standing, registry, upkeep};
 
 use crate::common::Database;
 use crate::common::spend::{DELETE_PATH, Fixture, GENERATE_PATH, LOGS_PATH, MASTER, log};
@@ -966,7 +966,13 @@ fn seconds(moment: DateTime<Utc>) -> String {
 /// Registers the owner's key through attribution, as a member's first turn would.
 async fn attributed(fixture: &Fixture) -> Key {
     fixture.mount_register().await;
-    let endpoint = attribute(fixture.state(), fixture.instance(), &fixture.subject()).await;
+    let endpoint = attribute(
+        fixture.state(),
+        fixture.instance(),
+        &fixture.subject(),
+        &Standing::read(fixture.state()).await,
+    )
+    .await;
     let key = fixture.key(&fixture.subject());
     assert_eq!(endpoint.key().expose(), key.secret.expose());
     key
@@ -1266,7 +1272,13 @@ async fn community_sends_the_master_key_and_registers_nothing() {
         .mount(&fixture.litellm)
         .await;
 
-    let endpoint = attribute(fixture.state(), fixture.instance(), &fixture.subject()).await;
+    let endpoint = attribute(
+        fixture.state(),
+        fixture.instance(),
+        &fixture.subject(),
+        &Standing::read(fixture.state()).await,
+    )
+    .await;
 
     assert_eq!(endpoint.key().expose(), MASTER);
     assert!(keys::active(fixture.pool()).await.unwrap().is_empty());
@@ -1282,7 +1294,13 @@ async fn a_lapsed_license_still_attributes() {
     fixture.lapsed().await;
     fixture.mount_register().await;
 
-    let endpoint = attribute(fixture.state(), fixture.instance(), &fixture.subject()).await;
+    let endpoint = attribute(
+        fixture.state(),
+        fixture.instance(),
+        &fixture.subject(),
+        &Standing::read(fixture.state()).await,
+    )
+    .await;
 
     assert!(endpoint.key().expose().starts_with("sk-zone-"));
 
@@ -1300,7 +1318,13 @@ async fn attribution_registers_each_key_once_per_process() {
     let key = fixture.key(&fixture.subject());
 
     for _ in 0..3 {
-        let endpoint = attribute(fixture.state(), fixture.instance(), &fixture.subject()).await;
+        let endpoint = attribute(
+            fixture.state(),
+            fixture.instance(),
+            &fixture.subject(),
+            &Standing::read(fixture.state()).await,
+        )
+        .await;
         assert!(endpoint.key().expose().starts_with("sk-zone-"));
         assert_eq!(endpoint.key().expose(), key.secret.expose());
         assert_eq!(endpoint.credential().expose(), MASTER);
@@ -1336,7 +1360,13 @@ async fn an_endpoint_that_is_not_attributable_is_sent_as_it_is() {
             "sk-workspace-saved-key-000",
         ));
 
-    let endpoint = attribute(fixture.state(), saved, &fixture.subject()).await;
+    let endpoint = attribute(
+        fixture.state(),
+        saved,
+        &fixture.subject(),
+        &Standing::read(fixture.state()).await,
+    )
+    .await;
 
     assert_eq!(endpoint.key().expose(), "sk-workspace-saved-key-000");
     fixture.litellm.verify().await;
@@ -1357,7 +1387,13 @@ async fn a_failed_registration_sends_the_master_key_and_cools_before_retrying() 
     let key = fixture.key(&fixture.subject());
 
     for _ in 0..2 {
-        let endpoint = attribute(fixture.state(), fixture.instance(), &fixture.subject()).await;
+        let endpoint = attribute(
+            fixture.state(),
+            fixture.instance(),
+            &fixture.subject(),
+            &Standing::read(fixture.state()).await,
+        )
+        .await;
         assert_eq!(endpoint.key().expose(), MASTER);
     }
 
@@ -1389,7 +1425,13 @@ async fn verify_registers_again_a_key_litellm_lost() {
         1
     );
 
-    let endpoint = attribute(fixture.state(), fixture.instance(), &fixture.subject()).await;
+    let endpoint = attribute(
+        fixture.state(),
+        fixture.instance(),
+        &fixture.subject(),
+        &Standing::read(fixture.state()).await,
+    )
+    .await;
     assert_eq!(endpoint.key().expose(), key.secret.expose());
     fixture.litellm.verify().await;
     assert_eq!(keys::active(fixture.pool()).await.unwrap().len(), 1);

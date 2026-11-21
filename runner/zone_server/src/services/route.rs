@@ -238,6 +238,19 @@ impl Route {
             .await
     }
 
+    /// [`Self::for_workspace`] for a request that sends no completions, such as checking a
+    /// model or describing a chat: its spend is neither attributed nor held to a budget, so a
+    /// used-up budget refuses it nothing.
+    pub async fn preview_workspace(state: &AppState, workspace: Uuid) -> Self {
+        Self::build_workspace(state, workspace, None).await
+    }
+
+    /// [`Self::for_chat`] for a request that sends no completions, as
+    /// [`Self::preview_workspace`].
+    pub async fn preview_chat(state: &AppState, chat: &ChatRow) -> Self {
+        Self::build_chat(state, chat, None).await
+    }
+
     async fn build_workspace(state: &AppState, workspace: Uuid, user: Option<Uuid>) -> Self {
         match saved(state, workspace).await {
             Ok(Some((organization, settings))) => {
@@ -435,23 +448,35 @@ impl Route {
     /// This route sent under the key derived for whoever its completions are spent for, and
     /// unusable while a hard budget covering that spend is used up this month. Only completions
     /// over HTTP to the instance's LiteLLM, under its own key, are attributed and held to a
-    /// budget, and only while spend is enforced. A budget that cannot be read holds nothing.
-    /// Calling it again changes nothing.
+    /// budget, and only while spend is enforced. A budget that cannot be read holds nothing, and
+    /// a refused route registers no key. Calling it again changes nothing.
     pub async fn spent(self, state: &AppState) -> Self {
         let Some(subject) = self.attributable(state.config()) else {
             return self;
         };
-        if !Standing::read(state).await.enforced {
+        let standing = Standing::read(state).await;
+        if !standing.enforced {
             return self;
         }
-        let exhausted = exhausted(state, &subject).await;
+        if let Some(exhausted) = exhausted(state, &subject).await {
+            tracing::info!(
+                workspace = %subject.workspace,
+                user = ?subject.user,
+                scope = ?exhausted.scope,
+                "A used-up hard budget refused a request"
+            );
+            return Self {
+                exhausted: Some(exhausted),
+                ..self
+            };
+        }
         let endpoint = match self.endpoint {
-            Ok(endpoint) => Ok(attribution::attribute(state, endpoint, &subject).await),
+            Ok(endpoint) => Ok(attribution::attribute(state, endpoint, &subject, &standing).await),
             unusable => unusable,
         };
         Self {
             endpoint,
-            exhausted,
+            exhausted: None,
             ..self
         }
     }
