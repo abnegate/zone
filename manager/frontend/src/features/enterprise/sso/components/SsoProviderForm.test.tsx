@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../../../api/ApiError';
+import { AdministersServerProvider } from '../../components/AdministersServer';
 import { ENTITLED, ENTRA, OKTA } from '../fixtures';
 import { refusalField, refusalMessage, UPGRADE_NOTICE } from '../messages';
 import { SsoRefusal } from '../SsoRefusal';
@@ -56,7 +57,9 @@ function renderForm(provider?: ProviderResponse) {
   render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
-        <SsoProviderForm provider={provider} onClose={onClose} />
+        <AdministersServerProvider value>
+          <SsoProviderForm provider={provider} onClose={onClose} />
+        </AdministersServerProvider>
       </MemoryRouter>
     </QueryClientProvider>
   );

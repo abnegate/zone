@@ -215,6 +215,12 @@ export const RENEW_LINK_LABEL = 'Renew on the License page';
 
 export const PASTE_KEY_LINK_LABEL = 'Paste the key on the License page';
 
+export const ASK_FOR_LICENSE_LABEL = 'Ask your server admin to install a license.';
+
+export const ASK_FOR_RENEWAL_LABEL = 'Ask your server admin to renew the license.';
+
+export const ASK_FOR_KEY_LABEL = 'Ask your server admin to paste the license key again.';
+
 export const NO_DESTINATIONS_READ_ONLY = 'No destinations are set up.';
 
 export const UNENCRYPTED_LABEL = 'Unencrypted';

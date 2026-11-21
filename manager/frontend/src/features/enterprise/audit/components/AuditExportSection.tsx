@@ -29,9 +29,14 @@ function StandingNotice({ standing, days }: StandingNoticeProps) {
     return null;
   }
   return notice.tone === NoticeTone.Upgrade ? (
-    <UpgradeNotice message={notice.message} action={notice.action} className="audit-notice" />
+    <UpgradeNotice
+      message={notice.message}
+      action={notice.action}
+      request={notice.request}
+      className="audit-notice"
+    />
   ) : (
-    <AuditLicenseWarning message={notice.message} action={notice.action} />
+    <AuditLicenseWarning message={notice.message} action={notice.action} request={notice.request} />
   );
 }
 

@@ -5,7 +5,7 @@ export {
   organizationScope,
   SERVER_SCOPE,
 } from './audit';
-export { LicenseSection } from './components';
+export { AdministersServerProvider, LicenseSection } from './components';
 export * from './hooks';
 export { LicenseRefusal } from './LicenseRefusal';
 export {

@@ -1,16 +1,16 @@
-import { Link } from 'react-router-dom';
-import { LICENSE_PATH } from '../../components/UpgradeNotice';
+import { LicenseLink } from '../../components/LicenseLink';
 
 interface AuditLicenseWarningProps {
   message: string;
   action: string;
+  request: string;
 }
 
-export function AuditLicenseWarning({ message, action }: AuditLicenseWarningProps) {
+export function AuditLicenseWarning({ message, action, request }: AuditLicenseWarningProps) {
   return (
     <div className="alert alert-warning audit-license-warning" role="status">
       <p>{message}</p>
-      <Link to={LICENSE_PATH}>{action}</Link>
+      <LicenseLink label={action} request={request} />
     </div>
   );
 }

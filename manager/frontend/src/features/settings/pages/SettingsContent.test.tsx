@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { render, screen } from '@testing-library/react';
 import type { OrgRole, WorkspaceRole } from '../../../types';
+import {
+  AdministersServerProvider,
+  useAdministersServer,
+} from '../../enterprise/components/AdministersServer';
 import { Permission } from '../../enterprise/roles/schemas';
 import { type SettingsAccess, SettingsGroup, SettingsSection } from '../navigation/sections';
 
@@ -19,6 +23,14 @@ const workspaceContext: {
 
 function marker(name: string) {
   return (props: object) => <div data-testid={name}>{JSON.stringify(props)}</div>;
+}
+
+function licensed(name: string) {
+  return (props: object) => (
+    <div data-testid={name} data-administers-server={String(useAdministersServer())}>
+      {JSON.stringify(props)}
+    </div>
+  );
 }
 
 mock.module('../../../shared/context/WorkspaceContext', () => ({
@@ -51,15 +63,16 @@ mock.module('../server/components', () => ({
 }));
 
 mock.module('../../enterprise', () => ({
-  AuditExportSection: marker('audit-export-section'),
+  AdministersServerProvider,
+  AuditExportSection: licensed('audit-export-section'),
   LicenseSection: marker('license-section'),
-  OrganizationPolicySection: marker('organization-policy-section'),
+  OrganizationPolicySection: licensed('organization-policy-section'),
   organizationScope: (id: string) => ({ kind: 'organization', organizationId: id }),
   Permission,
-  RolesSection: marker('roles-section'),
+  RolesSection: licensed('roles-section'),
   SERVER_SCOPE: { kind: 'server' },
   SsoSection: marker('sso-section'),
-  WorkspacePolicySection: marker('workspace-policy-section'),
+  WorkspacePolicySection: licensed('workspace-policy-section'),
 }));
 
 mock.module('../../auth/components', () => ({
@@ -361,6 +374,32 @@ describe('SettingsContent', () => {
       renderSection(SettingsGroup.Organization, SettingsSection.Roles, access('member', 'admin'));
       expect(propsOf('roles-section')).toEqual({ organizationId });
     });
+
+    it.each([true, false])(
+      'tells the roles whether the viewer administers the server (%p), so license notices link only where the License page is reachable',
+      (administersServer) => {
+        renderSection(SettingsGroup.Organization, SettingsSection.Roles, {
+          ...access('member', 'owner'),
+          administersServer,
+        });
+        expect(screen.getByTestId('roles-section')).toHaveAttribute(
+          'data-administers-server',
+          String(administersServer)
+        );
+      }
+    );
+
+    it.each([
+      [SettingsGroup.Organization, SettingsSection.AgentPolicy, 'organization-policy-section'],
+      [SettingsGroup.Workspace, SettingsSection.AgentPolicy, 'workspace-policy-section'],
+      [SettingsGroup.Organization, SettingsSection.AuditExport, 'audit-export-section'],
+    ])(
+      'keeps %s %s license notices from linking a viewer who does not administer the server',
+      (group, section, testId) => {
+        renderSection(group, section, access('admin', 'owner'));
+        expect(screen.getByTestId(testId)).toHaveAttribute('data-administers-server', 'false');
+      }
+    );
 
     it('renders no roles for an organization member', () => {
       const { container } = render(

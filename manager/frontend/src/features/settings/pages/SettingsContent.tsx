@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { SessionsSection } from '../../auth/components';
 import {
+  AdministersServerProvider,
   AuditExportSection,
   LicenseSection,
   OrganizationPolicySection,
@@ -193,15 +194,13 @@ function youContent(section: SettingsSection): ReactNode {
   return section === SettingsSection.Sessions ? <SessionsSection /> : null;
 }
 
-export default function SettingsContent({ group, section, access }: SettingsContentProps) {
-  const { currentOrganization, currentWorkspace } = useWorkspace();
-  const organizationId = currentOrganization?.id ?? null;
-  const workspaceId = currentWorkspace?.id ?? null;
-
-  if (!findSection(group, section)?.visible(access)) {
-    return null;
-  }
-
+function groupContent(
+  group: SettingsGroup,
+  section: SettingsSection,
+  access: SettingsAccess,
+  workspaceId: string | null,
+  organizationId: string | null
+): ReactNode {
   switch (group) {
     case SettingsGroup.Workspace:
       return workspaceContent(section, access, workspaceId, organizationId);
@@ -212,4 +211,20 @@ export default function SettingsContent({ group, section, access }: SettingsCont
     case SettingsGroup.You:
       return youContent(section);
   }
+}
+
+export default function SettingsContent({ group, section, access }: SettingsContentProps) {
+  const { currentOrganization, currentWorkspace } = useWorkspace();
+  const organizationId = currentOrganization?.id ?? null;
+  const workspaceId = currentWorkspace?.id ?? null;
+
+  if (!findSection(group, section)?.visible(access)) {
+    return null;
+  }
+
+  return (
+    <AdministersServerProvider value={access.administersServer}>
+      {groupContent(group, section, access, workspaceId, organizationId)}
+    </AdministersServerProvider>
+  );
 }

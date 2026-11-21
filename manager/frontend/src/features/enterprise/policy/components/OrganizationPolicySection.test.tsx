@@ -3,6 +3,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../../../api/ApiError';
+import { AdministersServerProvider } from '../../components/AdministersServer';
+import { ASK_FOR_RENEWAL } from '../../components/LapsedNotice';
+import { ASK_FOR_LICENSE } from '../../components/UpgradeNotice';
 import {
   ACTIVE_ORGANIZATION,
   COMMUNITY_ORGANIZATION,
@@ -33,22 +36,24 @@ afterAll(() => {
   mock.restore();
 });
 
-function renderSection() {
+function renderSection(administersServer = true) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
-        <OrganizationPolicySection organizationId={ORGANIZATION_ID} />
+        <AdministersServerProvider value={administersServer}>
+          <OrganizationPolicySection organizationId={ORGANIZATION_ID} />
+        </AdministersServerProvider>
       </MemoryRouter>
     </QueryClientProvider>
   );
 }
 
-async function loaded(policy: OrganizationPolicyResponse) {
+async function loaded(policy: OrganizationPolicyResponse, administersServer = true) {
   organization.mockResolvedValue(policy);
-  renderSection();
+  renderSection(administersServer);
   await screen.findByRole('heading', { name: 'Agent policy' });
 }
 
@@ -98,6 +103,23 @@ describe('OrganizationPolicySection', () => {
       );
       expect(screen.queryByRole('group', { name: 'Providers' })).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: SAVE_LABEL })).not.toBeInTheDocument();
+    });
+
+    it('asks an organization owner who does not administer the server for a license instead of linking to it', async () => {
+      await loaded(COMMUNITY_ORGANIZATION, false);
+
+      expect(screen.getByText(UPGRADE_NOTICE)).toBeInTheDocument();
+      expect(screen.getByText(ASK_FOR_LICENSE)).toBeInTheDocument();
+      expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    });
+
+    it('asks an organization owner who does not administer the server to get a lapsed license renewed', async () => {
+      await loaded(LAPSED_ORGANIZATION, false);
+
+      const warning = screen.getByRole('status');
+      expect(warning).toHaveTextContent(LAPSED_NOTICE);
+      expect(warning).toHaveTextContent(ASK_FOR_RENEWAL);
+      expect(screen.queryByRole('link')).not.toBeInTheDocument();
     });
 
     it('warns that a lapsed license keeps enforcing and shows the policy read-only', async () => {

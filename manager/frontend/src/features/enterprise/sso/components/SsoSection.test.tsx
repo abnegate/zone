@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../../../api/ApiError';
+import { AdministersServerProvider } from '../../components/AdministersServer';
 import { LicenseStatus } from '../../schemas';
 import {
   COMMUNITY_EMPTY,
@@ -53,7 +54,9 @@ function renderSection() {
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
-        <SsoSection />
+        <AdministersServerProvider value>
+          <SsoSection />
+        </AdministersServerProvider>
       </MemoryRouter>
     </QueryClientProvider>
   );

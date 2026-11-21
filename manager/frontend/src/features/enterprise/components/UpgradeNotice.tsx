@@ -1,15 +1,15 @@
 import { buttonVariants } from '@zone/ui';
-import { Link } from 'react-router-dom';
-import { SettingsGroup, SettingsSection, settingsPath } from '../../settings/navigation/sections';
-
-export const LICENSE_PATH = settingsPath(SettingsGroup.Server, SettingsSection.License);
+import { LicenseLink } from './LicenseLink';
 
 export const LICENSE_LINK = 'Go to License';
+
+export const ASK_FOR_LICENSE = 'Ask your server admin to install a license.';
 
 interface UpgradeNoticeProps {
   message: string;
   className: string;
   action?: string;
+  request?: string;
   announced?: boolean;
 }
 
@@ -17,14 +17,17 @@ export function UpgradeNotice({
   message,
   className,
   action = LICENSE_LINK,
+  request = ASK_FOR_LICENSE,
   announced = false,
 }: UpgradeNoticeProps) {
   return (
     <div className={`settings-card ${className}`} role={announced ? 'alert' : 'note'}>
       <p>{message}</p>
-      <Link to={LICENSE_PATH} className={buttonVariants({ variant: 'outline', size: 'sm' })}>
-        {action}
-      </Link>
+      <LicenseLink
+        label={action}
+        request={request}
+        className={buttonVariants({ variant: 'outline', size: 'sm' })}
+      />
     </div>
   );
 }
