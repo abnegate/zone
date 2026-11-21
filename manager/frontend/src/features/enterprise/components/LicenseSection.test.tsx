@@ -11,6 +11,7 @@ import {
   MANUAL_RENEWAL,
   OVER_SEATS,
   RENEWAL_DISABLED,
+  RENEWAL_ENDED,
   RENEWAL_UNREACHABLE,
   RENEWED,
   UNCOUNTED,
@@ -184,7 +185,7 @@ describe('LicenseSection', () => {
         Expires: 'Nov 1, 2027',
         'Grace ends': 'Dec 1, 2027',
         Renewal: 'Renews automatically',
-        'Last renewal check': 'Not checked yet',
+        'Last renewal check': 'No check recorded yet',
       });
       expect(screen.getByRole('button', { name: 'Replace license' })).toBeInTheDocument();
       expect(removeButton()).toBeInTheDocument();
@@ -270,6 +271,15 @@ describe('LicenseSection', () => {
 
       expect(details()[RENEWAL_CHECK]).toBe('Oct 25, 2027 License server unreachable');
       expect(renewalOutcome()).toHaveClass('ui-badge-warning');
+    });
+
+    it('says a subscription the license server will not renew is not renewable, without claiming it ended', async () => {
+      await loaded(RENEWAL_ENDED);
+
+      expect(details()[RENEWAL_CHECK]).toBe('Oct 27, 2027 Subscription not renewable');
+      expect(renewalOutcome()).toHaveClass('ui-badge-warning');
+      expect(screen.queryByText(/ended/i)).not.toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
 
     it('says automatic renewal is off on this server without a check row', async () => {

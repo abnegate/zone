@@ -72,7 +72,7 @@ const RENEWAL_MODE_LABELS: Readonly<Record<RenewalModeValue, string>> = {
 const RENEWAL_OUTCOME_LABELS: Readonly<Record<RenewalOutcomeValue, string>> = {
   [RenewalOutcome.Renewed]: 'Renewed',
   [RenewalOutcome.Current]: 'Up to date',
-  [RenewalOutcome.Ended]: 'Subscription ended',
+  [RenewalOutcome.Ended]: 'Subscription not renewable',
   [RenewalOutcome.Refused]: 'Refused by the license server',
   [RenewalOutcome.Rejected]: 'Renewed key not accepted',
   [RenewalOutcome.Unreachable]: 'License server unreachable',
@@ -87,7 +87,7 @@ const RENEWAL_OUTCOME_TONES: Readonly<Record<RenewalOutcomeValue, Tone>> = {
   [RenewalOutcome.Unreachable]: Tone.Warning,
 };
 
-const RENEWAL_UNCHECKED = 'Not checked yet';
+const RENEWAL_UNRECORDED = 'No check recorded yet';
 
 const SEATS_UNCOUNTED = 'Seat usage unavailable';
 
@@ -158,7 +158,7 @@ export function showsRenewalAttempt({ mode, attempted_at }: Renewal): boolean {
 }
 
 export function renewalAttemptDate({ attempted_at }: Renewal): string {
-  return attempted_at === null ? RENEWAL_UNCHECKED : licenseDate(attempted_at);
+  return attempted_at === null ? RENEWAL_UNRECORDED : licenseDate(attempted_at);
 }
 
 function seatsNoun(count: number): string {

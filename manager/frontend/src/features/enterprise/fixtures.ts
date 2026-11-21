@@ -71,6 +71,15 @@ export const RENEWAL_UNREACHABLE: LicenseResponse = {
   },
 };
 
+export const RENEWAL_ENDED: LicenseResponse = {
+  ...ACTIVE,
+  renewal: {
+    mode: RenewalMode.Automatic,
+    attempted_at: '2027-10-27T03:00:00Z',
+    outcome: RenewalOutcome.Ended,
+  },
+};
+
 export const RENEWAL_DISABLED: LicenseResponse = {
   ...ACTIVE,
   renewal: { mode: RenewalMode.Disabled, attempted_at: null, outcome: null },

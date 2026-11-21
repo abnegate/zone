@@ -208,7 +208,7 @@ describe('renewalOutcomeLabel and renewalOutcomeTone', () => {
     ).toEqual([
       ['Renewed', Tone.Success],
       ['Up to date', Tone.Success],
-      ['Subscription ended', Tone.Warning],
+      ['Subscription not renewable', Tone.Warning],
       ['Refused by the license server', Tone.Warning],
       ['Renewed key not accepted', Tone.Warning],
       ['License server unreachable', Tone.Warning],
@@ -251,10 +251,10 @@ describe('showsRenewalAttempt', () => {
 });
 
 describe('renewalAttemptDate', () => {
-  it('says the license was not checked yet when no attempt is recorded', () => {
+  it('says no check is recorded yet rather than claiming none was made', () => {
     expect(
       renewalAttemptDate({ mode: RenewalMode.Automatic, attempted_at: null, outcome: null })
-    ).toBe('Not checked yet');
+    ).toBe('No check recorded yet');
   });
 
   it('shows the calendar date of the last attempt in UTC', () => {
@@ -267,7 +267,7 @@ describe('renewalAttemptDate', () => {
     ).toBe('Oct 20, 2027');
   });
 
-  it('claims no enforcement before the first check', () => {
+  it('claims no enforcement while no check is recorded', () => {
     expect(
       renewalAttemptDate({ mode: RenewalMode.Automatic, attempted_at: null, outcome: null })
     ).not.toMatch(ENFORCEMENT_CLAIM);
