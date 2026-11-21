@@ -145,3 +145,4 @@ zone_context = { path = "../zone_context", features = ["test-utils"] }
 zone_enterprise = { path = "../zone_enterprise", features = ["signing"] }
 wiremock = "=0.6.5"
 tempfile = "=3.27.0"
+flate2 = "=1.1.10"

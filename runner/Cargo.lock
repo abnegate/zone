@@ -9876,6 +9876,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
+ "flate2",
  "form_urlencoded",
  "futures",
  "futures-util",

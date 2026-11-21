@@ -3,12 +3,14 @@
 //! the console handoff, with every refusal on the way.
 
 use std::collections::HashMap;
+use std::io::Read;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{TimeDelta, Utc};
+use flate2::read::DeflateDecoder;
 use reqwest::Url;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -380,195 +382,14 @@ fn wrapped(options: &Options) -> String {
     STANDARD.encode(wrapped)
 }
 
-/// The AuthnRequest inside an HTTP-Redirect binding URL: base64, then raw DEFLATE.
 fn authn_request(url: &Url) -> Document {
     let parameters: HashMap<String, String> = url.query_pairs().into_owned().collect();
     let compressed = STANDARD.decode(&parameters[SAML_REQUEST]).unwrap();
-    Document::parse(&inflate(&compressed)).unwrap()
-}
-
-const LENGTH_BASES: [usize; 29] = [
-    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
-    163, 195, 227, 258,
-];
-const LENGTH_EXTRA_BITS: [u32; 29] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
-];
-const DISTANCE_BASES: [usize; 30] = [
-    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
-    2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
-];
-const DISTANCE_EXTRA_BITS: [u32; 30] = [
-    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
-    13,
-];
-const CODE_LENGTH_ORDER: [usize; 19] = [
-    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
-];
-const MAXIMUM_CODE_LENGTH: usize = 15;
-const END_OF_BLOCK: usize = 256;
-
-/// Reads a DEFLATE stream least significant bit first, as RFC 1951 packs it.
-struct Bits<'a> {
-    input: &'a [u8],
-    position: usize,
-    buffer: u32,
-    count: u32,
-}
-
-impl Bits<'_> {
-    fn take(&mut self, wanted: u32) -> usize {
-        while self.count < wanted {
-            self.buffer |= u32::from(self.input[self.position]) << self.count;
-            self.position += 1;
-            self.count += 8;
-        }
-        let value = self.buffer & ((1 << wanted) - 1);
-        self.buffer >>= wanted;
-        self.count -= wanted;
-        value as usize
-    }
-}
-
-/// A canonical Huffman code: how many codes there are of each length, and the symbols in code
-/// order.
-struct Huffman {
-    counts: [usize; MAXIMUM_CODE_LENGTH + 1],
-    symbols: Vec<usize>,
-}
-
-impl Huffman {
-    fn new(lengths: &[usize]) -> Self {
-        let mut counts = [0; MAXIMUM_CODE_LENGTH + 1];
-        for &length in lengths {
-            counts[length] += 1;
-        }
-        counts[0] = 0;
-        let mut offsets = [0; MAXIMUM_CODE_LENGTH + 1];
-        let mut next = 0;
-        for (length, &count) in counts.iter().enumerate().skip(1) {
-            offsets[length] = next;
-            next += count;
-        }
-        let mut symbols = vec![0; lengths.len()];
-        for (symbol, &length) in lengths.iter().enumerate() {
-            if length != 0 {
-                symbols[offsets[length]] = symbol;
-                offsets[length] += 1;
-            }
-        }
-        Self { counts, symbols }
-    }
-
-    fn decode(&self, bits: &mut Bits<'_>) -> usize {
-        let (mut code, mut first, mut index) = (0, 0, 0);
-        for &count in &self.counts[1..] {
-            code |= bits.take(1);
-            if code < first + count {
-                return self.symbols[index + code - first];
-            }
-            index += count;
-            first = (first + count) << 1;
-            code <<= 1;
-        }
-        panic!("the DEFLATE stream has an invalid Huffman code");
-    }
-}
-
-fn inflate(input: &[u8]) -> Vec<u8> {
-    let mut bits = Bits {
-        input,
-        position: 0,
-        buffer: 0,
-        count: 0,
-    };
-    let mut output = Vec::new();
-    loop {
-        let last = bits.take(1) == 1;
-        match bits.take(2) {
-            0 => {
-                bits.buffer = 0;
-                bits.count = 0;
-                let start = bits.position + 4;
-                let length = usize::from(u16::from_le_bytes([
-                    input[bits.position],
-                    input[bits.position + 1],
-                ]));
-                output.extend_from_slice(&input[start..start + length]);
-                bits.position = start + length;
-            }
-            1 => {
-                let mut lengths = vec![8; 288];
-                lengths[144..256].fill(9);
-                lengths[256..280].fill(7);
-                expand(
-                    &mut bits,
-                    &mut output,
-                    &Huffman::new(&lengths),
-                    &Huffman::new(&[5; 30]),
-                );
-            }
-            2 => {
-                let literals = bits.take(5) + 257;
-                let distances = bits.take(5) + 1;
-                let mut code_lengths = [0; 19];
-                let declared = bits.take(4) + 4;
-                for &position in &CODE_LENGTH_ORDER[..declared] {
-                    code_lengths[position] = bits.take(3);
-                }
-                let code_length = Huffman::new(&code_lengths);
-                let mut lengths = Vec::with_capacity(literals + distances);
-                while lengths.len() < literals + distances {
-                    match code_length.decode(&mut bits) {
-                        16 => {
-                            let previous = *lengths.last().expect("a repeat follows a length");
-                            let repeat = 3 + bits.take(2);
-                            lengths.extend(std::iter::repeat_n(previous, repeat));
-                        }
-                        17 => {
-                            let repeat = 3 + bits.take(3);
-                            lengths.extend(std::iter::repeat_n(0, repeat));
-                        }
-                        18 => {
-                            let repeat = 11 + bits.take(7);
-                            lengths.extend(std::iter::repeat_n(0, repeat));
-                        }
-                        length => lengths.push(length),
-                    }
-                }
-                expand(
-                    &mut bits,
-                    &mut output,
-                    &Huffman::new(&lengths[..literals]),
-                    &Huffman::new(&lengths[literals..]),
-                );
-            }
-            _ => panic!("the DEFLATE stream has a reserved block type"),
-        }
-        if last {
-            return output;
-        }
-    }
-}
-
-fn expand(bits: &mut Bits<'_>, output: &mut Vec<u8>, literal: &Huffman, distance: &Huffman) {
-    loop {
-        let symbol = literal.decode(bits);
-        if symbol < END_OF_BLOCK {
-            output.push(u8::try_from(symbol).unwrap());
-            continue;
-        }
-        if symbol == END_OF_BLOCK {
-            return;
-        }
-        let index = symbol - END_OF_BLOCK - 1;
-        let length = LENGTH_BASES[index] + bits.take(LENGTH_EXTRA_BITS[index]);
-        let code = distance.decode(bits);
-        let back = DISTANCE_BASES[code] + bits.take(DISTANCE_EXTRA_BITS[code]);
-        for _ in 0..length {
-            output.push(output[output.len() - back]);
-        }
-    }
+    let mut xml = Vec::new();
+    DeflateDecoder::new(compressed.as_slice())
+        .read_to_end(&mut xml)
+        .unwrap();
+    Document::parse(&xml).unwrap()
 }
 
 #[tokio::test]
