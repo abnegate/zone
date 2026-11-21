@@ -25,9 +25,7 @@ const months = new Intl.DateTimeFormat(LOCALE, {
   timeZone: TIME_ZONE,
 });
 
-const moments = new Intl.DateTimeFormat(LOCALE, {
-  month: 'short',
-  day: 'numeric',
+const clock = new Intl.DateTimeFormat(LOCALE, {
   hour: 'numeric',
   minute: '2-digit',
   timeZone: TIME_ZONE,
@@ -51,6 +49,15 @@ export function monthLabel(month: string): string {
   return formatted(`${month}${MONTH_START}`, months);
 }
 
+function part(parts: Intl.DateTimeFormatPart[], type: Intl.DateTimeFormatPartTypes): string {
+  return parts.find((candidate) => candidate.type === type)?.value ?? '';
+}
+
 export function momentLabel(instant: string): string {
-  return formatted(instant, moments);
+  const date = new Date(instant);
+  if (Number.isNaN(date.getTime())) {
+    return instant;
+  }
+  const time = clock.formatToParts(date);
+  return `${days.format(date)} at ${part(time, 'hour')}:${part(time, 'minute')} ${part(time, 'dayPeriod')} ${part(time, 'timeZoneName')}`;
 }
