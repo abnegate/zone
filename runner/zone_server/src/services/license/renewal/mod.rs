@@ -4,6 +4,7 @@ mod client;
 mod due;
 pub mod mode;
 pub mod outcome;
+mod private;
 mod proxy;
 mod renew;
 pub mod settings;

@@ -2566,7 +2566,7 @@ On by default. Once a day, the server looks at its Zone Enterprise license, and 
 
 ### `ZONE_LICENSE_RENEWAL_URL`
 - **Default**: `https://licenses.bitecode.ltd/licenses/renew`
-- **Description**: Where the license key is posted for renewal. It must be an `http` or `https` URL with no user name or password in it; a private or loopback address is accepted, a link-local or cloud metadata address is not. A URL that breaks either rule stops the server at startup with a message naming the variable, and the URL itself is written only to the warning log. Point it elsewhere only for a license server you were told to use.
+- **Description**: Where the license key is posted for renewal. It must be an `http` or `https` URL with no user name or password in it, and it must not name a link-local or cloud metadata address. The key works like a password, so plain `http` is accepted only for a loopback or private network host: `localhost`, `127.0.0.0/8`, `::1`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`, a single-label name such as a compose service (`http://signer:8080/...`), or a name under `.localhost`, `.local`, `.internal` or `.home.arpa`. Any other host needs `https`. A URL that breaks a rule stops the server at startup with a message naming the variable but not the URL. Point it elsewhere only for a license server you were told to use.
 
 ---
 

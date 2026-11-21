@@ -2506,6 +2506,10 @@ mod tests {
                 "http://169.254.169.254/latest",
                 renewal::SettingsError::Metadata,
             ),
+            (
+                "http://licenses.example.com/renew",
+                renewal::SettingsError::Plaintext,
+            ),
         ] {
             environment.set(renewal::URL_VARIABLE, url);
             let refused = Config::from_env().map(|_| ()).unwrap_err();
