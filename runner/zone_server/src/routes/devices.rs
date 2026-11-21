@@ -1,4 +1,4 @@
-//! Organization admin device list, allow/block, and instance lock.
+//! Organization device list, allow/block, and instance lock.
 
 use axum::{
     Json,
@@ -58,9 +58,9 @@ pub struct UpdateDevicePolicyRequest {
 /// GET /api/organizations/:org_id/devices
 pub async fn list(
     State(state): State<AppState>,
-    OrganizationPermit(admin): OrganizationPermit<{ Permission::DevicesRead.index() }>,
+    OrganizationPermit(member): OrganizationPermit<{ Permission::DevicesRead.index() }>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let listed = devices::list_for_organization(state.db(), admin.organization_id)
+    let listed = devices::list_for_organization(state.db(), member.organization_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "Failed to list devices");
@@ -78,11 +78,11 @@ pub async fn list(
 /// PATCH /api/organizations/:org_id/devices/:device_id
 pub async fn update(
     State(state): State<AppState>,
-    OrganizationPermit(admin): OrganizationPermit<{ Permission::DevicesUpdate.index() }>,
+    OrganizationPermit(member): OrganizationPermit<{ Permission::DevicesUpdate.index() }>,
     Path((_, device_id)): Path<(Uuid, Uuid)>,
     Json(request): Json<UpdateDeviceRequest>,
 ) -> Result<impl IntoResponse, ServerError> {
-    if !devices::belongs_to_organization(state.db(), admin.organization_id, device_id)
+    if !devices::belongs_to_organization(state.db(), member.organization_id, device_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "Failed to verify device membership");
@@ -131,10 +131,10 @@ pub async fn update(
         audit(
             state.db(),
             AuditEvent {
-                organization_id: Some(admin.organization_id),
+                organization_id: Some(member.organization_id),
                 workspace_id: None,
-                actor_id: admin.user_id,
-                actor_email: &admin.email,
+                actor_id: member.user_id,
+                actor_email: &member.email,
                 action: match status {
                     devices::Status::Allowed => actions::DEVICE_ALLOWED,
                     devices::Status::Blocked => actions::DEVICE_BLOCKED,
@@ -161,10 +161,10 @@ pub async fn update(
         audit(
             state.db(),
             AuditEvent {
-                organization_id: Some(admin.organization_id),
+                organization_id: Some(member.organization_id),
                 workspace_id: None,
-                actor_id: admin.user_id,
-                actor_email: &admin.email,
+                actor_id: member.user_id,
+                actor_email: &member.email,
                 action: actions::DEVICE_RENAMED,
                 resource_type: resources::DEVICE,
                 resource_id: Some(device_id),
@@ -175,7 +175,7 @@ pub async fn update(
         .await;
     }
 
-    let listed = devices::list_for_organization(state.db(), admin.organization_id)
+    let listed = devices::list_for_organization(state.db(), member.organization_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "Failed to load device");
@@ -205,7 +205,7 @@ pub async fn get_policy(
 /// PUT /api/organizations/:org_id/device-policy
 pub async fn set_policy(
     State(state): State<AppState>,
-    OrganizationPermit(admin): OrganizationPermit<{ Permission::DevicesUpdate.index() }>,
+    OrganizationPermit(member): OrganizationPermit<{ Permission::DevicesUpdate.index() }>,
     Json(request): Json<UpdateDevicePolicyRequest>,
 ) -> Result<impl IntoResponse, ServerError> {
     let mode = match request.mode.as_str() {
@@ -230,10 +230,10 @@ pub async fn set_policy(
     audit(
         state.db(),
         AuditEvent {
-            organization_id: Some(admin.organization_id),
+            organization_id: Some(member.organization_id),
             workspace_id: None,
-            actor_id: admin.user_id,
-            actor_email: &admin.email,
+            actor_id: member.user_id,
+            actor_email: &member.email,
             action: actions::DEVICE_POLICY_UPDATED,
             resource_type: resources::DEVICE_POLICY,
             resource_id: None,
