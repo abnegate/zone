@@ -11,6 +11,7 @@ import {
   TEAM_LAPSED,
   UNCOUNTED_COMMUNITY,
 } from '../fixtures';
+import { LICENSE_PATH } from '../licensePath';
 import { PRICING_URL } from '../pricing';
 import type { LicenseResponse } from '../types';
 
@@ -21,11 +22,9 @@ mock.module('../api', () => ({ licenseApi: { get, set: mock(), remove: mock() } 
 mock.module('../../auth/context', () => ({ useAuth }));
 
 let MemberCapBanner: typeof import('./MemberCapBanner').MemberCapBanner;
-let LICENSE_PATH: string;
 
 beforeAll(async () => {
   ({ MemberCapBanner } = await import('./MemberCapBanner'));
-  ({ LICENSE_PATH } = await import('./PlanUpgradeNotice'));
 });
 
 afterAll(() => {

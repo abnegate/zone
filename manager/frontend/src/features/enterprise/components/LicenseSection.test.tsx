@@ -245,7 +245,9 @@ describe('LicenseSection', () => {
       expect(details().Members).toBe('3 of 3 members this month');
       const notice = screen.getByRole('status');
       expect(notice).toHaveClass('alert-warning');
-      expect(notice).toHaveTextContent('reached the 3 active members it allows without an active Zone Team or Enterprise license');
+      expect(notice).toHaveTextContent(
+        'reached the 3 active members it allows without an active Zone Team or Enterprise license'
+      );
       expect(notice).toHaveTextContent(
         'new members are refused until a Team or Enterprise license is added'
       );

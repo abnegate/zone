@@ -6,7 +6,6 @@ export {
   SERVER_SCOPE,
 } from './audit';
 export {
-  LICENSE_PATH,
   LicenseSection,
   MemberCapBanner,
   MemberCapRefusal,
@@ -14,6 +13,7 @@ export {
 } from './components';
 export * from './hooks';
 export { LicenseRefusal } from './LicenseRefusal';
+export { LICENSE_PATH } from './licensePath';
 export { COMMUNITY_MEMBERS } from './limits';
 export {
   isMemberCapRefusal,
