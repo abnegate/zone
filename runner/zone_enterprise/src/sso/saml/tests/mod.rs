@@ -1,6 +1,7 @@
 mod canonical;
 mod document;
 mod metadata;
+mod response;
 mod signature;
 mod testing;
 
