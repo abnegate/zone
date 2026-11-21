@@ -360,6 +360,7 @@ impl Fixture {
         let mut connection = self.pool().acquire().await.unwrap();
         budgets::update(
             &mut connection,
+            self.policy.organization,
             row.id,
             &Budget {
                 limit: Microdollars(limit),

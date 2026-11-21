@@ -359,9 +359,10 @@ budget gets the same notices as a hard one.
 
 A notice goes:
 
-- by email, when SMTP is configured, to the organization's active owners and
+- by email, when SMTP is configured, to the organization's owners and
   admins, and for a workspace budget to that workspace's owners and admins
-  too, one at a time, each waiting up to 60 seconds;
+  too, once per address and never to a deactivated account, one at a time,
+  each waiting up to 60 seconds;
 - to the server's notification channels:
   [`ZONE_NOTIFY_SLACK_WEBHOOK`](CONFIGURATION.md#zone_notify_slack_webhook),
   [`ZONE_NOTIFY_DISCORD_WEBHOOK`](CONFIGURATION.md#zone_notify_discord_webhook)

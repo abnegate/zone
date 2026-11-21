@@ -7,7 +7,7 @@ use super::budget_row::BudgetRow;
 const THRESHOLD: &str = "threshold_percent";
 
 #[derive(sqlx::FromRow)]
-pub(super) struct Record {
+pub(super) struct Columns {
     id: Uuid,
     organization_id: Uuid,
     workspace_id: Option<Uuid>,
@@ -22,29 +22,29 @@ pub(super) struct Record {
     spent_microdollars: i64,
 }
 
-impl TryFrom<Record> for BudgetRow {
+impl TryFrom<Columns> for BudgetRow {
     type Error = sqlx::Error;
 
-    fn try_from(record: Record) -> Result<Self, Self::Error> {
+    fn try_from(columns: Columns) -> Result<Self, Self::Error> {
         let threshold_percent =
-            u8::try_from(record.threshold_percent).map_err(|error| sqlx::Error::ColumnDecode {
+            u8::try_from(columns.threshold_percent).map_err(|error| sqlx::Error::ColumnDecode {
                 index: THRESHOLD.to_owned(),
                 source: Box::new(error),
             })?;
         Ok(Self {
-            id: record.id,
-            organization_id: record.organization_id,
-            target: Target::of(record.workspace_id, record.user_id),
+            id: columns.id,
+            organization_id: columns.organization_id,
+            target: Target::of(columns.workspace_id, columns.user_id),
             budget: Budget {
-                limit: Microdollars(record.limit_microdollars),
+                limit: Microdollars(columns.limit_microdollars),
                 threshold_percent,
-                hard: record.hard,
+                hard: columns.hard,
             },
-            workspace_name: record.workspace_name,
-            user_name: record.user_name,
-            user_email: record.user_email,
-            spent: Microdollars(record.spent_microdollars),
-            updated_at: record.updated_at,
+            workspace_name: columns.workspace_name,
+            user_name: columns.user_name,
+            user_email: columns.user_email,
+            spent: Microdollars(columns.spent_microdollars),
+            updated_at: columns.updated_at,
         })
     }
 }

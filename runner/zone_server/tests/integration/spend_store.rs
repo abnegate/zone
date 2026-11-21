@@ -1,6 +1,9 @@
 //! The spend data layer: budgets, derived keys, ingesting LiteLLM's spend logs, and keeping
 //! LiteLLM's keys in step.
 
+use std::time::{Duration, Instant};
+
+use abnegate_notify::Fanout;
 use abnegate_secret::MasterKey;
 use chrono::{DateTime, NaiveDate, SubsecRound, TimeDelta, Utc};
 use sqlx::PgPool;
@@ -10,15 +13,17 @@ use wiremock::{Mock, ResponseTemplate};
 use zone_enterprise::spend::{Budget, Microdollars, Month, Scope, State, Target};
 use zone_server::db::audit::lock::Lock;
 use zone_server::db::migrations;
+use zone_server::db::organization_members::OrgRole;
 use zone_server::db::spend::budgets::{self, Announcement, BudgetRow, CreateError, Crossing};
 use zone_server::db::spend::{cursor, keys};
+use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::services::spend::attribution::attribute;
 use zone_server::services::spend::client::DATE_FORMAT;
 use zone_server::services::spend::ingest::{self, Ingested, OVERLAP, SPEND_LOCK};
-use zone_server::services::spend::{Key, registry, upkeep};
+use zone_server::services::spend::{Key, notice, registry, upkeep};
 
 use crate::common::Database;
-use crate::common::spend::{DELETE_PATH, Fixture, GENERATE_PATH, LOGS_PATH, MASTER, log};
+use crate::common::spend::{DELETE_PATH, Fixture, GENERATE_PATH, LOGS_PATH, MASTER, Spend, log};
 
 const PREFIX: &str = "spend_store";
 const TOKEN: &str = "spend-store-token";
@@ -127,7 +132,13 @@ impl Store {
 
     async fn update(&self, id: Uuid, budget: Budget, actor: Uuid) -> BudgetRow {
         let mut transaction = self.pool().begin().await.unwrap();
-        let updated = budgets::update(&mut transaction, id, &budget, actor, month())
+        let organization: Uuid =
+            sqlx::query_scalar("SELECT organization_id FROM budgets WHERE id = $1")
+                .bind(id)
+                .fetch_one(&mut *transaction)
+                .await
+                .unwrap();
+        let updated = budgets::update(&mut transaction, organization, id, &budget, actor, month())
             .await
             .unwrap();
         budgets::refresh(&mut transaction, id, month())
@@ -142,6 +153,14 @@ impl Store {
         budgets::refresh(&mut connection, id, month())
             .await
             .unwrap();
+    }
+
+    async fn fetched(&self, organization: Uuid, id: Uuid) -> Option<BudgetRow> {
+        budgets::list(self.pool(), organization, month())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == id)
     }
 
     async fn markers(&self, id: Uuid) -> Markers {
@@ -287,16 +306,12 @@ async fn a_created_budget_answers_its_target_names_and_author() {
     assert_eq!(authors, (Some(author), Some(author)));
 
     assert_eq!(
-        budgets::get(fixture.pool(), organization, created.id, month())
-            .await
-            .unwrap(),
+        fixture.fetched(organization, created.id).await,
         Some(created.clone())
     );
     let stranger = fixture.organization().await;
     assert_eq!(
-        budgets::get(fixture.pool(), stranger, created.id, month())
-            .await
-            .unwrap(),
+        fixture.fetched(stranger, created.id).await,
         None,
         "another organization's budget is not found"
     );
@@ -498,12 +513,7 @@ async fn a_deleted_workspace_keeps_counting_for_its_organization() {
     assert_eq!(listed.len(), 1, "the workspace's budget goes with it");
     assert_eq!(listed[0].id, whole.id);
     assert_eq!(listed[0].spent, Microdollars(25));
-    assert_eq!(
-        budgets::get(fixture.pool(), organization, scoped.id, month())
-            .await
-            .unwrap(),
-        None
-    );
+    assert_eq!(fixture.fetched(organization, scoped.id).await, None);
 
     fixture.cleanup().await;
 }
@@ -566,18 +576,13 @@ async fn lock_answers_the_organizations_budget_and_delete_removes_it() {
         )
         .await
         .unwrap();
+    fixture.spend(organization, None, None, 7, inside()).await;
     fixture
-        .spend(
-            organization,
-            None,
-            None,
-            7,
-            Utc::now() - TimeDelta::seconds(1),
-        )
+        .spend(organization, None, None, 70, month().end())
         .await;
 
     let mut transaction = fixture.pool().begin().await.unwrap();
-    let locked = budgets::lock(&mut transaction, organization, created.id)
+    let locked = budgets::lock(&mut transaction, organization, created.id, month())
         .await
         .unwrap()
         .unwrap();
@@ -585,16 +590,30 @@ async fn lock_answers_the_organizations_budget_and_delete_removes_it() {
     assert_eq!(
         locked.spent,
         Microdollars(7),
-        "lock reads this month's spend"
+        "lock reads the month's spend"
     );
     assert_eq!(
-        budgets::lock(&mut transaction, stranger, created.id)
+        budgets::lock(&mut transaction, stranger, created.id, month())
             .await
             .unwrap(),
         None
     );
-    assert!(budgets::delete(&mut transaction, created.id).await.unwrap());
-    assert!(!budgets::delete(&mut transaction, created.id).await.unwrap());
+    assert!(
+        !budgets::delete(&mut transaction, stranger, created.id)
+            .await
+            .unwrap(),
+        "another organization can't delete the budget"
+    );
+    assert!(
+        budgets::delete(&mut transaction, organization, created.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !budgets::delete(&mut transaction, organization, created.id)
+            .await
+            .unwrap()
+    );
     transaction.commit().await.unwrap();
 
     assert!(
@@ -942,6 +961,287 @@ async fn settle_rearms_a_notice_once_its_condition_lapses() {
         fixture.markers(created.id).await,
         (Some(next.date()), None, None)
     );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn every_target_counts_its_own_spend_and_unbudgeted_organizations_count_for_none() {
+    let fixture = Store::new().await;
+    let organization = fixture.organization().await;
+    let unbudgeted = fixture.organization().await;
+    let platform = fixture.workspace(organization, "Platform").await;
+    let research = fixture.workspace(organization, "Research").await;
+    let gone = fixture.workspace(organization, "Gone").await;
+    let elsewhere = fixture.workspace(unbudgeted, "Elsewhere").await;
+    let ada = fixture.user("Ada").await;
+    let grace = fixture.user("Grace").await;
+    let linus = fixture.user("Linus").await;
+    for (organization, workspace, user, microdollars) in [
+        (organization, Some(platform), Some(ada), 1),
+        (organization, Some(platform), None, 10),
+        (organization, Some(gone), Some(ada), 100),
+        (organization, Some(gone), None, 1_000),
+        (organization, Some(research), Some(linus), 10_000),
+        (organization, Some(research), Some(grace), 100_000),
+        (unbudgeted, Some(elsewhere), Some(ada), 1_000_000),
+        (unbudgeted, None, None, 10_000_000),
+    ] {
+        fixture
+            .spend(organization, workspace, user, microdollars, inside())
+            .await;
+    }
+    let mut expected = Vec::new();
+    for (target, spent) in [
+        (organization_wide(), 111_111),
+        (Target::of(Some(platform), None), 11),
+        (Target::of(Some(research), None), 110_000),
+        (Target::of(None, Some(ada)), 101),
+        (Target::of(None, Some(grace)), 100_000),
+    ] {
+        let created = fixture
+            .create(organization, target, budget(1, false), ada)
+            .await
+            .unwrap();
+        expected.push((created.id, spent));
+    }
+    sqlx::query("DELETE FROM workspaces WHERE id = $1")
+        .bind(gone)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(linus)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+    let (research_budget, research_spent) = expected[2];
+    expected.sort();
+
+    let mut listed: Vec<(Uuid, i64)> = budgets::list(fixture.pool(), organization, month())
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.id, row.spent.0))
+        .collect();
+    listed.sort();
+    assert_eq!(
+        listed, expected,
+        "spend without a workspace or member counts only for the organization"
+    );
+    let mut settled: Vec<(Uuid, i64)> = budgets::settle(fixture.pool(), month())
+        .await
+        .unwrap()
+        .iter()
+        .map(|crossing| (crossing.row.id, crossing.row.spent.0))
+        .collect();
+    settled.sort();
+    assert_eq!(settled, expected, "settle sums each target as list does");
+    let mut transaction = fixture.pool().begin().await.unwrap();
+    let locked = budgets::lock(&mut transaction, organization, research_budget, month())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(locked.spent.0, research_spent);
+    transaction.rollback().await.unwrap();
+    assert!(
+        budgets::list(fixture.pool(), unbudgeted, month())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_month_past_the_largest_sum_is_held_at_the_most_microdollars() {
+    let fixture = Store::new().await;
+    let organization = fixture.organization().await;
+    let ada = fixture.user("Ada").await;
+    for _ in 0..2 {
+        fixture
+            .spend(organization, None, None, i64::MAX, inside())
+            .await;
+    }
+
+    let created = fixture
+        .create(organization, organization_wide(), budget(1, true), ada)
+        .await
+        .unwrap();
+    assert_eq!(created.spent, Microdollars(i64::MAX));
+    let listed = budgets::list(fixture.pool(), organization, month())
+        .await
+        .unwrap();
+    assert_eq!(listed[0].spent, Microdollars(i64::MAX));
+    let crossings = budgets::settle(fixture.pool(), month()).await.unwrap();
+    assert_eq!(
+        crossing(&crossings, created.id),
+        Some(Announcement::Exhaustion)
+    );
+    assert_eq!(crossings[0].row.spent, Microdollars(i64::MAX));
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn settle_answers_nothing_for_a_budget_changed_while_it_waited() {
+    let fixture = Store::new().await;
+    let organization = fixture.organization().await;
+    let ada = fixture.user("Ada").await;
+    let created = fixture
+        .create(organization, organization_wide(), budget(100, true), ada)
+        .await
+        .unwrap();
+    fixture.spend(organization, None, None, 150, inside()).await;
+
+    let mut edit = fixture.pool().begin().await.unwrap();
+    let editor: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *edit)
+        .await
+        .unwrap();
+    budgets::update(
+        &mut edit,
+        organization,
+        created.id,
+        &budget(1_000, true),
+        ada,
+        month(),
+    )
+    .await
+    .unwrap();
+    budgets::refresh(&mut edit, created.id, month())
+        .await
+        .unwrap();
+    let pool = fixture.pool().clone();
+    let settling = tokio::spawn(async move { budgets::settle(&pool, month()).await });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
+        )
+        .bind(editor)
+        .fetch_one(fixture.pool())
+        .await
+        .unwrap();
+        if blocked {
+            break;
+        }
+        assert!(Instant::now() < deadline, "settle never waited on the edit");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    edit.commit().await.unwrap();
+
+    let crossings = settling.await.unwrap().unwrap();
+    assert!(
+        crossings.is_empty(),
+        "no notice for the limit the edit replaced: {crossings:?}"
+    );
+    assert_eq!(fixture.markers(created.id).await, (None, None, None));
+    assert!(
+        budgets::settle(fixture.pool(), month())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn update_leaves_another_organizations_budget_alone() {
+    let fixture = Store::new().await;
+    let organization = fixture.organization().await;
+    let stranger = fixture.organization().await;
+    let ada = fixture.user("Ada").await;
+    let created = fixture
+        .create(organization, organization_wide(), budget(100, false), ada)
+        .await
+        .unwrap();
+
+    let mut transaction = fixture.pool().begin().await.unwrap();
+    let error = budgets::update(
+        &mut transaction,
+        stranger,
+        created.id,
+        &budget(500, true),
+        ada,
+        month(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, sqlx::Error::RowNotFound), "{error}");
+    transaction.commit().await.unwrap();
+
+    assert_eq!(
+        fixture.fetched(organization, created.id).await,
+        Some(created)
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_budget_notice_goes_to_active_accounts_only() {
+    let fixture = Fixture::new("spend_notice_active").await;
+    let admin = fixture.policy.member(OrgRole::Admin, None).await;
+    let departed = fixture.policy.member(OrgRole::Admin, None).await;
+    let steward = fixture
+        .policy
+        .member(OrgRole::Member, Some(WorkspaceRole::Admin))
+        .await;
+    let departed_steward = fixture
+        .policy
+        .member(OrgRole::Member, Some(WorkspaceRole::Owner))
+        .await;
+    fixture
+        .policy
+        .member(OrgRole::Member, Some(WorkspaceRole::Member))
+        .await;
+    sqlx::query("UPDATE users SET is_active = false WHERE id = ANY($1)")
+        .bind(vec![departed.id, departed_steward.id])
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+    fixture
+        .record(Spend {
+            occurred_at: inside(),
+            ..fixture.spend()
+        })
+        .await;
+    let mut connection = fixture.pool().acquire().await.unwrap();
+    let created = budgets::create(
+        &mut connection,
+        fixture.policy.organization,
+        &Target::of(Some(fixture.policy.workspace), None),
+        &budget(1, false),
+        fixture.policy.owner.id,
+        month(),
+    )
+    .await
+    .unwrap();
+    drop(connection);
+
+    let crossings = budgets::settle(fixture.pool(), month()).await.unwrap();
+    let crossing = crossings
+        .iter()
+        .find(|crossing| crossing.row.id == created.id)
+        .expect("the budget is used up");
+    assert!(
+        notice::announce(fixture.state(), &Fanout::new(), crossing, month())
+            .await
+            .unwrap()
+    );
+
+    let mut mailed = fixture.mailed();
+    mailed.sort();
+    let mut expected = vec![
+        fixture.policy.owner.email.clone(),
+        admin.email,
+        steward.email,
+    ];
+    expected.sort();
+    assert_eq!(mailed, expected, "deactivated accounts get no notice");
 
     fixture.cleanup().await;
 }
