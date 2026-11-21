@@ -594,7 +594,8 @@ anywhere and is renewed by pasting, as before.
    grace period included. A license that isn't due is left alone and nothing
    is sent or recorded.
 2. A due license is posted to `ZONE_LICENSE_RENEWAL_URL`, by default
-   `https://licenses.bitecode.ltd/licenses/renew`.
+   `https://licenses.bitecode.ltd/licenses/renew`. The URL must use `https`
+   unless it names a [loopback or private network host](#what-zone-sends).
 3. The signer verifies the key and reads its subscription from Polar. When
    the subscription is `active` and its current period ends later than the
    key, or ends at the same time with a different seat count, it signs a key
@@ -623,6 +624,18 @@ renewal carry the new seat count.
 
 The first check runs about a minute after the server starts, and then every
 24 hours.
+
+The license panel shows how the installed license renews, which the license
+API reports as the renewal `mode`:
+
+| Mode | When | The panel shows |
+|---|---|---|
+| `automatic` | The license carries a subscription and the daily check is running on this server. | Renews automatically |
+| `disabled` | The license carries a subscription, but this server doesn't check it: `ZONE_LICENSE_RENEWAL=false`, or renewal is on but its HTTP client failed to build at startup, which zone-server logs as an error. | Automatic renewal is off on this server |
+| `manual` | The license has no subscription. | Renew by pasting a new key before it expires |
+
+Under `automatic` the panel also shows the last check, or *No check recorded
+yet* before the first one.
 
 ### Waiting for payment
 
@@ -678,7 +691,19 @@ User-Agent: Zone
 
 The key holds nothing the signer didn't put there itself: the customer name,
 seats, dates and subscription id. Zone sends no version, host name, seat
-usage, user, or anything else about the server. The request uses the
+usage, user, or anything else about the server.
+
+The key works like a password, so zone-server refuses at startup a
+`ZONE_LICENSE_RENEWAL_URL` that would send it in plain `http` across a public
+network. Plain `http` is accepted only for a loopback or private network host:
+`localhost`, `127.0.0.0/8`, `::1`, `10.0.0.0/8`, `172.16.0.0/12`,
+`192.168.0.0/16`, `fc00::/7`, the IPv4-mapped IPv6 forms of those addresses, a
+single-label name such as a compose service (`http://signer:8080/...`), or a
+name under `.localhost`, `.local`, `.internal` or `.home.arpa`. Any other host
+needs `https`. See [CONFIGURATION.md](CONFIGURATION.md#zone_license_renewal_url)
+for the URL's other rules.
+
+The request uses the
 system's proxy settings (`HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`), follows
 no redirects, and gives up after 30 seconds, or 10 seconds without a
 connection.
