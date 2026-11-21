@@ -69,7 +69,10 @@ fn client_webview_uses_stable_loopback() {
 #[test]
 fn launcher_icon_is_theme_blue_and_inset() {
     let svg = fs::read_to_string(desktop_dir().join("icons/icon.svg")).unwrap();
-    assert!(svg.contains("#0011d9"), "launcher mark must use --ui-accent");
+    assert!(
+        svg.contains("#0011d9"),
+        "launcher mark must use --ui-accent"
+    );
     assert!(
         svg.contains("#1a1612"),
         "launcher background must match the dark canvas"
