@@ -30,6 +30,7 @@ fn current() -> Payload {
         expires_at: expiry(),
         key_id: KEY_ID.into(),
         subscription: Some(SUBSCRIPTION.into()),
+        plan: None,
     }
 }
 

@@ -244,6 +244,7 @@ fn expiring(expires_in: TimeDelta) -> Payload {
         expires_at,
         key_id: TRUSTED.into(),
         subscription: None,
+        plan: None,
     }
 }
 

@@ -21,6 +21,7 @@ fn license() -> License {
             expires_at: "2027-11-01T00:00:00Z".parse().unwrap(),
             key_id: KEY_ID.into(),
             subscription: None,
+            plan: None,
         },
         &signing,
     );

@@ -337,6 +337,7 @@ mod tests {
                 expires_at,
                 key_id: KEY_ID.into(),
                 subscription: subscription.map(str::to_owned),
+                plan: None,
             },
             &signing,
         );
