@@ -285,13 +285,13 @@ a.change-server-btn:hover {
 
   .sidebar {
     transform: translateX(-100%);
-    box-shadow: var(--ui-shadow-2xl);
     padding-top: var(--ui-safe-top);
     padding-bottom: var(--ui-safe-bottom);
   }
 
   .sidebar.open {
     transform: translateX(0);
+    box-shadow: var(--ui-shadow-2xl);
   }
 
   /* The header grows to hold the close control at a thumb-sized target. */

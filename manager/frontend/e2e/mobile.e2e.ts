@@ -23,10 +23,19 @@ test.describe('Mobile Responsiveness', () => {
 
   test.describe('Sidebar', () => {
     test('sidebar is hidden by default on mobile', async ({ page }) => {
-      // Sidebar should be off-screen on mobile (transformed)
       const sidebar = page.locator('.sidebar');
       await expect(sidebar).toBeAttached();
-      // The sidebar exists but is translated off-screen
+      await expect(sidebar).not.toBeInViewport();
+    });
+
+    test('a closed sidebar casts no shadow over the page edge', async ({ page }) => {
+      const sidebar = page.locator('.sidebar');
+      await expect(sidebar).not.toBeInViewport();
+      await expect(sidebar).toHaveCSS('box-shadow', 'none');
+
+      await page.click('.page-bar-lead-btn');
+      await expect(page.locator('.sidebar.open')).toBeVisible();
+      await expect(sidebar).not.toHaveCSS('box-shadow', 'none');
     });
 
     test('the bar leads with the drawer trigger on mobile', async ({ page }) => {
