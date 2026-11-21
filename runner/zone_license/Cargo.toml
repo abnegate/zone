@@ -1,6 +1,6 @@
 [package]
 name = "zone_license"
-description = "Zone Enterprise license signer and Polar webhook"
+description = "Zone license signer and Polar webhook"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -12,7 +12,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 use wiremock::matchers::{any, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_enterprise::{Keyring, TrustedKey};
+use zone_enterprise::{Keyring, Plan, TrustedKey};
 
 use super::*;
 use crate::http::tests::Recording;
@@ -21,6 +21,7 @@ use crate::license_id;
 use crate::logging;
 use crate::polar::{self, AccessToken, Proxy, WebhookSecret};
 use crate::private_key::PrivateKey;
+use crate::products::Products;
 use crate::renewal::SETTLEMENT;
 use crate::signer::Signer;
 
@@ -73,6 +74,16 @@ fn signed_by(
     seats: u32,
     subscription: Option<&str>,
 ) -> String {
+    signed_for(signer, expires_at, seats, subscription, Plan::Enterprise)
+}
+
+fn signed_for(
+    signer: &Signer,
+    expires_at: DateTime<Utc>,
+    seats: u32,
+    subscription: Option<&str>,
+    plan: Plan,
+) -> String {
     signer
         .sign(&Terms {
             id: Uuid::from_u128(1),
@@ -81,12 +92,17 @@ fn signed_by(
             issued_at: expires_at - TimeDelta::days(365),
             expires_at,
             subscription: subscription.map(str::to_owned),
+            plan,
         })
         .unwrap()
 }
 
 fn key(expires_at: DateTime<Utc>, seats: u32) -> String {
     signed_by(&previous(), expires_at, seats, Some(SUBSCRIPTION))
+}
+
+fn planned(expires_at: DateTime<Utc>, seats: u32, plan: Plan) -> String {
+    signed_for(&previous(), expires_at, seats, Some(SUBSCRIPTION), plan)
 }
 
 fn expiring() -> String {
@@ -130,10 +146,14 @@ fn client(server: &MockServer) -> polar::Client {
 }
 
 fn context(outbox: Arc<Recording>) -> Context {
+    listing(outbox, PRODUCT)
+}
+
+fn listing(outbox: Arc<Recording>, products: &str) -> Context {
     Context::new(
         signer(),
         WebhookSecret::new(SECRET),
-        vec![PRODUCT.to_owned()],
+        Products::parse(products).unwrap(),
         outbox,
     )
 }
@@ -172,9 +192,18 @@ async fn renewing_at(
     request: Request<Body>,
     clock: fn() -> DateTime<Utc>,
 ) -> (StatusCode, Option<Value>) {
+    renewing_listed(client, request, clock, PRODUCT).await
+}
+
+async fn renewing_listed(
+    client: polar::Client,
+    request: Request<Body>,
+    clock: fn() -> DateTime<Utc>,
+    products: &str,
+) -> (StatusCode, Option<Value>) {
     let outbox = Arc::new(Recording::default());
     let renewer = Renewer::new(keyring(), client).with_clock(clock);
-    let app = router(context(outbox.clone()).with_renewer(renewer));
+    let app = router(listing(outbox.clone(), products).with_renewer(renewer));
     let answered = answer(app, request).await;
     assert!(outbox.sent().is_empty(), "the renew route never emails");
     answered
@@ -215,13 +244,61 @@ async fn an_expiring_key_renews_to_the_current_period() {
     let payload = license.payload();
     assert_eq!(
         payload.id,
-        license_id::derive(SUBSCRIPTION, at(PERIOD_END), 5)
+        license_id::derive(SUBSCRIPTION, at(PERIOD_END), 5, Plan::Enterprise)
     );
     assert_eq!(payload.customer, CUSTOMER);
     assert_eq!(payload.seats, 5);
     assert_eq!(payload.issued_at, at(PERIOD_START));
     assert_eq!(payload.expires_at, at(PERIOD_END));
+    assert_eq!(payload.plan, Some(Plan::Enterprise));
     assert_eq!(license.subscription(), Some(SUBSCRIPTION));
+}
+
+#[tokio::test]
+async fn a_move_to_a_team_product_renews_to_a_team_key_in_the_same_period() {
+    let server = polar(active()).await;
+    let (status, body) = renewing_listed(
+        client(&server),
+        asking(&key(at(PERIOD_END), 5)),
+        settled,
+        &format!("{PRODUCT}=team"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let license = renewed(body);
+    assert_eq!(license.plan(), Plan::Team);
+    assert_eq!(license.seats(), 5);
+    assert_eq!(license.expires_at(), at(PERIOD_END));
+    assert_eq!(
+        license.id(),
+        license_id::derive(SUBSCRIPTION, at(PERIOD_END), 5, Plan::Team)
+    );
+}
+
+#[tokio::test]
+async fn a_move_to_an_enterprise_product_renews_to_an_enterprise_key_in_the_same_period() {
+    let server = polar(active()).await;
+    let (status, body) = renew(&server, asking(&planned(at(PERIOD_END), 5, Plan::Team))).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let license = renewed(body);
+    assert_eq!(license.plan(), Plan::Enterprise);
+    assert_eq!(license.seats(), 5);
+}
+
+#[tokio::test]
+async fn a_team_key_on_a_team_product_covering_the_period_is_current() {
+    let server = polar(active()).await;
+    let (status, body) = renewing_listed(
+        client(&server),
+        asking(&planned(at(PERIOD_END), 5, Plan::Team)),
+        settled,
+        &format!("{PRODUCT}=team"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(body, None);
 }
 
 #[tokio::test]
@@ -509,7 +586,7 @@ async fn a_renewal_logs_its_ids_and_never_the_key_or_the_customer() {
     let logged = logged(tracing::Level::INFO, active(), &key).await;
 
     let old = keyring().verify(&key).unwrap().id();
-    let new = license_id::derive(SUBSCRIPTION, at(PERIOD_END), 5);
+    let new = license_id::derive(SUBSCRIPTION, at(PERIOD_END), 5, Plan::Enterprise);
     for expected in [
         "outcome=renewed".to_owned(),
         format!("subscription=\"{SUBSCRIPTION}\""),
