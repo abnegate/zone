@@ -557,6 +557,34 @@ async fn a_lapsed_license_keeps_enforcing_custom_roles() {
 }
 
 #[tokio::test]
+async fn community_keeps_enforcing_existing_custom_roles() {
+    let fixture = fixture().await;
+    let writer = workspace_holder(&fixture, &[Permission::WorkspaceWrite]).await;
+    let reader = workspace_holder(&fixture, &[]).await;
+
+    let task = Call::post(
+        format!("/api/workspaces/{}/tasks", fixture.workspace),
+        json!({ "description": "Written on Community by a custom role" }),
+    );
+    let response = task.send(&fixture, &writer.token).await;
+    assert_eq!(
+        response.status,
+        StatusCode::CREATED,
+        "{}",
+        describe(&task, &response)
+    );
+    let response = task.send(&fixture, &reader.token).await;
+    assert_eq!(
+        response.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        describe(&task, &response)
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn an_unparsable_assignment_keeps_each_routes_own_refusal() {
     let fixture = fixture().await;
     let member = organization_member(&fixture).await;
