@@ -139,6 +139,7 @@ mod sessions;
 mod skills_store;
 mod sso_enforcement;
 mod sso_providers;
+mod sso_saml;
 mod sso_sign_in;
 mod sso_store;
 mod sync;
