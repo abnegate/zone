@@ -4,10 +4,9 @@ use chrono::NaiveDateTime;
 use sqlx::{Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
-use super::{
-    DbResult,
-    workspace_members::{self, WorkspaceRole},
-};
+use crate::auth::Permission;
+
+use super::{DbResult, workspace_members};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AccessError {
@@ -37,11 +36,17 @@ async fn authorize(
     user_id: Uuid,
     write: bool,
 ) -> AccessResult<()> {
-    let role = workspace_members::lock_role(connection, workspace_id, user_id).await?;
+    let grant = workspace_members::lock_membership(connection, workspace_id, user_id)
+        .await?
+        .map(|membership| membership.grant);
+    let required = if write {
+        Permission::WorkspaceWrite
+    } else {
+        Permission::WorkspaceRead
+    };
 
-    match role {
-        Some(WorkspaceRole::Owner | WorkspaceRole::Admin | WorkspaceRole::Member) => Ok(()),
-        Some(WorkspaceRole::Viewer) if !write => Ok(()),
+    match grant {
+        Some(grant) if grant.allows(required) => Ok(()),
         _ if write => Err(AccessError::Forbidden(
             "You do not have write access to this workspace",
         )),

@@ -6,9 +6,11 @@ use sqlx::{PgConnection, PgPool};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::auth::Permission;
+
 use super::DbResult;
 use super::tasks::{self, Origin};
-use super::workspace_members::{self, WorkspaceRole};
+use super::workspace_members;
 
 /// The last thing a model reads before it decides what to do while a runner
 /// runs, which is why the waiting section pins this one too.
@@ -102,10 +104,13 @@ pub async fn authorize(
     user_id: Uuid,
     write: bool,
 ) -> DbResult<()> {
-    let role = workspace_members::lock_role(connection, workspace_id, user_id).await?;
-    if !role.is_some_and(|role| {
-        role >= WorkspaceRole::Member || (!write && role == WorkspaceRole::Viewer)
-    }) {
+    let required = if write {
+        Permission::WorkspaceWrite
+    } else {
+        Permission::WorkspaceRead
+    };
+    let membership = workspace_members::lock_membership(connection, workspace_id, user_id).await?;
+    if !membership.is_some_and(|membership| membership.grant.allows(required)) {
         return Err(invalid("Workspace access denied"));
     }
     Ok(())
@@ -474,6 +479,56 @@ pub async fn tail_task_log(
         "logs": lines,
         "has_more": has_more,
     }))
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    use crate::auth::{Grant, Permission, Scope};
+    use crate::db::custom_roles::{self, Creation, Definition};
+    use crate::db::workspace_members::WorkspaceRole;
+
+    /// Moves `user` onto a fresh workspace custom role holding `granted` and
+    /// the base, with the built-in column pinned to viewer as every custom
+    /// holder's is.
+    pub async fn hold(
+        pool: &PgPool,
+        organization: Uuid,
+        workspace: Uuid,
+        user: Uuid,
+        granted: &[Permission],
+    ) {
+        let names: Vec<String> = granted
+            .iter()
+            .map(|permission| permission.name().to_string())
+            .collect();
+        let grant = Grant::compose(Scope::Workspace, &names).expect("the role composes");
+        let definition = Definition {
+            name: &format!("Custom {}", Uuid::new_v4()),
+            description: None,
+            scope: Scope::Workspace,
+            grant: &grant,
+        };
+        let Creation::Created(role) = custom_roles::create(pool, organization, &definition, user)
+            .await
+            .expect("the role is created")
+        else {
+            panic!("a fresh role name was taken");
+        };
+        sqlx::query(
+            "UPDATE workspace_members SET role = $3, custom_role_id = $4 \
+             WHERE workspace_id = $1 AND user_id = $2",
+        )
+        .bind(workspace)
+        .bind(user)
+        .bind(WorkspaceRole::Viewer.as_str())
+        .bind(role.id)
+        .execute(pool)
+        .await
+        .expect("the custom role is assigned");
+    }
 }
 
 #[cfg(test)]
@@ -908,6 +963,41 @@ mod tests {
             .unwrap();
         assert!(list_chats(&pool, workspace, user).await.is_err());
         cleanup(&pool, other_organization, other_user).await;
+        cleanup(&pool, organization, user).await;
+    }
+
+    #[tokio::test]
+    async fn a_custom_role_writes_only_when_it_holds_workspace_write() {
+        let (pool, organization, workspace, user, _) = fixture().await;
+        let task = || Task {
+            title: Some("Custom".into()),
+            description: String::new(),
+            assignee_id: None,
+        };
+
+        testing::hold(&pool, organization, workspace, user, &[]).await;
+        assert!(list_chats(&pool, workspace, user).await.is_ok());
+        assert!(
+            create_task(&pool, workspace, user, None, Origin::Member, task())
+                .await
+                .is_err(),
+            "a custom role holding only workspace:read created a task"
+        );
+
+        testing::hold(
+            &pool,
+            organization,
+            workspace,
+            user,
+            &[Permission::WorkspaceWrite],
+        )
+        .await;
+        assert!(
+            create_task(&pool, workspace, user, None, Origin::Member, task())
+                .await
+                .is_ok(),
+            "a viewer-pinned custom role holding workspace:write was refused"
+        );
         cleanup(&pool, organization, user).await;
     }
 

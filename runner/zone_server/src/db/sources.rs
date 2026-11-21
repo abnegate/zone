@@ -11,7 +11,10 @@ use uuid::Uuid;
 use zone_context::adapters::GitLabAdapter;
 use zone_context::error::ContextError;
 
+use crate::auth::Permission;
+
 use super::DbResult;
+use super::workspace_members::WorkspaceRole;
 
 mod create_error;
 mod link;
@@ -756,11 +759,11 @@ pub async fn list_active_index_sources(pool: &PgPool) -> DbResult<Vec<ActiveInde
                 FROM workspace_members wm
                 WHERE wm.workspace_id = s.workspace_id
                   AND wm.is_active
-                  AND wm.role IN ('owner', 'admin', 'member')
+                  AND workspace_permits(wm.user_id, s.workspace_id, $1)
                 ORDER BY
                     CASE wm.role
-                        WHEN 'owner' THEN 0
-                        WHEN 'admin' THEN 1
+                        WHEN $2 THEN 0
+                        WHEN $3 THEN 1
                         ELSE 2
                     END,
                     wm.created_at
@@ -772,6 +775,9 @@ pub async fn list_active_index_sources(pool: &PgPool) -> DbResult<Vec<ActiveInde
           AND s.workspace_id IS NOT NULL
         "#,
     )
+    .bind(Permission::WorkspaceWrite.name())
+    .bind(WorkspaceRole::Owner.as_str())
+    .bind(WorkspaceRole::Admin.as_str())
     .fetch_all(pool)
     .await
 }
@@ -1404,6 +1410,103 @@ mod tests {
             listed.as_source_row().github_installation_id,
             Some(installation.id)
         );
+    }
+
+    #[tokio::test]
+    async fn the_indexer_acts_as_the_highest_ranked_member_holding_workspace_write() {
+        let pool = testing::pool().await;
+        let organization = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Indexer', $1::text)")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization");
+        sqlx::query(
+            "INSERT INTO workspaces (id, organization_id, name, slug) \
+             VALUES ($1, $2, 'Indexer', $1::text)",
+        )
+        .bind(workspace)
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .expect("a workspace");
+        let mut seated = Vec::new();
+        for _ in 0..3 {
+            let user: Uuid = sqlx::query_scalar(
+                "INSERT INTO users (email, password_hash) VALUES ($1, 'x') RETURNING id",
+            )
+            .bind(format!("{}@example.test", Uuid::new_v4()))
+            .fetch_one(&pool)
+            .await
+            .expect("a user");
+            sqlx::query(
+                "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)",
+            )
+            .bind(workspace)
+            .bind(user)
+            .bind(WorkspaceRole::Viewer.as_str())
+            .execute(&pool)
+            .await
+            .expect("a member");
+            seated.push(user);
+        }
+        let [viewer, reader, writer] = seated[..] else {
+            unreachable!("three members were seated");
+        };
+        crate::db::actions::testing::hold(&pool, organization, workspace, reader, &[]).await;
+        let source = widgets(&pool, workspace, None, None).await;
+        let actor = || async {
+            list_active_index_sources(&pool)
+                .await
+                .expect("the listing")
+                .into_iter()
+                .find(|candidate| candidate.id == source.id)
+                .expect("the active source")
+                .user_id
+        };
+
+        assert_eq!(
+            actor().await,
+            None,
+            "a member without workspace:write was chosen"
+        );
+
+        crate::db::actions::testing::hold(
+            &pool,
+            organization,
+            workspace,
+            writer,
+            &[Permission::WorkspaceWrite],
+        )
+        .await;
+        assert_eq!(actor().await, Some(writer));
+
+        sqlx::query(
+            "UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2",
+        )
+        .bind(workspace)
+        .bind(viewer)
+        .bind(WorkspaceRole::Owner.as_str())
+        .execute(&pool)
+        .await
+        .expect("the owner");
+        assert_eq!(
+            actor().await,
+            Some(viewer),
+            "the owner is no longer preferred"
+        );
+
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("the organization is removed");
+        sqlx::query("DELETE FROM users WHERE id = ANY($1)")
+            .bind(&seated)
+            .execute(&pool)
+            .await
+            .expect("the users are removed");
     }
 
     #[tokio::test]

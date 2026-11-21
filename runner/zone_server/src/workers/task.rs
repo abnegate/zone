@@ -59,6 +59,7 @@ use crate::config::ModelBackend;
 use crate::db::audit::actions;
 use crate::db::task_tool_calls;
 use crate::db::tasks;
+use crate::db::workspace_members;
 use crate::services::backend;
 use crate::services::backend::Resolved;
 use crate::services::chat::session;
@@ -954,14 +955,9 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
     };
     if let Some(actor) = run.triggered_by {
         let allowed = match tasks::get_task(state.db(), task_id).await {
-            Ok(Some(task)) => crate::db::workspace_members::has_role_or_higher(
-                state.db(),
-                actor,
-                task.workspace_id,
-                crate::db::workspace_members::WorkspaceRole::Member,
-            )
-            .await
-            .unwrap_or(false),
+            Ok(Some(task)) => workspace_members::can_write(state.db(), task.workspace_id, actor)
+                .await
+                .unwrap_or(false),
             _ => false,
         };
         if !allowed {

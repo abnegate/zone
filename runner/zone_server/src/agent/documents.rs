@@ -18,7 +18,7 @@ use abnegate_agent::tool::Tier;
 use super::identifier::Kind;
 use super::tools::WorkspaceScope;
 use crate::db::knowledge::{self, Document, DocumentUpdate};
-use crate::db::workspace_members::{self, WorkspaceRole};
+use crate::db::workspace_members;
 use crate::db::{DbResult, chat_sources};
 
 const LIST_LIMIT: i64 = 25;
@@ -181,18 +181,17 @@ impl Tool for DocumentTool {
 impl DocumentTool {
     async fn run(&self, params: &Value) -> Result<ToolResult, sqlx::Error> {
         let scope = &self.scope;
-        let required = match self.operation {
-            Operation::List | Operation::Read => WorkspaceRole::Viewer,
-            Operation::Create | Operation::Update => WorkspaceRole::Member,
+        let permitted = match self.operation {
+            Operation::List | Operation::Read => {
+                workspace_members::can_read(scope.state.db(), scope.workspace_id, scope.user_id)
+                    .await?
+            }
+            Operation::Create | Operation::Update => {
+                workspace_members::can_write(scope.state.db(), scope.workspace_id, scope.user_id)
+                    .await?
+            }
         };
-        if !workspace_members::has_role_or_higher(
-            scope.state.db(),
-            scope.user_id,
-            scope.workspace_id,
-            required,
-        )
-        .await?
-        {
+        if !permitted {
             return Ok(ToolResult::error(
                 "You do not have permission to perform this document operation in this workspace.",
             ));
@@ -539,6 +538,7 @@ mod tests {
     use super::*;
     use crate::agent::citations::{self, CitationKind};
     use crate::agent::identifier;
+    use crate::db::workspace_members::WorkspaceRole;
     use crate::state::{AppState, test_config};
     use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;

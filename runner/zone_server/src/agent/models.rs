@@ -2,7 +2,7 @@
 
 use super::tools::{WorkspaceScope, optional_string_arg, string_arg};
 use crate::auth::permission::{self, Permission};
-use crate::db::workspace_members::{self, WorkspaceRole};
+use crate::db::workspace_members;
 use crate::pull::Pull;
 use crate::routes::models::{
     self, COMFY_SOURCE, CatalogError, DismissError, ListModelsQuery, Method, Subject, TrainForm,
@@ -327,11 +327,10 @@ impl ModelTool {
 
     async fn run(&self, params: &Value, context: &ToolContext) -> ToolResult {
         if self.tier().mutating() {
-            match workspace_members::has_role_or_higher(
+            match workspace_members::can_write(
                 self.scope.state.db(),
-                self.scope.user_id,
                 self.scope.workspace_id,
-                WorkspaceRole::Member,
+                self.scope.user_id,
             )
             .await
             {
@@ -838,6 +837,7 @@ fn json_ok(value: impl Serialize) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::workspace_members::WorkspaceRole;
     use crate::services::comfy::policy;
     use crate::state::test_config;
     use crate::train_jobs::TrainJobStatus;

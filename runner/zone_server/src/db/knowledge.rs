@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use uuid::Uuid;
 use zone_context::embeddings::align_vector;
 
+use crate::auth::Permission;
+
 use super::DbResult;
 
 pub mod discovery;
@@ -1151,6 +1153,43 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        crate::db::actions::testing::hold(&pool, organization, workspace, user, &[]).await;
+        assert!(
+            create_document(&pool, workspace, user, "Denied", "Denied")
+                .await
+                .unwrap()
+                .is_none(),
+            "a custom role holding only workspace:read created a document"
+        );
+        crate::db::actions::testing::hold(
+            &pool,
+            organization,
+            workspace,
+            user,
+            &[Permission::WorkspaceWrite],
+        )
+        .await;
+        assert!(
+            update_document(
+                &pool,
+                workspace,
+                user,
+                id,
+                DocumentUpdate {
+                    title: Some("Custom"),
+                    content: None
+                }
+            )
+            .await
+            .unwrap(),
+            "a custom role holding workspace:write could not edit a document"
+        );
+        assert!(
+            create_document(&pool, workspace, user, "Custom", "Custom")
+                .await
+                .unwrap()
+                .is_some()
+        );
         workspace_members::remove_member(&pool, workspace, user)
             .await
             .unwrap();
@@ -1352,12 +1391,13 @@ pub async fn create_document(
     sqlx::query_scalar(
         "INSERT INTO knowledge_entries (workspace_id, title, content, token_count, created_by)
          SELECT $1, $3, $4, ceil(length($4::text)::numeric / 4)::integer, $2
-         WHERE get_workspace_role($2, $1) IN ('member', 'admin', 'owner') RETURNING id",
+         WHERE workspace_permits($2, $1, $5) RETURNING id",
     )
     .bind(workspace_id)
     .bind(user_id)
     .bind(title)
     .bind(content)
+    .bind(Permission::WorkspaceWrite.name())
     .fetch_optional(pool)
     .await
 }
@@ -1389,13 +1429,14 @@ pub async fn update_document(
         not_memory!(),
         " ",
         not_learned!(),
-        " AND get_workspace_role($2, $1) IN ('member', 'admin', 'owner')",
+        " AND workspace_permits($2, $1, $6)",
     ))
     .bind(workspace_id)
     .bind(user_id)
     .bind(id)
     .bind(update.title)
     .bind(update.content)
+    .bind(Permission::WorkspaceWrite.name())
     .execute(&mut *transaction)
     .await?
     .rows_affected()

@@ -3,6 +3,8 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::auth::Permission;
+
 use super::{DbResult, tasks};
 
 /// A run and its ordered logs from one authorized read.
@@ -18,10 +20,11 @@ pub struct Snapshot {
 pub async fn read(pool: &PgPool, run: Uuid, actor: Uuid) -> DbResult<Option<Snapshot>> {
     let mut transaction = pool.begin().await?;
     let member: Option<Uuid> = sqlx::query_scalar(
-        "SELECT members.user_id FROM task_runs runs JOIN tasks ON tasks.id = runs.task_id JOIN workspace_members members ON members.workspace_id = tasks.workspace_id WHERE runs.id = $1 AND members.user_id = $2 AND members.is_active AND members.role IN ('owner', 'admin', 'member', 'viewer') FOR SHARE OF members",
+        "SELECT members.user_id FROM task_runs runs JOIN tasks ON tasks.id = runs.task_id JOIN workspace_members members ON members.workspace_id = tasks.workspace_id WHERE runs.id = $1 AND members.user_id = $2 AND members.is_active AND workspace_permits(members.user_id, members.workspace_id, $3) FOR SHARE OF members",
     )
     .bind(run)
     .bind(actor)
+    .bind(Permission::WorkspaceRead.name())
     .fetch_optional(&mut *transaction)
     .await?;
     if member.is_none() {
@@ -37,16 +40,17 @@ pub async fn read(pool: &PgPool, run: Uuid, actor: Uuid) -> DbResult<Option<Snap
 
 /// Authorize a writer against a run and return the run alone.
 ///
-/// A viewer may read a run and must never answer for it, so the roles here are
-/// narrower than [`read`]'s. The logs are left unread: a caller answering a
+/// A viewer may read a run and must never answer for it, so this needs
+/// `workspace:write` where [`read`] needs `workspace:read`. The logs are left unread: a caller answering a
 /// parked run needs `pending_question`, and nothing else the run has said.
 pub async fn write(pool: &PgPool, run: Uuid, actor: Uuid) -> DbResult<Option<tasks::TaskRunRow>> {
     let mut transaction = pool.begin().await?;
     let member: Option<Uuid> = sqlx::query_scalar(
-        "SELECT members.user_id FROM task_runs runs JOIN tasks ON tasks.id = runs.task_id JOIN workspace_members members ON members.workspace_id = tasks.workspace_id WHERE runs.id = $1 AND members.user_id = $2 AND members.is_active AND members.role IN ('owner', 'admin', 'member') FOR SHARE OF members",
+        "SELECT members.user_id FROM task_runs runs JOIN tasks ON tasks.id = runs.task_id JOIN workspace_members members ON members.workspace_id = tasks.workspace_id WHERE runs.id = $1 AND members.user_id = $2 AND members.is_active AND workspace_permits(members.user_id, members.workspace_id, $3) FOR SHARE OF members",
     )
     .bind(run)
     .bind(actor)
+    .bind(Permission::WorkspaceWrite.name())
     .fetch_optional(&mut *transaction)
     .await?;
     if member.is_none() {

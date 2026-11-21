@@ -4,6 +4,8 @@ use chrono::NaiveDateTime;
 use sqlx::{Executor, PgPool, Postgres};
 use uuid::Uuid;
 
+use crate::auth::Permission;
+
 use super::{DbResult, workspace_members};
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
@@ -58,9 +60,9 @@ where
     .await
 }
 
-/// The chat's tasks as `reader` may see them, or `None` when they are not an
-/// active member of `workspace`. Their membership stays locked until the read
-/// is done, so a revocation cannot commit between the check and the read.
+/// The chat's tasks as `reader` may see them, or `None` unless they may read
+/// `workspace`. Their membership stays locked until the read is done, so a
+/// revocation cannot commit between the check and the read.
 pub async fn read(
     pool: &PgPool,
     workspace: Uuid,
@@ -68,9 +70,9 @@ pub async fn read(
     reader: Uuid,
 ) -> DbResult<Option<Vec<ChatTaskRow>>> {
     let mut transaction = pool.begin().await?;
-    if workspace_members::lock_role(&mut transaction, workspace, reader)
+    if !workspace_members::lock_membership(&mut transaction, workspace, reader)
         .await?
-        .is_none()
+        .is_some_and(|membership| membership.grant.allows(Permission::WorkspaceRead))
     {
         return Ok(None);
     }

@@ -7,6 +7,7 @@ use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::auth::Permission;
 use crate::services::chat::notice;
 use crate::services::github::pull_requests;
 use crate::services::task_progress;
@@ -14,7 +15,7 @@ use crate::services::task_progress;
 use super::{
     DbResult,
     auto_projects::{self, Claim},
-    workspace_members::{self, WorkspaceRole},
+    workspace_members,
 };
 
 mod origin;
@@ -329,8 +330,8 @@ pub struct Execution {
 impl Execution {
     /// Legacy tasks may execute without an actor, but can never publish.
     pub async fn authorized(&self, pool: &PgPool, publication: bool) -> DbResult<bool> {
-        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT EXISTS(SELECT 1 FROM tasks t JOIN task_runs r ON r.task_id=t.id WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.owner=$3 AND r.triggered_by IS NOT DISTINCT FROM $4 AND r.status IN {ACTIVE_RUN_STATUSES} AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND (NOT $5 OR (t.created_by IS NOT NULL AND $4::uuid IS NOT NULL)) AND (($4::uuid IS NULL AND t.created_by IS NULL) OR EXISTS(SELECT 1 FROM workspace_members m WHERE m.workspace_id=t.workspace_id AND m.user_id=$4 AND m.is_active AND m.role IN ('member','admin','owner'))))")))
-            .bind(self.task).bind(self.run).bind(self.owner).bind(self.actor).bind(publication).fetch_one(pool).await
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT EXISTS(SELECT 1 FROM tasks t JOIN task_runs r ON r.task_id=t.id WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.owner=$3 AND r.triggered_by IS NOT DISTINCT FROM $4 AND r.status IN {ACTIVE_RUN_STATUSES} AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND (NOT $5 OR (t.created_by IS NOT NULL AND $4::uuid IS NOT NULL)) AND (($4::uuid IS NULL AND t.created_by IS NULL) OR workspace_permits($4, t.workspace_id, $6)))")))
+            .bind(self.task).bind(self.run).bind(self.owner).bind(self.actor).bind(publication).bind(Permission::WorkspaceWrite.name()).fetch_one(pool).await
     }
 }
 
@@ -407,9 +408,9 @@ async fn lock_writer(
     user_id: Uuid,
 ) -> DbResult<bool> {
     Ok(
-        workspace_members::lock_role(connection, workspace_id, user_id)
+        workspace_members::lock_membership(connection, workspace_id, user_id)
             .await?
-            .is_some_and(|role| role >= WorkspaceRole::Member),
+            .is_some_and(|membership| membership.grant.allows(Permission::WorkspaceWrite)),
     )
 }
 
@@ -2021,8 +2022,8 @@ pub async fn update_task_pr(
     branch: &str,
     status: pull_requests::Status,
 ) -> DbResult<bool> {
-    Ok(sqlx::query("UPDATE tasks t SET pr_url=$5, branch_name=$6, pr_status=$7, pr_created_at=NOW(), updated_at=NOW() FROM task_runs r, workspace_members m WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.task_id=t.id AND r.owner=$3 AND r.triggered_by=$4 AND r.status='running' AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND t.created_by IS NOT NULL AND m.workspace_id=t.workspace_id AND m.user_id=$4 AND m.is_active AND m.role IN ('member','admin','owner')")
-        .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(url).bind(branch).bind(status.as_str()).execute(pool).await?.rows_affected() == 1)
+    Ok(sqlx::query("UPDATE tasks t SET pr_url=$5, branch_name=$6, pr_status=$7, pr_created_at=NOW(), updated_at=NOW() FROM task_runs r WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.task_id=t.id AND r.owner=$3 AND r.triggered_by=$4 AND r.status='running' AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND t.created_by IS NOT NULL AND workspace_permits($4, t.workspace_id, $8)")
+        .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(url).bind(branch).bind(status.as_str()).bind(Permission::WorkspaceWrite.name()).execute(pool).await?.rows_affected() == 1)
 }
 
 /// Record how a task's pull request stands once its reception has been read.
@@ -2043,8 +2044,8 @@ pub async fn update_task_branch(
     execution: &Execution,
     branch: &str,
 ) -> DbResult<bool> {
-    Ok(sqlx::query("UPDATE tasks t SET branch_name=$5, updated_at=NOW() FROM task_runs r, workspace_members m WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.task_id=t.id AND r.owner=$3 AND r.triggered_by=$4 AND r.status='running' AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND t.created_by IS NOT NULL AND m.workspace_id=t.workspace_id AND m.user_id=$4 AND m.is_active AND m.role IN ('member','admin','owner')")
-        .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(branch).execute(pool).await?.rows_affected() == 1)
+    Ok(sqlx::query("UPDATE tasks t SET branch_name=$5, updated_at=NOW() FROM task_runs r WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.task_id=t.id AND r.owner=$3 AND r.triggered_by=$4 AND r.status='running' AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND t.created_by IS NOT NULL AND workspace_permits($4, t.workspace_id, $6)")
+        .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(branch).bind(Permission::WorkspaceWrite.name()).execute(pool).await?.rows_affected() == 1)
 }
 
 /// Insert a task inside a caller's transaction, for a write that makes several
