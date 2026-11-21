@@ -45,6 +45,7 @@ const ENTITLEMENT_RS = join(ENTERPRISE, 'entitlement.rs');
 const MIGRATION_SQL = join(RUNNER, 'zone_server/migrations/0001_v1.sql');
 const ORGANIZATIONS_RS = join(SERVER, 'routes/organizations.rs');
 const WORKSPACES_RS = join(SERVER, 'routes/workspaces.rs');
+const COMMON_RS = join(SERVER, 'routes/common.rs');
 const ASSIGNMENT_FIELDS = ['custom_role_id', 'role'];
 const STANDING_FIELDS = ['custom_role', 'permissions', 'role'];
 const SUMMARY = 'Summary';
@@ -288,9 +289,9 @@ describe('the member routes take and send what the console models', () => {
 
   test.each(MEMBER_ROUTES)(
     'a %s member row carries a nullable custom role and a permission list',
-    (scope, path, _, row) => {
+    (scope, _path, _request, row) => {
       const fields = Object.fromEntries(
-        exactly(read(path), STANDING_FIELDS).map((field) => [field.name, field.nullable])
+        exactly(read(COMMON_RS), STANDING_FIELDS).map((field) => [field.name, field.nullable])
       );
       expect(fields).toEqual({ role: false, custom_role: true, permissions: false });
 
