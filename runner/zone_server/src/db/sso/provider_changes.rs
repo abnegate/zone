@@ -6,6 +6,9 @@ pub struct ProviderChanges {
     pub issuer: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<SecretValue>,
+    pub sso_url: Option<String>,
+    pub certificates: Option<Vec<String>>,
+    pub metadata_url: Option<Option<String>>,
     pub allowed_domains: Option<Vec<String>>,
     pub require_verified_email: Option<bool>,
     pub enabled: Option<bool>,
@@ -17,13 +20,17 @@ impl ProviderChanges {
             && self.issuer.is_none()
             && self.client_id.is_none()
             && self.client_secret.is_none()
+            && self.sso_url.is_none()
+            && self.certificates.is_none()
+            && self.metadata_url.is_none()
             && self.allowed_domains.is_none()
             && self.require_verified_email.is_none()
             && self.enabled.is_none()
     }
 
-    /// A subject is unique only within one issuer, and some providers give each client its own,
-    /// so a new issuer or client ID makes every stored subject meaningless.
+    /// A subject is unique only within one issuer (for SAML, the entity ID), and some providers
+    /// give each client its own, so a new issuer or client ID makes every stored subject
+    /// meaningless.
     pub fn renames_subjects(&self) -> bool {
         self.issuer.is_some() || self.client_id.is_some()
     }
@@ -54,6 +61,9 @@ mod tests {
             !ProviderChanges {
                 display_name: Some("Okta".into()),
                 client_secret: Some(SecretValue::new("rotated")),
+                sso_url: Some("https://acme.okta.com/app/sso/saml".into()),
+                certificates: Some(vec!["MIIC".into()]),
+                metadata_url: Some(None),
                 allowed_domains: Some(vec!["acme.io".into()]),
                 require_verified_email: Some(false),
                 enabled: Some(false),
@@ -81,6 +91,18 @@ mod tests {
             },
             ProviderChanges {
                 client_secret: Some(SecretValue::new("s3cret")),
+                ..Default::default()
+            },
+            ProviderChanges {
+                sso_url: Some("https://acme.okta.com/app/sso/saml".into()),
+                ..Default::default()
+            },
+            ProviderChanges {
+                certificates: Some(Vec::new()),
+                ..Default::default()
+            },
+            ProviderChanges {
+                metadata_url: Some(None),
                 ..Default::default()
             },
             ProviderChanges {

@@ -1,9 +1,20 @@
 use reqwest::Url;
 
 pub const CALLBACK_PATH: &str = "/sso/callback";
+pub const SAML_METADATA_PATH: &str = "/api/auth/sso/saml/metadata";
+pub const SAML_ACS_PATH: &str = "/api/auth/sso/saml/acs";
 
 pub fn redirect_uri(app_base_url: &str) -> String {
     format!("{}{CALLBACK_PATH}", callback_origin(app_base_url))
+}
+
+/// The service provider's entity ID, which is also where its metadata is served.
+pub fn saml_entity_id(app_base_url: &str) -> String {
+    format!("{}{SAML_METADATA_PATH}", callback_origin(app_base_url))
+}
+
+pub fn saml_acs_url(app_base_url: &str) -> String {
+    format!("{}{SAML_ACS_PATH}", callback_origin(app_base_url))
 }
 
 /// The scheme, host and port of the console. A sign-in has to start on this origin, because the
@@ -66,5 +77,40 @@ mod tests {
         for (base, origin) in cases {
             assert_eq!(callback_origin(base), origin, "{base}");
         }
+    }
+
+    #[test]
+    fn the_saml_urls_are_their_paths_on_the_callback_origin() {
+        for base in [
+            "https://zone.example.com",
+            "https://zone.example.com/",
+            "https://example.com/zone",
+            "https://zone.example.com:8443/app/",
+            "http://localhost:3000",
+        ] {
+            let origin = callback_origin(base);
+            assert_eq!(
+                saml_entity_id(base),
+                format!("{origin}{SAML_METADATA_PATH}"),
+                "{base}"
+            );
+            assert_eq!(
+                saml_acs_url(base),
+                format!("{origin}{SAML_ACS_PATH}"),
+                "{base}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_saml_urls_are_the_contract_paths() {
+        assert_eq!(
+            saml_entity_id("https://example.com/zone"),
+            "https://example.com/api/auth/sso/saml/metadata"
+        );
+        assert_eq!(
+            saml_acs_url("https://zone.example.com:8443/"),
+            "https://zone.example.com:8443/api/auth/sso/saml/acs"
+        );
     }
 }

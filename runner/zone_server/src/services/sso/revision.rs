@@ -3,7 +3,7 @@ use std::fmt;
 use abnegate_secret::{MasterKey, REDACTED, SecretValue};
 use zone_enterprise::sso::Fields;
 
-use crate::db::sso::{ProviderRecord, ProviderResult};
+use crate::db::sso::{Connection, ProviderError, ProviderRecord, ProviderResult};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct Revision<'a> {
@@ -41,21 +41,24 @@ impl<'a> Revision<'a> {
         &self,
         record: &'b ProviderRecord,
         client_secret: &'b SecretValue,
-    ) -> Fields<'b>
+    ) -> ProviderResult<Fields<'b>>
     where
         'a: 'b,
     {
-        Fields {
+        let Connection::Oidc { client_id, .. } = &record.connection else {
+            return Err(ProviderError::Mismatch(record.id));
+        };
+        Ok(Fields {
             protocol: record.protocol,
             display_name: self.display_name.unwrap_or(&record.display_name),
             issuer: self.issuer.unwrap_or(&record.issuer),
-            client_id: self.client_id.unwrap_or(&record.client_id),
+            client_id: self.client_id.unwrap_or(client_id),
             client_secret: client_secret.expose(),
             allowed_domains: self.allowed_domains.unwrap_or(&record.allowed_domains),
             require_verified_email: self
                 .require_verified_email
                 .unwrap_or(record.require_verified_email),
-        }
+        })
     }
 
     pub fn enabled(&self, record: &ProviderRecord) -> bool {
@@ -107,8 +110,11 @@ mod tests {
             protocol: Protocol::Oidc,
             display_name: "Okta".into(),
             issuer: "https://acme.okta.com".into(),
-            client_id: "0oa1".into(),
-            sealed_secret: encrypt_value(&SecretValue::new(SECRET), key).expect("a sealed secret"),
+            connection: Connection::Oidc {
+                client_id: "0oa1".into(),
+                sealed_secret: encrypt_value(&SecretValue::new(SECRET), key)
+                    .expect("a sealed secret"),
+            },
             allowed_domains: vec!["acme.com".into()],
             require_verified_email: true,
             enabled: true,
@@ -124,7 +130,10 @@ mod tests {
         let revision = Revision::default();
         let secret = revision.client_secret(&record, &key).unwrap();
         assert_eq!(secret.expose(), SECRET);
-        assert_eq!(revision.fields(&record, &secret), record.fields(&secret));
+        assert_eq!(
+            revision.fields(&record, &secret).unwrap(),
+            record.fields(&secret).unwrap()
+        );
         assert!(revision.enabled(&record));
         assert!(!revision.replaces_secret(&record, &key));
     }
@@ -144,7 +153,7 @@ mod tests {
             enabled: Some(false),
         };
         let secret = revision.client_secret(&record, &key).unwrap();
-        let fields = revision.fields(&record, &secret);
+        let fields = revision.fields(&record, &secret).unwrap();
         assert_eq!(fields.display_name, "Entra");
         assert_eq!(fields.issuer, "https://login.microsoftonline.com/t/v2.0");
         assert_eq!(fields.client_id, "app");
