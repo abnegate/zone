@@ -4,6 +4,8 @@
 
 use std::sync::Arc;
 
+use axum::body::Body;
+use axum::http;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -19,7 +21,7 @@ use zone_server::state::AppState;
 
 use super::database::Database;
 use super::mail::Recording;
-use super::{TestClient, policy, sso, test_config};
+use super::{TestClient, TestResponse, policy, sso, test_config};
 
 /// The stand-in LiteLLM's master key, the instance's `LITELLM_KEY`.
 pub const MASTER: &str = "sk-spend-master-0123456789";
@@ -27,6 +29,36 @@ pub const GENERATE_PATH: &str = "/key/generate";
 pub const INFO_PATH: &str = "/key/info";
 pub const DELETE_PATH: &str = "/key/delete";
 pub const LOGS_PATH: &str = "/spend/logs/v2";
+
+pub fn reports_path(organization: Uuid) -> String {
+    format!("/api/organizations/{organization}/spend-reports")
+}
+
+pub fn exports_path(organization: Uuid) -> String {
+    format!("/api/organizations/{organization}/spend-exports")
+}
+
+pub fn budgets_path(organization: Uuid) -> String {
+    format!("/api/organizations/{organization}/budgets")
+}
+
+pub fn budget_path(organization: Uuid, budget: impl std::fmt::Display) -> String {
+    format!("/api/organizations/{organization}/budgets/{budget}")
+}
+
+/// A request's spend as ingest stores it, written straight to `spend_records`.
+#[derive(Debug, Clone)]
+pub struct Spend {
+    pub organization: Uuid,
+    pub workspace: Option<Uuid>,
+    pub user: Option<Uuid>,
+    pub model: String,
+    pub provider: String,
+    pub microdollars: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub occurred_at: DateTime<Utc>,
+}
 
 pub struct Fixture {
     pub policy: policy::Fixture,
@@ -189,6 +221,74 @@ impl Fixture {
         .fetch_all(self.pool())
         .await
         .unwrap()
+    }
+
+    /// A dollar of the owner's spend in the fixture's workspace on `gpt-4o` through OpenAI, now.
+    pub fn spend(&self) -> Spend {
+        Spend {
+            organization: self.policy.organization,
+            workspace: Some(self.policy.workspace),
+            user: Some(self.policy.owner.id),
+            model: "gpt-4o".to_string(),
+            provider: "openai".to_string(),
+            microdollars: 1_000_000,
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            occurred_at: Utc::now(),
+        }
+    }
+
+    pub async fn record(&self, spend: Spend) {
+        sqlx::query(
+            "INSERT INTO spend_records (request_id, organization_id, workspace_id, user_id, token,
+                 model, provider, spend_microdollars, prompt_tokens, completion_tokens, occurred_at)
+             VALUES ($1, $2, $3, $4, 'spend-routes-token', $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(spend.organization)
+        .bind(spend.workspace)
+        .bind(spend.user)
+        .bind(spend.model)
+        .bind(spend.provider)
+        .bind(spend.microdollars)
+        .bind(spend.prompt_tokens)
+        .bind(spend.completion_tokens)
+        .bind(spend.occurred_at)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
+    fn http(&self) -> &TestClient {
+        &self.policy.sso.client
+    }
+
+    pub async fn get(&self, uri: &str, token: &str) -> TestResponse {
+        self.http().get_auth(uri, token).await
+    }
+
+    pub async fn post(&self, uri: &str, token: &str, body: &Value) -> TestResponse {
+        self.http().post_json_auth(uri, body, token).await
+    }
+
+    /// Posts `body` as it is, such as JSON cut short.
+    pub async fn post_raw(&self, uri: &str, token: &str, body: &'static str) -> TestResponse {
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        self.http().send_request(request).await
+    }
+
+    pub async fn patch(&self, uri: &str, token: &str, body: &Value) -> TestResponse {
+        self.http().patch_json_auth(uri, body, token).await
+    }
+
+    pub async fn delete(&self, uri: &str, token: &str) -> TestResponse {
+        self.http().delete_auth(uri, token).await
     }
 
     pub async fn cleanup(self) {

@@ -3,6 +3,7 @@
 
 pub mod attribution;
 pub mod client;
+pub mod coverage;
 pub mod error;
 pub mod ingest;
 pub mod key;
