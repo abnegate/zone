@@ -1,5 +1,6 @@
 use crate::sso::account::ACCOUNT_DISABLED;
 use crate::sso::rejection::Rejection;
+use crate::sso::saml::Refusal;
 
 pub const SSO_REQUIRED: &str = "sso_required";
 pub const PROVIDER_NOT_FOUND: &str = "sso_provider_not_found";
@@ -18,6 +19,13 @@ pub const EMAIL_MISSING: &str = "sso_email_missing";
 pub const EMAIL_UNVERIFIED: &str = "sso_email_unverified";
 pub const DOMAIN_NOT_ALLOWED: &str = "sso_domain_not_allowed";
 pub const EMAIL_CONFLICT: &str = "sso_email_conflict";
+pub const METADATA_INVALID: &str = "sso_metadata_invalid";
+pub const ASSERTION_INVALID: &str = "sso_assertion_invalid";
+pub const SIGN_IN_REFUSED: &str = "sso_sign_in_refused";
+pub const SIGN_IN_FAILED: &str = "sso_sign_in_failed";
+pub const DOMAIN_REQUIRED: &str = "sso_domain_required";
+pub const VERIFIED_EMAIL_UNSUPPORTED: &str = "sso_verified_email_unsupported";
+pub const PROTOCOL_MISMATCH: &str = "sso_protocol_mismatch";
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
@@ -63,6 +71,20 @@ pub enum Error {
     EmailConflict,
     #[error("This account is disabled.")]
     AccountDisabled,
+    #[error("The identity provider's SAML metadata couldn't be used: {0}")]
+    MetadataInvalid(String),
+    #[error("The identity provider's SAML response was refused because {0}.")]
+    AssertionInvalid(Refusal),
+    #[error("The identity provider refused the sign-in with status {0}.")]
+    SignInRefused(String),
+    #[error("A SAML provider needs at least one allowed email domain.")]
+    DomainRequired,
+    #[error(
+        "A SAML provider can't require a verified email, because SAML doesn't say whether the identity provider verified it."
+    )]
+    VerifiedEmailUnsupported,
+    #[error("That setting belongs to a different single sign-on protocol than this provider's.")]
+    ProtocolMismatch,
 }
 
 impl Error {
@@ -86,6 +108,12 @@ impl Error {
             Self::DomainNotAllowed => DOMAIN_NOT_ALLOWED,
             Self::EmailConflict => EMAIL_CONFLICT,
             Self::AccountDisabled => ACCOUNT_DISABLED,
+            Self::MetadataInvalid(_) => METADATA_INVALID,
+            Self::AssertionInvalid(_) => ASSERTION_INVALID,
+            Self::SignInRefused(_) => SIGN_IN_REFUSED,
+            Self::DomainRequired => DOMAIN_REQUIRED,
+            Self::VerifiedEmailUnsupported => VERIFIED_EMAIL_UNSUPPORTED,
+            Self::ProtocolMismatch => PROTOCOL_MISMATCH,
         }
     }
 }
@@ -94,7 +122,7 @@ impl Error {
 mod tests {
     use super::*;
 
-    fn every() -> [Error; 18] {
+    fn every() -> [Error; 24] {
         [
             Error::Required,
             Error::ProviderNotFound,
@@ -114,6 +142,12 @@ mod tests {
             Error::DomainNotAllowed,
             Error::EmailConflict,
             Error::AccountDisabled,
+            Error::MetadataInvalid("no signing certificate".into()),
+            Error::AssertionInvalid(Refusal::Unsigned),
+            Error::SignInRefused("urn:oasis:names:tc:SAML:2.0:status:Responder".into()),
+            Error::DomainRequired,
+            Error::VerifiedEmailUnsupported,
+            Error::ProtocolMismatch,
         ]
     }
 
@@ -141,6 +175,12 @@ mod tests {
                 "sso_domain_not_allowed",
                 "sso_email_conflict",
                 "account_disabled",
+                "sso_metadata_invalid",
+                "sso_assertion_invalid",
+                "sso_sign_in_refused",
+                "sso_domain_required",
+                "sso_verified_email_unsupported",
+                "sso_protocol_mismatch",
             ]
         );
     }
@@ -164,6 +204,18 @@ mod tests {
         assert_eq!(EMAIL_UNVERIFIED, "sso_email_unverified");
         assert_eq!(DOMAIN_NOT_ALLOWED, "sso_domain_not_allowed");
         assert_eq!(EMAIL_CONFLICT, "sso_email_conflict");
+        assert_eq!(METADATA_INVALID, "sso_metadata_invalid");
+        assert_eq!(ASSERTION_INVALID, "sso_assertion_invalid");
+        assert_eq!(SIGN_IN_REFUSED, "sso_sign_in_refused");
+        assert_eq!(SIGN_IN_FAILED, "sso_sign_in_failed");
+        assert_eq!(DOMAIN_REQUIRED, "sso_domain_required");
+        assert_eq!(VERIFIED_EMAIL_UNSUPPORTED, "sso_verified_email_unsupported");
+        assert_eq!(PROTOCOL_MISMATCH, "sso_protocol_mismatch");
+    }
+
+    #[test]
+    fn sign_in_failed_is_no_error_code() {
+        assert!(every().iter().all(|error| error.code() != SIGN_IN_FAILED));
     }
 
     #[test]
@@ -190,6 +242,23 @@ mod tests {
             Error::DomainInvalid("*.acme.com".into())
                 .to_string()
                 .contains("*.acme.com")
+        );
+    }
+
+    #[test]
+    fn assertion_message_names_the_reason() {
+        assert_eq!(
+            Error::AssertionInvalid(Refusal::Audience).to_string(),
+            "The identity provider's SAML response was refused because it's meant for a different service provider."
+        );
+    }
+
+    #[test]
+    fn sign_in_refused_message_names_the_status() {
+        assert!(
+            Error::SignInRefused("urn:oasis:names:tc:SAML:2.0:status:Requester".into())
+                .to_string()
+                .contains("status:Requester")
         );
     }
 

@@ -20,6 +20,9 @@ pub struct Provider {
 
 impl Provider {
     pub fn parse(fields: &Fields<'_>) -> Result<Self, Error> {
+        if fields.protocol != Protocol::Oidc {
+            return Err(Error::ProtocolMismatch);
+        }
         Ok(Self {
             protocol: fields.protocol,
             display_name: DisplayName::parse(fields.display_name)?,
@@ -100,6 +103,15 @@ mod tests {
         for (fields, error) in cases {
             assert_eq!(Provider::parse(&fields), Err(error.clone()), "{error:?}");
         }
+    }
+
+    #[test]
+    fn refuses_fields_of_another_protocol() {
+        let fields = Fields {
+            protocol: Protocol::Saml,
+            ..fields(&[])
+        };
+        assert_eq!(Provider::parse(&fields), Err(Error::ProtocolMismatch));
     }
 
     #[test]
