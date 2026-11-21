@@ -1,0 +1,8 @@
+<root a="x&#xD;y&#xA;z&#x9;w" b="crlf line" c="&amp;&lt;>&quot;'">
+  <text>one
+two
+three&#xD;four &amp; &lt; &gt; " '</text>
+  <data>&lt;raw&gt; &amp; "quoted" ]]&gt; 
+ end</data>
+  <mixed>abcd</mixed>
+</root>

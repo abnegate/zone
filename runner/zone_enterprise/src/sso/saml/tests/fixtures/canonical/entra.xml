@@ -1,0 +1,14 @@
+<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="_response" Version="2.0" IssueInstant="2026-11-21T10:00:00.1234567Z">
+  <Issuer xmlns="urn:oasis:names:tc:SAML:2.0:assertion">https://sts.windows.net/tenant/</Issuer>
+  <samlp:Status xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>
+  <Assertion xmlns="urn:oasis:names:tc:SAML:2.0:assertion" ID="_assertion" IssueInstant="2026-11-21T10:00:00.1234567Z" Version="2.0">
+    <Issuer xmlns="urn:oasis:names:tc:SAML:2.0:assertion">https://sts.windows.net/tenant/</Issuer>
+    <Subject><NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:persistent">8f3c</NameID></Subject>
+    <Advice xmlns="">
+      <Plain>no namespace</Plain>
+      <Plain xmlns="">still none</Plain>
+      <Back xmlns="urn:oasis:names:tc:SAML:2.0:assertion"><Inner xmlns="">gone again</Inner></Back>
+    </Advice>
+    <AttributeStatement xmlns:p="urn:p"><p:Value xmlns:p="urn:p">same</p:Value><p:Value xmlns:p="urn:other">changed</p:Value></AttributeStatement>
+  </Assertion>
+</samlp:Response>
