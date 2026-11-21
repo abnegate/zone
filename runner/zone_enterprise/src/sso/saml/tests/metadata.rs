@@ -430,10 +430,17 @@ fn a_redirect_binding_without_a_location_is_refused() {
 
 #[test]
 fn a_plain_http_sso_url_off_loopback_is_refused() {
-    for location in ["http://idp.acme.test/sso", "javascript:alert(1)", "/sso"] {
+    for location in [
+        "http://idp.acme.test/sso",
+        "javascript:alert(1)",
+        "/sso",
+        "https://user:pass@idp.acme.test/sso",
+        "https://user@idp.acme.test/sso",
+        "https://idp.acme.test/sso#top",
+    ] {
         assert_eq!(
             reason(parse(&metadata(ENTITY_ID, location, &[CERTIFICATE]))),
-            "The single sign-on URL must be an absolute https URL; plain http is only allowed for localhost.",
+            "The single sign-on URL must be an absolute https URL with no credentials or fragment; plain http is only allowed for localhost.",
             "{location}"
         );
     }
@@ -587,7 +594,7 @@ fn a_provider_reports_each_invalid_field() {
                 ..fields(&certificates, &domains)
             },
             Error::MetadataInvalid(
-                "The single sign-on URL must be an absolute https URL; plain http is only allowed for localhost."
+                "The single sign-on URL must be an absolute https URL with no credentials or fragment; plain http is only allowed for localhost."
                     .to_owned(),
             ),
         ),

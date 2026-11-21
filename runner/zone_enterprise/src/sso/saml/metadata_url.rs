@@ -16,18 +16,18 @@ impl MetadataUrl {
                     .to_owned(),
             )
         };
-        let url = Url::parse(value.trim()).map_err(|_| refused())?;
-        let plain =
-            url.username().is_empty() && url.password().is_none() && url.fragment().is_none();
-        if !plain || !endpoint_allowed(&url) {
-            return Err(refused());
-        }
-        Ok(Self(url))
+        endpoint(value).map(Self).ok_or_else(refused)
     }
 
     pub fn as_url(&self) -> &Url {
         &self.0
     }
+}
+
+pub(super) fn endpoint(value: &str) -> Option<Url> {
+    let url = Url::parse(value.trim()).ok()?;
+    let plain = url.username().is_empty() && url.password().is_none() && url.fragment().is_none();
+    (plain && endpoint_allowed(&url)).then_some(url)
 }
 
 impl fmt::Display for MetadataUrl {
