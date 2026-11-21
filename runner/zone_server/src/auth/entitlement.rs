@@ -103,6 +103,7 @@ mod tests {
             (Feature::AuditExport, ENTERPRISE_MESSAGE),
             (Feature::AuditStreaming, ENTERPRISE_MESSAGE),
             (Feature::AuditRetention, ENTERPRISE_MESSAGE),
+            (Feature::CustomRoles, ENTERPRISE_MESSAGE),
             (Feature::Spend, TEAM_MESSAGE),
             (Feature::Members, TEAM_MESSAGE),
         ];
