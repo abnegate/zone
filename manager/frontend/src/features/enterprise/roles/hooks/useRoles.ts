@@ -1,9 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
 import { useCallback } from 'react';
+import { retryLoad } from '../../retry';
 import { rolesApi } from '../api';
 import { rolesQueryKeys } from '../queryKeys';
 import type { RolesResponse } from '../types';
-import { retryLoad } from './retry';
 
 export interface RolesState {
   response: RolesResponse | null;

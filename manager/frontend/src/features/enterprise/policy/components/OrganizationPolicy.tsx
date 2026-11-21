@@ -1,10 +1,11 @@
+import { UpgradeNotice } from '../../components/UpgradeNotice';
 import { useUpdateOrganizationPolicy } from '../hooks';
+import { UPGRADE_NOTICE } from '../labels';
 import { community } from '../license';
 import { PolicyScope } from '../source';
 import type { OrganizationPolicyResponse } from '../types';
 import { PolicyEditor } from './PolicyEditor';
 import { PolicyStatus } from './PolicyStatus';
-import { PolicyUpgradeNotice } from './PolicyUpgradeNotice';
 
 export const ORGANIZATION_READ_ONLY =
   'Only organization owners and admins can change the agent policy.';
@@ -18,7 +19,7 @@ export function OrganizationPolicy({ organizationId, policy }: OrganizationPolic
   const update = useUpdateOrganizationPolicy(organizationId);
 
   if (community(policy)) {
-    return <PolicyUpgradeNotice />;
+    return <UpgradeNotice message={UPGRADE_NOTICE} className="policy-notice" />;
   }
 
   return (

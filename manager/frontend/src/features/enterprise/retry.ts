@@ -1,7 +1,7 @@
-import { ApiError } from '../../../../api/ApiError';
-import { HttpStatus } from '../../../../api/HttpStatus';
+import { ApiError } from '../../api/ApiError';
+import { HttpStatus } from '../../api/HttpStatus';
 
-export const ROLES_RETRY_LIMIT = 3;
+export const RETRY_LIMIT = 3;
 
 function refused(error: Error): boolean {
   return (
@@ -12,5 +12,5 @@ function refused(error: Error): boolean {
 }
 
 export function retryLoad(failures: number, error: Error): boolean {
-  return !refused(error) && failures < ROLES_RETRY_LIMIT;
+  return !refused(error) && failures < RETRY_LIMIT;
 }

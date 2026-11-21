@@ -14,7 +14,7 @@ import {
   OKTA,
   REDIRECT_URI,
 } from '../fixtures';
-import { refusalMessage } from '../messages';
+import { LAPSED_NOTICE, refusalMessage, UPGRADE_NOTICE } from '../messages';
 import { SsoRefusal } from '../SsoRefusal';
 import { SsoAdminCode } from '../schemas';
 import type { SettingsResponse } from '../types';
@@ -24,8 +24,6 @@ import {
   ENFORCEMENT_DESCRIPTION,
   ENFORCEMENT_LABEL,
 } from './SsoEnforcement';
-import { LAPSED_NOTICE } from './SsoLapsedNotice';
-import { UPGRADE_NOTICE } from './SsoUpgradeNotice';
 
 const get = mock();
 const createProvider = mock();

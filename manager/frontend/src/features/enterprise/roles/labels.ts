@@ -198,6 +198,16 @@ export const SCOPE_LABEL = 'Applies to';
 
 export const PERMISSIONS_LABEL = 'Permissions';
 
+export const NAME_PLACEHOLDER = 'Release manager';
+
+export const CREATE_TITLE = 'Create role';
+
+export const DONE_LABEL = 'Done';
+
+export const FIXED_SCOPE_HINT = "A role's scope can't change after it is created.";
+
+export const META_SEPARATOR = ' · ';
+
 export const UPGRADE_NOTICE =
   'Custom roles are part of Zone Enterprise. Add a license to compose roles from individual permissions and assign them to members.';
 

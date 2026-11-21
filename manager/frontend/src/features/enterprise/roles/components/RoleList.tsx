@@ -4,14 +4,13 @@ import {
   EMPTY_EDITABLE,
   EMPTY_READ_ONLY,
   LIST_TITLE,
+  META_SEPARATOR,
   memberCount,
   permissionCount,
   SCOPE_LABELS,
 } from '../labels';
 import { RoleScope } from '../schemas';
 import type { CustomRole } from '../types';
-
-export const META_SEPARATOR = ' · ';
 
 interface RoleListProps {
   roles: readonly CustomRole[];
@@ -37,7 +36,7 @@ export function RoleList({ roles, editable, onCreate, onOpen, onDelete }: RoleLi
       ) : (
         <ul className="roles-list">
           {roles.map((role) => (
-            <li key={role.id} className="roles-item" aria-label={role.name}>
+            <li key={role.id} className="roles-item">
               <div className="roles-item-identity">
                 <div className="roles-item-heading">
                   <span className="roles-item-name">{role.name}</span>

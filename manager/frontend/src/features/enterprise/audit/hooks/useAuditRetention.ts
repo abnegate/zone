@@ -1,9 +1,9 @@
 import { skipToken, useQuery } from '@tanstack/react-query';
 import { useCallback } from 'react';
+import { retryLoad } from '../../retry';
 import { auditApi } from '../api';
 import { auditQueryKeys } from '../queryKeys';
 import type { AuditScope, RetentionResponse } from '../types';
-import { retryLoad } from './retry';
 
 export interface AuditRetentionState {
   retention: RetentionResponse | undefined;

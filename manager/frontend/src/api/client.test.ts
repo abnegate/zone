@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { RoleRefusal } from '../features/enterprise/roles/RoleRefusal';
-import { RoleCode } from '../features/enterprise/roles/schemas';
+import { ValidationError } from '../validation/ValidationError';
 import { ApiError } from './ApiError';
 import { client } from './client';
+
+const ROLE_REFUSAL_CODES = ['role_exceeds', 'license_required'] as const;
 
 // Mock fetch globally
 const mockFetch = mock();
@@ -2469,6 +2470,16 @@ describe('Client', () => {
     describe('updateOrgMemberRole', () => {
       const request = { role: 'admin' as const };
 
+      it('refuses a request naming both a role and a custom role before sending it', async () => {
+        await expect(
+          client.updateOrgMemberRole(orgId, userId, {
+            role: 'admin',
+            custom_role_id: 'role-1',
+          } as unknown as typeof request)
+        ).rejects.toBeInstanceOf(ValidationError);
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
       it('updates member role successfully', async () => {
         const updatedMember = {
           ...mockMember,
@@ -2554,7 +2565,7 @@ describe('Client', () => {
         expect(result.permissions).toEqual(['organization:read', 'audit_logs:read']);
       });
 
-      for (const code of [RoleCode.Exceeds, RoleCode.LicenseRequired]) {
+      for (const code of ROLE_REFUSAL_CODES) {
         it(`keeps the ${code} code of a refused assignment`, async () => {
           mockFetch.mockResolvedValueOnce({
             ok: false,
@@ -2566,9 +2577,9 @@ describe('Client', () => {
             .updateOrgMemberRole(orgId, userId, { custom_role_id: 'role-1' })
             .catch((error: unknown) => error);
 
-          expect(failure).toBeInstanceOf(RoleRefusal);
-          expect((failure as RoleRefusal).code).toBe(code);
-          expect((failure as RoleRefusal).status).toBe(403);
+          expect(failure).toBeInstanceOf(ApiError);
+          expect((failure as ApiError).code).toBe(code);
+          expect((failure as ApiError).status).toBe(403);
         });
       }
 
@@ -3000,6 +3011,15 @@ describe('Client', () => {
     describe('updateWorkspaceMemberRole', () => {
       const request = { role: 'admin' as const };
 
+      it('refuses an unknown role before sending it', async () => {
+        await expect(
+          client.updateWorkspaceMemberRole(workspaceId, userId, {
+            role: 'boss',
+          } as unknown as { role: 'member' })
+        ).rejects.toBeInstanceOf(ValidationError);
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
       it('updates member role successfully', async () => {
         const updatedMember = {
           ...mockMember,
@@ -3109,15 +3129,15 @@ describe('Client', () => {
         mockFetch.mockResolvedValueOnce({
           ok: false,
           status: 403,
-          json: async () => ({ error: 'Refused', code: RoleCode.Exceeds }),
+          json: async () => ({ error: 'Refused', code: ROLE_REFUSAL_CODES[0] }),
         });
 
         const failure = await client
           .updateWorkspaceMemberRole(workspaceId, userId, { custom_role_id: 'role-2' })
           .catch((error: unknown) => error);
 
-        expect(failure).toBeInstanceOf(RoleRefusal);
-        expect((failure as RoleRefusal).code).toBe(RoleCode.Exceeds);
+        expect(failure).toBeInstanceOf(ApiError);
+        expect((failure as ApiError).code).toBe(ROLE_REFUSAL_CODES[0]);
       });
 
       it('URL encodes workspace ID and user ID', async () => {

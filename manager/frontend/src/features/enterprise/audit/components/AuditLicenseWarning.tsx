@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { LICENSE_PATH } from './AuditUpgradeNotice';
+import { LICENSE_PATH } from '../../components/UpgradeNotice';
 
 interface AuditLicenseWarningProps {
   message: string;
