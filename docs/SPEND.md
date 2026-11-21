@@ -18,9 +18,10 @@ Organization → Spend**.
 ## Licensing
 
 Spend reports and budgets are part of Zone Team, which Zone Enterprise
-includes. Changing a budget needs a Team license that verifies and is either
-active or in its 30-day grace period after expiry. You install the license
-under **Settings → This server → License**.
+includes. Changing a budget needs a Team or Enterprise license that verifies
+and is either active or in its 30-day grace period after expiry. A key that
+names no plan, issued before Team existed, counts as Enterprise. You install
+the license under **Settings → This server → License**.
 
 | License state | Attribution, ingestion and hard limits | Reports and CSV | Budgets |
 |---|---|---|---|
@@ -47,8 +48,10 @@ reads the license.
 
 - **Enforced** means spend is attributed, ingested, reported and held to hard
   limits. It holds while a Team or Enterprise key is stored, including a lapsed
-  one, and while a key that no longer verifies is stored, the same rule
-  [agent policy](POLICY.md) uses.
+  one, and while a key that no longer verifies is stored. That last case is
+  `Stored::enforces`, the fail-closed rule every licensed feature shares: a key
+  that stops verifying keeps its feature enforced until it is replaced or
+  removed.
 - **Entitled** means budgets may be changed. It holds for a Team or Enterprise
   key that verifies and is active or in grace.
 
