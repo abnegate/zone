@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { AuthRequestError } from '../../../api/auth';
 import { clientModule } from '../../../test/client';
+import { memberCapMessage } from '../../enterprise/members';
+import { PRICING_URL } from '../../enterprise/pricing';
 import { SSO_OFFERED, SSO_REQUIRED } from '../ssoFixtures';
 import type { InvitationDetails } from '../types';
 
@@ -192,6 +195,40 @@ describe('InvitationAcceptPage', () => {
       expect(mockNavigate).toHaveBeenCalledWith('/');
     });
     expect(mockNavigate).not.toHaveBeenCalledWith('/org-settings');
+  });
+
+  async function accept() {
+    mockUseAuth.mockReturnValue({ isAuthenticated: true });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /accept invitation/i }));
+  }
+
+  it('explains the member cap with a link to the plans when accepting is refused at it', async () => {
+    mockAcceptInvitation.mockRejectedValue(
+      new AuthRequestError('Server text', 'member_cap_reached')
+    );
+
+    await accept();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(memberCapMessage());
+    expect(alert).not.toHaveTextContent('Server text');
+    expect(screen.getByRole('link', { name: /Compare plans/ })).toHaveAttribute(
+      'href',
+      PRICING_URL
+    );
+    expect(mockNavigate).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /accept invitation/i })).toBeEnabled();
+  });
+
+  it('shows the plain message when accepting fails for another reason', async () => {
+    mockAcceptInvitation.mockRejectedValue(new Error('Already a member'));
+
+    await accept();
+
+    expect(await screen.findByText('Already a member')).toBeInTheDocument();
+    expect(screen.queryByText(memberCapMessage())).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Compare plans/ })).not.toBeInTheDocument();
   });
 
   it('displays error when invitation fetch fails', async () => {

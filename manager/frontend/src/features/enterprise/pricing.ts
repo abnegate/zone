@@ -1,7 +1,7 @@
 import { LicenseStatus } from './schemas';
 import type { LicenseStatus as LicenseStatusValue } from './types';
 
-export const PRICING_URL = 'https://zone.abnegate.dev/pricing';
+export const PRICING_URL = 'https://zone.bitecode.ltd/pricing/';
 
 const OFFERS_PURCHASE: Readonly<Record<LicenseStatusValue, boolean>> = {
   [LicenseStatus.Community]: true,

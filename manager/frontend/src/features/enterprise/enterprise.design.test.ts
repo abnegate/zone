@@ -106,3 +106,47 @@ describe('enterprise switch surfaces', () => {
     expect(rule(switchCss, '.enterprise-switch-control:disabled')).toContain('cursor: not-allowed');
   });
 });
+
+describe('plan upgrade notice surfaces', () => {
+  it('stacks the heading, message and link and lets them shrink', () => {
+    const notice = rule(css, '.plan-notice');
+    expect(notice).toContain('flex-direction: column');
+    expect(notice).toContain('min-width: 0');
+    expect(rule(css, '.plan-notice-title')).toContain('margin: 0');
+    expect(rule(css, '.plan-notice p')).toContain('margin: 0');
+  });
+});
+
+describe('member cap banner surfaces', () => {
+  const bannerCss = read(join(import.meta.dir, 'components', 'MemberCapBanner.css'));
+
+  it('draws only from the design tokens and has no color literals', () => {
+    const variables = [...bannerCss.matchAll(/var\((--[\w-]+)/g)].map((match) => match[1]);
+    expect(variables.length).toBeGreaterThan(0);
+    for (const variable of variables) {
+      expect(variable).toStartWith('--ui-');
+    }
+    expect(bannerCss).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    expect(bannerCss).not.toMatch(/\b(?:rgb|rgba|hsl|hsla|oklch|color-mix)\(/i);
+  });
+
+  it('wraps its text and actions and lets them shrink so nothing scrolls sideways', () => {
+    for (const selector of [
+      '.member-cap-banner',
+      '.member-cap-banner-text',
+      '.member-cap-banner-actions',
+    ]) {
+      expect(rule(bannerCss, selector), selector).toContain('min-width: 0');
+    }
+    expect(rule(bannerCss, '.member-cap-banner')).toContain('flex-wrap: wrap');
+    expect(rule(bannerCss, '.member-cap-banner-actions')).toContain('flex-wrap: wrap');
+    expect(rule(media(bannerCss, PHONE), '.member-cap-banner-text')).toContain('flex-basis: 100%');
+  });
+
+  it('keeps a workspace page filling the rest of the viewport under the banner', () => {
+    const page = rule(bannerCss, '.main-content:has(> .member-cap-banner) .page--workspace');
+    expect(page).toContain('flex: 1');
+    expect(page).toContain('height: auto');
+    expect(page).toContain('min-height: 0');
+  });
+});

@@ -1,6 +1,8 @@
 import { Button } from '@zone/ui';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { MemberCapRefusal } from '../../enterprise/components/MemberCapRefusal';
+import { isMemberCapRefusal } from '../../enterprise/members';
 import AuthCard from '../components/AuthCard';
 import AuthStatus from '../components/AuthStatus';
 import { useAuth } from '../context';
@@ -21,6 +23,7 @@ export default function InvitationAcceptPage() {
   const [loading, setLoading] = useState(true);
   const [accepting, setAccepting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [capped, setCapped] = useState(false);
 
   const loadInvitation = useCallback(async () => {
     if (!token) {
@@ -55,13 +58,18 @@ export default function InvitationAcceptPage() {
 
     setAccepting(true);
     setError(null);
+    setCapped(false);
 
     try {
       const { client } = await import('../../../api/client');
       await client.acceptInvitation(token);
       navigate('/');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to accept invitation');
+      if (isMemberCapRefusal(err)) {
+        setCapped(true);
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to accept invitation');
+      }
     } finally {
       setAccepting(false);
     }
@@ -178,6 +186,7 @@ export default function InvitationAcceptPage() {
         </div>
 
         {error && <div className="alert alert-error">{error}</div>}
+        {capped && <MemberCapRefusal className="alert alert-error" />}
 
         <div className="invitation-actions">
           {!isAuthenticated ? (

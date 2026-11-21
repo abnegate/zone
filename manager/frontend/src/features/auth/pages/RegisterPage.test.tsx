@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
 import { AuthRequestError } from '../../../api/auth';
+import { memberCapMessage } from '../../enterprise/members';
 import { SsoCode } from '../SsoCode';
 import { SSO_OFFERED, SSO_REQUIRED } from '../ssoFixtures';
 import { SSO_MESSAGES } from '../ssoMessages';
@@ -374,6 +375,34 @@ describe('RegisterPage', () => {
       await userEvent.click(screen.getByRole('button', { name: /create account/i }));
 
       expect(await screen.findByText(SSO_MESSAGES[SsoCode.Required])).toBeInTheDocument();
+    });
+  });
+
+  describe('Member cap', () => {
+    async function submit() {
+      renderRegisterPage();
+      await userEvent.type(screen.getByLabelText(/email/i), 'new@example.com');
+      await userEvent.type(screen.getByLabelText(/^password$/i), 'Password123');
+      await userEvent.type(screen.getByLabelText(/confirm password/i), 'Password123');
+      await userEvent.click(screen.getByRole('button', { name: /create account/i }));
+    }
+
+    it('explains the member cap when registration is refused at it', async () => {
+      mockRegister.mockRejectedValue(new AuthRequestError('Server text', 'member_cap_reached'));
+
+      await submit();
+
+      expect(await screen.findByText(memberCapMessage())).toBeInTheDocument();
+      expect(screen.queryByText('Server text')).not.toBeInTheDocument();
+    });
+
+    it("keeps the server's message for a refusal that is not the cap", async () => {
+      mockRegister.mockRejectedValue(new Error('Email already registered'));
+
+      await submit();
+
+      expect(await screen.findByText('Email already registered')).toBeInTheDocument();
+      expect(screen.queryByText(memberCapMessage())).not.toBeInTheDocument();
     });
   });
 });
