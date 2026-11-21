@@ -67,11 +67,11 @@ fn client_webview_uses_stable_loopback() {
 }
 
 #[test]
-fn launcher_icon_is_theme_blue_and_inset() {
+fn launcher_icon_is_brand_cyan_and_inset() {
     let svg = fs::read_to_string(desktop_dir().join("icons/icon.svg")).unwrap();
     assert!(
-        svg.contains("#0011d9"),
-        "launcher mark must use --ui-accent"
+        svg.contains("#00f3ff"),
+        "launcher mark must use the brand cyan"
     );
     assert!(
         svg.contains("#1a1612"),
@@ -84,7 +84,7 @@ fn launcher_icon_is_theme_blue_and_inset() {
     let night = fs::read_to_string(desktop_dir().join("icons/icon-night.svg")).unwrap();
     assert!(
         night.contains("#00f3ff"),
-        "night launcher mark must use dark --ui-accent"
+        "night launcher mark must use the brand cyan"
     );
     assert!(night.contains("translate(21 21) scale(1.03125)"));
     let script = fs::read_to_string(repo_root().join("scripts/generate-tauri-icons.sh")).unwrap();
