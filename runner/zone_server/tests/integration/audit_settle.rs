@@ -81,8 +81,8 @@ async fn settle_does_not_wait_for_a_drop_its_rows_are_already_past() {
 
 #[tokio::test]
 async fn a_test_database_is_dropped_only_through_the_drop_gate() {
-    let quiescing = gate(EXCLUSIVE).await;
     let doomed = Database::new(PREFIX).await;
+    let quiescing = gate(EXCLUSIVE).await;
     let name = doomed.name.clone();
     let mut cleanup = tokio::spawn(doomed.cleanup());
 
