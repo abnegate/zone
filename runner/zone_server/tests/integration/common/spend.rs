@@ -10,8 +10,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+use zone_enterprise::spend::{Budget, DEFAULT_THRESHOLD, Microdollars, Month, Target};
 use zone_server::config::Config;
 use zone_server::db::migrations;
+use zone_server::db::spend::budgets::{self, BudgetRow};
+use zone_server::db::spend::keys;
 use zone_server::services::endpoint::Endpoint;
 use zone_server::services::mail::AccountMail;
 use zone_server::services::spend::{self, Client, Key, Subject};
@@ -51,14 +54,20 @@ pub struct Stored {
 
 impl Fixture {
     pub async fn new(prefix: &'static str) -> Self {
+        Self::configured(prefix, |_| {}).await
+    }
+
+    /// [`Self::new`] with its config changed by `configure` before the server starts.
+    pub async fn configured(prefix: &'static str, configure: impl FnOnce(&mut Config)) -> Self {
         // A pooled server keeps its address across tests, and the key registry is keyed by
         // LiteLLM's address for the whole process.
         let litellm = MockServer::builder().start().await;
-        let config = Config {
+        let mut config = Config {
             litellm_host: litellm.uri(),
             litellm_key: MASTER.to_string(),
             ..test_config()
         };
+        configure(&mut config);
         let database = Database::new(prefix).await;
         migrations::run(&database.pool).await.unwrap();
         let mail = Arc::new(Recording::default());
@@ -189,6 +198,96 @@ impl Fixture {
         .fetch_all(self.pool())
         .await
         .unwrap()
+    }
+
+    /// Records `subject`'s key as derived, as its first attributed request would, and returns it.
+    pub async fn derive(&self, subject: &Subject) -> Key {
+        let key = self.key(subject);
+        keys::insert(
+            self.pool(),
+            &key.token,
+            subject.organization,
+            subject.workspace,
+            subject.user,
+        )
+        .await
+        .unwrap();
+        key
+    }
+
+    /// Stores `microdollars` of `subject`'s spend from a minute ago, as an ingest would.
+    pub async fn spend(&self, subject: &Subject, request: &str, microdollars: i64) {
+        let key = self.derive(subject).await;
+        sqlx::query(
+            "INSERT INTO spend_records (request_id, organization_id, workspace_id, user_id, token,
+                                        model, provider, spend_microdollars, occurred_at)
+             VALUES ($1, $2, $3, $4, $5, 'gpt-4o', 'openai', $6, now() - interval '1 minute')",
+        )
+        .bind(request)
+        .bind(subject.organization)
+        .bind(subject.workspace)
+        .bind(subject.user)
+        .bind(&key.token)
+        .bind(microdollars)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
+    /// A budget of `limit` microdollars a month for `target`, created by the owner and settled
+    /// against what is already spent this month.
+    pub async fn budget(&self, target: Target, limit: i64, hard: bool) -> BudgetRow {
+        let month = Month::current();
+        let mut connection = self.pool().acquire().await.unwrap();
+        let row = budgets::create(
+            &mut connection,
+            self.policy.organization,
+            &target,
+            &Budget {
+                limit: Microdollars(limit),
+                threshold_percent: DEFAULT_THRESHOLD,
+                hard,
+            },
+            self.policy.owner.id,
+            month,
+        )
+        .await
+        .unwrap();
+        budgets::refresh(&mut connection, row.id, month)
+            .await
+            .unwrap();
+        row
+    }
+
+    /// Changes `row`'s limit to `limit` microdollars, as an admin's edit does, and settles it.
+    pub async fn limit(&self, row: &BudgetRow, limit: i64) {
+        let month = Month::current();
+        let mut connection = self.pool().acquire().await.unwrap();
+        budgets::update(
+            &mut connection,
+            row.id,
+            &Budget {
+                limit: Microdollars(limit),
+                ..row.budget
+            },
+            self.policy.owner.id,
+            month,
+        )
+        .await
+        .unwrap();
+        budgets::refresh(&mut connection, row.id, month)
+            .await
+            .unwrap();
+    }
+
+    /// Serves the real router, for a test that needs a WebSocket, and returns its `host:port`.
+    pub async fn serve(&self) -> String {
+        super::serve(self.state().clone()).await
+    }
+
+    /// Who account mail went to, in the order it was sent.
+    pub fn mailed(&self) -> Vec<String> {
+        self.policy.sso.mail.recipients()
     }
 
     pub async fn cleanup(self) {

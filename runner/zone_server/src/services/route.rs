@@ -6,16 +6,19 @@ use abnegate_agent_cli::AgentKind;
 use uuid::Uuid;
 use zone_core::llm::LlmBackend;
 use zone_enterprise::policy::{Denial, Effective};
+use zone_enterprise::spend::{Exhausted, Month};
 
 use crate::config::Config;
 use crate::db::ai_settings::{self, EffectiveAiSettings};
 use crate::db::chats::provider::{self, Choice};
 use crate::db::chats::{ChatRow, ChatSession};
+use crate::db::spend::budgets;
 use crate::db::workspaces;
 use crate::services::backend::{self, Continuation, Resolved, Routing};
 use crate::services::endpoint::{Endpoint, Origin, UrlError};
 use crate::services::policy;
 use crate::services::provider::Provider;
+use crate::services::spend::{Standing, Subject, attribution};
 use crate::services::stages::{self, Preferences};
 use crate::state::AppState;
 
@@ -43,6 +46,8 @@ pub enum Reason {
     /// The organization's or workspace's agent policy refuses the agent or direct provider
     /// completions would run on, or could not be read.
     Denied(Denial),
+    /// A hard budget covering whoever the completions are spent for is used up this month.
+    Exhausted(Exhausted),
 }
 
 impl From<UrlError> for Reason {
@@ -81,6 +86,7 @@ impl fmt::Display for Reason {
                 formatter.write_str("the model this chat chose isn't saved for it in AI Settings")
             }
             Self::Denied(denial) => clause(formatter, *denial),
+            Self::Exhausted(exhausted) => write!(formatter, "{exhausted}"),
         }
     }
 }
@@ -140,6 +146,7 @@ impl fmt::Display for Unusable {
                 "This workspace's AI endpoint can't be used: {reason}. Check AI Settings."
             ),
             Reason::Denied(denial) => write!(formatter, "{denial}"),
+            Reason::Exhausted(exhausted) => write!(formatter, "{exhausted}"),
         }
     }
 }
@@ -153,7 +160,10 @@ impl Unusable {
     }
 
     pub fn code(&self) -> Option<&'static str> {
-        self.denial().map(|denial| denial.code())
+        match self.reason {
+            Reason::Exhausted(exhausted) => Some(exhausted.code()),
+            _ => self.denial().map(|denial| denial.code()),
+        }
     }
 }
 
@@ -176,6 +186,9 @@ impl From<Reason> for Unusable {
 ///
 /// A route read for a workspace or a chat carries the agent policy it runs under, read once,
 /// and is unusable while that policy refuses its agent or direct provider, or cannot be read.
+///
+/// Its completions over the instance's LiteLLM are spent for its workspace, or for the member
+/// whose turn they answer, and are unusable while a hard budget covering that spend is used up.
 #[derive(Clone)]
 pub struct Route {
     endpoint: Result<Endpoint, Unusable>,
@@ -188,6 +201,13 @@ pub struct Route {
     /// The agent the instance runs completions on, when it runs them on one.
     configured: Option<AgentKind>,
     policy: Result<Option<Effective>, Denial>,
+    /// Whose spend the completions are, none outside a workspace's settings.
+    subject: Option<Subject>,
+    /// The used-up hard budget the completions' spend is held to.
+    exhausted: Option<Exhausted>,
+    /// Whether the completions were moved onto the instance's endpoint, so they run over HTTP
+    /// whatever agent the settings prefer.
+    http: bool,
 }
 
 #[derive(Clone)]
@@ -198,25 +218,45 @@ struct Saved {
 
 impl Route {
     pub async fn for_workspace(state: &AppState, workspace: Uuid) -> Self {
+        Self::build_workspace(state, workspace, None)
+            .await
+            .spent(state)
+            .await
+    }
+
+    /// The route `chat`'s completions take: the provider the chat chose, on
+    /// its workspace's saved keys and endpoints, else its workspace's route.
+    pub async fn for_chat(state: &AppState, chat: &ChatRow) -> Self {
+        Self::build_chat(state, chat, None).await.spent(state).await
+    }
+
+    /// [`Self::for_chat`] for a turn `user` asked for, whose spend is theirs.
+    pub async fn for_turn(state: &AppState, chat: &ChatRow, user: Uuid) -> Self {
+        Self::build_chat(state, chat, Some(user))
+            .await
+            .spent(state)
+            .await
+    }
+
+    async fn build_workspace(state: &AppState, workspace: Uuid, user: Option<Uuid>) -> Self {
         match saved(state, workspace).await {
             Ok(Some((organization, settings))) => {
                 Self::new(state.config(), workspace, organization, settings)
                     .governed(policy::load(state, organization, Some(workspace)).await)
+                    .by(user)
             }
             Ok(None) => Self::instance(state.config()),
             Err(reason) => Self::unusable(reason),
         }
     }
 
-    /// The route `chat`'s completions take: the provider the chat chose, on
-    /// its workspace's saved keys and endpoints, else its workspace's route.
-    pub async fn for_chat(state: &AppState, chat: &ChatRow) -> Self {
+    async fn build_chat(state: &AppState, chat: &ChatRow, user: Option<Uuid>) -> Self {
         let Some(workspace) = chat.workspace_id else {
             return Self::instance(state.config());
         };
         let choice = match provider::get(state.db(), chat.id).await {
             Ok(Some(choice)) => choice,
-            Ok(None) => return Self::for_workspace(state, workspace).await,
+            Ok(None) => return Self::build_workspace(state, workspace, user).await,
             Err(error) => {
                 tracing::warn!(
                     chat_id = %chat.id,
@@ -230,6 +270,7 @@ impl Route {
             Ok(Some((organization, settings))) => {
                 Self::choosing(state.config(), workspace, organization, &settings, choice)
                     .governed(policy::load(state, organization, Some(workspace)).await)
+                    .by(user)
             }
             Ok(None) | Err(_) => {
                 let reason = Reason::SettingsUnreadable(choice.provider);
@@ -295,6 +336,13 @@ impl Route {
             windowed,
             configured: config.model_backend().agent(),
             policy: Ok(None),
+            subject: Some(Subject {
+                organization,
+                workspace,
+                user: None,
+            }),
+            exhausted: None,
+            http: false,
         }
     }
 
@@ -338,6 +386,13 @@ impl Route {
             windowed: true,
             configured: config.model_backend().agent(),
             policy: Ok(None),
+            subject: Some(Subject {
+                organization,
+                workspace,
+                user: None,
+            }),
+            exhausted: None,
+            http: false,
         }
     }
 
@@ -349,6 +404,9 @@ impl Route {
             windowed: true,
             configured: config.model_backend().agent(),
             policy: Ok(None),
+            subject: None,
+            exhausted: None,
+            http: false,
         }
     }
 
@@ -360,7 +418,53 @@ impl Route {
             windowed: true,
             configured: None,
             policy: Ok(None),
+            subject: None,
+            exhausted: None,
+            http: false,
         }
+    }
+
+    /// This route with its spend `user`'s, or its workspace's automation's when none.
+    fn by(self, user: Option<Uuid>) -> Self {
+        Self {
+            subject: self.subject.map(|subject| Subject { user, ..subject }),
+            ..self
+        }
+    }
+
+    /// This route sent under the key derived for whoever its completions are spent for, and
+    /// unusable while a hard budget covering that spend is used up this month. Only completions
+    /// over HTTP to the instance's LiteLLM, under its own key, are attributed and held to a
+    /// budget, and only while spend is enforced. A budget that cannot be read holds nothing.
+    /// Calling it again changes nothing.
+    pub async fn spent(self, state: &AppState) -> Self {
+        let Some(subject) = self.attributable(state.config()) else {
+            return self;
+        };
+        if !Standing::read(state).await.enforced {
+            return self;
+        }
+        let exhausted = exhausted(state, &subject).await;
+        let endpoint = match self.endpoint {
+            Ok(endpoint) => Ok(attribution::attribute(state, endpoint, &subject).await),
+            unusable => unusable,
+        };
+        Self {
+            endpoint,
+            exhausted,
+            ..self
+        }
+    }
+
+    /// Whose spend this route's completions can be attributed to: none unless they run over
+    /// HTTP to the instance's LiteLLM under its own key, on a workspace's settings, and the
+    /// policy lets them.
+    fn attributable(&self, config: &Config) -> Option<Subject> {
+        let endpoint = self.endpoint.as_ref().ok()?;
+        let over_http = self.http || self.preferred().is_none();
+        (over_http && endpoint.attributable(config) && self.denial().is_none())
+            .then_some(self.subject)
+            .flatten()
     }
 
     /// This route under `policy`, in place of any it ran under: unusable while `policy` refuses
@@ -516,27 +620,38 @@ impl Route {
             .map_err(|unusable| *unusable)
     }
 
-    /// The endpoint completions go to, or why there is none.
+    /// The endpoint completions go to, or why there is none: the policy's denial before a
+    /// used-up budget.
     pub fn endpoint(&self) -> Result<&Endpoint, Unusable> {
-        match self.denied() {
+        match self.refused() {
             Some(unusable) => Err(unusable),
             None => self.endpoint.as_ref().map_err(|unusable| *unusable),
         }
     }
 
     pub fn into_endpoint(self) -> Result<Endpoint, Unusable> {
-        match self.denied() {
+        match self.refused() {
             Some(unusable) => Err(unusable),
             None => self.endpoint,
         }
     }
 
-    /// These settings with their completions sent to the instance's own
-    /// endpoint instead. An unusable route stays unusable.
+    fn refused(&self) -> Option<Unusable> {
+        self.denied().or_else(|| {
+            self.exhausted
+                .map(|exhausted| Unusable::from(Reason::Exhausted(exhausted)))
+        })
+    }
+
+    /// These settings with their completions sent over HTTP to the instance's own endpoint
+    /// instead. An unusable route stays unusable. Their spend is neither attributed nor held to a
+    /// budget until the caller awaits [`Self::spent`] on the route this returns.
     pub fn on_instance(self, config: &Config) -> Self {
         Self {
             endpoint: self.endpoint.map(|_| Endpoint::instance(config)),
             configured: config.model_backend().agent(),
+            exhausted: None,
+            http: true,
             ..self
         }
     }
@@ -676,6 +791,30 @@ impl Route {
     }
 }
 
+/// The broadest used-up hard budget covering `subject`'s spend this month, none when its budgets
+/// cannot be read.
+async fn exhausted(state: &AppState, subject: &Subject) -> Option<Exhausted> {
+    match budgets::exhausted(
+        state.db(),
+        subject.organization,
+        subject.workspace,
+        subject.user,
+        Month::current(),
+    )
+    .await
+    {
+        Ok(scope) => scope.map(|scope| Exhausted { scope }),
+        Err(error) => {
+            tracing::error!(
+                workspace = %subject.workspace,
+                %error,
+                "Could not read the budgets a request is held to, so it is sent without them"
+            );
+            None
+        }
+    }
+}
+
 /// The organization `workspace` belongs to and its effective AI settings,
 /// nothing when there is no such workspace, or [`Reason::Unreadable`] when
 /// either cannot be read, with the reason logged.
@@ -751,6 +890,7 @@ mod tests {
     use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
     use zone_core::llm::SignIn;
     use zone_enterprise::policy::{self, Rules};
+    use zone_enterprise::spend::{BUDGET_EXHAUSTED, Scope};
 
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
@@ -1870,6 +2010,255 @@ mod tests {
                 )
                 .await,
             Ok(())
+        );
+    }
+
+    fn exhausted(scope: Scope) -> Option<Exhausted> {
+        Some(Exhausted { scope })
+    }
+
+    fn reason(route: &Route) -> Option<Reason> {
+        route.endpoint().err().map(|unusable| unusable.reason)
+    }
+
+    #[test]
+    fn a_used_up_budget_says_whose_it_is_and_carries_its_code() {
+        for (scope, said) in [
+            (
+                Scope::Organization,
+                "Your organization's monthly AI budget is used up, so this request wasn't sent. An organization admin can raise it under Settings › Spend; it resets on the 1st (UTC).",
+            ),
+            (
+                Scope::Workspace,
+                "This workspace's monthly AI budget is used up, so this request wasn't sent. An organization admin can raise it under Settings › Spend; it resets on the 1st (UTC).",
+            ),
+            (
+                Scope::User,
+                "Your monthly AI budget is used up, so this request wasn't sent. An organization admin can raise it under Settings › Spend; it resets on the 1st (UTC).",
+            ),
+        ] {
+            let reason = Reason::Exhausted(Exhausted { scope });
+            let unusable = Unusable::from(reason);
+
+            assert_eq!(unusable.to_string(), said);
+            assert_eq!(reason.to_string(), said);
+            assert_eq!(unusable.code(), Some(BUDGET_EXHAUSTED));
+            assert_eq!(
+                unusable.denial(),
+                None,
+                "a used-up budget is not a policy denial"
+            );
+        }
+    }
+
+    #[test]
+    fn a_policy_denial_is_reported_before_a_used_up_budget() {
+        let config = instance_on(None);
+        let denied = Route {
+            exhausted: exhausted(Scope::Workspace),
+            ..routed(
+                &config,
+                openai_at("https://api.openai.com/v1"),
+                Rules {
+                    providers: Some(vec![policy::Provider::Anthropic]),
+                    ..Rules::default()
+                },
+            )
+        };
+
+        let denial = Reason::Denied(Denial::Provider(policy::Provider::OpenAI));
+        assert_eq!(reason(&denied), Some(denial));
+        assert_eq!(
+            denied
+                .clone()
+                .into_endpoint()
+                .err()
+                .map(|unusable| unusable.reason),
+            Some(denial)
+        );
+
+        let allowed = denied.with_policy(None);
+        let used_up = Reason::Exhausted(Exhausted {
+            scope: Scope::Workspace,
+        });
+        assert_eq!(reason(&allowed), Some(used_up));
+        assert_eq!(allowed.agent(&config), None);
+        assert_eq!(
+            allowed
+                .into_endpoint()
+                .err()
+                .map(|unusable| unusable.reason),
+            Some(used_up)
+        );
+    }
+
+    #[test]
+    fn a_route_moved_onto_the_instance_is_held_to_no_budget_until_it_is_spent_again() {
+        let config = instance_on(None);
+        let organization = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        let route = Route {
+            exhausted: exhausted(Scope::Organization),
+            ..Route::new(
+                &config,
+                workspace,
+                organization,
+                settings(PROVIDER_SELF_HOSTED),
+            )
+            .by(Some(Uuid::nil()))
+        };
+        assert!(route.endpoint().is_err());
+
+        let moved = route.on_instance(&config);
+
+        assert!(
+            moved.endpoint().is_ok(),
+            "the budget read for the old endpoint stayed"
+        );
+        assert_eq!(
+            moved.subject,
+            Some(Subject {
+                organization,
+                workspace,
+                user: Some(Uuid::nil()),
+            }),
+            "whose spend it is did not move with it"
+        );
+    }
+
+    #[test]
+    fn only_completions_over_http_to_the_instances_litellm_are_attributable() {
+        let config = instance_on(None);
+        let organization = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        let subject = Subject {
+            organization,
+            workspace,
+            user: None,
+        };
+        let on = |settings| Route::new(&config, workspace, organization, settings);
+
+        assert_eq!(
+            on(settings(PROVIDER_SELF_HOSTED)).attributable(&config),
+            Some(subject)
+        );
+        assert_eq!(
+            on(openai_at("https://api.openai.com/v1")).attributable(&config),
+            None,
+            "a direct provider's spend was attributed"
+        );
+        assert_eq!(
+            on(settings(PROVIDER_CLAUDE_CODE)).attributable(&config),
+            None,
+            "a coding agent's spend was attributed"
+        );
+        assert_eq!(Route::instance(&config).attributable(&config), None);
+        assert_eq!(
+            routed(
+                &config,
+                settings(PROVIDER_SELF_HOSTED),
+                Rules {
+                    models: Some(vec![]),
+                    agents: Some(vec![]),
+                    ..Rules::default()
+                },
+            )
+            .attributable(&config),
+            Some(Subject {
+                organization: Uuid::nil(),
+                workspace: Uuid::nil(),
+                user: None,
+            }),
+            "a LiteLLM's models are judged per request, not by the route"
+        );
+        assert_eq!(
+            on(settings(PROVIDER_SELF_HOSTED))
+                .governed(Err(Denial::Unreadable))
+                .attributable(&config),
+            None,
+            "a route the policy refuses was attributed"
+        );
+        assert_eq!(
+            Route::new(
+                &instance_on(Some(AgentKind::Codex)),
+                workspace,
+                organization,
+                settings(PROVIDER_SELF_HOSTED),
+            )
+            .attributable(&config),
+            None,
+            "a route on the instance's own agent was attributed"
+        );
+    }
+
+    #[test]
+    fn an_agent_route_moved_onto_the_instance_is_attributed_and_held_to_its_budget() {
+        let config = instance_on(None);
+        let organization = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        let route = Route::new(
+            &config,
+            workspace,
+            organization,
+            settings(PROVIDER_CLAUDE_CODE),
+        );
+        assert_eq!(route.preferred(), Some(AgentKind::Claude));
+        assert_eq!(route.attributable(&config), None);
+
+        let moved = route.on_instance(&config);
+
+        assert_eq!(
+            moved.preferred(),
+            Some(AgentKind::Claude),
+            "the settings still prefer their agent"
+        );
+        assert_eq!(
+            moved.attributable(&config),
+            Some(Subject {
+                organization,
+                workspace,
+                user: None,
+            }),
+            "a repair moved onto the instance's LiteLLM runs over HTTP, so its spend counts"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_reads_its_workspaces_settings_once_and_is_spent_for_its_member() {
+        let fixture = Fixture::new(PROVIDER_SELF_HOSTED).await;
+        let following = fixture.chat(None).await;
+        let chosen = fixture.chat(choice(Provider::SelfHosted, None)).await;
+        let member = Uuid::new_v4();
+
+        let before = reads::of(fixture.workspace);
+        let turn = Route::for_turn(&fixture.state, &following, member).await;
+        let followed = reads::of(fixture.workspace);
+        let picked = Route::for_turn(&fixture.state, &chosen, member).await;
+        let chose = reads::of(fixture.workspace);
+        let automation = Route::for_chat(&fixture.state, &following).await;
+        fixture.remove().await;
+
+        assert_eq!(
+            followed - before,
+            1,
+            "a turn read its settings more than once"
+        );
+        assert_eq!(
+            chose - followed,
+            1,
+            "a turn on a chosen provider read its settings more than once"
+        );
+        let spender = Some(Subject {
+            organization: fixture.organization,
+            workspace: fixture.workspace,
+            user: Some(member),
+        });
+        assert_eq!(turn.subject, spender);
+        assert_eq!(picked.subject, spender);
+        assert_eq!(
+            automation.subject.map(|subject| subject.user),
+            Some(None),
+            "a chat's own completions are its workspace's automation"
         );
     }
 }

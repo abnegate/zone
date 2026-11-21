@@ -1515,7 +1515,7 @@ pub async fn context(
         Ok(actor) => actor,
         Err(error) => return error.into_response(),
     };
-    let route = Route::for_chat(&state, &chat).await;
+    let route = Route::for_turn(&state, &chat, actor).await;
     let chat = route.apply(chat);
     let driver = route
         .agent(state.config())

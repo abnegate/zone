@@ -744,12 +744,7 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         actor: None,
     };
     let refusal = resolved.as_ref().err().and_then(backend::Error::denial);
-    let (backend, route) = match repair_route(
-        route,
-        resolved,
-        backend::instance(state.config()),
-        state.config(),
-    ) {
+    let (backend, route) = match repaired(state, route, resolved).await {
         Ok(chosen) => chosen,
         Err(reason) => {
             if let Some(denial) = refusal {
@@ -950,6 +945,22 @@ async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Opti
     ];
     let response = client.chat(&messages, None).await.ok()?;
     Subject::parse(response.choices.first()?.message.content.as_deref()?)
+}
+
+/// [`repair_route`] on the instance this server runs, with a route moved onto the instance's
+/// LiteLLM attributed and held to its budget as every route over it is.
+async fn repaired(
+    state: &AppState,
+    route: Route,
+    resolved: Result<LlmBackend, backend::Error>,
+) -> Result<(LlmBackend, Route), String> {
+    let (backend, route) = repair_route(
+        route,
+        resolved,
+        backend::instance(state.config()),
+        state.config(),
+    )?;
+    Ok((backend, route.spent(state).await))
 }
 
 /// Where a repair's turns go: the workspace's endpoint when it runs over HTTP,
@@ -1372,6 +1383,166 @@ mod tests {
             leaked.is_empty(),
             "the instance's LITELLM_HOST was sent {} completions",
             leaked.len()
+        );
+    }
+
+    /// A migrated database of a test's own, for one that stores the server-wide license.
+    struct Isolated {
+        admin: PgPool,
+        pool: PgPool,
+        name: String,
+    }
+
+    impl Isolated {
+        async fn create() -> Self {
+            let admin = PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+            )
+            .await
+            .expect("the test database");
+            // Identifiers contain only this prefix and UUID hexadecimal.
+            let name = format!("repair_{}", Uuid::new_v4().simple());
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+                .execute(&admin)
+                .await
+                .expect("a database of the test's own");
+            let options = (*admin.connect_options()).clone().database(&name);
+            let pool = PgPool::connect_with(options)
+                .await
+                .expect("the test's own database");
+            crate::db::migrations::run(&pool).await.expect("the schema");
+            Self { admin, pool, name }
+        }
+
+        async fn remove(self) {
+            self.pool.close().await;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE {} WITH (FORCE)",
+                self.name
+            )))
+            .execute(&self.admin)
+            .await
+            .expect("the test's database to be dropped");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_repair_moved_onto_the_instance_is_attributed_and_held_to_its_budget() {
+        use chrono::{TimeDelta, Utc};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+        use zone_enterprise::spend::{BUDGET_EXHAUSTED, Exhausted, Month, Scope};
+        use zone_enterprise::{Keyring, Payload, SigningKey, TrustedKey, sign};
+
+        use crate::services::route::Reason;
+        use crate::services::spend::Key;
+
+        const KEY_ID: &str = "test-1";
+        let litellm = MockServer::builder().start().await;
+        Mock::given(method("POST"))
+            .and(path("/key/generate"))
+            .respond_with(|request: &Request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap_or_default();
+                let key = body["key"].as_str().unwrap_or_default();
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "key": key, "token": Key::hash(key) }))
+            })
+            .mount(&litellm)
+            .await;
+        let database = Isolated::create().await;
+        let pool = database.pool.clone();
+        let state = AppState::new(instance_config(&litellm.uri()), pool.clone(), None);
+        state.disable_mcp();
+        let signing = SigningKey::from_bytes(&[0x11; 32]);
+        state.install_keyring(
+            Keyring::new([TrustedKey::new(KEY_ID, signing.verifying_key().to_bytes()).unwrap()])
+                .unwrap(),
+        );
+        let now = Utc::now();
+        let license = sign(
+            &Payload {
+                id: Uuid::new_v4(),
+                customer: "Acme Ltd".into(),
+                seats: 3,
+                issued_at: now - TimeDelta::days(1),
+                expires_at: now + TimeDelta::days(365),
+                key_id: KEY_ID.into(),
+                subscription: None,
+            },
+            &signing,
+        );
+        crate::db::licenses::replace(&pool, &license)
+            .await
+            .expect("the license");
+        let suffix = Uuid::new_v4().simple().to_string();
+        let organization = organizations::create_organization(&pool, "Repair", &suffix, None)
+            .await
+            .expect("an organization")
+            .id;
+        let workspace = workspaces::create_workspace(&pool, organization, "Repair", &suffix, None)
+            .await
+            .expect("a workspace")
+            .id;
+        sqlx::query(
+            "INSERT INTO organization_ai_settings (organization_id, provider, completions_routed) \
+             VALUES ($1, $2, true)",
+        )
+        .bind(organization)
+        .bind(crate::db::ai_settings::PROVIDER_CLAUDE_CODE)
+        .execute(&pool)
+        .await
+        .expect("the organization's AI settings");
+        sqlx::query(
+            "INSERT INTO budgets (organization_id, limit_microdollars, hard, exhausted_month) \
+             VALUES ($1, 1, true, $2)",
+        )
+        .bind(organization)
+        .bind(Month::current().date())
+        .execute(&pool)
+        .await
+        .expect("a used-up hard budget");
+
+        let route = Route::for_workspace(&state, workspace).await;
+        let agent = route
+            .endpoint()
+            .map(|endpoint| endpoint.key().expose().to_string());
+        let (backend, blocked) = repaired(&state, route.clone(), Ok(claude()))
+            .await
+            .expect("the instance runs over HTTP");
+        sqlx::query("UPDATE budgets SET exhausted_month = NULL")
+            .execute(&pool)
+            .await
+            .expect("the budget raised");
+        let (_, attributed) = repaired(&state, route, Ok(claude()))
+            .await
+            .expect("the instance runs over HTTP");
+        let key = attributed
+            .endpoint()
+            .map(|endpoint| endpoint.key().expose().to_string());
+        database.remove().await;
+
+        assert_eq!(
+            agent.as_deref(),
+            Ok(INSTANCE_KEY),
+            "a coding agent's route is neither attributed nor held to a budget"
+        );
+        assert!(matches!(backend, LlmBackend::Http));
+        let unusable = blocked
+            .endpoint()
+            .expect_err("a repair on the instance's LiteLLM is held to its organization's budget");
+        assert_eq!(
+            unusable.reason,
+            Reason::Exhausted(Exhausted {
+                scope: Scope::Organization
+            })
+        );
+        assert_eq!(unusable.code(), Some(BUDGET_EXHAUSTED));
+        assert_eq!(
+            key.as_deref(),
+            Ok(Key::derive(state.master_key(), workspace, None)
+                .secret
+                .expose()),
+            "a repair on the instance's LiteLLM is sent under its workspace's automation key"
         );
     }
 

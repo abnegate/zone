@@ -7,10 +7,12 @@ pub mod error;
 pub mod ingest;
 pub mod key;
 pub mod log;
+pub mod notice;
 pub mod page;
 pub mod registry;
 pub mod standing;
 pub mod subject;
+pub mod sweep;
 pub mod unlicensed;
 pub mod upkeep;
 

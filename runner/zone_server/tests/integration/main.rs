@@ -137,6 +137,7 @@ mod seal_secrets;
 mod seats;
 mod sessions;
 mod skills_store;
+mod spend_enforcement;
 mod spend_store;
 mod sso_enforcement;
 mod sso_providers;
