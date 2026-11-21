@@ -3,14 +3,13 @@
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use chrono::{SubsecRound, TimeDelta, Utc};
 use serde_json::{Value, json};
 use uuid::Uuid;
+use zone_enterprise::LICENSE_REQUIRED;
 use zone_enterprise::sso::{
     CLIENT_ID_INVALID, CLIENT_SECRET_INVALID, DISCOVERY_FAILED, DISPLAY_NAME_INVALID,
     DOMAIN_INVALID, ISSUER_INVALID, PROVIDER_DUPLICATE, PROVIDER_NOT_FOUND,
 };
-use zone_enterprise::{LICENSE_REQUIRED, Payload, Plan, SigningKey, sign};
 use zone_server::auth::admin_guard::REQUIRED;
 use zone_server::auth::entitlement::ENTERPRISE_MESSAGE;
 use zone_server::db::audit::{actions, resources};
@@ -19,30 +18,11 @@ use zone_server::db::sso::providers;
 use crate::common::identity_provider::{
     CLIENT_ID, CLIENT_SECRET, DISCOVERY_PATH, DISPLAY_NAME, IdentityProvider, MISMATCHED_ISSUER,
 };
-use crate::common::sso::{Account, ENFORCEMENT, Fixture, PROVIDERS, SETTINGS, grace, lapsed};
+use crate::common::sso::{Account, ENFORCEMENT, Fixture, PROVIDERS, SETTINGS, grace, lapsed, team};
 use crate::common::{REFUSED_URL, TestResponse};
 
 const PREFIX: &str = "sso_providers";
 const REPLACED_SECRET: &str = "r0tated:secret+value";
-const KEY_ID: &str = "test-1";
-const SEED: [u8; 32] = [0x11; 32];
-
-fn team() -> String {
-    let expires_at = Utc::now().trunc_subsecs(0) + TimeDelta::days(365);
-    sign(
-        &Payload {
-            id: Uuid::new_v4(),
-            customer: "Acme Ltd".into(),
-            seats: 25,
-            issued_at: expires_at - TimeDelta::days(365),
-            expires_at,
-            key_id: KEY_ID.into(),
-            subscription: None,
-            plan: Some(Plan::Team),
-        },
-        &SigningKey::from_bytes(&SEED),
-    )
-}
 
 fn assert_code(response: &TestResponse, status: StatusCode, code: &str) {
     response.assert_status(status);
