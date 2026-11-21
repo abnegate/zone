@@ -77,7 +77,7 @@
 <section class="section section-sunken" aria-labelledby="buying-heading">
   <div class="container">
     <h2 id="buying-heading">How buying works</h2>
-    <p class="section-lead">Zone never handles your money and never phones home. It only verifies a key.</p>
+    <p class="section-lead">Zone never handles your money. It verifies a key on your own server.</p>
     <ol class="steps">
       <li>
         <h3>Check out</h3>
@@ -125,9 +125,11 @@
       <details>
         <summary>Does Zone contact a license server?</summary>
         <p>
-          No. A license key is signed, and Zone checks the signature against a public key built into
-          Zone, at startup and whenever an admin pastes a new key. Verification happens entirely on
-          your server, with no phone-home.
+          Only to renew. A license key is signed, and Zone checks the signature on your server
+          against a public key built into Zone, with no call out. Once a day, in the two weeks before
+          a subscription key expires, a server that can reach the internet sends its current key, and
+          nothing else, to fetch the renewed one. Set <code>ZONE_LICENSE_RENEWAL=false</code> to turn
+          that off and paste keys yourself.
         </p>
       </details>
       <details>
@@ -158,8 +160,10 @@
         <summary>Can we change our seat count or renew?</summary>
         <p>
           Yes. Renewals and seat changes go through Polar, and each one emails a new key to your
-          billing contact. Paste it into Settings &rarr; License to replace the old one. If you
-          cancel, your current key keeps working until it expires.
+          billing contact. A server that can reach the internet installs it by itself, unless
+          automatic renewal is turned off; otherwise paste it into Settings &rarr; License to
+          replace the old one. If you cancel, your current
+          key keeps working until it expires.
         </p>
       </details>
       <details>
