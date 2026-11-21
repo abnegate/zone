@@ -947,6 +947,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn document_tools_follow_the_callers_custom_role() {
+        use crate::auth::Permission;
+        use crate::db::tenant::Tenant;
+
+        let tenant = Tenant::new().await;
+        let writer = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;
+        let reader = tenant.workspace_holder(&[]).await;
+        let mut results = Vec::new();
+        for (user, name) in [
+            (writer, "create_document"),
+            (reader, "create_document"),
+            (reader, LIST_TOOL),
+        ] {
+            let scope = WorkspaceScope {
+                state: AppState::new(test_config(), tenant.pool.clone(), None),
+                workspace_id: tenant.workspace,
+                chat_id: Some(Uuid::new_v4()),
+                user_id: user,
+                offline: false,
+                origin: crate::db::tasks::Origin::Member,
+            };
+            let mut registry = ToolRegistry::new();
+            register(&mut registry, &scope);
+            let result = registry
+                .get(name)
+                .expect("the document tool")
+                .execute(
+                    json!({"title": "Held by a role", "content": "Custom roles"}),
+                    &ToolContext::default(),
+                )
+                .await
+                .expect("the tool answers");
+            results.push((result.success, result.error));
+        }
+        tenant.cleanup().await;
+
+        let refusal =
+            "You do not have permission to perform this document operation in this workspace.";
+        assert_eq!(
+            results,
+            [
+                (true, None),
+                (false, Some(refusal.to_string())),
+                (true, None)
+            ]
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "requires migrated PostgreSQL DATABASE_URL"]
     async fn document_tools_round_trip_complete_content() {
         use crate::db::{organizations, users, workspaces};

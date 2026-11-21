@@ -3597,6 +3597,102 @@ mod tests {
         assert!(Arc::ptr_eq(get_semaphore(), get_semaphore()));
     }
 
+    /// The worker re-checks the trigger through its custom role: a viewer
+    /// holding `workspace:write` gets the run claimed, and once the role is
+    /// narrowed to the base the next run fails before it is claimed.
+    #[tokio::test]
+    async fn the_worker_follows_the_triggers_custom_role() {
+        use crate::auth::{Permission, Scope};
+        use crate::db::tenant::Tenant;
+
+        let _execution = EXECUTION.lock().await;
+        let tenant = Tenant::new().await;
+        let pool = tenant.pool.clone();
+        let actor = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;
+        let task = tasks::create_task_as(
+            &pool,
+            tenant.workspace,
+            &[],
+            "Custom trigger",
+            "Must not run",
+            None,
+            None,
+            true,
+            None,
+            Some(actor),
+        )
+        .await
+        .unwrap();
+        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
+
+        let refused = tasks::create_task_run_as(&pool, task.id, Some(actor))
+            .await
+            .unwrap();
+        let reading = tenant.custom_role(Scope::Workspace, &[]).await;
+        tenant.hold_workspace_role(actor, reading).await;
+        execute_task_run(&state, refused.id, task.id).await;
+        let refused = tasks::get_task_run(&pool, refused.id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let writing = tenant
+            .custom_role(Scope::Workspace, &[Permission::WorkspaceWrite])
+            .await;
+        tenant.hold_workspace_role(actor, writing).await;
+        let admitted = tasks::create_task_run_as(&pool, task.id, Some(actor))
+            .await
+            .unwrap();
+        let held = get_semaphore()
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TASKS as u32)
+            .await
+            .unwrap();
+        let execution = tokio::spawn({
+            let state = state.clone();
+            async move { execute_task_run(&state, admitted.id, task.id).await }
+        });
+        let claimed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let owned: bool =
+                    sqlx::query_scalar("SELECT owner IS NOT NULL FROM task_runs WHERE id = $1")
+                        .bind(admitted.id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                if owned {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let stopped = tasks::stop_task_run_authorized(&pool, actor, admitted.id)
+            .await
+            .unwrap();
+        stop::request(admitted.id);
+        tokio::time::timeout(Duration::from_secs(5), execution)
+            .await
+            .expect("a stop ends the run")
+            .unwrap();
+        drop(held);
+        tenant.cleanup().await;
+
+        assert_eq!(refused.status, "failed");
+        assert_eq!(
+            refused.error_message.as_deref(),
+            Some("Workspace write access required")
+        );
+        assert!(
+            claimed.is_ok(),
+            "the worker never claimed a custom writer's run"
+        );
+        assert!(
+            matches!(stopped, tasks::Mutation::Applied(tasks::Stop::Stopped(_))),
+            "the custom writer's run was not live to stop"
+        );
+    }
+
     #[tokio::test]
     async fn test_database_task_callback_creation() {
         let pool = PgPool::connect_lazy("postgres://localhost/test").unwrap();
