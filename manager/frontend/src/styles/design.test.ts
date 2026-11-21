@@ -53,6 +53,13 @@ describe('design tokens', () => {
     expect(token(variables, 'ui-radius-xl')).toBe('1.5rem');
     expect(token(variables, 'ui-accent-600')).toBe('#0011d9');
   });
+
+  it('draws the logo mark in the fixed brand cyan, not the workspace accent', () => {
+    expect(rule(variables, ":root, :root[data-theme='light']")).toContain('--ui-brand: #008c94;');
+    expect(rule(variables, ":root[data-theme='dark']")).toContain('--ui-brand: #00f3ff;');
+    const logo = read(join(styles, '..', 'shared', 'components', 'ZoneLogo', 'ZoneLogo.css'));
+    expect(rule(logo, '.zone-logo__icon')).toContain('color: var(--ui-brand);');
+  });
 });
 
 describe('shared surfaces', () => {
