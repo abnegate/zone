@@ -116,6 +116,12 @@
   font-size: var(--ui-text-sm);
 }
 
+.invitation-accept-page .alert a {
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+}
+
 .invitation-accept-page .invitation-actions {
   display: flex;
   flex-direction: column;

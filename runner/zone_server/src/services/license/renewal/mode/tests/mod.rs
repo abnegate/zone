@@ -20,6 +20,7 @@ fn license(subscription: Option<&str>) -> License {
             expires_at: "2027-11-01T00:00:00Z".parse().unwrap(),
             key_id: KEY_ID.into(),
             subscription: subscription.map(str::to_owned),
+            plan: None,
         },
         &signing,
     );

@@ -2,6 +2,8 @@ import { Button, EmptyState, Input, Modal, Select } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useAuth } from '../../../auth';
+import { MemberCapRefusal } from '../../../enterprise/components/MemberCapRefusal';
+import { isMemberCapRefusal } from '../../../enterprise/members';
 import { memberLabel } from '../../memberLabel';
 import type { AddOrgMemberRequest, OrganizationMember, OrgRole } from '../types';
 import './OrgMembersSection.css';
@@ -43,6 +45,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
   const [addEmailError, setAddEmailError] = useState<string | undefined>(undefined);
   const [addRole, setAddRole] = useState<OrgRole>('member');
   const [adding, setAdding] = useState(false);
+  const [capped, setCapped] = useState(false);
 
   const [showRemoveModal, setShowRemoveModal] = useState(false);
   const [memberToRemove, setMemberToRemove] = useState<OrganizationMember | null>(null);
@@ -97,6 +100,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
 
     setAdding(true);
     setError(undefined);
+    setCapped(false);
 
     try {
       const request: AddOrgMemberRequest = {
@@ -111,10 +115,20 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
       setAddEmailError(undefined);
       await loadMembers();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to add member');
+      if (isMemberCapRefusal(err)) {
+        setCapped(true);
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to add member');
+      }
     } finally {
       setAdding(false);
     }
+  };
+
+  const closeAddModal = () => {
+    setShowAddModal(false);
+    setAddEmailError(undefined);
+    setCapped(false);
   };
 
   const handleRoleChangeRequest = (member: OrganizationMember, newRole: OrgRole) => {
@@ -347,15 +361,9 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
           </table>
         </div>
       )}
-      <Modal
-        isOpen={showAddModal}
-        onClose={() => {
-          setShowAddModal(false);
-          setAddEmailError(undefined);
-        }}
-        title="Add Organization Member"
-      >
+      <Modal isOpen={showAddModal} onClose={closeAddModal} title="Add Organization Member">
         <form onSubmit={handleAddMember} className="add-member-form">
+          {capped && <MemberCapRefusal className="modal-error" />}
           <Input
             label="Email"
             type="email"
@@ -375,14 +383,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
             options={grantableRoles()}
           />
           <div className="modal-actions">
-            <Button
-              type="button"
-              onClick={() => {
-                setShowAddModal(false);
-                setAddEmailError(undefined);
-              }}
-              variant="secondary"
-            >
+            <Button type="button" onClick={closeAddModal} variant="secondary">
               Cancel
             </Button>
             <Button type="submit" loading={adding} variant="primary">

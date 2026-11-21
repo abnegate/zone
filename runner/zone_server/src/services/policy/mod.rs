@@ -224,7 +224,7 @@ async fn organization_of(state: &AppState, workspace: Uuid) -> Option<Uuid> {
 pub fn enforces(stored: &Stored) -> bool {
     match stored {
         Stored::Unverified(_) => true,
-        Stored::Empty | Stored::Verified(_) => Feature::enforced(stored.license()),
+        Stored::Empty | Stored::Verified(_) => Feature::Policy.enforced(stored.license()),
     }
 }
 

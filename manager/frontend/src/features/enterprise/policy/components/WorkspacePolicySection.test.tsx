@@ -106,6 +106,22 @@ describe('WorkspacePolicySection', () => {
     expect(screen.queryByRole('group', { name: 'Providers' })).not.toBeInTheDocument();
   });
 
+  it('shows a Team server the Enterprise upgrade notice and no editor', async () => {
+    await loaded({
+      ...ACTIVE_WORKSPACE_INHERITED,
+      entitled: false,
+      enforced: false,
+      edition: Edition.Team,
+      status: LicenseStatus.Active,
+      editable: false,
+      organization: OPEN_RULES,
+      effective: OPEN_RULES,
+    });
+
+    expect(screen.getByText(UPGRADE_NOTICE)).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Providers' })).not.toBeInTheDocument();
+  });
+
   it('marks inherited and unrestricted fields and shows the organization and effective values', async () => {
     await loaded(ACTIVE_WORKSPACE_INHERITED);
 

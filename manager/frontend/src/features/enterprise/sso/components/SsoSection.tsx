@@ -1,6 +1,7 @@
 import { Button } from '@zone/ui';
 import { useId, useState } from 'react';
-import { LicenseStatus } from '../../schemas';
+import { includes } from '../../plans';
+import { LicenseStatus, Plan } from '../../schemas';
 import { useSso } from '../hooks';
 import type { ProviderResponse, SettingsResponse } from '../types';
 import { DeleteSsoProviderDialog } from './DeleteSsoProviderDialog';
@@ -13,7 +14,11 @@ import { SsoUpgradeNotice } from './SsoUpgradeNotice';
 import './SsoSection.css';
 
 function lapsed(settings: SettingsResponse): boolean {
-  return !settings.entitled && settings.status === LicenseStatus.Lapsed;
+  return (
+    !settings.entitled &&
+    settings.status === LicenseStatus.Lapsed &&
+    includes(settings.edition, Plan.Enterprise)
+  );
 }
 
 function SsoSettings({ settings }: { settings: SettingsResponse }) {

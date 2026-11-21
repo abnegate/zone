@@ -301,6 +301,7 @@ mod tests {
                 expires_at: now + expires_in,
                 key_id: KEY_ID.into(),
                 subscription: None,
+                plan: None,
             },
             &signing(),
         )

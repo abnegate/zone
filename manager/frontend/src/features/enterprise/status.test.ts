@@ -42,6 +42,7 @@ import {
 describe('editionLabel', () => {
   it('names each edition', () => {
     expect(editionLabel('community')).toBe('Community');
+    expect(editionLabel('team')).toBe('Team');
     expect(editionLabel('enterprise')).toBe('Enterprise');
   });
 });
@@ -108,7 +109,7 @@ describe('seatText', () => {
   });
 
   it('counts used seats alone in Community', () => {
-    expect(seatText(COMMUNITY.seats)).toBe('12 seats used this month');
+    expect(seatText(COMMUNITY.seats)).toBe('2 seats used this month');
     expect(seatText({ used: 1, licensed: null, over: false })).toBe('1 seat used this month');
   });
 

@@ -5,6 +5,8 @@ import type {
   LicenseRefusalSchema,
   LicenseResponseSchema,
   LicenseStatusSchema,
+  MembersSchema,
+  PlanSchema,
   RenewalSchema,
   SeatsSchema,
   SetLicenseRequestSchema,
@@ -12,9 +14,11 @@ import type {
 } from './schemas';
 
 export type Edition = z.infer<typeof EditionSchema>;
+export type Plan = z.infer<typeof PlanSchema>;
 export type LicenseStatus = z.infer<typeof LicenseStatusSchema>;
 export type LicenseDetails = z.infer<typeof LicenseDetailsSchema>;
 export type Seats = z.infer<typeof SeatsSchema>;
+export type Members = z.infer<typeof MembersSchema>;
 export type LicenseResponse = z.infer<typeof LicenseResponseSchema>;
 export type SetLicenseRequest = z.infer<typeof SetLicenseRequestSchema>;
 export type LicenseRefusalBody = z.infer<typeof LicenseRefusalSchema>;
