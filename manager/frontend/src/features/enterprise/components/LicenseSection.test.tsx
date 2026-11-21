@@ -5,6 +5,8 @@ import { ApiError } from '../../../api/ApiError';
 import {
   ACTIVE,
   COMMUNITY,
+  COMMUNITY_AT_CAP,
+  COMMUNITY_OVER_CAP,
   ENFORCEMENT_CLAIM,
   GRACE,
   LAPSED,
@@ -14,6 +16,8 @@ import {
   RENEWAL_ENDED,
   RENEWAL_UNREACHABLE,
   RENEWED,
+  TEAM,
+  TEAM_LAPSED,
   UNCOUNTED,
   UNCOUNTED_COMMUNITY,
   UNVERIFIED,
@@ -136,12 +140,12 @@ describe('LicenseSection', () => {
       expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     });
 
-    it('shows Community with the seats used and an enabled paste box', async () => {
+    it('shows Community with its members against the cap and an enabled paste box', async () => {
       await loaded(COMMUNITY);
 
       expect(screen.getByText('Community')).toBeInTheDocument();
       expect(screen.getByText(/No license is installed/)).toBeInTheDocument();
-      expect(details()).toEqual({ Seats: '12 seats used this month' });
+      expect(details()).toEqual({ Members: '2 of 3 members this month' });
       expect(keyBox()).toBeEnabled();
       expect(screen.getByRole('button', { name: 'Add license' })).toBeDisabled();
       expect(screen.queryByRole('button', { name: 'Remove license' })).not.toBeInTheDocument();
@@ -160,7 +164,7 @@ describe('LicenseSection', () => {
       expect(warning).toHaveTextContent('signed with a key this release no longer trusts');
       expect(warning).toHaveTextContent('Paste a renewed key.');
       expect(screen.getByText('Community', { selector: '.license-edition-name' })).toBeTruthy();
-      expect(details()).toEqual({ Seats: '12 seats used this month' });
+      expect(details()).toEqual({ Members: '2 of 3 members this month' });
       expect(removeButton()).toBeEnabled();
       expect(screen.getByRole('button', { name: 'Replace license' })).toBeDisabled();
     });
@@ -207,7 +211,7 @@ describe('LicenseSection', () => {
       await loaded(LAPSED);
 
       expect(screen.getByText('Lapsed')).toBeInTheDocument();
-      const warning = screen.getByRole('status');
+      const warning = screen.getByText(/lapsed on/);
       expect(warning).toHaveClass('alert-error');
       expect(warning).toHaveTextContent('lapsed on Dec 1, 2027');
       expect(warning).toHaveTextContent('Paste a renewed license key');
@@ -225,6 +229,67 @@ describe('LicenseSection', () => {
       );
       expect(notice).toHaveTextContent('Everyone keeps access');
       expect(details().Seats).toBe('30 of 25 seats used this month');
+    });
+
+    it('describes the plan without naming one edition', async () => {
+      await loaded(COMMUNITY);
+
+      const description = screen.getByText(/member usage/);
+      expect(description).toHaveTextContent("See this server's plan and member usage");
+      expect(description).not.toHaveTextContent('Enterprise');
+    });
+
+    it('says new members are refused at the cap while everyone already here keeps access', async () => {
+      await loaded(COMMUNITY_AT_CAP);
+
+      expect(details().Members).toBe('3 of 3 members this month');
+      const notice = screen.getByRole('status');
+      expect(notice).toHaveClass('alert-warning');
+      expect(notice).toHaveTextContent('reached the 3 active members Zone Community allows');
+      expect(notice).toHaveTextContent(
+        'new members are refused until a Team or Enterprise license is added'
+      );
+      expect(notice).toHaveTextContent('Everyone already here keeps access.');
+      expect(screen.getByRole('link', { name: /Buy a license/ })).toHaveAttribute(
+        'href',
+        PRICING_URL
+      );
+    });
+
+    it('alerts once over the cap, counting the extra people and promising nobody loses access', async () => {
+      await loaded(COMMUNITY_OVER_CAP);
+
+      expect(details().Members).toBe('5 of 3 members this month');
+      const alert = screen.getByRole('status');
+      expect(alert).toHaveClass('alert-warning');
+      expect(alert).toHaveTextContent(
+        '5 people were active this month, 2 more than the 3 members Zone Community allows'
+      );
+      expect(alert).toHaveTextContent('Everyone keeps access');
+      expect(alert).not.toHaveTextContent(/block|lock|suspend|disable|lose/i);
+      expect(screen.queryByText(/reached the 3 active members/)).not.toBeInTheDocument();
+    });
+
+    it('shows an active Team license with seats and no member cap', async () => {
+      await loaded(TEAM);
+
+      expect(screen.getByText('Team', { selector: '.license-edition-name' })).toBeTruthy();
+      expect(screen.getByText('Active')).toBeInTheDocument();
+      expect(details().Seats).toBe('12 of 25 seats used this month');
+      expect(details()).not.toHaveProperty('Members');
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: /Buy a license/ })).not.toBeInTheDocument();
+    });
+
+    it('keeps the Team edition on a lapsed Team license and counts it against the cap', async () => {
+      await loaded(TEAM_LAPSED);
+
+      expect(screen.getByText('Team', { selector: '.license-edition-name' })).toBeTruthy();
+      expect(details().Members).toBe('12 of 3 members this month');
+      expect(details().Seats).toBe('12 of 25 seats used this month');
+      expect(
+        screen.getByText(/12 people were active this month, 9 more than the 3 members/)
+      ).toHaveClass('alert-warning');
     });
 
     it('says seat usage is unavailable instead of showing a count it does not have', async () => {
@@ -568,7 +633,7 @@ describe('LicenseSection', () => {
       confirmRemoval();
 
       await screen.findByText(/No license is installed/);
-      expect(details()).toEqual({ Seats: 'Seat usage unavailable' });
+      expect(details()).toEqual({ Members: 'Member usage unavailable (3 members allowed)' });
       expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
 

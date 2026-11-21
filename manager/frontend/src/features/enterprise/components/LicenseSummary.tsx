@@ -1,4 +1,5 @@
 import { Button } from '@zone/ui';
+import { memberText } from '../members';
 import {
   editionLabel,
   expiryLabel,
@@ -20,7 +21,8 @@ interface LicenseSummaryProps {
 }
 
 export function LicenseSummary({ response, changing, onRemove }: LicenseSummaryProps) {
-  const { edition, status, license, seats, unverified, renewal } = response;
+  const { edition, status, license, seats, members, unverified, renewal } = response;
+  const membership = memberText(members);
 
   return (
     <div className="settings-card license-summary">
@@ -59,10 +61,18 @@ export function LicenseSummary({ response, changing, onRemove }: LicenseSummaryP
             <dd>{license.customer}</dd>
           </div>
         )}
-        <div className="license-detail">
-          <dt>Seats</dt>
-          <dd>{seatText(seats)}</dd>
-        </div>
+        {membership && (
+          <div className="license-detail">
+            <dt>Members</dt>
+            <dd>{membership}</dd>
+          </div>
+        )}
+        {(license || !membership) && (
+          <div className="license-detail">
+            <dt>Seats</dt>
+            <dd>{seatText(seats)}</dd>
+          </div>
+        )}
         {license && (
           <>
             <div className="license-detail">

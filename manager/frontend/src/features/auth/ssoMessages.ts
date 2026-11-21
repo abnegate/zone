@@ -1,4 +1,5 @@
 import { AuthRequestError } from '../../api/auth';
+import { isMemberCapRefusal, memberCapMessage } from '../enterprise/members';
 import { SsoCode } from './SsoCode';
 
 export const SSO_INCOMPLETE = "Sign-in didn't complete. Start again from the sign-in page.";
@@ -36,6 +37,9 @@ export function ssoMessage(code: string): string | null {
 }
 
 export function messageOf(error: unknown, fallback: string): string {
+  if (isMemberCapRefusal(error)) {
+    return memberCapMessage();
+  }
   if (error instanceof AuthRequestError) {
     return ssoMessage(error.code) ?? error.message;
   }

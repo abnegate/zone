@@ -68,3 +68,16 @@ export const LAPSED_WITH_PROVIDER: SettingsResponse = {
   redirect_uri: REDIRECT_URI,
   providers: [OKTA],
 };
+
+export const TEAM_ACTIVE: SettingsResponse = {
+  ...COMMUNITY_EMPTY,
+  edition: Edition.Team,
+  status: LicenseStatus.Active,
+};
+
+export const TEAM_LAPSED: SettingsResponse = {
+  ...COMMUNITY_EMPTY,
+  edition: Edition.Team,
+  status: LicenseStatus.Lapsed,
+  providers: [OKTA],
+};

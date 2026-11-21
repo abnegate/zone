@@ -21,13 +21,13 @@ afterAll(() => {
   mock.restore();
 });
 
-function render() {
+function render(options?: Parameters<typeof useLicense>[0]) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retryDelay: 0, gcTime: 0 } },
   });
   const wrapper = ({ children }: { children: ReactNode }) =>
     createElement(QueryClientProvider, { client: queryClient }, children);
-  return renderHook(() => useLicense(), { wrapper });
+  return renderHook(() => useLicense(options), { wrapper });
 }
 
 describe('useLicense', () => {
@@ -44,6 +44,25 @@ describe('useLicense', () => {
     await waitFor(() => expect(result.current.response).toEqual(COMMUNITY));
     expect(result.current.loading).toBe(false);
     expect(result.current.error).toBeNull();
+  });
+
+  it('never asks for the license while disabled', async () => {
+    get.mockResolvedValue(COMMUNITY);
+    const { result } = render({ enabled: false });
+
+    await act(async () => {});
+
+    expect(get).not.toHaveBeenCalled();
+    expect(result.current.response).toBeUndefined();
+    expect(result.current.error).toBeNull();
+  });
+
+  it('asks for the license when enabled', async () => {
+    get.mockResolvedValue(COMMUNITY);
+    const { result } = render({ enabled: true });
+
+    await waitFor(() => expect(result.current.response).toEqual(COMMUNITY));
+    expect(get).toHaveBeenCalledTimes(1);
   });
 
   it('reads a stored key that no longer verifies', async () => {

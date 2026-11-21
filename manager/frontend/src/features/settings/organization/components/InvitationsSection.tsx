@@ -1,6 +1,8 @@
 import { Button, EmptyState, Modal, Select } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
+import { MemberCapRefusal } from '../../../enterprise/components/MemberCapRefusal';
+import { isMemberCapRefusal } from '../../../enterprise/members';
 import type { Workspace, WorkspaceRole } from '../../workspace/types';
 import type { CreateInvitationRequest, Invitation, OrgRole } from '../types';
 import './InvitationsSection.css';
@@ -16,8 +18,8 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
   const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [capped, setCapped] = useState(false);
 
-  // Form state
   const [email, setEmail] = useState('');
   const [orgRole, setOrgRole] = useState<OrgRole>('member');
   const [workspaceId, setWorkspaceId] = useState('');
@@ -45,6 +47,7 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
     e.preventDefault();
     setSubmitting(true);
     setError(null);
+    setCapped(false);
 
     try {
       const request: CreateInvitationRequest = {
@@ -65,10 +68,19 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
       setWorkspaceRole('member');
       loadInvitations();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create invitation');
+      if (isMemberCapRefusal(err)) {
+        setCapped(true);
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to create invitation');
+      }
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const closeModal = () => {
+    setShowModal(false);
+    setCapped(false);
   };
 
   const handleRevoke = async (invitationId: string) => {
@@ -192,8 +204,9 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
         </div>
       )}
 
-      <Modal isOpen={showModal} onClose={() => setShowModal(false)} title="Invite Member">
+      <Modal isOpen={showModal} onClose={closeModal} title="Invite Member">
         <form onSubmit={handleSubmit} className="invitation-form">
+          {capped && <MemberCapRefusal className="modal-error" />}
           <div className="form-group">
             <label htmlFor="email">Email Address</label>
             <input
@@ -256,12 +269,7 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
           )}
 
           <div className="modal-actions">
-            <Button
-              type="button"
-              onClick={() => setShowModal(false)}
-              variant="secondary"
-              disabled={submitting}
-            >
+            <Button type="button" onClick={closeModal} variant="secondary" disabled={submitting}>
               Cancel
             </Button>
             <Button type="submit" variant="primary" loading={submitting}>
