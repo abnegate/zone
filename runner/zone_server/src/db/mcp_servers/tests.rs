@@ -1895,7 +1895,8 @@ async fn a_custom_role_manages_servers_only_with_the_servers_permission() {
     )
     .await;
     testing::assign_organization(&fixture.pool, fixture.organization, manager, managing).await;
-    testing::assign_organization(&fixture.pool, fixture.organization, fixture.member, reading).await;
+    testing::assign_organization(&fixture.pool, fixture.organization, fixture.member, reading)
+        .await;
 
     let created = create_authorized(
         &fixture.pool,
@@ -2030,7 +2031,8 @@ async fn a_custom_role_of_another_organization_grants_nothing() {
         &[Permission::McpServersUpdate],
     )
     .await;
-    testing::assign_organization(&fixture.pool, fixture.organization, fixture.member, foreign).await;
+    testing::assign_organization(&fixture.pool, fixture.organization, fixture.member, foreign)
+        .await;
 
     let created = create_authorized(
         &fixture.pool,
@@ -2089,7 +2091,8 @@ async fn a_role_that_grants_nothing_reads_no_workspace_servers() {
         )
         .await;
     }
-    testing::assign_organization(&fixture.pool, fixture.organization, fixture.member, foreign).await;
+    testing::assign_organization(&fixture.pool, fixture.organization, fixture.member, foreign)
+        .await;
     testing::assign_workspace(&fixture.pool, fixture.workspace, wanderer, roaming).await;
 
     let mut connection = fixture.pool.acquire().await.expect("a connection");
