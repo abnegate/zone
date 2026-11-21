@@ -1,6 +1,6 @@
 //! Workspace membership guards for authorization
 //!
-//! Provides extractors that verify workspace membership and roles.
+//! Provides extractors that verify workspace membership and permissions.
 
 use axum::{
     extract::{FromRef, FromRequestParts, Path},
@@ -133,109 +133,6 @@ where
             role: membership.role,
             custom_role: membership.custom_role,
             grant: membership.grant,
-        })
-    }
-}
-
-/// Guard that requires workspace writer role (member or higher)
-#[derive(Debug, Clone)]
-pub struct WorkspaceWriter {
-    pub workspace_id: Uuid,
-    pub user_id: Uuid,
-    pub email: String,
-    pub role: workspace_members::WorkspaceRole,
-}
-
-impl<S> FromRequestParts<S> for WorkspaceWriter
-where
-    S: Send + Sync,
-    AppState: FromRef<S>,
-{
-    type Rejection = AuthError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let member = WorkspaceMember::from_request_parts(parts, state).await?;
-
-        if member.role < workspace_members::WorkspaceRole::Member {
-            return Err(AuthError {
-                status: StatusCode::FORBIDDEN,
-                message: "Workspace write access required".to_string(),
-            });
-        }
-
-        Ok(WorkspaceWriter {
-            workspace_id: member.workspace_id,
-            user_id: member.user_id,
-            email: member.email,
-            role: member.role,
-        })
-    }
-}
-
-/// Guard that requires workspace admin role
-#[derive(Debug, Clone)]
-pub struct WorkspaceAdmin {
-    pub workspace_id: Uuid,
-    pub user_id: Uuid,
-    pub email: String,
-    pub role: workspace_members::WorkspaceRole,
-}
-
-impl<S> FromRequestParts<S> for WorkspaceAdmin
-where
-    S: Send + Sync,
-    AppState: FromRef<S>,
-{
-    type Rejection = AuthError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let member = WorkspaceMember::from_request_parts(parts, state).await?;
-
-        if member.role < workspace_members::WorkspaceRole::Admin {
-            return Err(AuthError {
-                status: StatusCode::FORBIDDEN,
-                message: "Workspace admin access required".to_string(),
-            });
-        }
-
-        Ok(WorkspaceAdmin {
-            workspace_id: member.workspace_id,
-            user_id: member.user_id,
-            email: member.email,
-            role: member.role,
-        })
-    }
-}
-
-/// Guard that requires workspace owner role
-#[derive(Debug, Clone)]
-pub struct WorkspaceOwner {
-    pub workspace_id: Uuid,
-    pub user_id: Uuid,
-    pub email: String,
-}
-
-impl<S> FromRequestParts<S> for WorkspaceOwner
-where
-    S: Send + Sync,
-    AppState: FromRef<S>,
-{
-    type Rejection = AuthError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let member = WorkspaceMember::from_request_parts(parts, state).await?;
-
-        if member.role != workspace_members::WorkspaceRole::Owner {
-            return Err(AuthError {
-                status: StatusCode::FORBIDDEN,
-                message: "Workspace owner access required".to_string(),
-            });
-        }
-
-        Ok(WorkspaceOwner {
-            workspace_id: member.workspace_id,
-            user_id: member.user_id,
-            email: member.email,
         })
     }
 }

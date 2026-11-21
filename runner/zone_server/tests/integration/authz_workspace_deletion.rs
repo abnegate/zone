@@ -1,7 +1,7 @@
 //! `remove_member` refuses a workspace admin who tries to unseat another admin
 //! or the owner, and refuses to remove the last admin at all. `delete_workspace`
-//! unseats every member at once -- owner included -- and asked only for
-//! `WorkspaceAdmin`. The organization sibling has always demanded `OrgOwner` to
+//! unseats every member at once -- owner included -- and asked only for a
+//! workspace admin. The organization sibling has always demanded an owner to
 //! destroy a tenant.
 //!
 //! Written from the attacker's side: an admin the owner seated deletes the

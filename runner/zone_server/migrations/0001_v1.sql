@@ -55,16 +55,6 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION get_organization_role(p_user_id uuid, p_organization_id uuid) RETURNS text
-    LANGUAGE plpgsql
-    AS $$
-DECLARE v_role TEXT;
-BEGIN
-  SELECT role INTO v_role FROM organization_members WHERE user_id = p_user_id AND organization_id = p_organization_id AND is_active = TRUE;
-  RETURN v_role;
-END;
-$$;
-
 CREATE FUNCTION get_task_source(p_task_id uuid) RETURNS TABLE(source_id uuid, source_type text, config jsonb, credentials text)
     LANGUAGE plpgsql
     AS $$
@@ -108,16 +98,6 @@ BEGIN
   RETURN QUERY
   SELECT ts.source_id, ts.source_type, ts.config, ts.credentials
   FROM get_task_sources(p_task_id) ts WHERE ts.category = p_category;
-END;
-$$;
-
-CREATE FUNCTION get_workspace_role(p_user_id uuid, p_workspace_id uuid) RETURNS text
-    LANGUAGE plpgsql
-    AS $$
-DECLARE v_role TEXT;
-BEGIN
-  SELECT role INTO v_role FROM workspace_members WHERE user_id = p_user_id AND workspace_id = p_workspace_id AND is_active = TRUE;
-  RETURN v_role;
 END;
 $$;
 

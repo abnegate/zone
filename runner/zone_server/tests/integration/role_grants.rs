@@ -682,16 +682,26 @@ async fn the_trigger_releases_a_custom_role_on_deactivation_and_on_a_legacy_role
         Some(workspace_role),
     )
     .await;
-    let row =
-        organization_members::update_member_role(&pool, organization, promoted, OrgRole::Admin)
-            .await
-            .expect("the legacy update lands despite the custom role check");
-    assert_eq!(row.role, OrgRole::Admin);
-    let row =
-        workspace_members::update_member_role(&pool, workspace, promoted, WorkspaceRole::Member)
-            .await
-            .expect("the legacy update lands despite the custom role check");
-    assert_eq!(row.role, WorkspaceRole::Member);
+    let role: String = sqlx::query_scalar(
+        "UPDATE organization_members SET role = $3 WHERE organization_id = $1 AND user_id = $2 RETURNING role",
+    )
+    .bind(organization)
+    .bind(promoted)
+    .bind(OrgRole::Admin.as_str())
+    .fetch_one(&pool)
+    .await
+    .expect("a role-only update lands despite the custom role check");
+    assert_eq!(role, OrgRole::Admin.as_str());
+    let role: String = sqlx::query_scalar(
+        "UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2 RETURNING role",
+    )
+    .bind(workspace)
+    .bind(promoted)
+    .bind(WorkspaceRole::Member.as_str())
+    .fetch_one(&pool)
+    .await
+    .expect("a role-only update lands despite the custom role check");
+    assert_eq!(role, WorkspaceRole::Member.as_str());
     assert_eq!(
         custom_role_of_organization_member(&pool, organization, promoted).await,
         None

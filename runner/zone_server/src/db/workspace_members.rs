@@ -56,62 +56,6 @@ pub async fn is_member(pool: &PgPool, user_id: Uuid, workspace_id: Uuid) -> DbRe
     Ok(result.flatten().unwrap_or(false))
 }
 
-/// Get user's role in workspace (None if not a member)
-pub async fn get_role(
-    pool: &PgPool,
-    user_id: Uuid,
-    workspace_id: Uuid,
-) -> DbResult<Option<WorkspaceRole>> {
-    let role: Option<String> = sqlx::query_scalar("SELECT get_workspace_role($1, $2)")
-        .bind(user_id)
-        .bind(workspace_id)
-        .fetch_one(pool)
-        .await?;
-
-    Ok(role.and_then(|r| r.parse().ok()))
-}
-
-/// Read and lock an active membership for the duration of the caller's transaction.
-///
-/// Holding this shared row lock gives membership revocation and the protected
-/// operation a definite order. Callers must keep the transaction open until
-/// the protected read or mutation finishes.
-pub async fn lock_role(
-    connection: &mut PgConnection,
-    workspace_id: Uuid,
-    user_id: Uuid,
-) -> DbResult<Option<WorkspaceRole>> {
-    let role: Option<String> = sqlx::query_scalar(
-        r#"
-        SELECT role
-        FROM workspace_members
-        WHERE workspace_id = $1
-          AND user_id = $2
-          AND is_active = TRUE
-        FOR SHARE
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(connection)
-    .await?;
-
-    Ok(role.and_then(|value| value.parse().ok()))
-}
-
-/// Check if user has at least the specified role
-pub async fn has_role_or_higher(
-    pool: &PgPool,
-    user_id: Uuid,
-    workspace_id: Uuid,
-    required_role: WorkspaceRole,
-) -> DbResult<bool> {
-    match get_role(pool, user_id, workspace_id).await? {
-        Some(role) => Ok(role >= required_role),
-        None => Ok(false),
-    }
-}
-
 /// Verify that all source IDs belong to the workspace
 pub async fn verify_sources_in_workspace(
     pool: &PgPool,
@@ -566,43 +510,6 @@ pub async fn list_user_workspaces_in_org(
         .collect())
 }
 
-/// Update a member's role
-pub async fn update_member_role(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    user_id: Uuid,
-    role: WorkspaceRole,
-) -> DbResult<WorkspaceMemberRow> {
-    let row = sqlx::query!(
-        r#"
-        UPDATE workspace_members
-        SET role = $3, updated_at = NOW()
-        WHERE workspace_id = $1 AND user_id = $2
-        RETURNING id, workspace_id, user_id, role, is_active,
-                  invited_by, invited_at, accepted_at, created_at, updated_at
-        "#,
-        workspace_id,
-        user_id,
-        role.as_str()
-    )
-    .fetch_one(pool)
-    .await?;
-
-    let now = chrono::Utc::now().naive_utc();
-    Ok(WorkspaceMemberRow {
-        id: row.id,
-        workspace_id: row.workspace_id,
-        user_id: row.user_id,
-        role: row.role.parse().unwrap_or(WorkspaceRole::Member),
-        is_active: row.is_active,
-        invited_by: row.invited_by,
-        invited_at: row.invited_at,
-        accepted_at: row.accepted_at,
-        created_at: row.created_at.unwrap_or(now),
-        updated_at: row.updated_at.unwrap_or(now),
-    })
-}
-
 pub async fn can_read(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<bool> {
     permits(pool, workspace_id, user_id, Permission::WorkspaceRead).await
 }
@@ -710,11 +617,6 @@ struct MembershipRow {
     role: String,
     #[sqlx(flatten)]
     reference: Reference,
-}
-
-/// Check if user can administrate workspace (admin or higher)
-pub async fn can_admin(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<bool> {
-    has_role_or_higher(pool, user_id, workspace_id, WorkspaceRole::Admin).await
 }
 
 /// Count the number of active admins (admin or owner) in a workspace
@@ -1115,19 +1017,18 @@ mod tests {
         not(target_os = "linux"),
         ignore = "PostgreSQL not available on this platform"
     )]
-    async fn test_get_role_returns_correct_role() {
+    async fn test_membership_returns_correct_role() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
-        // Add user as admin
         add_member(&pool, workspace_id, user_id, WorkspaceRole::Admin, None)
             .await
             .expect("Failed to add member");
 
-        // Get role
-        let role = get_role(&pool, user_id, workspace_id)
+        let role = membership(&pool, workspace_id, user_id)
             .await
-            .expect("Failed to get role");
+            .expect("Failed to read membership")
+            .map(|membership| membership.role);
 
         assert_eq!(role, Some(WorkspaceRole::Admin), "Role should be Admin");
     }
@@ -1137,7 +1038,7 @@ mod tests {
         not(target_os = "linux"),
         ignore = "PostgreSQL not available on this platform"
     )]
-    async fn test_get_role_returns_none_for_non_member() {
+    async fn test_membership_returns_none_for_non_member() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, _user_id) = setup_test_data(&pool).await;
 
@@ -1154,12 +1055,11 @@ mod tests {
         .expect("Failed to create user")
         .id;
 
-        // Get role
-        let role = get_role(&pool, non_member_id, workspace_id)
+        let held = membership(&pool, workspace_id, non_member_id)
             .await
-            .expect("Failed to get role");
+            .expect("Failed to read membership");
 
-        assert_eq!(role, None, "Non-member should have no role");
+        assert!(held.is_none(), "Non-member should have no membership");
     }
 
     #[tokio::test]
@@ -1167,46 +1067,40 @@ mod tests {
         not(target_os = "linux"),
         ignore = "PostgreSQL not available on this platform"
     )]
-    async fn test_has_role_or_higher_works_correctly() {
+    async fn test_permits_follows_the_built_in_admin_set() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
-        // Add user as admin
         add_member(&pool, workspace_id, user_id, WorkspaceRole::Admin, None)
             .await
             .expect("Failed to add member");
 
-        // Admin should satisfy admin requirement
-        assert!(
-            has_role_or_higher(&pool, user_id, workspace_id, WorkspaceRole::Admin)
-                .await
-                .expect("Failed to check role"),
-            "Admin should have admin role"
-        );
+        for permission in [
+            Permission::WorkspaceRead,
+            Permission::WorkspaceWrite,
+            Permission::WorkspaceUpdate,
+        ] {
+            assert!(
+                permits(&pool, workspace_id, user_id, permission)
+                    .await
+                    .expect("Failed to check permission"),
+                "Admin should hold {}",
+                permission.name()
+            );
+        }
 
-        // Admin should satisfy member requirement
-        assert!(
-            has_role_or_higher(&pool, user_id, workspace_id, WorkspaceRole::Member)
-                .await
-                .expect("Failed to check role"),
-            "Admin should satisfy member requirement"
-        );
-
-        // Admin should satisfy viewer requirement
-        assert!(
-            has_role_or_higher(&pool, user_id, workspace_id, WorkspaceRole::Viewer)
-                .await
-                .expect("Failed to check role"),
-            "Admin should satisfy viewer requirement"
-        );
-
-        // Admin should NOT satisfy owner requirement
-        assert!(
-            !has_role_or_higher(&pool, user_id, workspace_id, WorkspaceRole::Owner)
-                .await
-                .expect("Failed to check role"),
-            "Admin should not satisfy owner requirement"
-        );
+        for permission in [
+            Permission::WorkspaceDelete,
+            Permission::WorkspaceAdministratorsUpdate,
+        ] {
+            assert!(
+                !permits(&pool, workspace_id, user_id, permission)
+                    .await
+                    .expect("Failed to check permission"),
+                "Admin should not hold {}",
+                permission.name()
+            );
+        }
     }
 
     #[tokio::test]

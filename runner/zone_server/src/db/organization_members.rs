@@ -540,43 +540,6 @@ pub async fn list_user_organizations(
         .collect())
 }
 
-/// Update a member's role
-pub async fn update_member_role(
-    pool: &PgPool,
-    organization_id: Uuid,
-    user_id: Uuid,
-    role: OrgRole,
-) -> DbResult<OrganizationMemberRow> {
-    let row = sqlx::query!(
-        r#"
-        UPDATE organization_members
-        SET role = $3, updated_at = NOW()
-        WHERE organization_id = $1 AND user_id = $2
-        RETURNING id, organization_id, user_id, role, is_active,
-                  invited_by, invited_at, accepted_at, created_at, updated_at
-        "#,
-        organization_id,
-        user_id,
-        role.as_str()
-    )
-    .fetch_one(pool)
-    .await?;
-
-    let now = chrono::Utc::now().naive_utc();
-    Ok(OrganizationMemberRow {
-        id: row.id,
-        organization_id: row.organization_id,
-        user_id: row.user_id,
-        role: row.role.parse().unwrap_or(OrgRole::Member),
-        is_active: row.is_active,
-        invited_by: row.invited_by,
-        invited_at: row.invited_at,
-        accepted_at: row.accepted_at,
-        created_at: row.created_at.unwrap_or(now),
-        updated_at: row.updated_at.unwrap_or(now),
-    })
-}
-
 /// Outcome of a role change that must leave an owner seated.
 #[derive(Debug)]
 pub enum RoleChange {
@@ -814,69 +777,6 @@ pub async fn is_member(pool: &PgPool, organization_id: Uuid, user_id: Uuid) -> D
     Ok(result.flatten().unwrap_or(false))
 }
 
-/// Read and lock an active membership for the duration of the caller's transaction.
-///
-/// Holding this shared row lock gives membership revocation and the protected
-/// operation a definite order. Callers must keep the transaction open until
-/// the protected read or mutation finishes.
-pub async fn lock_role(
-    connection: &mut PgConnection,
-    organization_id: Uuid,
-    user_id: Uuid,
-) -> DbResult<Option<OrgRole>> {
-    let role: Option<String> = sqlx::query_scalar(
-        r#"
-        SELECT role
-        FROM organization_members
-        WHERE organization_id = $1
-          AND user_id = $2
-          AND is_active = TRUE
-        FOR SHARE
-        "#,
-    )
-    .bind(organization_id)
-    .bind(user_id)
-    .fetch_optional(connection)
-    .await?;
-
-    Ok(role.and_then(|value| value.parse().ok()))
-}
-
-/// Check if user is an admin or owner of organization
-pub async fn is_admin(pool: &PgPool, organization_id: Uuid, user_id: Uuid) -> DbResult<bool> {
-    let role: Option<String> = sqlx::query_scalar("SELECT get_organization_role($1, $2)")
-        .bind(user_id)
-        .bind(organization_id)
-        .fetch_one(pool)
-        .await?;
-
-    if let Some(role_str) = role
-        && let Ok(role) = role_str.parse::<OrgRole>()
-    {
-        return Ok(role >= OrgRole::Admin);
-    }
-
-    Ok(false)
-}
-
-/// Check if user is an owner of organization
-pub async fn is_owner(pool: &PgPool, organization_id: Uuid, user_id: Uuid) -> DbResult<bool> {
-    let role: Option<String> = sqlx::query_scalar("SELECT get_organization_role($1, $2)")
-        .bind(user_id)
-        .bind(organization_id)
-        .fetch_one(pool)
-        .await?;
-
-    if let Some(role_str) = role
-        && let Ok(role) = role_str.parse::<OrgRole>()
-    {
-        return Ok(role == OrgRole::Owner);
-    }
-
-    Ok(false)
-}
-
-/// Count active owners in an organization
 /// How many active seats an organization holds.
 pub async fn count_active_members(pool: &PgPool, organization_id: Uuid) -> DbResult<i64> {
     let count: Option<i64> = sqlx::query_scalar(
@@ -889,6 +789,7 @@ pub async fn count_active_members(pool: &PgPool, organization_id: Uuid) -> DbRes
     Ok(count.unwrap_or(0))
 }
 
+/// Count active owners in an organization
 pub async fn count_owners(pool: &PgPool, organization_id: Uuid) -> DbResult<i64> {
     let count = sqlx::query_scalar!(
         r#"

@@ -6,6 +6,8 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use zone_server::auth::Grant;
+use zone_server::db::custom_roles::Assignment;
 use zone_server::db::{organization_members, organizations, users};
 
 async fn create_test_pool() -> PgPool {
@@ -59,10 +61,6 @@ async fn setup_test_data(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
 
     (org_id, user1_id, user2_id)
 }
-
-// =============================================================================
-// CRUD Operations Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_add_member_creates_membership() {
@@ -352,7 +350,7 @@ async fn test_list_user_organizations_returns_all_orgs() {
 }
 
 #[tokio::test]
-async fn test_update_member_role_changes_role() {
+async fn test_change_role_promotes_member() {
     let pool = create_test_pool().await;
     let (org_id, user_id, _) = setup_test_data(&pool).await;
 
@@ -367,23 +365,21 @@ async fn test_update_member_role_changes_role() {
     .await
     .expect("Failed to add member");
 
-    // Update to Admin
-    let result = organization_members::update_member_role(
+    let result = organization_members::change_role(
         &pool,
         org_id,
         user_id,
-        organization_members::OrgRole::Admin,
+        Assignment::BuiltIn(organization_members::OrgRole::Admin),
+        &Grant::organization(organization_members::OrgRole::Owner),
     )
-    .await;
+    .await
+    .expect("Failed to change role");
 
-    assert!(result.is_ok());
-    let updated = result.unwrap();
+    let organization_members::RoleChange::Applied(updated) = result else {
+        panic!("An owner should promote a member to admin, got {result:?}");
+    };
     assert_eq!(updated.role, organization_members::OrgRole::Admin);
 }
-
-// =============================================================================
-// Role Hierarchy Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_is_member_returns_true_for_active_member() {
@@ -418,120 +414,6 @@ async fn test_is_member_returns_false_for_non_member() {
 
     assert!(!is_member, "Non-member should return false");
 }
-
-#[tokio::test]
-async fn test_is_admin_returns_true_for_admin() {
-    let pool = create_test_pool().await;
-    let (org_id, user_id, _) = setup_test_data(&pool).await;
-
-    organization_members::add_member(
-        &pool,
-        org_id,
-        user_id,
-        organization_members::OrgRole::Admin,
-        None,
-    )
-    .await
-    .expect("Failed to add admin");
-
-    let is_admin = organization_members::is_admin(&pool, org_id, user_id)
-        .await
-        .expect("Failed to check admin status");
-
-    assert!(is_admin, "Admin should return true");
-}
-
-#[tokio::test]
-async fn test_is_admin_returns_true_for_owner() {
-    let pool = create_test_pool().await;
-    let (org_id, user_id, _) = setup_test_data(&pool).await;
-
-    organization_members::add_member(
-        &pool,
-        org_id,
-        user_id,
-        organization_members::OrgRole::Owner,
-        None,
-    )
-    .await
-    .expect("Failed to add owner");
-
-    let is_admin = organization_members::is_admin(&pool, org_id, user_id)
-        .await
-        .expect("Failed to check admin status");
-
-    assert!(is_admin, "Owner should satisfy admin requirement");
-}
-
-#[tokio::test]
-async fn test_is_admin_returns_false_for_member() {
-    let pool = create_test_pool().await;
-    let (org_id, user_id, _) = setup_test_data(&pool).await;
-
-    organization_members::add_member(
-        &pool,
-        org_id,
-        user_id,
-        organization_members::OrgRole::Member,
-        None,
-    )
-    .await
-    .expect("Failed to add member");
-
-    let is_admin = organization_members::is_admin(&pool, org_id, user_id)
-        .await
-        .expect("Failed to check admin status");
-
-    assert!(!is_admin, "Regular member should not be admin");
-}
-
-#[tokio::test]
-async fn test_is_owner_returns_true_for_owner() {
-    let pool = create_test_pool().await;
-    let (org_id, user_id, _) = setup_test_data(&pool).await;
-
-    organization_members::add_member(
-        &pool,
-        org_id,
-        user_id,
-        organization_members::OrgRole::Owner,
-        None,
-    )
-    .await
-    .expect("Failed to add owner");
-
-    let is_owner = organization_members::is_owner(&pool, org_id, user_id)
-        .await
-        .expect("Failed to check owner status");
-
-    assert!(is_owner, "Owner should return true");
-}
-
-#[tokio::test]
-async fn test_is_owner_returns_false_for_admin() {
-    let pool = create_test_pool().await;
-    let (org_id, user_id, _) = setup_test_data(&pool).await;
-
-    organization_members::add_member(
-        &pool,
-        org_id,
-        user_id,
-        organization_members::OrgRole::Admin,
-        None,
-    )
-    .await
-    .expect("Failed to add admin");
-
-    let is_owner = organization_members::is_owner(&pool, org_id, user_id)
-        .await
-        .expect("Failed to check owner status");
-
-    assert!(!is_owner, "Admin should not be owner");
-}
-
-// =============================================================================
-// Cascade Delete Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_cascade_delete_when_org_deleted() {
@@ -601,10 +483,6 @@ async fn test_cascade_delete_when_user_deleted() {
         "Member should be deleted when user is deleted"
     );
 }
-
-// =============================================================================
-// Role Comparison Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_role_hierarchy_ordering() {
