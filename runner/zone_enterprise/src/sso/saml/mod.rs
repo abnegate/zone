@@ -1,14 +1,24 @@
 mod attribute;
+mod authorization;
 mod builder;
 pub mod canonical;
+mod certificate;
+mod client;
 mod document;
 mod element;
+mod entity_id;
+mod fields;
 mod malformed;
+mod metadata;
+mod metadata_url;
 mod namespace;
 mod node;
 mod node_id;
+mod provider;
 mod refusal;
 mod scope;
+pub mod service_metadata;
+mod service_provider;
 #[cfg(any(test, feature = "signing"))]
 pub mod testing;
 #[cfg(test)]
@@ -16,10 +26,19 @@ mod tests;
 pub mod uri;
 
 pub use attribute::Attribute;
+pub use authorization::{Authorization, RELAY_STATE, SAML_REQUEST};
+pub use certificate::Certificate;
+pub use client::Client;
 pub use document::Document;
 pub use element::Element;
+pub use entity_id::EntityId;
+pub use fields::Fields;
 pub use malformed::Malformed;
+pub use metadata::Metadata;
+pub use metadata_url::MetadataUrl;
 pub use namespace::Namespace;
 pub use node::Node;
 pub use node_id::NodeId;
+pub use provider::Provider;
 pub use refusal::Refusal;
+pub use service_provider::ServiceProvider;
