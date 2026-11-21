@@ -76,8 +76,7 @@ async fn install(
     {
         Ok(Some(change)) => {
             audit(pool, &change).await;
-            license_renewal::record(pool, change.current.text(), Outcome::Renewed.as_str(), now)
-                .await?;
+            license_renewal::record(pool, change.current.text(), Outcome::Renewed, now).await?;
             report(Outcome::Renewed, license.id(), Some(change.current.id()));
             Ok(Some(Outcome::Renewed))
         }
@@ -102,7 +101,7 @@ async fn settle(
     outcome: Outcome,
     now: DateTime<Utc>,
 ) -> DbResult<Option<Outcome>> {
-    license_renewal::record(pool, license.text(), outcome.as_str(), now).await?;
+    license_renewal::record(pool, license.text(), outcome, now).await?;
     report(outcome, license.id(), None);
     Ok(Some(outcome))
 }

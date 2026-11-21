@@ -12,6 +12,7 @@ const OUTCOME_CHECK: &str = "licenses_renewal_outcome_check";
 const STORED: &str = "stored";
 const OTHER: &str = "other";
 const RENEWED: &str = "renewed";
+const UNKNOWN_OUTCOME: &str = "expired";
 
 struct Fixture {
     database: Database,
@@ -78,7 +79,7 @@ async fn an_attempt_is_recorded_against_the_stored_key() {
     let at = attempted();
 
     assert!(
-        license_renewal::record(fixture.pool(), STORED, Outcome::Current.as_str(), at)
+        license_renewal::record(fixture.pool(), STORED, Outcome::Current, at)
             .await
             .unwrap()
     );
@@ -98,7 +99,7 @@ async fn an_attempt_against_another_key_records_nothing() {
     let fixture = Fixture::stored().await;
 
     assert!(
-        !license_renewal::record(fixture.pool(), OTHER, Outcome::Ended.as_str(), attempted())
+        !license_renewal::record(fixture.pool(), OTHER, Outcome::Ended, attempted())
             .await
             .unwrap()
     );
@@ -116,7 +117,7 @@ async fn an_attempt_with_no_key_stored_records_nothing() {
     let fixture = Fixture::new().await;
 
     assert!(
-        !license_renewal::record(fixture.pool(), STORED, Outcome::Ended.as_str(), attempted())
+        !license_renewal::record(fixture.pool(), STORED, Outcome::Ended, attempted())
             .await
             .unwrap()
     );
@@ -128,14 +129,9 @@ async fn an_attempt_with_no_key_stored_records_nothing() {
 #[tokio::test]
 async fn replacing_the_key_clears_the_status() {
     let fixture = Fixture::stored().await;
-    license_renewal::record(
-        fixture.pool(),
-        STORED,
-        Outcome::Unreachable.as_str(),
-        attempted(),
-    )
-    .await
-    .unwrap();
+    license_renewal::record(fixture.pool(), STORED, Outcome::Unreachable, attempted())
+        .await
+        .unwrap();
 
     licenses::replace(fixture.pool(), OTHER).await.unwrap();
 
@@ -147,14 +143,9 @@ async fn replacing_the_key_clears_the_status() {
 #[tokio::test]
 async fn removing_the_key_clears_the_status() {
     let fixture = Fixture::stored().await;
-    license_renewal::record(
-        fixture.pool(),
-        STORED,
-        Outcome::Refused.as_str(),
-        attempted(),
-    )
-    .await
-    .unwrap();
+    license_renewal::record(fixture.pool(), STORED, Outcome::Refused, attempted())
+        .await
+        .unwrap();
 
     licenses::remove(fixture.pool()).await.unwrap();
 
@@ -168,9 +159,15 @@ async fn removing_the_key_clears_the_status() {
 async fn an_unknown_outcome_violates_the_check() {
     let fixture = Fixture::stored().await;
 
-    let error = license_renewal::record(fixture.pool(), STORED, "expired", attempted())
-        .await
-        .unwrap_err();
+    let error = sqlx::query(
+        "UPDATE licenses SET renewal_attempted_at = $1, renewal_outcome = $2 WHERE key = $3",
+    )
+    .bind(attempted())
+    .bind(UNKNOWN_OUTCOME)
+    .bind(STORED)
+    .execute(fixture.pool())
+    .await
+    .unwrap_err();
 
     let error = error.as_database_error().expect("a database error");
     assert_eq!(error.code().as_deref(), Some(CHECK_VIOLATION));
@@ -186,7 +183,7 @@ async fn every_outcome_is_accepted_by_the_check() {
     for outcome in Outcome::ALL {
         let at = attempted();
         assert!(
-            license_renewal::record(fixture.pool(), STORED, outcome.as_str(), at)
+            license_renewal::record(fixture.pool(), STORED, outcome, at)
                 .await
                 .unwrap(),
             "{outcome:?}"
@@ -201,14 +198,9 @@ async fn every_outcome_is_accepted_by_the_check() {
 #[tokio::test]
 async fn swapping_from_the_stored_key_installs_and_clears_the_status() {
     let fixture = Fixture::stored().await;
-    license_renewal::record(
-        fixture.pool(),
-        STORED,
-        Outcome::Current.as_str(),
-        attempted(),
-    )
-    .await
-    .unwrap();
+    license_renewal::record(fixture.pool(), STORED, Outcome::Current, attempted())
+        .await
+        .unwrap();
     let before: DateTime<Utc> = sqlx::query_scalar("SELECT updated_at FROM licenses")
         .fetch_one(fixture.pool())
         .await
@@ -238,7 +230,7 @@ async fn swapping_from_the_stored_key_installs_and_clears_the_status() {
 async fn swapping_from_another_key_leaves_the_key_and_status() {
     let fixture = Fixture::stored().await;
     let at = attempted();
-    license_renewal::record(fixture.pool(), STORED, Outcome::Ended.as_str(), at)
+    license_renewal::record(fixture.pool(), STORED, Outcome::Ended, at)
         .await
         .unwrap();
 

@@ -3,6 +3,7 @@ use sqlx::{Executor, PgPool, Postgres};
 
 use super::DbResult;
 use super::licenses::SINGLETON;
+use crate::services::license::renewal::Outcome;
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct LicenseRenewal {
@@ -24,8 +25,12 @@ where
     .await
 }
 
-/// Records an attempt against `key` only while it is still the stored key.
-pub async fn record(pool: &PgPool, key: &str, outcome: &str, at: DateTime<Utc>) -> DbResult<bool> {
+pub async fn record(
+    pool: &PgPool,
+    key: &str,
+    outcome: Outcome,
+    at: DateTime<Utc>,
+) -> DbResult<bool> {
     let result = sqlx::query(
         "UPDATE licenses SET renewal_attempted_at = $3, renewal_outcome = $4
          WHERE id = $1 AND key = $2",
@@ -33,7 +38,7 @@ pub async fn record(pool: &PgPool, key: &str, outcome: &str, at: DateTime<Utc>) 
     .bind(SINGLETON)
     .bind(key)
     .bind(at)
-    .bind(outcome)
+    .bind(outcome.as_str())
     .execute(pool)
     .await?;
     Ok(result.rows_affected() == 1)
