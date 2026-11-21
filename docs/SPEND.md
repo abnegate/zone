@@ -41,14 +41,16 @@ budgets and the spend it already counted, and picks up again as soon as a
 license is installed.
 
 One function decides all of this: `standing()` in
-`runner/zone_server/src/services/spend/standing.rs`. No other spend code reads
-the license.
+`runner/zone_server/src/services/spend/standing.rs`, which asks
+`Feature::Spend`, a Team feature in `zone_enterprise`. No other spend code
+reads the license.
 
 - **Enforced** means spend is attributed, ingested, reported and held to hard
-  limits. It holds while any license key is stored, including a lapsed one and
-  one that no longer verifies, the same rule [agent policy](POLICY.md) uses.
-- **Entitled** means budgets may be changed. It holds for a key that verifies
-  and is active or in grace.
+  limits. It holds while a Team or Enterprise key is stored, including a lapsed
+  one, and while a key that no longer verifies is stored, the same rule
+  [agent policy](POLICY.md) uses.
+- **Entitled** means budgets may be changed. It holds for a Team or Enterprise
+  key that verifies and is active or in grace.
 
 If Zone can't read the license, it treats spend as neither enforced nor
 entitled until it can, and logs the error. Requests keep going, uncounted and
@@ -446,7 +448,7 @@ writes no entry. Refused requests aren't audited.
 
 | Code | Status | Meaning |
 |---|---|---|
-| `license_required` | 403 | This needs a Zone Team license that is active or in its grace period. See [Licensing](#licensing). |
+| `license_required` | 403 | This needs a Zone Team or Enterprise license that is active or in its grace period. See [Licensing](#licensing). |
 | `spend_body_invalid` | 400 | The request body can't be read: it isn't valid JSON, has a key that isn't a budget field, or has a value of the wrong type. |
 | `spend_range_invalid` | 400 | `from` or `to` isn't a `YYYY-MM-DD` date, `from` is after `to`, the range covers more than 366 days, `workspace_id` or `user_id` isn't a UUID, or one of these parameters is given twice. |
 | `budget_limit_invalid` | 400 | The limit is $0 or less. |
@@ -500,8 +502,8 @@ Every `GET` that answers JSON carries the licensing state:
 | Field | Meaning |
 |---|---|
 | `entitled` | The license allows changing budgets: active or in grace. |
-| `enforced` | The license enforces spend: any stored license key, including a lapsed one or one that no longer verifies. |
-| `edition` | The license's edition, such as `community` or `enterprise`. |
+| `enforced` | The license enforces spend: a stored Team or Enterprise key, including a lapsed one, or any key that no longer verifies. |
+| `edition` | The license's edition: `community`, `team` or `enterprise`. |
 | `status` | `community`, `active`, `grace` or `lapsed`. |
 | `editable` | The license allows changing budgets and you may change them. |
 
@@ -525,7 +527,7 @@ another organization gives an empty report.
 {
   "entitled": true,
   "enforced": true,
-  "edition": "enterprise",
+  "edition": "team",
   "status": "active",
   "editable": true,
   "report": {
