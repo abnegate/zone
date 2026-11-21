@@ -3,11 +3,7 @@ use clap::Parser;
 use crate::command::Command;
 
 #[derive(Debug, Clone, Parser)]
-#[command(
-    name = "zone-license",
-    version,
-    about = "Zone Enterprise license signer"
-)]
+#[command(name = "zone-license", version, about = "Zone license signer")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -16,6 +12,8 @@ pub struct Cli {
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
+    use clap::error::ErrorKind;
+    use zone_enterprise::Plan;
 
     use super::*;
 
@@ -73,11 +71,14 @@ mod tests {
             "0193a8e2-7c4b-7d10-8f00-4d2c5a9b1e01",
             "--subscription",
             "b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c",
+            "--plan",
+            "team",
         ])
         .unwrap();
         let Command::Sign(arguments) = cli.command else {
             panic!("parsed {:?}", cli.command);
         };
+        assert_eq!(arguments.plan, Plan::Team);
         assert_eq!(arguments.customer, "Acme Ltd");
         assert_eq!(arguments.seats, 25);
         assert_eq!(
@@ -116,6 +117,45 @@ mod tests {
             panic!("parsed {:?}", cli.command);
         };
         assert_eq!(arguments.subscription, None);
+        assert_eq!(arguments.plan, Plan::Enterprise);
+    }
+
+    fn sign_with_plan(plan: &str) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from([
+            "zone-license",
+            "sign",
+            "--customer",
+            "Acme Ltd",
+            "--seats",
+            "25",
+            "--expires-at",
+            "2027-11-01",
+            "--plan",
+            plan,
+        ])
+    }
+
+    #[test]
+    fn parses_either_plan() {
+        for plan in Plan::ALL {
+            let cli = sign_with_plan(plan.as_str()).unwrap();
+            let Command::Sign(arguments) = cli.command else {
+                panic!("parsed {:?}", cli.command);
+            };
+            assert_eq!(arguments.plan, plan);
+        }
+    }
+
+    #[test]
+    fn refuses_an_unknown_plan() {
+        for plan in ["business", "Team", "ENTERPRISE", ""] {
+            let error = sign_with_plan(plan).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                ErrorKind::ValueValidation,
+                "{plan:?}: {error}"
+            );
+        }
     }
 
     #[test]

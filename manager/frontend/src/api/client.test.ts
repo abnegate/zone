@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { ApiError } from './ApiError';
+import { AuthRequestError } from './auth';
 import { client } from './client';
 
 // Mock fetch globally
@@ -3607,6 +3608,56 @@ describe('Client', () => {
           })
         ).rejects.toThrow('Insufficient permissions to create invitations');
       });
+
+      const CAP_MESSAGE =
+        'This server allows 3 active members without an active Zone Team or Enterprise license. Add a license to add more people.';
+
+      const capRefusal = () => ({
+        ok: false,
+        status: 403,
+        json: async () => ({ error: CAP_MESSAGE, code: 'member_cap_reached' }),
+      });
+
+      async function refusalOf(call: () => Promise<unknown>): Promise<unknown> {
+        try {
+          await call();
+        } catch (error) {
+          return error;
+        }
+        throw new Error('the call did not fail');
+      }
+
+      for (const [name, call] of [
+        [
+          'createInvitation',
+          () => client.createInvitation(orgId, { email: 'test@test.com', org_role: 'member' }),
+        ],
+        ['acceptInvitation', () => client.acceptInvitation(token)],
+        ['addOrgMember', () => client.addOrgMember(orgId, { email: 'a@b.co', role: 'member' })],
+      ] as const) {
+        it(`keeps the refusal code from a ${name} failure`, async () => {
+          mockFetch.mockResolvedValueOnce(capRefusal());
+
+          const error = await refusalOf(call);
+
+          expect(error).toBeInstanceOf(AuthRequestError);
+          expect((error as AuthRequestError).code).toBe('member_cap_reached');
+          expect((error as AuthRequestError).message).toBe(CAP_MESSAGE);
+        });
+
+        it(`throws a plain error from a ${name} failure without a code`, async () => {
+          mockFetch.mockResolvedValueOnce({
+            ok: false,
+            status: 409,
+            json: async () => ({ error: 'Already a member' }),
+          });
+
+          const error = await refusalOf(call);
+
+          expect(error).not.toBeInstanceOf(AuthRequestError);
+          expect((error as Error).message).toBe('Already a member');
+        });
+      }
 
       it('parses error detail from acceptInvitation failure', async () => {
         mockFetch.mockResolvedValueOnce({

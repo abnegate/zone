@@ -31,6 +31,7 @@ pub fn run(
             .unwrap_or_else(|| Utc::now().trunc_subsecs(0)),
         expires_at: arguments.expires_at,
         subscription: arguments.subscription,
+        plan: arguments.plan,
     };
     let license = signer.sign(&terms)?;
     writeln!(stdout, "{license}")?;
@@ -38,6 +39,7 @@ pub fn run(
         id = %terms.id,
         key_id = signer.key_id(),
         seats = terms.seats,
+        plan = %terms.plan,
         expires_at = %terms.expires_at,
         "signed a license"
     );
@@ -49,7 +51,7 @@ mod tests {
     use std::fs;
 
     use chrono::{DateTime, TimeZone};
-    use zone_enterprise::TrustedKey;
+    use zone_enterprise::{Plan, TrustedKey};
 
     use super::*;
     use crate::untrusted::Untrusted;
@@ -86,6 +88,7 @@ mod tests {
                 issued_at: None,
                 id: None,
                 subscription: None,
+                plan: Plan::Enterprise,
             },
         }
     }
@@ -121,6 +124,29 @@ mod tests {
         assert_eq!(payload.expires_at, expires_at());
         assert_eq!(payload.key_id, KEY_ID);
         assert_eq!(payload.subscription, None);
+        assert_eq!(payload.plan, Some(Plan::Enterprise));
+    }
+
+    #[test]
+    fn signs_the_plan_it_is_given() {
+        for plan in Plan::ALL {
+            let fixture = fixture();
+            let mut stdout = Vec::new();
+            run(
+                SignArguments {
+                    plan,
+                    ..fixture.arguments
+                },
+                &keyring(),
+                &mut stdout,
+            )
+            .unwrap();
+            let license = keyring()
+                .verify(&String::from_utf8(stdout).unwrap())
+                .unwrap();
+            assert_eq!(license.plan(), plan);
+            assert_eq!(license.payload().plan, Some(plan));
+        }
     }
 
     #[test]

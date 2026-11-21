@@ -3,6 +3,7 @@ use zone_enterprise::sso::Error;
 use crate::auth::password::PasswordError;
 use crate::db::sso::ProviderError;
 use crate::services::account::Refusal;
+use crate::services::members::AdmissionError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SignInFailure {
@@ -20,6 +21,8 @@ pub enum SignInFailure {
     Stale,
     #[error("Too many sign-ins are waiting for the identity provider")]
     Busy,
+    #[error("The server is at its cap of {cap} active members")]
+    Full { cap: u32 },
 }
 
 impl SignInFailure {
@@ -42,6 +45,15 @@ impl From<ProviderError> for SignInFailure {
         match error {
             ProviderError::Database(error) => Self::Storage(error),
             error => Self::Provider(error),
+        }
+    }
+}
+
+impl From<AdmissionError> for SignInFailure {
+    fn from(error: AdmissionError) -> Self {
+        match error {
+            AdmissionError::Full { cap } => Self::Full { cap },
+            AdmissionError::Database(error) => Self::Storage(error),
         }
     }
 }
@@ -78,5 +90,18 @@ mod tests {
             SignInFailure::from(ProviderError::Duplicate),
             SignInFailure::Provider(ProviderError::Duplicate)
         ));
+    }
+
+    #[test]
+    fn a_full_server_is_full_and_an_admission_database_error_is_a_storage_error() {
+        assert!(matches!(
+            SignInFailure::from(AdmissionError::Full { cap: 3 }),
+            SignInFailure::Full { cap: 3 }
+        ));
+        assert!(matches!(
+            SignInFailure::from(AdmissionError::Database(sqlx::Error::PoolClosed)),
+            SignInFailure::Storage(sqlx::Error::PoolClosed)
+        ));
+        assert!(!SignInFailure::Full { cap: 3 }.raced(&["users_email_key"]));
     }
 }

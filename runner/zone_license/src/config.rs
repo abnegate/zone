@@ -10,6 +10,7 @@ use crate::config_error::ConfigError;
 use crate::polar::{AccessToken, WebhookSecret};
 use crate::private_key::PrivateKey;
 use crate::problem::Problem;
+use crate::products::Products;
 use crate::signer::Signer;
 use crate::variable::Variable;
 
@@ -18,17 +19,15 @@ pub const DEFAULT_LISTEN: SocketAddr =
 pub const DEFAULT_SMTP_PORT: u16 = 587;
 pub const DEFAULT_SENDER_NAME: &str = "Zone";
 
-const PRODUCT_SEPARATOR: char = ',';
 const LISTEN_REASON: &str = "it must be an IP address and port, such as 0.0.0.0:8080";
 const PORT_REASON: &str = "it must be a port number from 1 to 65535";
 const FROM_REASON: &str = "it must be a bare email address, such as licenses@example.com";
 const FROM_NAME_REASON: &str = "it must be a single line";
-const PRODUCTS_REASON: &str = "it must list at least one Polar product ID, separated by commas";
 
 pub struct Config {
     pub signer: Signer,
     pub secret: WebhookSecret,
-    pub products: Vec<String>,
+    pub products: Products,
     pub access_token: Option<AccessToken>,
     pub keyring: Keyring,
     pub listen: SocketAddr,
@@ -62,12 +61,11 @@ impl Config {
         );
         let products = required(value(Variable::Products), Variable::Products, &mut problems)
             .and_then(|list| {
-                let products = products(&list);
-                if products.is_empty() {
-                    problems.push(invalid(Variable::Products, PRODUCTS_REASON));
-                    return None;
-                }
-                Some(products)
+                Products::parse(&list)
+                    .map_err(|error| {
+                        problems.push(invalid(Variable::Products, &error.to_string()));
+                    })
+                    .ok()
             });
         let access_token = value(Variable::AccessToken).map(AccessToken::new);
         let listen = parsed(
@@ -177,14 +175,6 @@ fn signer(
     Some(signer)
 }
 
-fn products(list: &str) -> Vec<String> {
-    list.split(PRODUCT_SEPARATOR)
-        .map(str::trim)
-        .filter(|product| !product.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
 fn required(
     found: Option<String>,
     variable: Variable,
@@ -241,7 +231,7 @@ mod tests {
     use std::collections::HashMap;
     use std::io::Write;
 
-    use zone_enterprise::TrustedKey;
+    use zone_enterprise::{Plan, TrustedKey};
 
     use super::*;
     use crate::private_key_error::PrivateKeyError;
@@ -317,7 +307,8 @@ mod tests {
         let config = load(&complete()).unwrap();
         assert_eq!(config.signer.key_id(), KEY_ID);
         assert_eq!(config.signer.public(), PrivateKey::new(SEED).public());
-        assert_eq!(config.products, [PRODUCT]);
+        assert_eq!(config.products.plan(PRODUCT), Some(Plan::Enterprise));
+        assert_eq!(config.products.len(), 1);
         assert_eq!(config.listen, "0.0.0.0:8080".parse().unwrap());
         assert_eq!(config.smtp.host, "smtp.example.test");
         assert_eq!(config.smtp.port, DEFAULT_SMTP_PORT);
@@ -498,7 +489,23 @@ mod tests {
     #[test]
     fn parses_the_product_list() {
         let config = load(&with(&[(Variable::Products, " prod_a, ,prod_b ,,prod_c,")])).unwrap();
-        assert_eq!(config.products, ["prod_a", "prod_b", "prod_c"]);
+        assert_eq!(
+            config.products,
+            Products::parse("prod_a,prod_b,prod_c").unwrap()
+        );
+        assert_eq!(config.products.len(), 3);
+    }
+
+    #[test]
+    fn maps_each_product_to_its_plan() {
+        let config = load(&with(&[(
+            Variable::Products,
+            "prod_a, prod_b = team, prod_c=enterprise",
+        )]))
+        .unwrap();
+        assert_eq!(config.products.plan("prod_a"), Some(Plan::Enterprise));
+        assert_eq!(config.products.plan("prod_b"), Some(Plan::Team));
+        assert_eq!(config.products.plan("prod_c"), Some(Plan::Enterprise));
     }
 
     #[test]
@@ -506,6 +513,24 @@ mod tests {
         for list in [",", " , ,"] {
             let problems = problems(&with(&[(Variable::Products, list)]));
             assert_eq!(invalid(&problems), [Variable::Products], "{list:?}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_bad_product_entry_naming_it() {
+        for (list, entry) in [
+            ("prod_a,prod_b=business", "prod_b=business"),
+            ("prod_a,=team", "=team"),
+            ("prod_a,prod_a=team", "prod_a=team"),
+        ] {
+            let problems = problems(&with(&[(Variable::Products, list)]));
+            assert_eq!(invalid(&problems), [Variable::Products], "{list}");
+            let shown = problems[0].to_string();
+            assert!(
+                shown.starts_with("POLAR_PRODUCT_IDS is invalid: "),
+                "{shown}"
+            );
+            assert!(shown.contains(&format!("{entry:?}")), "{shown}");
         }
     }
 

@@ -87,7 +87,9 @@ mod tests {
 
     use super::*;
     use crate::encoding::SEPARATOR;
+    use crate::error::PAYLOAD_INVALID;
     use crate::fixtures;
+    use crate::plan::Plan;
     use crate::signing::{sign, sign_bytes};
 
     fn signed() -> String {
@@ -465,10 +467,37 @@ mod tests {
             .unwrap()
             .insert("tier".into(), json!("team"));
         let text = sign_bytes(&serde_json::to_vec(&value).unwrap(), &fixtures::first());
-        assert_eq!(
-            fixtures::keyring().verify(&text).unwrap().payload(),
-            &fixtures::payload()
-        );
+        let license = fixtures::keyring().verify(&text).unwrap();
+        assert_eq!(license.payload(), &fixtures::payload());
+        assert_eq!(license.plan(), Plan::Enterprise);
+    }
+
+    #[test]
+    fn verifies_a_license_with_each_plan() {
+        for plan in Plan::ALL {
+            let payload = Payload {
+                plan: Some(plan),
+                ..fixtures::payload()
+            };
+            let license = fixtures::keyring()
+                .verify(&sign(&payload, &fixtures::first()))
+                .unwrap();
+            assert_eq!(license.plan(), plan);
+            assert_eq!(license.payload(), &payload);
+        }
+    }
+
+    #[test]
+    fn refuses_a_signed_unknown_plan() {
+        let mut value = payload_value();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("plan".into(), json!("business"));
+        let text = sign_bytes(&serde_json::to_vec(&value).unwrap(), &fixtures::first());
+        let error = fixtures::keyring().verify(&text).unwrap_err();
+        assert!(matches!(error, Error::Payload(_)), "got {error:?}");
+        assert_eq!(error.code(), PAYLOAD_INVALID);
     }
 
     #[test]

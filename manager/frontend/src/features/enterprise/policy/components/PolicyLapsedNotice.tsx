@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
+import { LICENSE_PATH } from '../../licensePath';
 import { LAPSED_NOTICE } from '../labels';
-import { LICENSE_PATH } from './PolicyUpgradeNotice';
 
 export function PolicyLapsedNotice() {
   return (

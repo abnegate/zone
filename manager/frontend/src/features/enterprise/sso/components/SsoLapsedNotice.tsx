@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { LICENSE_PATH } from './SsoUpgradeNotice';
+import { LICENSE_PATH } from '../../licensePath';
 
 export const LAPSED_NOTICE =
   'Your Zone license has lapsed. Sign-in with these providers and the single sign-on requirement keep working, but changing them needs a renewed license.';

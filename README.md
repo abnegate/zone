@@ -45,7 +45,7 @@ Zone is one platform with three parts: a shared core, and Zone Code and Zone Stu
 - **Multi-Tenant Architecture**: Organizations and workspaces for team collaboration, with email invitations
 - **Role-Based Access Control**: Fine-grained permissions with users, roles, policies and an audit log
 - **Enterprise controls**: With a Zone Enterprise license, single sign-on ([docs/SSO.md](docs/SSO.md)), agent and model policy ([docs/POLICY.md](docs/POLICY.md)), and audit log download, streaming to a SIEM and retention ([docs/AUDIT.md](docs/AUDIT.md))
-- **Licensing**: How Zone Enterprise licenses are sold through Polar, signed and emailed, and how to run the signer ([docs/LICENSING.md](docs/LICENSING.md))
+- **Licensing**: Community is free, with every feature, for up to 3 active members per server. A Zone Team license lifts the cap and adds spend reports and budgets; Zone Enterprise adds the controls above. How licenses are sold through Polar, signed and emailed, and how to run the signer ([docs/LICENSING.md](docs/LICENSING.md), [pricing](https://zone.bitecode.ltd/pricing/))
 - **Theme Customization**: Workspace-specific theming
 
 ### Zone Code
@@ -596,8 +596,8 @@ MIT, except `runner/zone_enterprise/` and
 `manager/frontend/src/features/enterprise/`, which are under the Zone Enterprise
 License in each directory's `LICENSE`. The license signer, `runner/zone_license/`,
 is MIT. See [LICENSE](LICENSE) for details, and
-[docs/LICENSING.md](docs/LICENSING.md) for how Zone Enterprise licenses are
-issued.
+[docs/LICENSING.md](docs/LICENSING.md) for how Zone Team and Enterprise
+licenses are issued.
 
 ## Contributing
 

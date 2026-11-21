@@ -1,6 +1,7 @@
 import { Button, buttonVariants } from '@zone/ui';
 import { useId, useState } from 'react';
 import { useLicense, useLicenseChanging } from '../hooks';
+import { memberCapNotice, overMemberNotice } from '../members';
 import { offersPurchase, PRICING_URL } from '../pricing';
 import { LicenseStatus } from '../schemas';
 import { overSeatNotice, statusNotice, storesLicense } from '../status';
@@ -22,6 +23,8 @@ export function LicenseSection() {
 
   const notice = response ? statusNotice(response) : null;
   const overSeats = response ? overSeatNotice(response.seats) : null;
+  const atCap = response ? memberCapNotice(response.members) : null;
+  const overCap = response ? overMemberNotice(response.members) : null;
   const lapsed = response?.status === LicenseStatus.Lapsed;
 
   return (
@@ -31,7 +34,9 @@ export function LicenseSection() {
           <h2 id={headingId} className="section-title">
             License
           </h2>
-          <p className="section-description">Verify a Zone Enterprise license on this server.</p>
+          <p className="section-description">
+            See this server's plan and member usage, and add a Zone license to change it.
+          </p>
         </div>
         {response && offersPurchase(response.status) && (
           <div className="section-row-actions">
@@ -63,6 +68,16 @@ export function LicenseSection() {
       {overSeats && (
         <div className="alert alert-warning" role="status">
           {overSeats}
+        </div>
+      )}
+      {atCap && (
+        <div className="alert alert-warning" role="status">
+          {atCap}
+        </div>
+      )}
+      {overCap && (
+        <div className="alert alert-warning" role="status">
+          {overCap}
         </div>
       )}
       {response && (

@@ -15,6 +15,7 @@ use crate::db::users::{self, UserRow};
 use crate::db::{refresh_tokens, sessions};
 use crate::routes::common::{AuditEvent, audit};
 use crate::services::account::{AuthResponse, Credential, provision, session};
+use crate::services::members;
 use crate::state::AppState;
 use crate::utils::crypto::generate_token;
 
@@ -204,6 +205,7 @@ async fn create(
     provider_id: Uuid,
     identity: &Identity,
 ) -> Result<Uuid, SignInFailure> {
+    members::admit(state, None).await?;
     let password_hash = unusable().await?;
     let mut transaction = state.db().begin().await?;
     let user = provision::insert(

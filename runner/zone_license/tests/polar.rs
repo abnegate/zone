@@ -2,9 +2,12 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde_json::{Value, json};
+use zone_enterprise::Plan;
+use zone_license::Products;
 use zone_license::decision::{Decision, decide};
 use zone_license::grant::Grant;
 use zone_license::ignored::Ignored;
+use zone_license::license_id;
 use zone_license::order_error::OrderError;
 use zone_license::polar::{
     Event, Headers, ID_HEADER, SIGNATURE_HEADER, SignatureError, TIMESTAMP_HEADER, WebhookSecret,
@@ -40,6 +43,7 @@ const CYCLE_ORDER: &str = "3d6e9f21-8a4b-4c1d-9e2f-0a1b2c3d4e02";
 const UPDATE_ORDER: &str = "3d6e9f21-8a4b-4c1d-9e2f-0a1b2c3d4e03";
 const SUBSCRIPTION: &str = "b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c";
 const PRODUCT: &str = "5f0c8a9e-6b1d-4c2e-9a3f-7d4e1b2c3a40";
+const TEAM_PRODUCT: &str = "8a2b6c1d-4e3f-4a5b-9c6d-7e8f9a0b1c2d";
 const EMAIL: &str = "billing@acme.test";
 const NO_EMAIL_ORDER: &str = "3d6e9f21-8a4b-4c1d-9e2f-0a1b2c3d4e07";
 const NO_SEATS_ORDER: &str = "3d6e9f21-8a4b-4c1d-9e2f-0a1b2c3d4e06";
@@ -79,6 +83,7 @@ fn grant(order: &str, seats: u32, start: &str, end: &str) -> Grant {
         seats,
         period_start: at(start),
         period_end: at(end),
+        plan: Plan::Enterprise,
     }
 }
 
@@ -86,15 +91,27 @@ fn first_year() -> Grant {
     grant(ORDER, 5, "2026-11-18T11:59:58Z", "2027-11-18T11:59:58Z")
 }
 
-fn products() -> [String; 1] {
-    [PRODUCT.to_owned()]
+fn listing(list: &str) -> Products {
+    Products::parse(list).unwrap()
+}
+
+fn products() -> Products {
+    listing(PRODUCT)
 }
 
 fn issued(event: &Event) -> Grant {
-    match decide(event, &products()) {
+    issued_from(event, &products())
+}
+
+fn issued_from(event: &Event, products: &Products) -> Grant {
+    match decide(event, products) {
         Ok(Decision::Issue(grant)) => grant,
         other => panic!("expected a grant, got {other:?}"),
     }
+}
+
+fn sold_as(product: &str) -> Event {
+    edited(CREATE, |value| value["data"]["product_id"] = json!(product))
 }
 
 #[test]
@@ -393,7 +410,7 @@ fn a_listed_product_without_seats_is_misconfigured() {
 #[test]
 fn an_unlisted_product_without_seats_is_ignored() {
     assert_eq!(
-        decide(&event(NO_SEATS), &["another-product".to_owned()]),
+        decide(&event(NO_SEATS), &listing("another-product")),
         Ok(Decision::Ignore(Ignored::Product))
     );
 }
@@ -468,17 +485,23 @@ fn customer_falls_back_to_the_email() {
 #[test]
 fn listed_product_issues() {
     assert_eq!(
-        decide(&event(CREATE), &[PRODUCT.to_owned()]),
+        decide(&event(CREATE), &listing(PRODUCT)),
         Ok(Decision::Issue(first_year()))
     );
 }
 
 #[test]
 fn unlisted_product_is_ignored() {
-    assert_eq!(
-        decide(&event(CREATE), &["another-product".to_owned()]),
-        Ok(Decision::Ignore(Ignored::Product))
-    );
+    for list in [
+        "another-product".to_owned(),
+        format!("another-product=team,{TEAM_PRODUCT}=team"),
+    ] {
+        assert_eq!(
+            decide(&event(CREATE), &listing(&list)),
+            Ok(Decision::Ignore(Ignored::Product)),
+            "{list}"
+        );
+    }
 }
 
 #[test]
@@ -491,9 +514,84 @@ fn order_without_a_product_is_ignored_when_products_are_listed() {
 }
 
 #[test]
-fn an_empty_product_list_issues_nothing() {
+fn a_bare_product_issues_enterprise_exactly_as_before_plans() {
+    let grant = issued(&event(CREATE));
+    assert_eq!(grant.plan, Plan::Enterprise);
     assert_eq!(
-        decide(&event(CREATE), &[]),
+        grant.terms().id,
+        license_id::derive(
+            SUBSCRIPTION,
+            at("2027-11-18T11:59:58Z"),
+            5,
+            Plan::Enterprise
+        )
+    );
+    let legacy = format!(
+        "{SUBSCRIPTION}/{}/5",
+        at("2027-11-18T11:59:58Z").timestamp()
+    );
+    assert_eq!(
+        grant.terms().id,
+        uuid::Uuid::new_v5(&license_id::NAMESPACE, legacy.as_bytes())
+    );
+}
+
+#[test]
+fn a_team_product_issues_a_team_grant() {
+    let grant = issued_from(&event(CREATE), &listing(&format!("{PRODUCT}=team")));
+    assert_eq!(
+        grant,
+        Grant {
+            plan: Plan::Team,
+            ..first_year()
+        }
+    );
+    assert_ne!(grant.terms().id, first_year().terms().id);
+}
+
+#[test]
+fn the_subscriptions_product_sets_the_plan_over_the_orders() {
+    let products = listing(&format!("{PRODUCT}=enterprise,{TEAM_PRODUCT}=team"));
+    let grant = issued_from(&sold_as(TEAM_PRODUCT), &products);
+    assert_eq!(grant.plan, Plan::Enterprise);
+
+    let downgraded = edited(CREATE, |value| {
+        value["data"]["subscription"]["product_id"] = json!(TEAM_PRODUCT);
+    });
+    assert_eq!(issued_from(&downgraded, &products).plan, Plan::Team);
+}
+
+#[test]
+fn a_subscription_without_a_product_takes_the_orders_plan() {
+    let products = listing(&format!("{PRODUCT}=team"));
+    for edit in [
+        (|value: &mut Value| value["data"]["subscription"]["product_id"] = Value::Null)
+            as fn(&mut Value),
+        |value: &mut Value| {
+            value["data"]["subscription"]
+                .as_object_mut()
+                .unwrap()
+                .remove("product_id");
+        },
+    ] {
+        let event = edited(CREATE, edit);
+        assert_eq!(issued_from(&event, &products).plan, Plan::Team);
+    }
+}
+
+#[test]
+fn an_unlisted_subscription_product_takes_the_orders_plan() {
+    let grant = issued_from(
+        &sold_as(TEAM_PRODUCT),
+        &listing(&format!("{TEAM_PRODUCT}=team")),
+    );
+    assert_eq!(grant.plan, Plan::Team);
+}
+
+#[test]
+fn a_listed_subscription_product_issues_nothing_for_an_unlisted_order() {
+    assert_eq!(
+        decide(&sold_as("another-product"), &products()),
         Ok(Decision::Ignore(Ignored::Product))
     );
 }
@@ -620,7 +718,7 @@ fn verified_body_maps_to_a_grant() {
     let secret = WebhookSecret::new(STANDARD_SECRET);
     verify(&secret, &headers(STANDARD_SIGNATURE), CREATE, now()).unwrap();
     assert_eq!(
-        decide(&Event::parse(CREATE).unwrap(), &[PRODUCT.to_owned()]),
+        decide(&Event::parse(CREATE).unwrap(), &listing(PRODUCT)),
         Ok(Decision::Issue(first_year()))
     );
 }
