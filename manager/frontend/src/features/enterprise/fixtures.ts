@@ -1,4 +1,4 @@
-import { COMMUNITY_MEMBERS } from './members';
+import { COMMUNITY_MEMBERS } from './limits';
 import {
   Edition,
   LicenseRefusalCode,

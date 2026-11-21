@@ -1,8 +1,9 @@
 import { AuthRequestError } from '../../api/auth';
+import { COMMUNITY_MEMBERS } from './limits';
 import { MemberCapCode } from './MemberCapCode';
 import type { Members } from './types';
 
-export const COMMUNITY_MEMBERS = 3;
+export { COMMUNITY_MEMBERS };
 
 const MEMBERS_UNCOUNTED = 'Member usage unavailable';
 

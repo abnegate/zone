@@ -14,8 +14,8 @@ export {
 } from './components';
 export * from './hooks';
 export { LicenseRefusal } from './LicenseRefusal';
+export { COMMUNITY_MEMBERS } from './limits';
 export {
-  COMMUNITY_MEMBERS,
   isMemberCapRefusal,
   memberCapMessage,
   memberCapNotice,
