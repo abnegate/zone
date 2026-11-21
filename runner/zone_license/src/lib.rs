@@ -18,6 +18,7 @@ pub mod polar;
 pub mod private_key;
 mod private_key_error;
 mod problem;
+pub mod renewal;
 pub mod serve;
 mod serve_error;
 pub mod sign;

@@ -10,6 +10,8 @@ pub enum ServeError {
     Config(#[from] ConfigError),
     #[error("the mail relay could not be set up: {0}")]
     Mail(#[from] MailError),
+    #[error("the Polar API client could not be set up: {0}")]
+    Polar(#[from] reqwest::Error),
     #[error("could not start the async runtime: {0}")]
     Runtime(io::Error),
     #[error("could not listen for shutdown signals: {0}")]
