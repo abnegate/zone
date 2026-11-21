@@ -1,10 +1,11 @@
 # Selling and issuing licenses
 
-This page is for whoever sells Zone Enterprise: how a license works, how to
-keep the signing key, how to set up Polar, and how to run `zone-license`, the
-signer that turns a Polar payment into a license key in the customer's inbox
-and hands online Zone servers their renewed key. If you run Zone and want to
-install a license you bought, you only need
+This page is for whoever sells Zone Team and Zone Enterprise: how a license
+works, how to keep the signing key, how to set up Polar, and how to run
+`zone-license`, the signer that turns a Polar payment into a license key in the
+customer's inbox and hands online Zone servers their renewed key. If you run
+Zone and want to install a license you bought, you only need
+[Editions](#editions),
 [What the customer receives](#what-the-customer-receives) and
 [Automatic renewal](#automatic-renewal).
 
@@ -24,13 +25,67 @@ install a license you bought, you only need
 
 ## Overview
 
-Zone has two editions. **Community** is free and has no seat, workspace or
-usage caps. **Zone Enterprise** is the one paid edition: any valid license
-unlocks every Enterprise feature, such as [single sign-on](SSO.md),
-[agent and model policy](POLICY.md), and [audit export, streaming and
-retention](AUDIT.md). It's billed per seat, yearly, through Polar, which is the
-merchant of record and handles VAT, GST and US sales tax. Zone never handles
-money; it only verifies a key.
+### Editions
+
+Zone has three editions:
+
+| Edition | Price | What it includes |
+|---|---|---|
+| **Community** | Free | Every product feature, for up to 3 [active members](#the-community-member-cap) per server. |
+| **Team** | Paid | Everything in Community with no member cap, plus spend reports and budgets. |
+| **Enterprise** | Paid | Everything in Team, plus [single sign-on](SSO.md), [agent and model policy](POLICY.md), and [audit export, streaming and retention](AUDIT.md). |
+
+A server with no license runs Community. A Team or Enterprise license unlocks
+its plan's features while it's active and through its grace period. Both paid
+editions are billed per seat, yearly, through Polar, which is the merchant of
+record and handles VAT, GST and US sales tax. Zone never handles money; it
+only verifies a key.
+
+### The Community member cap
+
+An active member is a person who is an active member of an active
+organization and signed in during the current calendar month (UTC): the same
+count as a [seat](#how-a-license-works), taken across every organization on
+the server. Without a Team or Enterprise license that is active or in its
+grace period, a server allows 3 of them. That covers no license, a paid
+license past its 30-day grace period, and a stored key that no longer
+verifies.
+
+Once 3 people count, Zone refuses anyone new, on every path that adds a
+person:
+
+- registering an account;
+- signing in through single sign-on for the first time, which would create an
+  account;
+- inviting an email address that isn't an existing member's;
+- accepting an invitation, for an account with no membership;
+- adding an account with no membership to an organization, including someone
+  whose only membership was removed;
+- creating an organization, for an account with no membership.
+
+Each refusal answers `403`:
+
+```json
+{"error": "This server runs Zone Community, which allows 3 active members. Add a Zone Team or Enterprise license to add more people.", "code": "member_cap_reached"}
+```
+
+The cap never signs anyone out and never refuses an existing member. Signing
+in and refreshing a session are never checked, including through single
+sign-on, and anyone with an active membership of an active organization can
+still be invited, accept invitations, join another organization and create
+one. A server can therefore be over the cap, for example after a paid license
+lapses. Server admins then
+see a banner that says so and that everyone keeps access, and new people are
+refused until a Team or Enterprise license is installed.
+
+The count follows the calendar month, so someone who hasn't signed in this
+month doesn't count until they do. A place is checked when the person is
+added, never reserved: an invitation sent under the cap can still be refused
+when it's accepted, and two sign-ups at the same moment can both get in.
+
+**Settings → This server → License** shows the count on a capped server, and
+`GET /api/license` reports it as `members`: `active` (`null` when it can't be
+counted), `cap` (`null` when the license lifts it) and `over`.
 
 ### How a license works
 
@@ -46,6 +101,10 @@ The payload holds:
 | `expires_at` | When it ends. |
 | `key_id` | Which signing key signed it, such as `2026-1`. |
 | `subscription` | Optional. The Polar subscription it was issued for, which lets a server [renew it automatically](#automatic-renewal). Keys without it are laid out exactly as before, and every Zone release reads both. |
+| `plan` | Optional. `team` or `enterprise`. A key without it is Enterprise, so every key issued before plans keeps its edition and is laid out exactly as before. Any other value fails verification with `license_payload_invalid`. A `tier` field in older keys is ignored. |
+
+The license API reports the plan as `license.plan`, and the server's edition
+as `edition`: `community`, `team` or `enterprise`.
 
 Every Zone release compiles in a keyring of trusted public keys, in
 `runner/zone_enterprise/src/production.rs`. Zone verifies a license against
@@ -57,21 +116,26 @@ only the key and can be turned off.
 
 - **Seats are soft.** A seat is a person who is an active member of an active
   organization and signed in during the current calendar month (UTC). Going
-  over the licensed count shows admins a banner; nobody is ever refused
-  sign-in because of it. The difference is trued up at renewal.
+  over a paid license's count shows admins a banner; nobody is ever refused
+  because of it. The difference is trued up at renewal. Only Community's
+  [member cap](#the-community-member-cap) refuses anyone.
 - **Expiry has a grace period.** For 30 days after `expires_at`, the license
-  still unlocks everything. After that it has lapsed: single sign-on keeps
-  working and existing policies stay enforced, but changing Enterprise
-  settings, audit streaming and export stop until a new license is pasted. The
-  signer never adds the grace period itself; Zone adds it when it reads
-  `expires_at`.
+  still unlocks everything its plan includes. After that it has lapsed: the
+  member cap applies again, single sign-on keeps working and existing policies
+  stay enforced, but changing Enterprise settings, audit streaming and export
+  stop until a new license is pasted. The signer never adds the grace period
+  itself; Zone adds it when it reads `expires_at`.
 - **A license can't be recalled.** Once a key is issued, it verifies until it
   lapses. See [Revocation](#revocation).
+- **Older releases read every key as Enterprise.** Zone releases from before
+  plans ignore `plan`, so a Team key installed on one unlocks every Enterprise
+  feature. Only a release that knows plans limits a Team key to Team's
+  features.
 
 The console's License section shows a **Buy a license** link on Community, on
 a lapsed license and on a stored key that no longer verifies. It points at
-`https://zone.abnegate.dev/pricing`, a placeholder until the pricing page goes
-live; the pricing page links to the Polar checkout.
+`https://zone.bitecode.ltd/pricing/`, which links to the Polar checkout for
+each plan.
 
 ### The licence boundary
 
@@ -175,11 +239,11 @@ ask Polar to enable seat-based pricing for the organization.
 
 ### 2. The product and price
 
-Create one product:
+Create one product per paid plan you sell:
 
 | Setting | Value |
 |---|---|
-| Name | `Zone Enterprise` |
+| Name | `Zone Team` or `Zone Enterprise` |
 | Product type | Subscription |
 | Billing cycle | Yearly |
 | Pricing type | Seat-based (`amount_type: seat_based`) |
@@ -200,8 +264,9 @@ seat assignment in Polar's portal.
 Polar caps a subscription at 1,000 seats. Sell larger deals by invoice and
 [hand-sign](#hand-signing-a-license) their keys.
 
-Copy the product's ID. It's the value for `POLAR_PRODUCT_IDS`, which the
-signer requires.
+Copy each product's ID into `POLAR_PRODUCT_IDS`, which the signer requires,
+with the plan its keys carry: `<team product id>=team,<enterprise product id>`.
+A bare ID issues Enterprise keys, as before. See [Environment](#environment).
 
 ### 3. The minimum seat count
 
@@ -237,8 +302,15 @@ customer keeps the larger key they already paid for until then. With
 renewal, and Zone shows the over-seats banner until then. With `next_period`,
 added seats wait a whole year.
 
+A plan change works the same way. When a customer moves their subscription
+from the Team product to the Enterprise product, or back, Polar pays a
+`subscription_update` order under `invoice`, and the signer emails a key with
+the new product's plan at once. A server's
+[automatic renewal](#automatic-renewal) only asks in the license's last 14
+days, so until then the customer pastes the emailed key.
+
 Turn on the setting that lets customers update their subscription from the
-customer portal if you want them to change seats themselves.
+customer portal if you want them to change seats or plan themselves.
 
 ### 5. No free trial
 
@@ -250,7 +322,7 @@ until the first paid renewal, when the trial ends. Offer evaluations with a
 
 ### 6. The checkout link
 
-Create a checkout link for the Zone Enterprise product. Leave the seat count
+Create a checkout link for each product. Leave the seat count
 open on the self-serve link, so buyers choose it in checkout within the
 price's tiers, and point the pricing page's buy button at it. Every buyer must
 give an email address; the key is sent there.
@@ -370,7 +442,7 @@ Values are trimmed, and a blank value counts as unset, except
 | Variable | Default | Meaning |
 |---|---|---|
 | `POLAR_WEBHOOK_SECRET` | Required | The endpoint's secret from Polar, starting `whsec_`. |
-| `POLAR_PRODUCT_IDS` | Required | Comma-separated Polar product IDs to issue keys for, at least one. Orders for other products are acknowledged and ignored, so nothing else the organization sells, or adds later, ever gets a key. |
+| `POLAR_PRODUCT_IDS` | Required | Comma-separated Polar products to issue keys for, at least one. Each entry is `<product-id>`, which issues Enterprise keys, or `<product-id>=team` or `<product-id>=enterprise`. The signer refuses to start, naming the entry, on an empty list, an empty ID, a plan other than `team` or `enterprise`, or the same ID twice. Orders for other products are acknowledged and ignored, so nothing else the organization sells, or adds later, ever gets a key. |
 | `ZONE_LICENSE_PRIVATE_KEY_FILE` | None | Path to the private key file, which must give its group and everyone else no access. Set exactly one of this and `ZONE_LICENSE_PRIVATE_KEY`. |
 | `ZONE_LICENSE_PRIVATE_KEY` | None | The private key itself: the base64 of the 32-byte seed. Set exactly one of this and `ZONE_LICENSE_PRIVATE_KEY_FILE`. |
 | `ZONE_LICENSE_KEY_ID` | Required | The signing key's id, such as `2026-2`. It must name a key in this release's production keyring, and that key must match the private key. |
@@ -432,7 +504,7 @@ At startup, `serve` logs `renewal = true` when `POLAR_ACCESS_TOKEN` is set and
 | `oversize` | `413` |
 | `unverified`, `unsubscribed` or `malformed` | `422`: the key doesn't verify, has no `subscription`, or its subscription id isn't a UUID |
 | `unsignable` | `500` |
-| `unauthorized`, `unexpected` or `misconfigured` | `502`: Polar refused the access token (`401` or `403`), answered something else unexpected, or the subscription has no seats |
+| `unauthorized`, `unexpected` or `misconfigured` | `502`: Polar refused the access token (`401` or `403`), answered something else unexpected, or the subscription is without seats |
 | `unavailable` | `503` |
 
 Besides the `outcome`, each line carries these fields:
@@ -550,16 +622,17 @@ sandbox purchase to a Gmail and an Outlook address before going live.
 ## What the customer receives
 
 When an order is paid, the customer gets an email at the address on the
-order. It names the customer, the seat count and the expiry date, carries the
-license key, and gives the steps to install it:
+order, with the subject "Your Zone Team license key" or "Your Zone Enterprise
+license key". It names the customer, the plan, the seat count and the expiry
+date, carries the license key, and gives the steps to install it:
 
 1. In Zone, open **Settings → This server → License**. Only server admins see
    it.
 2. Paste the key.
 3. Click **Add license** (**Replace license** if one is already installed).
 
-Zone verifies the key on the spot and unlocks the Enterprise features in
-place: the same image and the same data, with no restart or reinstall.
+Zone verifies the key on the spot and unlocks its plan's features in place:
+the same image and the same data, with no restart or reinstall.
 
 The name on the license is the order's billing name; failing that, the
 customer's billing name, then the customer's name, then their email address.
@@ -571,6 +644,7 @@ space, and the email shows exactly the name the license carries.
 | A new subscription is paid | A key for the seats bought, expiring at the end of the first year. |
 | A renewal is paid | A new key for the next year, by email. A server that [renews automatically](#automatic-renewal) installs the same license itself; any other server needs the new key pasted before the old one's grace period ends. |
 | The seat count changes, with `invoice` proration | A new key with the new seat count and the same expiry, as soon as the change is billed. |
+| The subscription moves to another product, with `invoice` proration | A new key with that product's plan, as soon as the change is billed. |
 | A renewal payment fails | Nothing until Polar collects it. If it does, the key arrives then, by email and to a server that [renews automatically](#automatic-renewal); see [Waiting for payment](#waiting-for-payment). |
 | The subscription is cancelled | Nothing. The current key runs to its expiry and then its 30-day grace period. |
 | The subscription is revoked or refunded | Nothing. The current key still runs to its expiry; see [Revocation](#revocation). |
@@ -598,13 +672,13 @@ anywhere and is renewed by pasting, as before.
    unless it names a [loopback or private network host](#what-zone-sends).
 3. The signer verifies the key and reads its subscription from Polar. When
    the subscription is `active` and its current period ends later than the
-   key, or ends at the same time with a different seat count, it signs a key
-   for that period and returns it. Any period other than the one the key was
-   issued for is signed only once it's three days old, so that Polar has
+   key, or ends at the same time with a different seat count or plan, it signs
+   a key for that period and returns it. Any period other than the one the key
+   was issued for is signed only once it's three days old, so that Polar has
    [collected its payment](#waiting-for-payment). Otherwise it answers that
    there's nothing newer yet, or that the subscription is not renewing.
 4. zone-server checks the new key and installs it in place of the old one,
-   just as a pasted key is installed: no restart, and the Enterprise features
+   just as a pasted key is installed: no restart, and the licensed features
    carry on. It writes a `license.renewed` entry to the audit log with no
    actor. If an admin pasted or removed a key while the request was in flight,
    the admin's change stands and the answer is dropped.
@@ -618,9 +692,9 @@ current one, so for the 14 days the answer is `current`, and for three days
 after that while the new period settles. The renewed key arrives within about
 three days of the period rolling over, plus up to a day for the next check.
 The old key has expired by then, but its 30-day grace period covers the wait
-and nothing stops working. A seat change mid-year still arrives only by
-email, because the key isn't due then. Paste that key, or let the next
-renewal carry the new seat count.
+and nothing stops working. A seat or plan change mid-year still arrives only
+by email, because the key isn't due then. Paste that key, or let the next
+renewal carry the new seat count and plan.
 
 The first check runs about a minute after the server starts, and then every
 24 hours.
@@ -728,7 +802,8 @@ A renewed key's terms come from the subscription's current period:
 | `issued_at` | The subscription's `current_period_start` in whole seconds |
 | `customer` | The old key's, unchanged |
 | `subscription` | The old key's, unchanged |
-| `id` | A UUIDv5 over the subscription, the period end and the seat count, as for the webhook |
+| `plan` | The plan `POLAR_PRODUCT_IDS` gives the subscription's current product |
+| `id` | A UUIDv5 over the subscription, the period end, the seat count and, for a Team key, the plan, as for the webhook |
 | `key_id` | `ZONE_LICENSE_KEY_ID` |
 
 The id is derived as the webhook derives it, so the key a server fetches for
@@ -741,14 +816,14 @@ the old one.
 | Status | Body | Meaning | Zone records |
 |---|---|---|---|
 | `200` | `{"license":"<new key>"}` | A new key was signed. | `renewed`; `rejected` if the body isn't a renewed key or the key fails Zone's check; `unreachable` if the body is over 64 KiB or can't be read in full |
-| `204` | | Nothing newer to issue yet: the subscription is `active` but the key already covers its current period and seats, its new period is less than three days old and [still settling](#waiting-for-payment), or it's `trialing`. | `current` |
+| `204` | | Nothing newer to issue yet: the subscription is `active` but the key already covers its current period, seats and plan, its new period is less than three days old and [still settling](#waiting-for-payment), or it's `trialing`. | `current` |
 | `400` | | The body can't be read: invalid JSON, no `license` field, or a missing or non-JSON `Content-Type`. | `refused` |
 | `404` | | Renewal is off on this signer: `POLAR_ACCESS_TOKEN` is unset. | `unreachable` |
 | `410` | | The subscription is not renewing: Polar has no such subscription, it has ended, its product isn't in `POLAR_PRODUCT_IDS`, or its status is anything but `active` or `trialing`, such as `past_due` after a failed charge. | `ended` |
 | `413` | | The body is over 16 KiB. | `refused` |
 | `422` | | The key doesn't verify, has no `subscription`, or its subscription id isn't a UUID. | `refused` |
 | `500` | | Signing failed. | `unreachable` |
-| `502` | | Polar refused the access token (`401` or `403`), answered something unexpected, or the subscription has no seats (`misconfigured`). | `unreachable` |
+| `502` | | Polar refused the access token (`401` or `403`), answered something unexpected, or the subscription is without seats (`misconfigured`). | `unreachable` |
 | `503` | | Polar timed out, couldn't be reached, or answered `408`, `429` or `5xx`. | `unreachable` |
 | Any other `2xx`, or a `3xx` | | Never sent by the signer; something in front of it answered. Zone follows no redirects. | `unreachable` |
 
@@ -798,6 +873,7 @@ zone-license sign --customer "Acme Ltd" --seats 10 --expires-at 2027-06-30
 | `--issued-at <time>` | When the license period starts, in either form `--expires-at` takes. Defaults to now; leave it out for a new license. |
 | `--id <uuid>` | The license id. Defaults to a random UUID; leave it out for a new license. |
 | `--subscription <id>` | The Polar subscription id the key belongs to, so servers can [renew it automatically](#automatic-renewal). Leave it out for a key that's only ever renewed by hand, such as an evaluation or a deal invoiced outside Polar. |
+| `--plan <plan>` | `team` or `enterprise`. Defaults to `enterprise`; any other value is refused. |
 
 It prints the license string and nothing else, so it can be piped or copied as
 it is. The private key never goes on the command line, and `sign` refuses a
@@ -810,8 +886,9 @@ For an evaluation, sign a short license, such as 30 days. It can't be
 withdrawn early: it runs to its expiry, plus the grace period.
 
 A key given `--subscription` renews only while that subscription is `active`
-and its product is in `POLAR_PRODUCT_IDS`, and each renewed key keeps the
-customer name you signed it with.
+and its product is in `POLAR_PRODUCT_IDS`. Each renewed key keeps the customer
+name you signed it with, and carries the plan of the subscription's current
+product, whatever `--plan` you signed it with.
 
 ## Rotating the signing key
 
@@ -852,7 +929,7 @@ single license:
   subscription. Short terms are the only control.
 - **A whole key** can be withdrawn by removing it from `KEYS`. Every license it
   signed then stops verifying on servers that upgrade to that release, and
-  their Enterprise features stop as if unlicensed until a new key is pasted.
+  their licensed features stop as if unlicensed until a new key is pasted.
   Send every paying customer a replacement key signed with the new key first.
 - **Servers that don't upgrade** keep trusting a removed key for as long as
   they run the old release, so a leaked key can sign licenses for them
@@ -871,7 +948,8 @@ It issues a key when all of these hold:
 - the event is `order.paid`;
 - the order's `paid` is true;
 - its `billing_reason` is `subscription_create` (a new subscription),
-  `subscription_cycle` (a renewal) or `subscription_update` (a seat change);
+  `subscription_cycle` (a renewal) or `subscription_update` (a seat or plan
+  change);
 - its product is in `POLAR_PRODUCT_IDS`;
 - its subscription is neither `trialing` nor `canceled`;
 - it's for a seat-based subscription with at least one seat.
@@ -891,7 +969,7 @@ is only due to cancel is still `active`, and its orders issue as usual.
 
 An order for a product in `POLAR_PRODUCT_IDS` that has no subscription, or a
 subscription without seats, isn't ignored: the customer has paid for a product
-you said is Zone Enterprise and would otherwise get nothing. The signer
+you said is a Zone plan and would otherwise get nothing. The signer
 answers `422` and logs an error with the outcome `misconfigured`, naming the
 order and the product. Fix the product's pricing so it's seat-based, then
 [hand-sign](#hand-signing-a-stuck-order) the order's key.
@@ -912,10 +990,10 @@ expiry and Zone's grace period follows.
 server asks rather than Polar telling. It reads the subscription's current
 state from Polar's API at the moment of the request, and signs only for an
 `active` subscription to a listed product whose current period runs past the
-key, and only once a new period has had [three days to
-settle](#waiting-for-payment), since an `active` subscription at the moment
-the period rolls over is in the same unpaid state `subscription.cycled`
-reports.
+key, or matches it with different seats or plan, and only once a new period
+has had [three days to settle](#waiting-for-payment), since an `active`
+subscription at the moment the period rolls over is in the same unpaid state
+`subscription.cycled` reports.
 
 ### The key's terms
 
@@ -925,7 +1003,8 @@ reports.
 | `expires_at` | The subscription's `current_period_end` in whole seconds, with no grace added |
 | `issued_at` | The subscription's `current_period_start` in whole seconds |
 | `customer` | The order's billing name, else the customer's billing name, else the customer's name, else their email |
-| `id` | A UUIDv5 over the subscription, the period end and the seat count |
+| `plan` | The plan `POLAR_PRODUCT_IDS` gives the subscription's current product; the order's product's plan when the subscription names no product or one that isn't listed |
+| `id` | A UUIDv5 over the subscription, the period end, the seat count and, for a Team key, the plan |
 | `key_id` | `ZONE_LICENSE_KEY_ID` |
 | `subscription` | The order's subscription id |
 
@@ -938,7 +1017,8 @@ id is derived from them, so the same order always produces the same,
 byte-identical key. A retry or a redelivery sends the customer the same key
 again, never a second license. A seat change within a period gets a new id,
 because the seat count is part of it, and so does a renewal, because the
-period end is.
+period end is. A Team key's id also covers its plan, so a plan change gets a
+new id too; an Enterprise key's id is derived exactly as before plans.
 
 If a send succeeds but Polar times out before it hears back, Polar retries and
 the customer receives the same email twice. Both carry the identical key.
@@ -993,19 +1073,20 @@ redeliver the order once it's fixed.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| The signer exits at startup | A required variable is missing or invalid, both or neither private key variables are set, the key file is too readable, or the key isn't in this release's keyring | Read the message, which names the variable. For an untrusted key, run a signer built from a release that trusts it. |
+| The signer exits at startup | A required variable is missing or invalid, such as a `POLAR_PRODUCT_IDS` entry with an unknown plan; both or neither private key variables are set; the key file is too readable; or the key isn't in this release's keyring | Read the message, which names the variable and, for `POLAR_PRODUCT_IDS`, the entry. For an untrusted key, run a signer built from a release that trusts it. |
 | Renewals get `404` and servers record `unreachable` | `POLAR_ACCESS_TOKEN` is unset, so renewal is off; the startup line logs `renewal = false` | Set the [access token](#7-the-access-token) and restart the signer. |
-| Renewals get `502` with an error in the log | Polar refused the access token, which has expired, been revoked or lacks `subscriptions:read`; or a subscription has no seats (`misconfigured`) | Create a new token with `subscriptions:read`. For `misconfigured`, make the product seat-based. |
+| Renewals get `502` with an error in the log | Polar refused the access token, which has expired, been revoked or lacks `subscriptions:read`; or a subscription is without seats (`misconfigured`) | Create a new token with `subscriptions:read`. For `misconfigured`, make the product seat-based. |
 | Renewals get `503` | Polar is down, slow or rate-limiting the signer | Nothing; servers ask again the next day. |
 | Renewals get `422` | The key doesn't verify with the signer's release, carries no subscription, or carries a subscription id that isn't a UUID | Run a signer built from a release that trusts every key you've signed with. Re-sign a hand-signed key with the right `--subscription`. |
 | Renewals get `410` for a paying customer | Its product isn't in `POLAR_PRODUCT_IDS`, or the subscription isn't `active` or `trialing` in Polar, such as `past_due` after a failed charge; the log's `reason` and `status` say which | Add the product, or settle the subscription in Polar. Until then, the customer pastes the key they're emailed. |
 | Renewals get `204` with `reason` `settling` | The subscription's new period started less than three days ago, so the signer is [waiting for payment](#waiting-for-payment) | Nothing; the key arrives on the first check after the three days. |
+| A Team key unlocks Enterprise features | The server runs a Zone release from before plans, which reads every key as Enterprise | Upgrade the server to a release that knows plans. |
 | A customer's key renews on servers that aren't theirs | The key leaked; the signer renews any key it signed while its subscription is `active` | Cancel or revoke the subscription and have the customer subscribe again. See [A leaked key](#a-leaked-key). |
 | Every delivery gets `401` | Wrong `POLAR_WEBHOOK_SECRET`, a proxy changing the body, or the host clock more than five minutes off | Copy the secret from the endpoint again, pass the body through unchanged, run NTP. |
 | Deliveries get `503` | The relay is down, slow, or refusing mail for now | Fix the relay; the `undelivered` log line gives the failure and the SMTP status. Polar retries, and you can redeliver anything that ran out of attempts. |
 | Deliveries get `422` with an `unsendable` log line | The relay refused the message for good, such as an unknown recipient or a refused sender, or the order's address can't be parsed | If the sender or the relay account is at fault, fix it and redeliver. If the recipient is, [hand-sign](#hand-signing-a-stuck-order) the key and send it to a corrected address. |
 | Deliveries get `422` | The order can't be issued, usually because it has no customer email (an `unaddressed` error in the log, naming the order) | [Hand-sign](#hand-signing-a-stuck-order) it and send the key yourself. |
-| A `misconfigured` error in the log | An order for a product in `POLAR_PRODUCT_IDS` had no seat-based subscription | Make the product seat-based, then [hand-sign](#hand-signing-a-stuck-order) the order the log names. |
+| A `misconfigured` error in the log | An order for a product in `POLAR_PRODUCT_IDS` had no subscription, or one without seats | Make the product seat-based, then [hand-sign](#hand-signing-a-stuck-order) the order the log names. |
 | Deliveries get `403` | Cloudflare Bot Fight Mode or another bot filter | Turn it off for the signer's name. |
 | The endpoint is disabled | 10 consecutive events failed | Fix the cause, [re-enable it](#re-enabling-the-endpoint), then redeliver. |
 | A customer says no email arrived | Spam filtering, or a mistyped address | Check SPF and DKIM, redeliver the order, or hand-sign it to a corrected address. |
@@ -1032,12 +1113,13 @@ sends the customer the same key again.
 ### Hand-signing a stuck order
 
 For an order the webhook can't handle, such as one with no email, sign its key
-yourself. Take the seat count and the subscription's current period from the
-order in Polar:
+yourself. Take the seat count, the product's plan and the subscription's
+current period from the order in Polar:
 
 ```sh
 zone-license sign \
   --customer "Acme Ltd" \
+  --plan team \
   --seats 5 \
   --issued-at 2026-11-18T11:59:58Z \
   --expires-at 2027-11-18T11:59:58Z \
