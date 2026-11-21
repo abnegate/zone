@@ -7,11 +7,12 @@ use chrono::{TimeDelta, Utc};
 use reqwest::Url;
 use sqlx::PgPool;
 use uuid::Uuid;
+use zone_enterprise::sso::saml::{self, Certificate};
 use zone_enterprise::sso::{Authorization, ClientId, Fields, Protocol, Provider};
 use zone_server::auth::hash_password;
 use zone_server::db::sso::{
-    Asserted, NewConnection, NewProvider, ProviderChanges, ProviderError, ProviderRecord,
-    assertions, attempts, identities, providers, settings,
+    Asserted, Connection, NewConnection, NewProvider, ProviderChanges, ProviderError,
+    ProviderRecord, assertions, attempts, identities, providers, settings,
 };
 use zone_server::db::users::{self, UserRow};
 use zone_server::db::{migrations, sealing::Column};
@@ -41,8 +42,10 @@ const SAML: &str = "saml";
 const ENTITY_ID: &str = "http://www.okta.com/exk1zone";
 const OTHER_ENTITY_ID: &str = "https://sts.windows.net/tenant/";
 const SSO_URL: &str = "https://acme.okta.com/app/zone/exk1zone/sso/saml";
+const OTHER_SSO_URL: &str = "https://login.microsoftonline.com/tenant/saml2";
 const METADATA_URL: &str = "https://acme.okta.com/app/exk1zone/sso/saml/metadata";
 const CERTIFICATE: &str = "MIIDazCCAlOgAwIBAgIUZone";
+const ROTATED_CERTIFICATE: &str = "MIIDazCCAlOgAwIBAgIURotated";
 const REQUEST_ID: &str = "_8f2c1d0e9b7a";
 const HANDOFF_CODE: &str = "one-time-handoff-code";
 const SUBJECT: &str = "00u1ada";
@@ -191,6 +194,22 @@ fn new_provider(issuer: &str, client_id: &str) -> NewProvider {
         },
         allowed_domains: vec!["acme.com".into()],
         require_verified_email: true,
+        enabled: true,
+    }
+}
+
+fn new_saml_provider(entity_id: &str, metadata_url: Option<&str>) -> NewProvider {
+    NewProvider {
+        protocol: Protocol::Saml,
+        display_name: "Okta".into(),
+        issuer: entity_id.into(),
+        connection: NewConnection::Saml {
+            sso_url: SSO_URL.into(),
+            certificates: vec![CERTIFICATE.into()],
+            metadata_url: metadata_url.map(str::to_owned),
+        },
+        allowed_domains: vec!["acme.com".into()],
+        require_verified_email: false,
         enabled: true,
     }
 }
@@ -812,6 +831,226 @@ async fn a_saml_entity_id_is_saved_once_but_may_match_an_oidc_issuer() {
     .await
     .expect("another OIDC client at the same issuer");
     assert_eq!(fixture.count("sso_providers").await, 4);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_saml_provider_round_trips_with_its_pinned_certificates_and_no_client() {
+    let fixture = Fixture::new().await;
+
+    let created = providers::create(
+        fixture.pool(),
+        &fixture.key,
+        &new_saml_provider(ENTITY_ID, Some(METADATA_URL)),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(created.protocol, Protocol::Saml);
+    assert_eq!(created.display_name, "Okta");
+    assert_eq!(created.issuer, ENTITY_ID);
+    assert_eq!(
+        created.connection,
+        Connection::Saml {
+            sso_url: SSO_URL.into(),
+            certificates: vec![CERTIFICATE.into()],
+            metadata_url: Some(METADATA_URL.into()),
+        }
+    );
+    assert_eq!(created.allowed_domains, ["acme.com"]);
+    assert!(!created.require_verified_email);
+    assert!(created.enabled);
+    assert_eq!(created.client_id(), None);
+    assert!(matches!(
+        created.client_secret(&fixture.key),
+        Err(ProviderError::Mismatch(id)) if id == created.id
+    ));
+    let secret = SecretValue::new(SECRET);
+    assert!(matches!(
+        created.fields(&secret),
+        Err(ProviderError::Mismatch(id)) if id == created.id
+    ));
+    let client: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT client_id, client_secret FROM sso_providers WHERE id = $1")
+            .bind(created.id)
+            .fetch_one(fixture.pool())
+            .await
+            .unwrap();
+    assert_eq!(client, (None, None));
+
+    assert_eq!(
+        providers::get(fixture.pool(), created.id).await.unwrap(),
+        Some(created.clone())
+    );
+    assert_eq!(
+        providers::list(fixture.pool()).await.unwrap(),
+        std::slice::from_ref(&created)
+    );
+    assert!(matches!(
+        providers::create(
+            fixture.pool(),
+            &fixture.key,
+            &new_saml_provider(ENTITY_ID, None),
+        )
+        .await,
+        Err(ProviderError::Duplicate)
+    ));
+
+    let pasted = providers::create(
+        fixture.pool(),
+        &fixture.key,
+        &new_saml_provider(OTHER_ENTITY_ID, None),
+    )
+    .await
+    .unwrap();
+    let fetched = providers::get(fixture.pool(), pasted.id)
+        .await
+        .unwrap()
+        .expect("the provider exists");
+    assert!(matches!(
+        fetched.connection,
+        Connection::Saml {
+            metadata_url: None,
+            ..
+        }
+    ));
+    assert_eq!(fixture.count("sso_providers").await, 2);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_stored_saml_provider_parses_back_into_the_provider_it_was_saved_from() {
+    let fixture = Fixture::new().await;
+    let metadata = saml::Metadata::parse(
+        saml::testing::metadata(
+            saml::testing::ENTITY_ID,
+            saml::testing::SSO_URL,
+            &[saml::testing::CERTIFICATE, saml::testing::OTHER_CERTIFICATE],
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let domains = vec!["ACME.com".to_owned(), "acme.com".to_owned()];
+    let provider = saml::Provider::from_metadata(" Okta ", &metadata, &domains, false).unwrap();
+
+    let created = providers::create(
+        fixture.pool(),
+        &fixture.key,
+        &NewProvider {
+            protocol: Protocol::Saml,
+            display_name: provider.display_name.as_str().to_owned(),
+            issuer: provider.entity_id.as_str().to_owned(),
+            connection: NewConnection::Saml {
+                sso_url: provider.sso_url.as_str().to_owned(),
+                certificates: provider
+                    .certificates
+                    .iter()
+                    .map(Certificate::encoded)
+                    .collect(),
+                metadata_url: None,
+            },
+            allowed_domains: provider.policy.domains.as_slice().to_vec(),
+            require_verified_email: provider.policy.require_verified_email,
+            enabled: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(created.display_name, "Okta");
+    assert_eq!(created.issuer, saml::testing::ENTITY_ID);
+    assert_eq!(created.allowed_domains, ["acme.com"]);
+    let Connection::Saml {
+        sso_url,
+        certificates,
+        ..
+    } = &created.connection
+    else {
+        panic!("a SAML provider is stored with a SAML connection");
+    };
+    assert_eq!(certificates.len(), 2);
+    assert_eq!(
+        saml::Provider::parse(&saml::Fields {
+            display_name: &created.display_name,
+            entity_id: &created.issuer,
+            sso_url,
+            certificates,
+            allowed_domains: &created.allowed_domains,
+            require_verified_email: created.require_verified_email,
+        })
+        .unwrap(),
+        provider
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_sparse_saml_update_keeps_every_field_it_leaves_out() {
+    let fixture = Fixture::new().await;
+    let created = providers::create(
+        fixture.pool(),
+        &fixture.key,
+        &new_saml_provider(ENTITY_ID, Some(METADATA_URL)),
+    )
+    .await
+    .unwrap();
+
+    let rotated = providers::update(
+        fixture.pool(),
+        &fixture.key,
+        created.id,
+        &ProviderChanges {
+            certificates: Some(vec![CERTIFICATE.into(), ROTATED_CERTIFICATE.into()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .expect("the provider exists");
+
+    assert_eq!(
+        rotated.connection,
+        Connection::Saml {
+            sso_url: SSO_URL.into(),
+            certificates: vec![CERTIFICATE.into(), ROTATED_CERTIFICATE.into()],
+            metadata_url: Some(METADATA_URL.into()),
+        }
+    );
+    assert_eq!(rotated.issuer, created.issuer);
+    assert_eq!(rotated.display_name, created.display_name);
+    assert_eq!(rotated.allowed_domains, created.allowed_domains);
+    assert_eq!(rotated.enabled, created.enabled);
+    assert!(rotated.updated_at >= created.updated_at);
+
+    let moved = providers::update(
+        fixture.pool(),
+        &fixture.key,
+        created.id,
+        &ProviderChanges {
+            issuer: Some(OTHER_ENTITY_ID.into()),
+            sso_url: Some(OTHER_SSO_URL.into()),
+            metadata_url: Some(None),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .expect("the provider exists");
+
+    assert_eq!(moved.protocol, Protocol::Saml);
+    assert_eq!(moved.issuer, OTHER_ENTITY_ID);
+    assert_eq!(
+        moved.connection,
+        Connection::Saml {
+            sso_url: OTHER_SSO_URL.into(),
+            certificates: vec![CERTIFICATE.into(), ROTATED_CERTIFICATE.into()],
+            metadata_url: None,
+        }
+    );
+    assert_eq!(
+        providers::get(fixture.pool(), created.id).await.unwrap(),
+        Some(moved)
+    );
     fixture.cleanup().await;
 }
 
