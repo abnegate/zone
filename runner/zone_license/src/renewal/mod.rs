@@ -78,7 +78,7 @@ fn newer(license: &License, expires_at: DateTime<Utc>, seats: u32) -> bool {
 }
 
 fn settling(license: &License, issued_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
-    issued_at >= license.expires_at()
+    issued_at != license.issued_at().trunc_subsecs(0)
         && issued_at
             .checked_add_signed(SETTLEMENT)
             .is_none_or(|settled| now < settled)

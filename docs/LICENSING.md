@@ -643,23 +643,27 @@ When a period ends, Polar moves the subscription into its next period first,
 still `active`, and only then creates the renewal order and charges it. A
 failed charge turns the subscription `past_due`. So for a short while after
 the period rolls over, an `active` subscription says nothing about whether
-the new year has been paid for, and the key's `expires_at` tells anyone
-holding it exactly when that moment is. The same holds when a trial converts
-to a paid subscription.
+the new period has been paid for. The same holds when a trial converts to a
+paid subscription, and when Polar starts a new period early because the
+product or billing interval changed.
 
-The signer therefore holds a new period for three days after it starts,
+The signer therefore holds every period other than the one the key was issued
+for, whose start is the key's `issued_at`, for three days after it starts,
 answering `204` (`current`, logged with `reason` `settling`). By then Polar
 has either collected the payment, and the next check gets the new key, or
 turned the subscription `past_due`, which the signer answers with `410`
 (`ended`). If Polar collects later, the subscription is `active` again and
 the next daily check renews.
 
-Only a period that starts at or after the key's expiry is held. A seat change
-within the period the key already covers is signed at once, and so is any
-period once it's three days old. That leaves one gap: a mid-period seat
-increase is signed before Polar has collected any prorated invoice for it.
-Seats are soft, so the worst case is a key that counts more seats than were
-paid for, in a period that was.
+A new period is held even when it starts before the key expires, such as a
+trial converting under a key that outlasts the trial. Keys from an order or a
+renewal are issued at their period's start, so a seat change within that
+period is signed at once, and so is any period once it's three days old. A
+hand-signed key's `issued_at` is rarely a period start, so even its first seat
+change waits the three days. That leaves one gap: a mid-period seat increase
+is signed before Polar has collected any prorated invoice for it. Seats are
+soft, so the worst case is a key that counts more seats than were paid for, in
+a period that was.
 
 ### A leaked key
 

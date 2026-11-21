@@ -32,13 +32,17 @@ fn signer() -> Signer {
 }
 
 fn license(expires_at: DateTime<Utc>, seats: u32) -> License {
+    signed(expires_at - TimeDelta::days(365), expires_at, seats)
+}
+
+fn signed(issued_at: DateTime<Utc>, expires_at: DateTime<Utc>, seats: u32) -> License {
     let signer = signer();
     let text = signer
         .sign(&Terms {
             id: Uuid::from_u128(1),
             customer: CUSTOMER.to_owned(),
             seats,
-            issued_at: expires_at - TimeDelta::days(365),
+            issued_at,
             expires_at,
             subscription: Some(SUBSCRIPTION.to_owned()),
         })
@@ -317,12 +321,59 @@ fn a_seat_change_in_the_same_period_is_not_held() {
 }
 
 #[test]
-fn a_seat_change_in_a_period_the_key_already_reaches_into_is_not_held() {
+fn a_seat_change_on_a_key_issued_in_whole_seconds_for_the_period_is_not_held() {
+    let precise = signed(at("2026-11-18T11:59:58.4Z"), period_end(), 3);
+    let terms = renewed(verdict_at(&precise, &subscription(), period_start()));
+    assert_eq!(terms.seats, 5);
+}
+
+#[test]
+fn a_period_starting_inside_the_key_term_is_settling_then_renews() {
+    let anchored = license(period_start() + TimeDelta::days(30), 5);
+    for now in [period_start(), settled() - TimeDelta::seconds(1)] {
+        assert_eq!(
+            verdict_at(&anchored, &subscription(), now),
+            Verdict::Settling,
+            "{now}"
+        );
+    }
+    let terms = renewed(verdict_at(&anchored, &subscription(), settled()));
+    assert_eq!(terms.expires_at, period_end());
+}
+
+#[test]
+fn a_seat_change_in_a_period_the_key_already_reaches_into_is_settling() {
     let partway = license(period_start() + TimeDelta::days(1), 3);
-    assert!(matches!(
+    assert_eq!(
         verdict_at(&partway, &subscription(), period_start()),
-        Verdict::Renew(_)
-    ));
+        Verdict::Settling
+    );
+}
+
+#[test]
+fn a_converted_trial_is_settling_under_a_key_that_outlasts_the_trial() {
+    let trial = signed(
+        period_start() - TimeDelta::days(14),
+        period_start() + TimeDelta::days(7),
+        5,
+    );
+    assert_eq!(
+        verdict_at(
+            &trial,
+            &subscription(),
+            period_start() + TimeDelta::hours(1)
+        ),
+        Verdict::Settling
+    );
+}
+
+#[test]
+fn a_key_with_a_sub_second_expiry_is_settling() {
+    let precise = signed(at("2025-11-18T11:59:58Z"), at("2026-11-18T11:59:58.5Z"), 5);
+    assert_eq!(
+        verdict_at(&precise, &subscription(), period_start()),
+        Verdict::Settling
+    );
 }
 
 #[test]
