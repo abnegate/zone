@@ -1,7 +1,7 @@
 use chrono::NaiveDate;
 use serde_json::json;
 use uuid::Uuid;
-use zone_enterprise::spend::{Error, Range};
+use zone_enterprise::spend::{Error, MAXIMUM_DAYS, Range};
 
 use super::exports::filename;
 use super::query::Query;
@@ -69,9 +69,17 @@ fn a_single_day_and_unknown_parameters_are_accepted() {
 }
 
 #[test]
+fn a_range_of_a_leap_year_of_days_is_the_longest_accepted() {
+    let query = read("from=2025-11-21&to=2026-11-21").unwrap();
+
+    assert_eq!(query.range.length(), MAXIMUM_DAYS);
+}
+
+#[test]
 fn every_unreadable_value_is_an_invalid_range() {
     for raw in [
         "from=2026-11-22&to=2026-11-21",
+        "from=2025-11-20&to=2026-11-21",
         "from=2026-13-01",
         "from=2026-11-1",
         "to=yesterday",

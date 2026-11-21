@@ -1,10 +1,7 @@
-//! An organization's attributed spend over a range of UTC days: its totals, each day's, and its
-//! split by workspace, member, model and provider.
-
 mod day;
 mod filter;
+mod line_row;
 mod named_usage;
-mod record;
 mod usage;
 mod user_usage;
 mod workspace_usage;
@@ -16,14 +13,16 @@ pub use usage::Usage;
 pub use user_usage::UserUsage;
 pub use workspace_usage::WorkspaceUsage;
 
-use futures::{Stream, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt, stream};
 use sqlx::postgres::PgArguments;
 use sqlx::query::QueryAs;
-use sqlx::{PgPool, Postgres};
-use zone_enterprise::spend::Line;
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use zone_enterprise::spend::{Line, Range};
 
-use self::record::Record;
+use self::line_row::LineRow;
 use crate::db::DbResult;
+
+const SNAPSHOT: &str = "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY";
 
 macro_rules! measured {
     () => {
@@ -80,11 +79,13 @@ const WORKSPACES: &str = concat!(
 );
 
 const USERS: &str = concat!(
-    "SELECT record.user_id AS id, account.display_name AS name, account.email AS email, ",
+    "SELECT record.user_id AS id, account.display_name AS name, account.email AS email, \
+     record.automated AS automated, ",
     measured!(),
     filtered!(),
-    "GROUP BY record.user_id, account.display_name, account.email \
-     ORDER BY spend_microdollars DESC, name NULLS LAST, email NULLS LAST, id NULLS LAST"
+    "GROUP BY record.user_id, record.automated, account.display_name, account.email \
+     ORDER BY spend_microdollars DESC, name NULLS LAST, email NULLS LAST, id NULLS LAST, \
+     automated DESC"
 );
 
 const MODELS: &str = concat!(
@@ -105,57 +106,86 @@ const LINES: &str = concat!(
     "SELECT ",
     day!(),
     " AS date, record.workspace_id, workspace.name AS workspace_name, record.user_id, \
-     account.email AS user_email, record.model, record.provider, ",
+     account.email AS user_email, record.automated, record.model, record.provider, ",
     measured!(),
     filtered!(),
     "GROUP BY 1, record.workspace_id, workspace.name, record.user_id, account.email, \
-     record.model, record.provider \
+     record.automated, record.model, record.provider \
      ORDER BY date, workspace_name NULLS LAST, record.workspace_id NULLS LAST, \
-     user_email NULLS LAST, record.user_id NULLS LAST, record.model, record.provider"
+     user_email NULLS LAST, record.user_id NULLS LAST, record.automated DESC, record.model, \
+     record.provider"
 );
 
-pub async fn totals(pool: &PgPool, filter: &Filter) -> DbResult<Usage> {
-    bound(sqlx::query_as(TOTALS), filter).fetch_one(pool).await
+/// A read-only transaction every part of one report reads, so the parts agree with each other
+/// however much spend lands while they run.
+pub async fn snapshot(pool: &PgPool) -> DbResult<Transaction<'static, Postgres>> {
+    pool.begin_with(SNAPSHOT).await
+}
+
+pub async fn totals(connection: &mut PgConnection, filter: &Filter) -> DbResult<Usage> {
+    bound(sqlx::query_as(TOTALS), filter)
+        .fetch_one(connection)
+        .await
 }
 
 /// One entry for every day of the range, zero on a day nothing was spent.
-pub async fn daily(pool: &PgPool, filter: &Filter) -> DbResult<Vec<Day>> {
+pub async fn daily(connection: &mut PgConnection, filter: &Filter) -> DbResult<Vec<Day>> {
     bound(sqlx::query_as(DAILY), filter)
         .bind(filter.range.from)
         .bind(filter.range.to)
-        .fetch_all(pool)
+        .fetch_all(connection)
         .await
 }
 
-pub async fn by_workspace(pool: &PgPool, filter: &Filter) -> DbResult<Vec<WorkspaceUsage>> {
+pub async fn by_workspace(
+    connection: &mut PgConnection,
+    filter: &Filter,
+) -> DbResult<Vec<WorkspaceUsage>> {
     bound(sqlx::query_as(WORKSPACES), filter)
-        .fetch_all(pool)
+        .fetch_all(connection)
         .await
 }
 
-pub async fn by_user(pool: &PgPool, filter: &Filter) -> DbResult<Vec<UserUsage>> {
-    bound(sqlx::query_as(USERS), filter).fetch_all(pool).await
+pub async fn by_user(connection: &mut PgConnection, filter: &Filter) -> DbResult<Vec<UserUsage>> {
+    bound(sqlx::query_as(USERS), filter)
+        .fetch_all(connection)
+        .await
 }
 
-pub async fn by_model(pool: &PgPool, filter: &Filter) -> DbResult<Vec<NamedUsage>> {
-    bound(sqlx::query_as(MODELS), filter).fetch_all(pool).await
+pub async fn by_model(connection: &mut PgConnection, filter: &Filter) -> DbResult<Vec<NamedUsage>> {
+    bound(sqlx::query_as(MODELS), filter)
+        .fetch_all(connection)
+        .await
 }
 
-pub async fn by_provider(pool: &PgPool, filter: &Filter) -> DbResult<Vec<NamedUsage>> {
+pub async fn by_provider(
+    connection: &mut PgConnection,
+    filter: &Filter,
+) -> DbResult<Vec<NamedUsage>> {
     bound(sqlx::query_as(PROVIDERS), filter)
-        .fetch_all(pool)
+        .fetch_all(connection)
         .await
 }
 
-/// The rows of a spend export, one per day, workspace, member, model and provider, read as the
-/// stream is polled.
+/// The rows of a spend export, one per day, workspace, member, model and provider. Each day is
+/// read whole on a connection of its own, which goes back to the pool before the day's rows are
+/// sent, so a client that reads slowly never holds one.
 pub fn lines(pool: PgPool, filter: Filter) -> impl Stream<Item = DbResult<Line>> + Send + 'static {
-    async_stream::try_stream! {
-        let mut records = bound(sqlx::query_as::<_, Record>(LINES), &filter).fetch(&pool);
-        while let Some(record) = records.try_next().await? {
-            yield Line::from(record);
-        }
-    }
+    stream::iter(filter.range.days())
+        .then(move |day| {
+            let pool = pool.clone();
+            let page = Filter {
+                range: Range { from: day, to: day },
+                ..filter
+            };
+            async move {
+                bound(sqlx::query_as::<_, LineRow>(LINES), &page)
+                    .fetch_all(&pool)
+                    .await
+            }
+        })
+        .map_ok(|rows| stream::iter(rows.into_iter().map(|row| Ok(Line::from(row)))))
+        .try_flatten()
 }
 
 fn bound<'q, O>(

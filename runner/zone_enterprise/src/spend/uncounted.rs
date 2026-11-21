@@ -8,12 +8,3 @@ pub enum Uncounted {
     ExternalEndpoint,
     SavedKey,
 }
-
-impl Uncounted {
-    pub const ALL: [Self; 4] = [
-        Self::CodingAgent,
-        Self::DirectProvider,
-        Self::ExternalEndpoint,
-        Self::SavedKey,
-    ];
-}

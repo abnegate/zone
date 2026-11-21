@@ -103,7 +103,10 @@ LiteLLM's figure half away from zero and counts a negative one as $0. The
 console shows dollars and cents; the CSV shows six decimal places.
 
 Spend for a workspace that's deleted keeps counting toward the organization's
-totals and shows as **Deleted workspace**.
+totals and shows as **Deleted workspace**. Spend for a member who's deleted
+keeps counting too, and shows as **Former member**, apart from Automation.
+Both hold for requests that finish after the deletion, which Zone still
+ingests.
 
 ## What isn't counted
 
@@ -172,7 +175,8 @@ The key is `sk-zone-` followed by the hexadecimal HMAC-SHA256 of
 `zone-spend-key:v1:{workspace id}:{user id or automation}`, keyed with key
 material derived from `ENCRYPTION_KEY`. Zone never stores it: it derives it
 again for each request. The `spend_keys` table keeps only the key's SHA-256,
-its token, beside the organization, workspace and member it stands for.
+its token, beside the organization, workspace and member it stands for, and
+whether it's a workspace's automation key.
 
 The key comes from `ENCRYPTION_KEY`, not `LITELLM_KEY`, so LiteLLM, which
 holds `LITELLM_KEY`, never has what it would need to work out a key.
@@ -199,7 +203,9 @@ LiteLLM, and sends a registered key without asking LiteLLM first. A restarted
 server registers each key again the first time it's used, which also restores
 keys LiteLLM lost to a database restore or a manual delete. Every 15 minutes
 the spend sweep checks each key the process has registered with
-`GET /key/info`, and registers again any LiteLLM no longer has.
+`GET /key/info`, and registers again any LiteLLM no longer has. A key
+LiteLLM can't answer for is logged and doesn't stop the check of the others;
+the sweep then reports how many failed.
 
 ### Changing `ENCRYPTION_KEY`
 
@@ -209,9 +215,11 @@ needed. Every 15 minutes the sweep deletes from LiteLLM, with
 no longer derives, and marks it revoked. Zone keeps its `spend_keys` row, so
 spend LiteLLM logged under it still counts.
 
-When a workspace is deleted, its `spend_keys` rows go with it, and its keys
-are left in LiteLLM. Its spend already counted stays, as **Deleted
-workspace**.
+When a workspace or a member is deleted, Zone keeps their `spend_keys` rows
+with the workspace or member cleared, so requests still finishing are counted,
+as **Deleted workspace** or **Former member**. The next sweep deletes those
+keys from LiteLLM the same way and marks them revoked, so nothing can be sent
+under them again.
 
 ### When LiteLLM's database is down
 
@@ -435,7 +443,7 @@ audited.
 |---|---|---|
 | `license_required` | 403 | This needs a Zone Team license that is active or in its grace period. See [Licensing](#licensing). |
 | `spend_body_invalid` | 400 | The request body can't be read: it isn't valid JSON, has a key that isn't a budget field, or has a value of the wrong type. |
-| `spend_range_invalid` | 400 | `from` or `to` isn't a `YYYY-MM-DD` date, `from` is after `to`, `workspace_id` or `user_id` isn't a UUID, or one of these parameters is given twice. |
+| `spend_range_invalid` | 400 | `from` or `to` isn't a `YYYY-MM-DD` date, `from` is after `to`, the range covers more than 366 days, `workspace_id` or `user_id` isn't a UUID, or one of these parameters is given twice. |
 | `budget_limit_invalid` | 400 | The limit is $0 or less. |
 | `budget_threshold_invalid` | 400 | The threshold isn't a whole percentage from 1 to 100. |
 | `budget_scope_invalid` | 400 | The scope doesn't carry exactly the ID it needs, or names a workspace or person outside the organization. |
@@ -461,9 +469,9 @@ These responses carry no code:
 | `PATCH /api/organizations/{org_id}/budgets/{budget_id}` | Change a budget. |
 | `DELETE /api/organizations/{org_id}/budgets/{budget_id}` | Delete a budget. |
 
-A report is checked in this order: membership (404), the caller's role (403),
-then the query (400 `spend_range_invalid`). A CSV export checks the license
-(403 `license_required`) after the role and before the query.
+A report and a CSV export are checked in this order: membership (404), the
+caller's role (403), then the query (400 `spend_range_invalid`). A CSV export
+then checks the license (403 `license_required`).
 
 Creating a budget is checked in this order:
 
@@ -501,7 +509,7 @@ GET /api/organizations/{org_id}/spend-reports?from=2026-11-01&to=2026-11-21&work
 | Parameter | Value |
 |---|---|
 | `from` | A `YYYY-MM-DD` date in UTC. Defaults to the first of the current month. |
-| `to` | A `YYYY-MM-DD` date in UTC, included. Defaults to today. Not before `from`. |
+| `to` | A `YYYY-MM-DD` date in UTC, included. Defaults to today. Not before `from`, and at most 366 days from it, counting both. |
 | `workspace_id` | Optional. Only that workspace's spend. |
 | `user_id` | Optional. Only that person's spend. |
 
@@ -527,7 +535,7 @@ another organization gives an empty report.
       {"id": "…", "name": "Payments", "spend_microdollars": 9100000, "requests": 610, "prompt_tokens": 1100000, "completion_tokens": 240000}
     ],
     "users": [
-      {"id": null, "name": null, "email": null, "spend_microdollars": 4200000, "requests": 300, "prompt_tokens": 520000, "completion_tokens": 90000}
+      {"id": null, "name": null, "email": null, "automated": true, "spend_microdollars": 4200000, "requests": 300, "prompt_tokens": 520000, "completion_tokens": 90000}
     ],
     "models": [
       {"name": "gpt-4o", "spend_microdollars": 12340000, "requests": 820, "prompt_tokens": 1450000, "completion_tokens": 310000}
@@ -547,7 +555,7 @@ another organization gives an empty report.
 | `total` | Spend, requests and tokens over the range. |
 | `daily` | One entry per UTC day of the range, with days that had nothing as zeros. |
 | `workspaces` | Per workspace. A `null` ID is a deleted workspace. |
-| `users` | Per person. A `null` ID is Automation. |
+| `users` | Per person. A `null` ID is Automation when `automated` is `true`, and a deleted member, shown as **Former member**, when it's `false`. |
 | `models` | Per model: LiteLLM's `model_group`, or `model` without one. |
 | `providers` | Per provider: LiteLLM's `custom_llm_provider`, or `unknown`. |
 | `uncounted` | The [reasons](#what-isnt-counted) traffic in the organization goes uncounted. |
@@ -565,13 +573,14 @@ while the server doesn't enforce spend, and every download is recorded as
 The header row is:
 
 ```
-date,workspace_id,workspace,user_id,user_email,model,provider,requests,prompt_tokens,completion_tokens,spend_usd
+date,workspace_id,workspace,user_id,user_email,automated,model,provider,requests,prompt_tokens,completion_tokens,spend_usd
 ```
 
 There's one row per day, workspace, person, model and provider, with CRLF
-line ends. `spend_usd` has six decimal places. Empty `user_id` and
-`user_email` are Automation, and an empty `workspace_id` is a deleted
-workspace. A text field starting with `=`, `+`, `-`, `@`, a tab or a carriage
+line ends. `spend_usd` has six decimal places. `automated` is `true` or
+`false`. Empty `user_id` and `user_email` are Automation when `automated` is
+`true`, and a deleted member when it's `false`. An empty `workspace_id` is a
+deleted workspace. A text field starting with `=`, `+`, `-`, `@`, a tab or a carriage
 return is quoted and prefixed with `'`, as in the
 [audit log CSV](AUDIT.md#downloading-the-audit-log).
 

@@ -3,15 +3,16 @@ use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
-use zone_enterprise::spend::{Draft, Error, Month, Patch, Scope, State as Spent, Target};
-use zone_enterprise::{Edition, Status};
+use zone_enterprise::spend::{Draft, Error, Month, Patch, Target};
 
 use super::access::{self, ORGANIZATION_MISSING};
+use super::audited_budget::AuditedBudget;
+use super::budget_response::BudgetResponse;
+use super::budgets_response::BudgetsResponse;
 use super::refusal::Refusal;
 use super::{caller, organization};
 use crate::auth::AuthUser;
@@ -24,56 +25,6 @@ use crate::services::spend::Standing;
 use crate::state::AppState;
 
 pub const BUDGET_MISSING: &str = "Budget not found";
-
-#[derive(Debug, Serialize)]
-pub struct BudgetsResponse {
-    pub entitled: bool,
-    pub enforced: bool,
-    pub edition: Edition,
-    pub status: Status,
-    pub editable: bool,
-    pub month: String,
-    pub budgets: Vec<BudgetResponse>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct BudgetResponse {
-    pub id: Uuid,
-    pub scope: Scope,
-    pub workspace_id: Option<Uuid>,
-    pub workspace_name: Option<String>,
-    pub user_id: Option<Uuid>,
-    pub user_name: Option<String>,
-    pub user_email: Option<String>,
-    pub limit_microdollars: i64,
-    pub threshold_percent: u8,
-    pub hard: bool,
-    /// This month's, in UTC.
-    pub spent_microdollars: i64,
-    pub state: Spent,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl From<BudgetRow> for BudgetResponse {
-    fn from(row: BudgetRow) -> Self {
-        let state = row.state();
-        Self {
-            id: row.id,
-            scope: row.target.scope,
-            workspace_id: row.target.workspace,
-            workspace_name: row.workspace_name,
-            user_id: row.target.user,
-            user_name: row.user_name,
-            user_email: row.user_email,
-            limit_microdollars: row.budget.limit.0,
-            threshold_percent: row.budget.threshold_percent,
-            hard: row.budget.hard,
-            spent_microdollars: row.spent.0,
-            state,
-            updated_at: row.updated_at,
-        }
-    }
-}
 
 /// GET /api/organizations/{org_id}/budgets
 pub async fn list(
@@ -134,10 +85,8 @@ async fn listed(
     let user = caller(auth)?;
     let organization = organization(path)?;
     let month = Month::current();
-    let mut connection = state.db().acquire().await?;
-    access::administer(&mut connection, organization, user).await?;
-    let rows = budgets::list(&mut *connection, organization, month).await?;
-    drop(connection);
+    access::admit(state.db(), organization, user).await?;
+    let rows = budgets::list(state.db(), organization, month).await?;
     let standing = Standing::read(state).await;
     Ok(BudgetsResponse {
         entitled: standing.entitled,
@@ -288,8 +237,6 @@ async fn locked(
         .ok_or(Refusal::Missing(BUDGET_MISSING))
 }
 
-/// Refuses a target outside the organization: a workspace it doesn't own, or someone who isn't
-/// one of its members.
 async fn covered(
     connection: &mut PgConnection,
     organization: Uuid,
@@ -311,14 +258,7 @@ async fn covered(
 }
 
 fn audited(row: &BudgetRow) -> Value {
-    json!({
-        "scope": row.target.scope,
-        "workspace_id": row.target.workspace,
-        "user_id": row.target.user,
-        "limit_microdollars": row.budget.limit.0,
-        "threshold_percent": row.budget.threshold_percent,
-        "hard": row.budget.hard,
-    })
+    json!(AuditedBudget::from(row))
 }
 
 async fn record(

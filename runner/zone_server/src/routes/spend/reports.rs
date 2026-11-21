@@ -2,45 +2,19 @@ use axum::Json;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, RawQuery, State};
 use axum::response::{IntoResponse, Response};
-use chrono::{DateTime, NaiveDate, Utc};
-use serde::Serialize;
+use chrono::Utc;
 use uuid::Uuid;
-use zone_enterprise::spend::Uncounted;
-use zone_enterprise::{Edition, Status};
 
 use super::query::Query;
 use super::refusal::Refusal;
+use super::report::Report;
+use super::report_response::ReportResponse;
 use super::{access, caller, organization};
 use crate::auth::AuthUser;
 use crate::db::spend::cursor;
-use crate::db::spend::report::{self, Day, Filter, NamedUsage, Usage, UserUsage, WorkspaceUsage};
+use crate::db::spend::report::{self, Filter};
 use crate::services::spend::{Standing, coverage};
 use crate::state::AppState;
-
-#[derive(Debug, Serialize)]
-pub struct ReportResponse {
-    pub entitled: bool,
-    pub enforced: bool,
-    pub edition: Edition,
-    pub status: Status,
-    pub editable: bool,
-    /// None while the server holds no license, when nothing is attributed.
-    pub report: Option<Report>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Report {
-    pub from: NaiveDate,
-    pub to: NaiveDate,
-    pub ingested_through: Option<DateTime<Utc>>,
-    pub total: Usage,
-    pub daily: Vec<Day>,
-    pub workspaces: Vec<WorkspaceUsage>,
-    pub users: Vec<UserUsage>,
-    pub models: Vec<NamedUsage>,
-    pub providers: Vec<NamedUsage>,
-    pub uncounted: Vec<Uncounted>,
-}
 
 /// GET /api/organizations/{org_id}/spend-reports
 pub async fn get(
@@ -81,18 +55,20 @@ async fn read(
     })
 }
 
+/// Reads one connection's worth at a time, so a report never takes more of the pool than one
+/// connection for its spend and a few for its coverage.
 async fn measure(state: &AppState, filter: Filter) -> Result<Report, Refusal> {
     let pool = state.db();
-    let (ingested_through, total, daily, workspaces, users, models, providers, uncounted) = tokio::try_join!(
-        cursor::read(pool),
-        report::totals(pool, &filter),
-        report::daily(pool, &filter),
-        report::by_workspace(pool, &filter),
-        report::by_user(pool, &filter),
-        report::by_model(pool, &filter),
-        report::by_provider(pool, &filter),
-        coverage::uncounted(state, filter.organization),
-    )?;
+    let ingested_through = cursor::read(pool).await?;
+    let mut snapshot = report::snapshot(pool).await?;
+    let total = report::totals(&mut snapshot, &filter).await?;
+    let daily = report::daily(&mut snapshot, &filter).await?;
+    let workspaces = report::by_workspace(&mut snapshot, &filter).await?;
+    let users = report::by_user(&mut snapshot, &filter).await?;
+    let models = report::by_model(&mut snapshot, &filter).await?;
+    let providers = report::by_provider(&mut snapshot, &filter).await?;
+    snapshot.commit().await?;
+    let uncounted = coverage::uncounted(state, filter.organization).await?;
     Ok(Report {
         from: filter.range.from,
         to: filter.range.to,

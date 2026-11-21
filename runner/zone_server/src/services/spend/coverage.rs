@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use futures::future::try_join_all;
+use futures::{StreamExt, TryStreamExt, stream};
 use uuid::Uuid;
 use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
 use zone_enterprise::spend::Uncounted;
@@ -15,19 +15,21 @@ use crate::db::workspaces;
 use crate::services::endpoint::{Endpoint, Origin};
 use crate::state::AppState;
 
+const CONCURRENCY: usize = 4;
+
 /// Every reason the traffic of the organization's active workspaces goes uncounted, in
 /// [`Uncounted`] order. A workspace's effective settings already carry the organization's.
 pub async fn uncounted(state: &AppState, organization: Uuid) -> DbResult<Vec<Uncounted>> {
     let pool = state.db();
     let workspaces = workspaces::list_workspaces(pool, organization).await?;
-    let settings = try_join_all(
+    let settings: Vec<EffectiveAiSettings> = stream::iter(
         workspaces
-            .iter()
-            .filter(|workspace| workspace.is_active.unwrap_or(true))
-            .map(|workspace| {
-                ai_settings::get_effective_ai_settings(pool, organization, workspace.id)
-            }),
+            .into_iter()
+            .filter(|workspace| workspace.is_active.unwrap_or(true)),
     )
+    .map(|workspace| ai_settings::get_effective_ai_settings(pool, organization, workspace.id))
+    .buffer_unordered(CONCURRENCY)
+    .try_collect()
     .await?;
     Ok(merged(state.config(), &settings))
 }

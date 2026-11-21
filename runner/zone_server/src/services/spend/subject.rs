@@ -11,12 +11,17 @@ pub struct Subject {
     pub user: Option<Uuid>,
 }
 
-impl From<&KeyRow> for Subject {
-    fn from(row: &KeyRow) -> Self {
-        Self {
-            organization: row.organization_id,
-            workspace: row.workspace_id,
-            user: row.user_id,
+impl Subject {
+    /// Whose spend `row`'s key carries, none once its workspace or member is deleted.
+    pub fn of(row: &KeyRow) -> Option<Self> {
+        let workspace = row.workspace_id?;
+        if !row.automated && row.user_id.is_none() {
+            return None;
         }
+        Some(Self {
+            organization: row.organization_id,
+            workspace,
+            user: row.user_id,
+        })
     }
 }

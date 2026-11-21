@@ -133,8 +133,9 @@ export function workspaceName(usage: Pick<WorkspaceUsage, 'id' | 'name'>): strin
   return usage.id === null ? DELETED_WORKSPACE : (usage.name ?? DELETED_WORKSPACE);
 }
 
-export function personName(usage: Pick<UserUsage, 'id' | 'name' | 'email'>): string {
-  if (usage.id === null) return AUTOMATION_LABEL;
+export function personName(usage: Pick<UserUsage, 'id' | 'name' | 'email' | 'automated'>): string {
+  if (usage.automated) return AUTOMATION_LABEL;
+  if (usage.id === null) return UNKNOWN_PERSON;
   return usage.name || usage.email || UNKNOWN_PERSON;
 }
 

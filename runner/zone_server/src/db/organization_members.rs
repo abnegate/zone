@@ -655,6 +655,21 @@ pub async fn is_member(pool: &PgPool, organization_id: Uuid, user_id: Uuid) -> D
     Ok(result.flatten().unwrap_or(false))
 }
 
+/// The role of an active membership, read without holding any lock.
+pub async fn role(
+    pool: &PgPool,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<OrgRole>> {
+    let role: Option<String> = sqlx::query_scalar("SELECT get_organization_role($1, $2)")
+        .bind(user_id)
+        .bind(organization_id)
+        .fetch_one(pool)
+        .await?;
+
+    Ok(role.and_then(|value| value.parse().ok()))
+}
+
 /// Read and lock an active membership for the duration of the caller's transaction.
 ///
 /// Holding this shared row lock gives membership revocation and the protected

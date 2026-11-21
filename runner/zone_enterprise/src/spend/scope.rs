@@ -7,7 +7,3 @@ pub enum Scope {
     Workspace,
     User,
 }
-
-impl Scope {
-    pub const ALL: [Self; 3] = [Self::Organization, Self::Workspace, Self::User];
-}

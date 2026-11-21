@@ -119,6 +119,7 @@ export const UserUsageSchema = z.object({
   id: z.string().nullable(),
   name: z.string().nullable(),
   email: z.string().nullable(),
+  automated: z.boolean(),
   ...UsageFields,
 });
 

@@ -3,10 +3,15 @@
 //! that is active or in its grace period.
 
 pub mod access;
+pub mod audited_budget;
+pub mod budget_response;
 pub mod budgets;
+pub mod budgets_response;
 pub mod exports;
 pub mod query;
 pub mod refusal;
+pub mod report;
+pub mod report_response;
 pub mod reports;
 
 #[cfg(test)]
