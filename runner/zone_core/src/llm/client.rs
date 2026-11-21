@@ -10,11 +10,11 @@ use abnegate_llm::{
     ChatResponse, ChatStreamChunk, Choice, Completion, CompletionRequest, Effort, Error, LlmConfig,
     Message, RequestOptions, ToolDefinition,
 };
-use futures::Stream;
+use futures::{Stream, StreamExt};
 
 use super::backend::LlmBackend;
 use super::cli::{BuiltinTools, Observer, SignIn, Toolset, confined};
-use reported::Reported;
+use reported::{Reported, Reporter};
 use turn::{Turn, ended, failed};
 
 mod provider;
@@ -133,6 +133,25 @@ impl LlmClient {
             .latest()
             .filter(|(reporter, _)| reporter == agent)
             .map(|(_, occupancy)| occupancy)
+    }
+
+    /// The model this client's backend last said answered, under its own
+    /// name for it.
+    ///
+    /// On a coding agent it is the agent's account of the model it wrote on,
+    /// which is all a turn that named no model has, since the agent chose for
+    /// itself. On an endpoint it is the name the server answered under, which
+    /// a proxy resolves to whichever model it routed the request to. A report
+    /// from a backend the turn has since handed over from is not this one's.
+    pub fn reported_model(&self) -> Option<String> {
+        let reporter = match &self.backend {
+            LlmBackend::Cli { agent, .. } => Reporter::Agent(*agent),
+            LlmBackend::Http => Reporter::Endpoint,
+        };
+        self.reported
+            .latest_model()
+            .filter(|(who, _)| *who == reporter)
+            .map(|(_, model)| model)
     }
 
     /// Ask the provider to halt on these strings. Custom GGUFs often ignore
@@ -269,10 +288,13 @@ impl LlmClient {
             sign_in,
         } = &self.backend
         else {
-            return self
+            let answered = self
                 .endpoint
                 .chat_with_options(model, messages, tools, options)
-                .await;
+                .await?;
+            self.reported
+                .record_model(Reporter::Endpoint, &answered.model);
+            return Ok(answered);
         };
 
         refuse_tools(tools, *agent)?;
@@ -322,7 +344,16 @@ impl LlmClient {
                 .endpoint
                 .chat_stream_with_options(model, messages, tools, options)
                 .await?;
-            return Ok(Box::pin(stream));
+            // The name the endpoint answers under, which a proxy resolves to
+            // the model it routed to and need not be the one asked for.
+            let reported = self.reported.clone();
+            return Ok(Box::pin(stream.inspect(move |chunk| {
+                if let Ok(chunk) = chunk
+                    && let Some(model) = &chunk.model
+                {
+                    reported.record_model(Reporter::Endpoint, model);
+                }
+            })));
         };
 
         refuse_tools(tools, *agent)?;

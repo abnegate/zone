@@ -2674,7 +2674,28 @@ async fn attempt_run<'a>(
 
     let outcome = turns.await;
     record_usage(&mut metered).await;
+    record_reported_model(state, run_id, owner, &llm).await;
     outcome
+}
+
+/// Keep the model the agent says it ran on, now that it has run.
+///
+/// A run that named no model asked the agent to choose one, and the agent's
+/// own report is the only account of what it chose: without this the run
+/// keeps the `auto` it started with and nothing downstream -- the reviewer's
+/// choice, the analytics -- knows what answered. An agent that reports none,
+/// as Codex does when its rollout names none, leaves what the run resolved to
+/// standing.
+async fn record_reported_model(state: &AppState, run: Uuid, owner: Uuid, llm: &LlmClient) {
+    let Some(model) = llm.reported_model() else {
+        return;
+    };
+    if !matches!(
+        tasks::record_run_model(state.db(), run, owner, &model).await,
+        Ok(true)
+    ) {
+        tracing::debug!(%run, model, "could not record the model the agent reported running on");
+    }
 }
 
 /// Records what the attempt metered, and lets the meter go only once that returns: a stop that
@@ -8285,12 +8306,16 @@ mod cli_tests {
     use serde_json::{Value, json};
     use std::path::PathBuf;
     use tempfile::TempDir;
-    use wiremock::MockServer;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
     use zone_core::llm::SignIn;
     use zone_core::llm::Toolset;
     use zone_enterprise::policy::{Effective, Rules};
 
     const ANSWER: &str = "Wrote it.";
+    /// The model a self-hosted endpoint answers under, which is not the name
+    /// the run asked it for.
+    const ANSWERED_ON: &str = "qwen3.8-27b-uncensored";
     const EXECUTABLE: &str = "claude";
     const ARGUMENTS: &str = "arguments";
     const PROMPT: &str = "prompt";
@@ -8554,6 +8579,18 @@ mod cli_tests {
                 agent: AgentKind::Claude,
                 executable: Some(agent.path(EXECUTABLE)),
             },
+            litellm_host: provider.uri(),
+            ollama_host: provider.uri(),
+            ..crate::state::test_config()
+        }
+    }
+
+    /// An instance that runs its turns on the OpenAI-compatible endpoint
+    /// `provider` serves, as a self-hosted instance does, rather than on a
+    /// coding agent.
+    fn served(provider: &MockServer) -> Config {
+        Config {
+            model_backend: ModelBackend::LiteLlm,
             litellm_host: provider.uri(),
             ollama_host: provider.uri(),
             ..crate::state::test_config()
@@ -9870,6 +9907,51 @@ mod cli_tests {
             .find(|window| window.name == zone_core::llm::window::FIVE_HOURS)
             .unwrap_or_else(|| panic!("no five-hour window in {windows:?}"));
         assert_eq!(window.used_percent, Some(50.0));
+    }
+
+    /// A self-hosted instance: the endpoint answers under the model it
+    /// routed the request to, which a proxy resolves from the name the run
+    /// asked for, and the run records what answered.
+    #[tokio::test]
+    async fn a_run_records_the_model_its_endpoint_answered_under() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!(
+                        "data: {}\n\ndata: [DONE]\n\n",
+                        json!({
+                            "model": ANSWERED_ON,
+                            "choices": [{"index": 0, "delta": {"content": ANSWER}, "finish_reason": "stop"}],
+                        })
+                    )),
+            )
+            .mount(&provider)
+            .await;
+        let state = fixture.state(served(&provider));
+
+        execute(&state, &fixture).await;
+
+        let finished = fixture.finished().await;
+        let model = tasks::run_mode(&fixture.pool, fixture.run)
+            .await
+            .unwrap()
+            .and_then(|mode| mode.model);
+        fixture.remove().await;
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(
+            model.as_deref(),
+            Some(ANSWERED_ON),
+            "the run kept {REFUSED_MODEL}, the name it asked the endpoint for"
+        );
     }
 
     /// Start the fixture's run on `state` under [`Agent::lingering`], wait
