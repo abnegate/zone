@@ -25,6 +25,7 @@ const STATUS_CODE: &str = "StatusCode";
 const VALUE: &str = "Value";
 const ASSERTION: &str = "Assertion";
 const ENCRYPTED: [&str; 3] = ["EncryptedAssertion", "EncryptedID", "EncryptedAttribute"];
+const STATUS_LIMIT: usize = 256;
 
 pub fn consume(
     provider: &Provider,
@@ -114,11 +115,18 @@ fn succeeded(document: &Document, response: NodeId) -> Result<(), Error> {
         })
         .and_then(|code| document.element(code))
         .and_then(|code| code.attribute(VALUE))
+        .filter(|code| token(code))
         .ok_or(Error::AssertionInvalid(Refusal::Incomplete))?;
     if code != uri::SUCCESS {
         return Err(Error::SignInRefused(code.to_owned()));
     }
     Ok(())
+}
+
+fn token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= STATUS_LIMIT
+        && value.chars().all(|character| character.is_ascii_graphic())
 }
 
 fn verified(

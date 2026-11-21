@@ -42,6 +42,7 @@ const ENTRA_EMAIL: &str = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims
 const ENTRA_UPN: &str = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name";
 const ENTRA_GIVEN_NAME: &str = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname";
 const ENTRA_SURNAME: &str = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname";
+const STATUS_LIMIT: usize = 256;
 
 fn now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 11, 21, 10, 0, 0).unwrap()
@@ -1066,6 +1067,39 @@ fn a_status_code_without_a_value_is_refused() {
         "<saml2p:StatusCode>",
     );
     assert_eq!(refusal(consume_xml(&xml)), Refusal::Incomplete);
+}
+
+#[test]
+fn a_status_value_that_is_not_a_token_is_refused() {
+    for status in [
+        format!("{RESPONDER}&#10;forged log line"),
+        format!("{RESPONDER}&#13;"),
+        format!("{RESPONDER}&#9;"),
+        format!("{RESPONDER} forged"),
+        format!("{RESPONDER}&#127;"),
+        format!("{RESPONDER}\u{85}"),
+        "x".repeat(STATUS_LIMIT + 1),
+        String::new(),
+    ] {
+        let xml = replaced(&error_response(REQUEST_ID), RESPONDER, &status);
+        assert_eq!(
+            refusal(consume_xml(&xml)),
+            Refusal::Incomplete,
+            "{status:?}"
+        );
+    }
+}
+
+#[test]
+fn a_status_value_up_to_the_limit_is_carried_as_it_is() {
+    let longest = format!(
+        "{RESPONDER}:{}",
+        "x".repeat(STATUS_LIMIT - RESPONDER.len() - 1)
+    );
+    for status in [REQUEST_DENIED.to_owned(), longest] {
+        let xml = replaced(&error_response(REQUEST_ID), RESPONDER, &status);
+        assert_eq!(consume_xml(&xml), Err(Error::SignInRefused(status)));
+    }
 }
 
 #[test]
