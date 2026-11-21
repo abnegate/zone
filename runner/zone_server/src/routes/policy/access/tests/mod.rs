@@ -1,137 +1,19 @@
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::*;
-use crate::auth::{Grant, Scope};
-use crate::db::custom_roles::{self, Creation, Definition};
+use crate::auth::Scope;
 use crate::db::organization_members::OrgRole;
+use crate::db::tenant::Tenant;
 use crate::db::workspace_members::WorkspaceRole;
 
-struct Tenant {
-    pool: PgPool,
-    organization: Uuid,
-    workspace: Uuid,
+async fn organization_access(tenant: &Tenant, user: Uuid) -> Result<Access, Refusal> {
+    let mut connection = tenant.pool.acquire().await.expect("a connection");
+    organization(&mut connection, tenant.organization, user).await
 }
 
-impl Tenant {
-    async fn new() -> Self {
-        let url = std::env::var("TEST_DATABASE_URL").expect("isolated test database");
-        let pool = PgPool::connect(&url)
-            .await
-            .expect("the test database accepts connections");
-        let organization = Uuid::new_v4();
-        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Policy', $1::text)")
-            .bind(organization)
-            .execute(&pool)
-            .await
-            .expect("an organization");
-        let workspace = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, 'Policy', $1::text)",
-        )
-        .bind(workspace)
-        .bind(organization)
-        .execute(&pool)
-        .await
-        .expect("a workspace");
-        Self {
-            pool,
-            organization,
-            workspace,
-        }
-    }
-
-    async fn user(&self) -> Uuid {
-        let user = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO users (id, email, password_hash) VALUES ($1, $1::text || '@zone.test', 'test-only')",
-        )
-        .bind(user)
-        .execute(&self.pool)
-        .await
-        .expect("a user");
-        user
-    }
-
-    async fn organization_member(&self, role: OrgRole) -> Uuid {
-        let user = self.user().await;
-        sqlx::query(
-            "INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, $3)",
-        )
-        .bind(self.organization)
-        .bind(user)
-        .bind(role.as_str())
-        .execute(&self.pool)
-        .await
-        .expect("an organization membership");
-        user
-    }
-
-    async fn workspace_member(&self, user: Uuid, role: WorkspaceRole) {
-        sqlx::query(
-            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)",
-        )
-        .bind(self.workspace)
-        .bind(user)
-        .bind(role.as_str())
-        .execute(&self.pool)
-        .await
-        .expect("a workspace membership");
-    }
-
-    async fn custom_role(&self, scope: Scope, permission: Permission) -> Uuid {
-        let grant =
-            Grant::compose(scope, &[permission.name().to_owned()]).expect("a composable grant");
-        let name = Uuid::new_v4().to_string();
-        let definition = Definition {
-            name: &name,
-            description: None,
-            scope,
-            grant: &grant,
-        };
-        let creator = self.user().await;
-        match custom_roles::create(&self.pool, self.organization, &definition, creator)
-            .await
-            .expect("a custom role")
-        {
-            Creation::Created(role) => role.id,
-            Creation::NameTaken => panic!("a fresh name is never taken"),
-        }
-    }
-
-    async fn hold_organization_role(&self, user: Uuid, role: Uuid) {
-        sqlx::query(
-            "UPDATE organization_members SET custom_role_id = $3 WHERE organization_id = $1 AND user_id = $2",
-        )
-        .bind(self.organization)
-        .bind(user)
-        .bind(role)
-        .execute(&self.pool)
-        .await
-        .expect("an organization custom role");
-    }
-
-    async fn hold_workspace_role(&self, user: Uuid, role: Uuid) {
-        sqlx::query(
-            "UPDATE workspace_members SET custom_role_id = $3 WHERE workspace_id = $1 AND user_id = $2",
-        )
-        .bind(self.workspace)
-        .bind(user)
-        .bind(role)
-        .execute(&self.pool)
-        .await
-        .expect("a workspace custom role");
-    }
-
-    async fn organization_access(&self, user: Uuid) -> Result<Access, Refusal> {
-        let mut connection = self.pool.acquire().await.expect("a connection");
-        organization(&mut connection, self.organization, user).await
-    }
-
-    async fn workspace_access(&self, user: Uuid) -> Result<Access, Refusal> {
-        let mut connection = self.pool.acquire().await.expect("a connection");
-        workspace(&mut connection, self.organization, self.workspace, user).await
-    }
+async fn workspace_access(tenant: &Tenant, user: Uuid) -> Result<Access, Refusal> {
+    let mut connection = tenant.pool.acquire().await.expect("a connection");
+    workspace(&mut connection, tenant.organization, tenant.workspace, user).await
 }
 
 #[tokio::test]
@@ -143,10 +25,10 @@ async fn the_policies_permission_writes_the_organization_policy() {
     let auditor = tenant.organization_member(OrgRole::Member).await;
     let outsider = tenant.user().await;
     let editing = tenant
-        .custom_role(Scope::Organization, Permission::PoliciesUpdate)
+        .custom_role(Scope::Organization, &[Permission::PoliciesUpdate])
         .await;
     let auditing = tenant
-        .custom_role(Scope::Organization, Permission::AuditLogsRead)
+        .custom_role(Scope::Organization, &[Permission::AuditLogsRead])
         .await;
     tenant.hold_organization_role(editor, editing).await;
     tenant.hold_organization_role(auditor, auditing).await;
@@ -157,17 +39,18 @@ async fn the_policies_permission_writes_the_organization_policy() {
         (member, Access::Read),
         (auditor, Access::Read),
     ] {
-        let access = tenant.organization_access(user).await;
+        let access = organization_access(&tenant, user).await;
         assert!(
             matches!(access, Ok(granted) if granted == expected),
             "{access:?}"
         );
     }
-    let missing = tenant.organization_access(outsider).await;
+    let missing = organization_access(&tenant, outsider).await;
     assert!(
         matches!(missing, Err(Refusal::Missing(ORGANIZATION_MISSING))),
         "{missing:?}"
     );
+    tenant.cleanup().await;
 }
 
 #[tokio::test]
@@ -175,7 +58,7 @@ async fn the_workspace_policy_cascades_from_the_organization_policies_permission
     let tenant = Tenant::new().await;
     let organization_editor = tenant.organization_member(OrgRole::Member).await;
     let editing = tenant
-        .custom_role(Scope::Organization, Permission::PoliciesUpdate)
+        .custom_role(Scope::Organization, &[Permission::PoliciesUpdate])
         .await;
     tenant
         .hold_organization_role(organization_editor, editing)
@@ -184,14 +67,15 @@ async fn the_workspace_policy_cascades_from_the_organization_policies_permission
     let unseated = tenant.organization_member(OrgRole::Member).await;
 
     for user in [organization_editor, organization_admin] {
-        let access = tenant.workspace_access(user).await;
+        let access = workspace_access(&tenant, user).await;
         assert!(matches!(access, Ok(Access::Write)), "{access:?}");
     }
-    let missing = tenant.workspace_access(unseated).await;
+    let missing = workspace_access(&tenant, unseated).await;
     assert!(
         matches!(missing, Err(Refusal::Missing(WORKSPACE_MISSING))),
         "{missing:?}"
     );
+    tenant.cleanup().await;
 }
 
 #[tokio::test]
@@ -208,10 +92,10 @@ async fn the_workspace_policies_permission_writes_the_workspace_policy() {
         tenant.workspace_member(user, WorkspaceRole::Viewer).await;
     }
     let editing = tenant
-        .custom_role(Scope::Workspace, Permission::WorkspacePoliciesUpdate)
+        .custom_role(Scope::Workspace, &[Permission::WorkspacePoliciesUpdate])
         .await;
     let writing = tenant
-        .custom_role(Scope::Workspace, Permission::WorkspaceWrite)
+        .custom_role(Scope::Workspace, &[Permission::WorkspaceWrite])
         .await;
     tenant.hold_workspace_role(editor, editing).await;
     tenant.hold_workspace_role(writer, writing).await;
@@ -222,10 +106,11 @@ async fn the_workspace_policies_permission_writes_the_workspace_policy() {
         (viewer, Access::Read),
         (writer, Access::Read),
     ] {
-        let access = tenant.workspace_access(user).await;
+        let access = workspace_access(&tenant, user).await;
         assert!(
             matches!(access, Ok(granted) if granted == expected),
             "{access:?}"
         );
     }
+    tenant.cleanup().await;
 }
