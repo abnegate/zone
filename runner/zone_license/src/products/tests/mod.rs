@@ -23,6 +23,16 @@ fn maps_each_listed_product_to_its_plan() {
 }
 
 #[test]
+fn iterates_products_in_listed_order() {
+    let products = Products::parse(&format!("{TEAM}=team,{ENTERPRISE}")).unwrap();
+    let listed: Vec<(&str, Plan)> = products
+        .iter()
+        .map(|product| (product.id.as_str(), product.plan))
+        .collect();
+    assert_eq!(listed, [(TEAM, Plan::Team), (ENTERPRISE, Plan::Enterprise)]);
+}
+
+#[test]
 fn tolerates_spaces_and_blank_entries() {
     let products = Products::parse(&format!(" {ENTERPRISE} , ,{TEAM} = team ,,")).unwrap();
     assert_eq!(products.plan(ENTERPRISE), Some(Plan::Enterprise));
