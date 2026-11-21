@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'bun:test';
+import { ORGANIZATION_PERMISSIONS, Permission } from '../../enterprise/roles/schemas';
 import {
+  administersOrganization,
   COMPACT_QUERY,
   findSection,
   GROUP_LABELS,
@@ -625,5 +627,83 @@ describe('visibleSections', () => {
   it('puts the canonical Sources path under workspace settings', () => {
     expect(SOURCES_PATH).toBe(settingsPath(SettingsGroup.Workspace, SettingsSection.Sources));
     expect(SOURCES_PATH).toBe('/settings/workspace/sources');
+  });
+});
+
+describe('permission-gated organization sections', () => {
+  const ORGANIZATION_AI = settingsPath(SettingsGroup.Organization, SettingsSection.Ai);
+  const ORGANIZATION_DEVICES = settingsPath(SettingsGroup.Organization, SettingsSection.Devices);
+  const ORGANIZATION_AUDIT = settingsPath(SettingsGroup.Organization, SettingsSection.Audit);
+
+  const holding = (organizationPermissions: readonly string[]): SettingsAccess => ({
+    organization: true,
+    organizationRole: 'member',
+    organizationPermissions,
+    workspace: false,
+    workspaceRole: undefined,
+    installsModels: false,
+    readsSources: false,
+    administersServer: false,
+  });
+
+  const organizationPaths = (access: SettingsAccess): string[] =>
+    paths(access).filter((path) => path.startsWith(`${SETTINGS_ROOT}/organization/`));
+
+  it('shows a custom role each section its permissions read, whatever its rank', () => {
+    expect(
+      organizationPaths(
+        holding([Permission.OrganizationRead, Permission.AuditLogsRead, Permission.DevicesRead])
+      )
+    ).toEqual([
+      ORGANIZATION_AGENT_POLICY,
+      ORGANIZATION_MEMBERS,
+      ORGANIZATION_DEVICES,
+      ORGANIZATION_AUDIT,
+      ORGANIZATION_GITHUB,
+      ORGANIZATION_MCP,
+    ]);
+  });
+
+  it('gates AI defaults, Roles, Devices, Audit log and Audit export on their own permissions', () => {
+    const gates: [string, string][] = [
+      [ORGANIZATION_AI, Permission.AiSettingsRead],
+      [ORGANIZATION_ROLES, Permission.RolesUpdate],
+      [ORGANIZATION_DEVICES, Permission.DevicesRead],
+      [ORGANIZATION_AUDIT, Permission.AuditLogsRead],
+      [ORGANIZATION_AUDIT_EXPORT, Permission.AuditUpdate],
+    ];
+    for (const [path, name] of gates) {
+      expect(organizationPaths(holding([Permission.OrganizationRead, name])), name).toContain(path);
+      expect(organizationPaths(holding([Permission.OrganizationRead])), name).not.toContain(path);
+    }
+  });
+
+  it('trusts the permissions over the rank when the server sends both', () => {
+    expect(
+      organizationPaths({ ...holding([Permission.OrganizationRead]), organizationRole: 'owner' })
+    ).toEqual([
+      ORGANIZATION_AGENT_POLICY,
+      ORGANIZATION_MEMBERS,
+      ORGANIZATION_GITHUB,
+      ORGANIZATION_MCP,
+    ]);
+  });
+
+  it('shows every organization section to the built-in admin permission set', () => {
+    const admin = ORGANIZATION_PERMISSIONS.filter(
+      (name) => name !== Permission.OrganizationDelete && name !== Permission.AdministratorsUpdate
+    );
+    expect(organizationPaths(holding(admin))).toEqual(pathsOf(SettingsGroup.Organization));
+  });
+
+  it('administers the organization with roles:update, or with the admin rank when no permissions are sent', () => {
+    expect(administersOrganization(holding([Permission.OrganizationRead]))).toBe(false);
+    expect(
+      administersOrganization(holding([Permission.OrganizationRead, Permission.RolesUpdate]))
+    ).toBe(true);
+    expect(administersOrganization({ organization: true, organizationRole: 'admin' })).toBe(true);
+    expect(administersOrganization({ organization: true, organizationRole: 'member' })).toBe(false);
+    expect(administersOrganization({ organization: true, organizationRole: undefined })).toBe(true);
+    expect(administersOrganization({ organization: false, organizationRole: 'owner' })).toBe(false);
   });
 });

@@ -64,7 +64,7 @@ beforeEach(() => {
 
 describe('DevicesSection', () => {
   it('lists connected and pending devices', async () => {
-    render(<DevicesSection orgId="org-1" />);
+    render(<DevicesSection orgId="org-1" editable />);
     expect(await screen.findByText('S23 Ultra')).toBeInTheDocument();
     expect(screen.getByText('Connected')).toBeInTheDocument();
     expect(screen.getByText('pending')).toBeInTheDocument();
@@ -72,7 +72,7 @@ describe('DevicesSection', () => {
   });
 
   it('allows a pending device', async () => {
-    render(<DevicesSection orgId="org-1" />);
+    render(<DevicesSection orgId="org-1" editable />);
     fireEvent.click(await screen.findByRole('button', { name: 'Allow Chrome' }));
     await waitFor(() => {
       expect(mockClient.updateDevice).toHaveBeenCalledWith('org-1', 'device-2', {
@@ -82,7 +82,7 @@ describe('DevicesSection', () => {
   });
 
   it('blocks a device after confirm', async () => {
-    render(<DevicesSection orgId="org-1" />);
+    render(<DevicesSection orgId="org-1" editable />);
     fireEvent.click(await screen.findByRole('button', { name: 'Block S23 Ultra' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Block' }));
     await waitFor(() => {
@@ -92,8 +92,19 @@ describe('DevicesSection', () => {
     });
   });
 
+  it('shows devices without controls to someone who can read but not change them', async () => {
+    render(<DevicesSection orgId="org-1" editable={false} />);
+
+    expect(await screen.findByText('S23 Ultra')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'S23 Ultra' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Allow Chrome' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Block S23 Ultra' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'Actions' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Only allowed devices may connect')).toBeDisabled();
+  });
+
   it('locks the instance to allowed devices', async () => {
-    render(<DevicesSection orgId="org-1" />);
+    render(<DevicesSection orgId="org-1" editable />);
     const lock = await screen.findByLabelText('Only allowed devices may connect');
     fireEvent.click(lock);
     await waitFor(() => {

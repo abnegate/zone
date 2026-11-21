@@ -2,22 +2,22 @@ import { Button, EmptyState, Modal, Select } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import type { Workspace, WorkspaceRole } from '../../workspace/types';
-import type { CreateInvitationRequest, Invitation, OrgRole } from '../types';
+import type { CreateInvitationRequest, Invitation, InvitationAccess, OrgRole } from '../types';
 import './InvitationsSection.css';
 
 interface InvitationsSectionProps {
   orgId: string;
   workspaces: Workspace[];
+  access: Pick<InvitationAccess, 'create' | 'revoke'>;
 }
 
-export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProps) {
+export function InvitationsSection({ orgId, workspaces, access }: InvitationsSectionProps) {
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  // Form state
   const [email, setEmail] = useState('');
   const [orgRole, setOrgRole] = useState<OrgRole>('member');
   const [workspaceId, setWorkspaceId] = useState('');
@@ -107,11 +107,13 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
           <h2 className="section-title">Pending Invitations</h2>
           <p className="section-description">Invitations expire seven days after they are sent.</p>
         </div>
-        <div className="section-row-actions">
-          <Button size="sm" onClick={() => setShowModal(true)}>
-            Invite Member
-          </Button>
-        </div>
+        {access.create && (
+          <div className="section-row-actions">
+            <Button size="sm" onClick={() => setShowModal(true)}>
+              Invite Member
+            </Button>
+          </div>
+        )}
       </div>
       {error && <div className="alert alert-error">{error}</div>}
       {invitations.length === 0 ? (
@@ -124,9 +126,11 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
           title="No pending invitations"
           description="Invite team members to join this organization"
           action={
-            <Button variant="secondary" onClick={() => setShowModal(true)}>
-              Send an invitation
-            </Button>
+            access.create ? (
+              <Button variant="secondary" onClick={() => setShowModal(true)}>
+                Send an invitation
+              </Button>
+            ) : undefined
           }
         />
       ) : (
@@ -140,7 +144,7 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
                 <th>WS Role</th>
                 <th>Invited By</th>
                 <th>Expires</th>
-                <th>Actions</th>
+                {access.revoke && <th>Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -175,16 +179,18 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
                     {formatDate(invitation.expires_at)}
                     {isExpired(invitation.expires_at) && ' (Expired)'}
                   </td>
-                  <td className="invitation-actions">
-                    <Button
-                      className="invitation-revoke"
-                      onClick={() => handleRevoke(invitation.id)}
-                      variant="ghost"
-                      size="sm"
-                    >
-                      Revoke
-                    </Button>
-                  </td>
+                  {access.revoke && (
+                    <td className="invitation-actions">
+                      <Button
+                        className="invitation-revoke"
+                        onClick={() => handleRevoke(invitation.id)}
+                        variant="ghost"
+                        size="sm"
+                      >
+                        Revoke
+                      </Button>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

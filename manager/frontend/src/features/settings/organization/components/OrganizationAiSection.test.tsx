@@ -161,20 +161,20 @@ describe('OrganizationAiSection', () => {
   describe('Loading State', () => {
     it('shows loading state initially', () => {
       mockClient.getOrgAiSettings.mockImplementation(() => new Promise(() => {}));
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       expect(screen.getByText('Loading settings...')).toBeInTheDocument();
     });
 
     it('shows error when loading fails', async () => {
       mockClient.getOrgAiSettings.mockRejectedValueOnce(new Error('Failed to load'));
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByText('Failed to load')).toBeInTheDocument();
       });
     });
 
     it('loads only the AI settings, leaving workspaces to the members section', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await screen.findByLabelText('AI Provider');
       expect(mockClient.getOrgAiSettings).toHaveBeenCalledWith(mockCurrentOrganization.id);
       expect(mockClient.getWorkspaces).not.toHaveBeenCalled();
@@ -182,7 +182,7 @@ describe('OrganizationAiSection', () => {
 
     it('asks for an organization when none is selected', () => {
       mockWorkspaceContext.currentOrganization = null;
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       expect(screen.getByText('Please select an organization')).toBeInTheDocument();
       expect(mockClient.getOrgAiSettings).not.toHaveBeenCalled();
     });
@@ -190,14 +190,14 @@ describe('OrganizationAiSection', () => {
 
   describe('Page Structure', () => {
     it('renders AI Provider Configuration section', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByText('AI Provider Configuration')).toBeInTheDocument();
       });
     });
 
     it('renders save and reset buttons', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeInTheDocument();
@@ -205,9 +205,23 @@ describe('OrganizationAiSection', () => {
     });
   });
 
+  describe('Read-only defaults', () => {
+    it('shows the defaults without save or reset to someone who can read but not change them', async () => {
+      render(<OrganizationAiSection editable={false} />, { wrapper: Providers });
+
+      expect(await screen.findByText('AI Provider Configuration')).toBeInTheDocument();
+      expect(screen.getByLabelText('AI Provider').closest('fieldset')).toBeDisabled();
+      expect(screen.queryByRole('button', { name: 'Save Changes' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Reset to Defaults' })).not.toBeInTheDocument();
+      expect(
+        screen.getByText('You can see these defaults, but your role doesn’t let you change them.')
+      ).toBeInTheDocument();
+    });
+  });
+
   describe('Provider Selection', () => {
     it('renders provider dropdown with current value', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         const select = screen.getByLabelText('AI Provider');
         expect(select).toHaveTextContent('Self-Hosted (Ollama via LiteLLM)');
@@ -215,7 +229,7 @@ describe('OrganizationAiSection', () => {
     });
 
     it('changes provider when dropdown changes', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByLabelText('AI Provider')).toBeInTheDocument();
       });
@@ -225,7 +239,7 @@ describe('OrganizationAiSection', () => {
     });
 
     it('shows all provider options', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByLabelText('AI Provider')).toBeInTheDocument();
       });
@@ -251,7 +265,7 @@ describe('OrganizationAiSection', () => {
 
     it('disables the providers and agents the organization policy denies, with the reason', async () => {
       policyApi.organization.mockResolvedValue(ACTIVE_ORGANIZATION);
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await screen.findByLabelText('AI Provider');
       await waitFor(() =>
         expect(policyApi.organization).toHaveBeenCalledWith(mockCurrentOrganization.id)
@@ -276,13 +290,13 @@ describe('OrganizationAiSection', () => {
     it('warns when the saved provider is one the policy denies', async () => {
       policyApi.organization.mockResolvedValue(ACTIVE_ORGANIZATION);
       mockClient.getOrgAiSettings.mockResolvedValue({ ...mockAiSettings, provider: 'openai' });
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
 
       expect(await screen.findByTestId('ai-provider-denial')).toHaveTextContent(OPENAI_DENIED);
     });
 
     it('leaves every provider open when the policy is not enforced', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await screen.findByLabelText('AI Provider');
       await waitFor(() => expect(policyApi.organization).toHaveBeenCalled());
 
@@ -313,7 +327,7 @@ describe('OrganizationAiSection', () => {
 
     it('asks for sign-in status only once a coding agent is chosen', async () => {
       mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await screen.findByLabelText('AI Provider');
       expect(agentsApi.list).not.toHaveBeenCalled();
       expect(screen.queryByText('Claude Code sign-in')).toBeNull();
@@ -346,7 +360,7 @@ describe('OrganizationAiSection', () => {
         },
       ];
       mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
 
       await waitFor(() =>
         expect(selectOptionValues('Fast Model')).toEqual(['', 'sonnet', 'opus', 'haiku'])
@@ -358,7 +372,7 @@ describe('OrganizationAiSection', () => {
 
     it('names no other provider as the embedding default when none are installed', async () => {
       mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
 
       const embedding = await screen.findByLabelText('Embedding Model');
       expect(embedding).toHaveAttribute('placeholder', 'Server default');
@@ -370,7 +384,7 @@ describe('OrganizationAiSection', () => {
         ...agentSettings,
         model_fast: 'claude-sonnet-4-5',
       });
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
 
       await waitFor(() =>
         expect(screen.getByLabelText('Fast Model')).toHaveTextContent('claude-sonnet-4-5')
@@ -379,7 +393,7 @@ describe('OrganizationAiSection', () => {
 
     it('saves a coding agent provider without any credentials, its models back on Automatic', async () => {
       mockClient.updateOrgAiSettings.mockResolvedValue(agentSettings);
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await screen.findByLabelText('AI Provider');
       expect(screen.getByLabelText('Fast Model')).toHaveTextContent('llama3.1:8b');
       chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
@@ -407,7 +421,7 @@ describe('OrganizationAiSection', () => {
 
     it('sends an empty host to clear the one saved, so the next save cannot bring it back', async () => {
       mockClient.updateOrgAiSettings.mockResolvedValue({ ...mockAiSettings, litellm_host: null });
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
 
       const host = await screen.findByLabelText(/LiteLLM Host/);
       await waitFor(() => expect(host).toHaveValue('http://localhost:4000'));
@@ -426,7 +440,7 @@ describe('OrganizationAiSection', () => {
     it('sends an empty model to clear one saved before Automatic was picked', async () => {
       mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
       mockClient.updateOrgAiSettings.mockResolvedValue({ ...agentSettings, model_reasoning: null });
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
 
       await screen.findByLabelText('Reasoning Model');
       await waitFor(() =>
@@ -444,7 +458,7 @@ describe('OrganizationAiSection', () => {
 
     it('says Automatic lets the agent choose, titles and summaries included', async () => {
       mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
 
       const fast = await screen.findByLabelText('Fast Model');
       expect(fast.closest('.form-group')?.querySelector('.ui-select-help-text')?.textContent).toBe(
@@ -485,7 +499,7 @@ describe('OrganizationAiSection', () => {
           expires_at: later(),
         });
         agentsApi.cancel.mockRejectedValue(new Error('Failed to cancel the codex sign-in: 500'));
-        render(<OrganizationAiSection />, { wrapper: Providers });
+        render(<OrganizationAiSection editable />, { wrapper: Providers });
 
         fireEvent.click(await screen.findByRole('button', { name: 'Sign in with ChatGPT' }));
         expect(await screen.findByText('ABCD-EFGHI')).toBeInTheDocument();
@@ -515,7 +529,7 @@ describe('OrganizationAiSection', () => {
         agentsApi.submitCode.mockRejectedValue(
           new Error('Claude rejected the code: Invalid authorization code')
         );
-        render(<OrganizationAiSection />, { wrapper: Providers });
+        render(<OrganizationAiSection editable />, { wrapper: Providers });
 
         fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Claude' }));
         fireEvent.change(await screen.findByLabelText('Code from claude.com'), {
@@ -537,7 +551,7 @@ describe('OrganizationAiSection', () => {
     it('asks to save a provider the organization is signed in to but has not chosen yet', async () => {
       mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
       mockClient.updateOrgAiSettings.mockResolvedValue(agentSettings);
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
 
       await screen.findByLabelText('AI Provider');
       chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
@@ -563,12 +577,12 @@ describe('OrganizationAiSection', () => {
         fixture.agents[1],
       ]);
       mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
-      const { unmount } = render(<OrganizationAiSection />, { wrapper: Providers });
+      const { unmount } = render(<OrganizationAiSection editable />, { wrapper: Providers });
       expect(await screen.findByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
       unmount();
 
       mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'member' };
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       expect(await screen.findByText('Ask an organization admin to sign in.')).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Sign in with Claude' })).toBeNull();
     });
@@ -576,21 +590,21 @@ describe('OrganizationAiSection', () => {
 
   describe('Self-Hosted Provider', () => {
     it('shows LiteLLM configuration for self_hosted provider', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByLabelText(/LiteLLM Host/i)).toBeInTheDocument();
       });
     });
 
     it('displays LiteLLM host value from settings', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByLabelText(/LiteLLM Host/i)).toHaveValue('http://localhost:4000');
       });
     });
 
     it('shows the Runpod train key beside the provider credentials', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       expect(await screen.findByLabelText(/^Runpod/)).toHaveAttribute(
         'placeholder',
         'Enter API key'
@@ -602,7 +616,7 @@ describe('OrganizationAiSection', () => {
         ...mockAiSettings,
         has_runpod_api_key: true,
       });
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       expect(await screen.findByLabelText(/^Runpod/)).toHaveAttribute('placeholder', '••••••••');
       expect(screen.getByText(/\(configured\)/i)).toBeInTheDocument();
     });
@@ -616,7 +630,7 @@ describe('OrganizationAiSection', () => {
         has_openai_api_key: true,
       });
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByLabelText(/OpenAI API Key/i)).toBeInTheDocument();
       });
@@ -629,7 +643,7 @@ describe('OrganizationAiSection', () => {
         has_openai_api_key: true,
       });
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByText(/\(configured\)/i)).toBeInTheDocument();
       });
@@ -643,7 +657,7 @@ describe('OrganizationAiSection', () => {
         provider: 'anthropic',
       });
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByLabelText(/Anthropic API Key/i)).toBeInTheDocument();
       });
@@ -658,7 +672,7 @@ describe('OrganizationAiSection', () => {
         bedrock_region: 'us-east-1',
       });
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByLabelText(/AWS Region/i)).toBeInTheDocument();
         expect(screen.getByLabelText(/Use IAM Role/i)).toBeInTheDocument();
@@ -673,7 +687,7 @@ describe('OrganizationAiSection', () => {
         bedrock_use_iam_role: false,
       });
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByLabelText(/Access Key ID/i)).toBeInTheDocument();
         expect(screen.getByLabelText(/Secret Access Key/i)).toBeInTheDocument();
@@ -688,7 +702,7 @@ describe('OrganizationAiSection', () => {
         bedrock_use_iam_role: true,
       });
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.queryByLabelText(/Access Key ID/i)).not.toBeInTheDocument();
         expect(screen.queryByLabelText(/Secret Access Key/i)).not.toBeInTheDocument();
@@ -698,35 +712,35 @@ describe('OrganizationAiSection', () => {
 
   describe('Model Selection', () => {
     it('shows model selection section', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByText('Default Models')).toBeInTheDocument();
       });
     });
 
     it('shows fast model dropdown', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByLabelText('Fast Model')).toBeInTheDocument();
       });
     });
 
     it('shows reasoning model dropdown', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByLabelText('Reasoning Model')).toBeInTheDocument();
       });
     });
 
     it('shows embedding model dropdown', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByLabelText('Embedding Model')).toBeInTheDocument();
       });
     });
 
     it('displays current model values', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByLabelText('Fast Model')).toHaveTextContent('llama3.1:8b');
         expect(screen.getByLabelText('Reasoning Model')).toHaveTextContent('deepseek-r1:7b');
@@ -739,7 +753,7 @@ describe('OrganizationAiSection', () => {
     it('saves settings on form submit', async () => {
       mockClient.updateOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
       });
@@ -758,7 +772,7 @@ describe('OrganizationAiSection', () => {
         model_audio: null,
       });
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByLabelText('Video Model')).toHaveTextContent(
           'wan2.2_ti2v_5B_fp16.safetensors'
@@ -782,7 +796,7 @@ describe('OrganizationAiSection', () => {
         model_audio: null,
       });
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByLabelText('Audio Model')).toHaveTextContent(
           'ace_step_v1_3.5b.safetensors'
@@ -803,7 +817,7 @@ describe('OrganizationAiSection', () => {
     it('shows success message after save', async () => {
       mockClient.updateOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
       });
@@ -819,7 +833,7 @@ describe('OrganizationAiSection', () => {
       const notice = '2 workspace keys wait for their admins to save again.';
       mockClient.updateOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
 
       expect(await screen.findByText(notice)).toBeInTheDocument();
@@ -829,7 +843,7 @@ describe('OrganizationAiSection', () => {
     it('shows error when save fails', async () => {
       mockClient.updateOrgAiSettings.mockRejectedValueOnce(new Error('Save failed'));
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
       });
@@ -846,7 +860,7 @@ describe('OrganizationAiSection', () => {
         "Failed to update org AI settings: litellm_host: The URL's host is not one this instance allows endpoints on.";
       mockClient.updateOrgAiSettings.mockRejectedValueOnce(new ApiError(message, 400));
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
 
       expect(await screen.findByText(message)).toHaveClass('alert-error');
@@ -857,7 +871,7 @@ describe('OrganizationAiSection', () => {
     it('resets settings on reset button click', async () => {
       mockClient.resetOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeInTheDocument();
       });
@@ -872,7 +886,7 @@ describe('OrganizationAiSection', () => {
     it('shows success message after reset', async () => {
       mockClient.resetOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeInTheDocument();
       });
@@ -888,7 +902,7 @@ describe('OrganizationAiSection', () => {
       const notice = '1 workspace key waits for its admin to save again.';
       mockClient.resetOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       fireEvent.click(await screen.findByRole('button', { name: 'Reset to Defaults' }));
 
       expect(await screen.findByText(notice)).toBeInTheDocument();
@@ -901,7 +915,7 @@ describe('OrganizationAiSection', () => {
       mockClient.updateOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
       mockClient.resetOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
       expect(await screen.findByText(notice)).toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: 'Reset to Defaults' }));
@@ -913,7 +927,7 @@ describe('OrganizationAiSection', () => {
     it('shows error when reset fails', async () => {
       mockClient.resetOrgAiSettings.mockRejectedValueOnce(new Error('Reset failed'));
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeInTheDocument();
       });
@@ -930,7 +944,7 @@ describe('OrganizationAiSection', () => {
         'Failed to reset org AI settings: Only organization admins can manage AI settings';
       mockClient.resetOrgAiSettings.mockRejectedValueOnce(new ApiError(message, 403));
 
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       fireEvent.click(await screen.findByRole('button', { name: 'Reset to Defaults' }));
 
       expect(await screen.findByText(message)).toHaveClass('alert-error');
@@ -939,7 +953,7 @@ describe('OrganizationAiSection', () => {
 
   describe('Button States', () => {
     it('buttons are initially enabled', async () => {
-      render(<OrganizationAiSection />, { wrapper: Providers });
+      render(<OrganizationAiSection editable />, { wrapper: Providers });
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
       });

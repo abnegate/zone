@@ -4,7 +4,7 @@ import { PERMISSIONS } from '../../../shared/types/permissions';
 import type { WorkspaceRoleState } from './useWorkspaceRole';
 
 interface AccessContext {
-  currentOrganization: { id: string; role: string } | null;
+  currentOrganization: { id: string; role: string; permissions?: readonly string[] } | null;
   currentWorkspace: { id: string } | null;
   loading: boolean;
   resolvingRole: boolean;
@@ -18,6 +18,10 @@ const workspaceContext: AccessContext = {
 };
 
 const workspaceRole: WorkspaceRoleState = { role: 'viewer', resolving: false };
+
+const AUDITOR = ['organization:read', 'audit_logs:read'];
+
+const EDITOR = ['workspace:read', 'workspace_ai_settings:update'];
 
 let user: { is_admin: boolean } | null = null;
 
@@ -54,6 +58,8 @@ describe('useSettingsAccess', () => {
     permissions = [];
     workspaceContext.loading = false;
     workspaceContext.resolvingRole = false;
+    workspaceContext.currentOrganization = { id: 'organization-1', role: 'member' };
+    workspaceRole.permissions = undefined;
   });
 
   it('marks a server admin as administering the server', () => {
@@ -93,5 +99,32 @@ describe('useSettingsAccess', () => {
       readsSources: true,
       administersServer: false,
     });
+  });
+
+  it('reads the organization permissions from the current organization', () => {
+    workspaceContext.currentOrganization = {
+      id: 'organization-1',
+      role: 'member',
+      permissions: AUDITOR,
+    };
+
+    const { result } = renderHook(() => useSettingsAccess());
+
+    expect(result.current.access.organizationPermissions).toEqual(AUDITOR);
+  });
+
+  it('reads the workspace permissions from the caller membership', () => {
+    workspaceRole.permissions = EDITOR;
+
+    const { result } = renderHook(() => useSettingsAccess());
+
+    expect(result.current.access.workspacePermissions).toEqual(EDITOR);
+  });
+
+  it('leaves both permission lists unknown when the server sends none', () => {
+    const { result } = renderHook(() => useSettingsAccess());
+
+    expect(result.current.access.organizationPermissions).toBeUndefined();
+    expect(result.current.access.workspacePermissions).toBeUndefined();
   });
 });

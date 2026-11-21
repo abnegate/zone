@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { WorkspaceRoleSchema } from '../../auth/schemas';
+import { CustomRoleReferenceSchema } from '../../enterprise/roles/schemas';
 
-// Organization Schemas
 export const OrgRoleSchema = z.enum(['owner', 'admin', 'member']);
 
 export const OrganizationSchema = z.object({
@@ -11,6 +11,8 @@ export const OrganizationSchema = z.object({
   description: z.string().nullable(),
   is_active: z.boolean(),
   role: OrgRoleSchema.optional(),
+  custom_role: CustomRoleReferenceSchema.nullable().optional(),
+  permissions: z.array(z.string()).optional(),
   created_at: z.string(),
   updated_at: z.string(),
 });
@@ -40,13 +42,14 @@ export const OrganizationResponseSchema = z.object({
   organization: OrganizationSchema,
 });
 
-// Organization Member Schemas
 export const OrganizationMemberSchema = z
   .object({
     id: z.string().min(1),
     user_id: z.string().min(1),
     organization_id: z.string().min(1),
     role: OrgRoleSchema,
+    custom_role: CustomRoleReferenceSchema.nullable().default(null),
+    permissions: z.array(z.string()).optional(),
     is_active: z.boolean().optional(),
     invited_by: z.string().nullable().optional(),
     email: z.string().nullable().optional(),
@@ -61,6 +64,8 @@ export const OrganizationMemberSchema = z
     user_id: member.user_id,
     organization_id: member.organization_id,
     role: member.role,
+    custom_role: member.custom_role,
+    permissions: member.permissions,
     email: member.email || '',
     display_name: member.display_name ?? null,
     joined_at: member.joined_at || member.created_at || '',
@@ -71,9 +76,14 @@ export const AddOrgMemberRequestSchema = z.object({
   role: OrgRoleSchema,
 });
 
-export const UpdateOrgMemberRequestSchema = z.object({
-  role: OrgRoleSchema,
+export const CustomRoleAssignmentSchema = z.strictObject({
+  custom_role_id: z.string().min(1),
 });
+
+export const UpdateOrgMemberRequestSchema = z.union([
+  z.strictObject({ role: OrgRoleSchema }),
+  CustomRoleAssignmentSchema,
+]);
 
 export const OrgMembersResponseSchema = z.object({
   members: z.array(OrganizationMemberSchema),
@@ -106,7 +116,6 @@ export const DevicePolicySchema = z.object({
   mode: z.enum(['open', 'allowed']),
 });
 
-// Invitation Schemas
 const workspaceRoles = ['owner', 'admin', 'member', 'viewer'] as const;
 
 export const InvitationSchema = z
@@ -162,7 +171,6 @@ export const InvitationsResponseSchema = z.preprocess(
   })
 );
 
-// Audit Log Schemas
 // Actions and resource types are the server's dotted names; the lists name the
 // ones the console offers as filters and the schema accepts any the server has.
 export const AUDIT_ACTIONS = [
@@ -189,6 +197,9 @@ export const AUDIT_ACTIONS = [
   'audit_retention.updated',
   'audit_retention.applied',
   'audit_export.downloaded',
+  'role.created',
+  'role.updated',
+  'role.deleted',
 ] as const;
 export const AUDIT_RESOURCE_TYPES = [
   'organization',
@@ -201,6 +212,7 @@ export const AUDIT_RESOURCE_TYPES = [
   'audit_destination',
   'audit_retention',
   'audit_export',
+  'role',
 ] as const;
 
 export const AuditActionSchema = z.string().min(1);
@@ -238,7 +250,6 @@ export const AuditLogsResponseSchema = z.object({
   total: z.number().min(0),
 });
 
-// Type exports
 export type OrganizationZ = z.infer<typeof OrganizationSchema>;
 export type OrganizationMemberZ = z.infer<typeof OrganizationMemberSchema>;
 export type OrgMembersResponse = z.infer<typeof OrgMembersResponseSchema>;

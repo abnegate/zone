@@ -6,6 +6,7 @@ import {
   LicenseSection,
   OrganizationPolicySection,
   organizationScope,
+  Permission,
   RolesSection,
   SERVER_SCOPE,
   SsoSection,
@@ -14,10 +15,11 @@ import {
 import { SourcesSection } from '../../sources/components';
 import { McpServersSection, WorkspaceMcpServersSection } from '../mcp';
 import {
-  allowsOrganization,
-  allowsWorkspace,
-  ORGANIZATION_ADMIN_ROLE,
-  WORKSPACE_EDIT_ROLE,
+  grantsOrganization,
+  grantsWorkspace,
+  type OrganizationPermission,
+  WORKSPACE_EDIT_PERMISSION,
+  type WorkspacePermission,
 } from '../navigation/access';
 import {
   findSection,
@@ -47,6 +49,14 @@ interface SettingsContentProps {
   access: SettingsAccess;
 }
 
+function inOrganization(access: SettingsAccess, name: OrganizationPermission): boolean {
+  return grantsOrganization(access.organizationPermissions, access.organizationRole, name);
+}
+
+function inWorkspace(access: SettingsAccess, name: WorkspacePermission): boolean {
+  return grantsWorkspace(access.workspacePermissions, access.workspaceRole, name);
+}
+
 function workspaceContent(
   section: SettingsSection,
   access: SettingsAccess,
@@ -55,17 +65,13 @@ function workspaceContent(
 ): ReactNode {
   switch (section) {
     case SettingsSection.General:
-      return (
-        <GeneralSection
-          editable={allowsWorkspace(access.workspaceRole, WORKSPACE_EDIT_ROLE.theme)}
-        />
-      );
+      return <GeneralSection editable={inWorkspace(access, WORKSPACE_EDIT_PERMISSION.theme)} />;
     case SettingsSection.Ai:
       return (
         <WorkspaceAiSection
-          editable={allowsWorkspace(access.workspaceRole, WORKSPACE_EDIT_ROLE.ai)}
+          editable={inWorkspace(access, WORKSPACE_EDIT_PERMISSION.ai)}
           organizationDefaultsPath={
-            allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE)
+            inOrganization(access, Permission.AiSettingsRead)
               ? settingsPath(SettingsGroup.Organization, SettingsSection.Ai)
               : undefined
           }
@@ -77,7 +83,7 @@ function workspaceContent(
           organizationId={organizationId}
           workspaceId={workspaceId}
           organizationPolicyPath={
-            allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE)
+            inOrganization(access, Permission.PoliciesUpdate)
               ? settingsPath(SettingsGroup.Organization, SettingsSection.AgentPolicy)
               : undefined
           }
@@ -88,15 +94,11 @@ function workspaceContent(
         <HostFoldersPanel
           workspaceId={workspaceId}
           orgId={organizationId}
-          readOnly={!allowsWorkspace(access.workspaceRole, WORKSPACE_EDIT_ROLE.folders)}
+          readOnly={!inWorkspace(access, WORKSPACE_EDIT_PERMISSION.folders)}
         />
       );
     case SettingsSection.Sources:
-      return (
-        <SourcesSection
-          readOnly={!allowsWorkspace(access.workspaceRole, WORKSPACE_EDIT_ROLE.sources)}
-        />
-      );
+      return <SourcesSection readOnly={!inWorkspace(access, WORKSPACE_EDIT_PERMISSION.sources)} />;
     case SettingsSection.Members:
       return workspaceId !== null && organizationId !== null ? (
         <WorkspaceMembersSection workspaceId={workspaceId} orgId={organizationId} />
@@ -106,7 +108,7 @@ function workspaceContent(
         <WorkspaceMcpServersSection
           organizationId={organizationId}
           workspaceId={workspaceId}
-          editable={allowsWorkspace(access.workspaceRole, WORKSPACE_EDIT_ROLE.mcp)}
+          editable={inWorkspace(access, WORKSPACE_EDIT_PERMISSION.mcp)}
         />
       ) : null;
     default:
@@ -121,13 +123,19 @@ function organizationContent(
 ): ReactNode {
   switch (section) {
     case SettingsSection.Ai:
-      return <OrganizationAiSection />;
+      return (
+        <OrganizationAiSection editable={inOrganization(access, Permission.AiSettingsUpdate)} />
+      );
     case SettingsSection.AgentPolicy:
       return <OrganizationPolicySection organizationId={organizationId} />;
     case SettingsSection.Members:
       return (
         <OrganizationMembersSection
-          invitations={allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE)}
+          invitations={{
+            read: inOrganization(access, Permission.InvitationsRead),
+            create: inOrganization(access, Permission.InvitationsCreate),
+            revoke: inOrganization(access, Permission.InvitationsDelete),
+          }}
         />
       );
     case SettingsSection.Roles:
@@ -136,18 +144,23 @@ function organizationContent(
       return (
         <GitHubSection
           organizationId={organizationId}
-          canManage={allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE)}
+          canManage={inOrganization(access, Permission.GitHubUpdate)}
         />
       );
     case SettingsSection.Mcp:
       return (
         <McpServersSection
           organizationId={organizationId}
-          canManage={allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE)}
+          canManage={inOrganization(access, Permission.McpServersUpdate)}
         />
       );
     case SettingsSection.Devices:
-      return <DevicesSection orgId={organizationId} />;
+      return (
+        <DevicesSection
+          orgId={organizationId}
+          editable={inOrganization(access, Permission.DevicesUpdate)}
+        />
+      );
     case SettingsSection.Audit:
       return <AuditLogsSection orgId={organizationId} />;
     case SettingsSection.AuditExport:

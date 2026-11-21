@@ -1,7 +1,16 @@
-import { Button, EmptyState, Input, Modal, Select } from '@zone/ui';
+import { Button, EmptyState, Input, Modal, Select, type SelectOption } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useAuth } from '../../../auth';
+import { RoleScope, useRoles } from '../../../enterprise';
+import {
+  type Assignment,
+  assignmentFailure,
+  assignmentOf,
+  assignsCustomRole,
+  customRoleOptions,
+  heldRole,
+} from '../../assignment';
 import { memberLabel } from '../../memberLabel';
 import type { AddOrgMemberRequest, OrganizationMember, OrgRole } from '../types';
 import './OrgMembersSection.css';
@@ -35,7 +44,6 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
   const [members, setMembers] = useState<OrganizationMember[]>([]);
   const [currentUserRole, setCurrentUserRole] = useState<OrgRole>('member');
 
-  // Track which member is being modified to prevent race conditions
   const [updatingMemberId, setUpdatingMemberId] = useState<string | null>(null);
 
   const [showAddModal, setShowAddModal] = useState(false);
@@ -117,7 +125,13 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
     }
   };
 
-  const handleRoleChangeRequest = (member: OrganizationMember, newRole: OrgRole) => {
+  const handleRoleChangeRequest = (member: OrganizationMember, value: string) => {
+    const assignment = assignmentOf<OrgRole>(value);
+    if (assignsCustomRole(assignment)) {
+      handleRoleChange(member.user_id, assignment);
+      return;
+    }
+    const newRole = assignment.role;
     if ((newRole === 'admin' || newRole === 'owner') && member.role === 'member') {
       setPendingRoleChange({ member, newRole });
       setShowRoleConfirmModal(true);
@@ -125,11 +139,11 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
       setPendingRoleChange({ member, newRole });
       setShowRoleConfirmModal(true);
     } else {
-      handleRoleChange(member.user_id, newRole);
+      handleRoleChange(member.user_id, assignment);
     }
   };
 
-  const handleRoleChange = async (userId: string, newRole: OrgRole) => {
+  const handleRoleChange = async (userId: string, assignment: Assignment<OrgRole>) => {
     const member = members.find((m) => m.user_id === userId);
     if (!member) return;
 
@@ -137,11 +151,11 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
     setError(undefined);
 
     try {
-      await client.updateOrgMemberRole(orgId, userId, { role: newRole });
+      await client.updateOrgMemberRole(orgId, userId, assignment);
       showSuccessMessage('Role updated successfully');
       await loadMembers();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update role');
+      setError(assignmentFailure(err, 'Failed to update role'));
     } finally {
       setUpdatingMemberId(null);
     }
@@ -151,7 +165,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
     if (!pendingRoleChange) return;
 
     setShowRoleConfirmModal(false);
-    await handleRoleChange(pendingRoleChange.member.user_id, pendingRoleChange.newRole);
+    await handleRoleChange(pendingRoleChange.member.user_id, { role: pendingRoleChange.newRole });
     setPendingRoleChange(null);
   };
 
@@ -174,9 +188,13 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
     }
   };
 
-  const getRoleBadgeClass = (role: OrgRole): string => {
-    return `role-badge role-badge-${role}`;
-  };
+  const getRoleBadgeClass = (member: OrganizationMember): string =>
+    member.custom_role === null
+      ? `role-badge role-badge-${member.role}`
+      : 'role-badge role-badge-custom';
+
+  const getRoleLabel = (member: OrganizationMember): string =>
+    member.custom_role?.name ?? member.role.charAt(0).toUpperCase() + member.role.slice(1);
 
   const formatDate = (dateString: string): string => {
     if (!dateString) return '—';
@@ -195,6 +213,8 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
 
   const canManageMembers = currentUserRole === 'admin' || currentUserRole === 'owner';
 
+  const { response: customRoles } = useRoles(canManageMembers ? orgId : null);
+
   const canModifyMember = (member: OrganizationMember): boolean => {
     if (!canManageMembers) return false;
     if (member.user_id === user?.id) return false;
@@ -208,7 +228,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
   // `add_member` refuses an admin granting admin or owner; the role route
   // refuses them granting owner. Offer only what both accept, so nothing on
   // offer comes back a 403.
-  const grantableRoles = (): Array<{ value: OrgRole; label: string }> => {
+  const grantableRoles = (): SelectOption[] => {
     if (!canManageMembers) return [];
     if (currentUserRole === 'admin') {
       return roleOptions.filter((r) => r.value !== 'owner' && r.value !== 'admin');
@@ -216,20 +236,19 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
     return roleOptions;
   };
 
-  const getAssignableRoles = (
-    member: OrganizationMember
-  ): Array<{ value: OrgRole; label: string }> => {
+  const getAssignableRoles = (member: OrganizationMember): SelectOption[] => {
     if (!canManageMembers) return [];
     // Only an owner may re-seat someone already holding admin or owner.
     if (currentUserRole === 'admin' && (member.role === 'admin' || member.role === 'owner')) {
       return roleOptions.filter((r) => r.value === member.role);
     }
-    return grantableRoles();
+    return [
+      ...grantableRoles(),
+      ...customRoleOptions(customRoles, RoleScope.Organization, member.custom_role),
+    ];
   };
 
-  const getAvailableRoles = (
-    member: OrganizationMember
-  ): Array<{ value: OrgRole; label: string }> =>
+  const getAvailableRoles = (member: OrganizationMember): SelectOption[] =>
     canManageMembers
       ? getAssignableRoles(member)
       : roleOptions.filter((r) => r.value === member.role);
@@ -303,17 +322,15 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
                       {editable ? (
                         <Select
                           compact
-                          value={member.role}
-                          onValueChange={(next) => handleRoleChangeRequest(member, next as OrgRole)}
+                          value={heldRole(member)}
+                          onValueChange={(next) => handleRoleChangeRequest(member, next)}
                           disabled={isUpdating}
                           className="role-select"
                           aria-label={`Change role for ${memberLabel(member)}`}
                           options={availableRoles}
                         />
                       ) : (
-                        <span className={getRoleBadgeClass(member.role)}>
-                          {member.role.charAt(0).toUpperCase() + member.role.slice(1)}
-                        </span>
+                        <span className={getRoleBadgeClass(member)}>{getRoleLabel(member)}</span>
                       )}
                     </td>
                     <td className="member-joined">{formatDate(member.joined_at)}</td>

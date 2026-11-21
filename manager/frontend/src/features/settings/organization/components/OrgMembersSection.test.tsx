@@ -2,6 +2,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { clientModule } from '../../../../test/client';
 import { chooseSelectElement } from '../../../../test/select';
+import { ACTIVE, AUDITOR, LAPSED, RELEASE_MANAGER } from '../../../enterprise/roles/fixtures';
+import { RoleRefusal } from '../../../enterprise/roles/RoleRefusal';
+import { RoleCode } from '../../../enterprise/roles/schemas';
+import type { RolesResponse } from '../../../enterprise/roles/types';
+import { customRoleValue } from '../../assignment';
 import type { OrganizationMember, OrgRole } from '../types';
 
 const mockClient = {
@@ -23,6 +28,17 @@ mock.module('../../../auth', () => ({
   useAuth: mockUseAuth,
 }));
 
+let rolesResponse: RolesResponse | null = null;
+
+const mockUseRoles = mock((_organizationId: string | null) => ({
+  response: rolesResponse,
+  loading: false,
+  error: null,
+  refresh: async () => {},
+}));
+
+mock.module('../../../enterprise/roles/hooks/useRoles', () => ({ useRoles: mockUseRoles }));
+
 let OrgMembersSection: typeof import('./OrgMembersSection').default;
 
 beforeAll(async () => {
@@ -38,6 +54,7 @@ const mockOwner: OrganizationMember = {
   user_id: 'user-1',
   organization_id: 'org-123',
   role: 'owner',
+  custom_role: null,
   email: 'owner@test.com',
   display_name: 'Test Owner',
   joined_at: '2024-01-01T00:00:00Z',
@@ -48,6 +65,7 @@ const mockAdmin: OrganizationMember = {
   user_id: 'user-2',
   organization_id: 'org-123',
   role: 'admin',
+  custom_role: null,
   email: 'admin@test.com',
   display_name: 'Test Admin',
   joined_at: '2024-01-02T00:00:00Z',
@@ -58,6 +76,7 @@ const mockMember: OrganizationMember = {
   user_id: 'user-3',
   organization_id: 'org-123',
   role: 'member',
+  custom_role: null,
   email: 'member@test.com',
   display_name: null,
   joined_at: '2024-01-03T00:00:00Z',
@@ -131,6 +150,7 @@ const rolesOfferedForNewMember = (): string[] => {
 describe('OrgMembersSection', () => {
   beforeEach(() => {
     mock.clearAllMocks();
+    rolesResponse = null;
     mockClient.getOrgMembers.mockResolvedValue({
       members: [mockOwner, mockAdmin, mockMember],
     });
@@ -564,6 +584,7 @@ describe('OrgMembersSection', () => {
         user_id: 'user-4',
         organization_id: 'org-123',
         role: 'member',
+        custom_role: null,
         email: 'newuser@test.com',
         display_name: 'New User',
         joined_at: '2024-01-04T00:00:00Z',
@@ -635,7 +656,7 @@ describe('OrgMembersSection', () => {
 
   describe('Remove Member Functionality', () => {
     it('removes member after confirmation', async () => {
-      mockClient.removeOrgMember.mockResolvedValueOnce();
+      mockClient.removeOrgMember.mockResolvedValueOnce(undefined);
 
       render(<OrgMembersSection orgId="org-123" />);
       await waitFor(() => {
@@ -797,5 +818,193 @@ describe('OrgMembersSection table anatomy', () => {
     const names = [...document.querySelectorAll('.member-name')].map((name) => name.textContent);
     expect(names).toEqual(['a27bd650', '3c92e73e']);
     expect(screen.queryByText('Member', { selector: '.member-name' })).toBeNull();
+  });
+});
+
+describe('OrgMembersSection custom roles', () => {
+  const auditor = { id: AUDITOR.id, name: AUDITOR.name };
+
+  const holdingAuditor: OrganizationMember = {
+    ...mockMember,
+    custom_role: auditor,
+    permissions: AUDITOR.permissions,
+  };
+
+  const optionsOf = (email: string): string[] => {
+    const trigger = roleSelectFor(email);
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    const values = screen
+      .getAllByRole('option')
+      .map((option) => option.getAttribute('data-value') ?? '');
+    fireEvent.keyDown(trigger, { key: 'Escape' });
+    return values;
+  };
+
+  const renderRoster = async (members: OrganizationMember[]) => {
+    mockClient.getOrgMembers.mockResolvedValue({ members });
+    render(<OrgMembersSection orgId="org-123" />);
+    await waitFor(() => {
+      expect(screen.getByText('member@test.com')).toBeInTheDocument();
+    });
+  };
+
+  beforeEach(() => {
+    mock.clearAllMocks();
+    rolesResponse = ACTIVE;
+    mockUseAuth.mockReturnValue({
+      isAuthenticated: true,
+      user: { id: 'user-1', email: 'owner@test.com' },
+    });
+  });
+
+  it('offers the organization roles of the organization after the built-in ones when licensed', async () => {
+    await renderRoster([mockOwner, mockAdmin, mockMember]);
+
+    expect(optionsOf('member@test.com')).toEqual([
+      'member',
+      'admin',
+      'owner',
+      customRoleValue(AUDITOR.id),
+    ]);
+    expect(optionsOf('member@test.com')).not.toContain(customRoleValue(RELEASE_MANAGER.id));
+  });
+
+  it('marks a custom role in the select as one', async () => {
+    await renderRoster([mockOwner, mockAdmin, mockMember]);
+
+    const trigger = roleSelectFor('member@test.com');
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    expect(screen.getByRole('option', { name: /Auditor/ })).toHaveTextContent('Custom role');
+    fireEvent.keyDown(trigger, { key: 'Escape' });
+  });
+
+  it('offers no custom roles without an active license', async () => {
+    rolesResponse = LAPSED;
+    await renderRoster([mockOwner, mockAdmin, mockMember]);
+
+    expect(optionsOf('member@test.com')).toEqual(['member', 'admin', 'owner']);
+  });
+
+  it('offers no custom roles before the roles load', async () => {
+    rolesResponse = null;
+    await renderRoster([mockOwner, mockAdmin, mockMember]);
+
+    expect(optionsOf('member@test.com')).toEqual(['member', 'admin', 'owner']);
+  });
+
+  it('asks for the roles once the caller manages members', async () => {
+    await renderRoster([mockOwner, mockAdmin, mockMember]);
+
+    expect(mockUseRoles).toHaveBeenLastCalledWith('org-123');
+  });
+
+  it('never asks for the roles when the caller cannot manage members', async () => {
+    await renderRoster(rosterWithSignedInUserAs('member'));
+
+    expect(mockUseRoles.mock.calls.length).toBeGreaterThan(0);
+    expect(mockUseRoles.mock.calls.every(([organizationId]) => organizationId === null)).toBe(true);
+  });
+
+  it('shows the custom role a member holds by name in the select', async () => {
+    await renderRoster([mockOwner, mockAdmin, holdingAuditor]);
+
+    expect(roleSelectFor('member@test.com')).toHaveTextContent('Auditor');
+  });
+
+  it('shows the custom role a member holds by name to someone who cannot change it', async () => {
+    await renderRoster(
+      rosterWithSignedInUserAs('member').map((member) =>
+        member.user_id === mockMember.user_id ? holdingAuditor : member
+      )
+    );
+
+    const badge = roleBadgeFor('member@test.com');
+    expect(badge).toHaveTextContent('Auditor');
+    expect(badge).toHaveClass('role-badge-custom');
+  });
+
+  it('keeps a held custom role selectable after the license lapses', async () => {
+    rolesResponse = LAPSED;
+    await renderRoster([mockOwner, mockAdmin, holdingAuditor]);
+
+    expect(optionsOf('member@test.com')).toEqual([
+      'member',
+      'admin',
+      'owner',
+      customRoleValue(AUDITOR.id),
+    ]);
+    expect(roleSelectFor('member@test.com')).toHaveTextContent('Auditor');
+  });
+
+  it('assigns a custom role by its id without asking to confirm', async () => {
+    mockClient.updateOrgMemberRole.mockResolvedValueOnce(holdingAuditor);
+    await renderRoster([mockOwner, mockAdmin, mockMember]);
+
+    chooseSelectElement(roleSelectFor('member@test.com'), /Auditor/);
+
+    await waitFor(() => {
+      expect(mockClient.updateOrgMemberRole).toHaveBeenCalledWith('org-123', 'user-3', {
+        custom_role_id: AUDITOR.id,
+      });
+    });
+    expect(screen.queryByText('Confirm Role Change')).not.toBeInTheDocument();
+  });
+
+  it('lets an admin give a member a custom role', async () => {
+    mockUseAuth.mockReturnValue({
+      isAuthenticated: true,
+      user: { id: 'user-2', email: 'admin@test.com' },
+    });
+    await renderRoster([mockOwner, mockAdmin, mockMember]);
+
+    expect(optionsOf('member@test.com')).toEqual(['member', customRoleValue(AUDITOR.id)]);
+    expect(roleBadgeFor('admin@test.com')).toHaveTextContent('Admin');
+  });
+
+  it('returns a custom role holder to a built-in role by name', async () => {
+    mockClient.updateOrgMemberRole.mockResolvedValueOnce(mockMember);
+    await renderRoster([mockOwner, mockAdmin, holdingAuditor]);
+
+    chooseSelectElement(roleSelectFor('member@test.com'), 'Member');
+
+    await waitFor(() => {
+      expect(mockClient.updateOrgMemberRole).toHaveBeenCalledWith('org-123', 'user-3', {
+        role: 'member',
+      });
+    });
+  });
+
+  const refusals: [RoleCode, RegExp][] = [
+    [RoleCode.Exceeds, /permissions you don’t hold/],
+    [RoleCode.LicenseRequired, /Zone Enterprise license/],
+  ];
+
+  for (const [code, message] of refusals) {
+    it(`explains a ${code} refusal`, async () => {
+      mockClient.updateOrgMemberRole.mockRejectedValueOnce(
+        new RoleRefusal({ error: 'Refused', code }, 403)
+      );
+      await renderRoster([mockOwner, mockAdmin, mockMember]);
+
+      chooseSelectElement(roleSelectFor('member@test.com'), /Auditor/);
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(message);
+    });
+  }
+
+  it('shows the server reason for any other refusal', async () => {
+    mockClient.updateOrgMemberRole.mockRejectedValueOnce(new Error('Role not found'));
+    await renderRoster([mockOwner, mockAdmin, mockMember]);
+
+    chooseSelectElement(roleSelectFor('member@test.com'), /Auditor/);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Role not found');
+  });
+
+  it('offers only built-in roles when adding a member', async () => {
+    await renderRoster([mockOwner, mockAdmin, mockMember]);
+    fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
+
+    expect(rolesOfferedForNewMember()).toEqual(['member', 'admin', 'owner']);
   });
 });

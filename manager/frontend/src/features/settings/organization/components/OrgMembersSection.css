@@ -108,6 +108,10 @@
   color: var(--ui-text-secondary);
 }
 
+.role-badge-custom {
+  text-transform: none;
+}
+
 .role-badge-owner,
 .role-badge.role-owner {
   background: var(--ui-accent-muted);

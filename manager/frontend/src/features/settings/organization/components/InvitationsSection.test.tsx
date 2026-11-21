@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { clientModule } from '../../../../test/client';
 import { chooseSelect } from '../../../../test/select';
-import type { Invitation, Workspace } from '../types';
+import type { Invitation, InvitationAccess, Workspace } from '../types';
 
 const mockGetInvitations = mock();
 const mockCreateInvitation = mock();
@@ -15,6 +15,8 @@ mock.module('../../../../api/client', () =>
     revokeInvitation: mockRevokeInvitation,
   })
 );
+
+const MANAGER: Pick<InvitationAccess, 'create' | 'revoke'> = { create: true, revoke: true };
 
 let InvitationsSection: typeof import('./InvitationsSection').InvitationsSection;
 
@@ -86,12 +88,12 @@ describe('InvitationsSection', () => {
   });
 
   it('renders loading state initially', () => {
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
     expect(screen.getByText('Loading invitations...')).toBeInTheDocument();
   });
 
   it('fetches and displays invitations', async () => {
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
 
     expect(await screen.findByText('invitee1@test.com')).toBeInTheDocument();
     expect(mockGetInvitations).toHaveBeenCalledWith(orgId);
@@ -102,7 +104,7 @@ describe('InvitationsSection', () => {
   it('displays empty state when no invitations', async () => {
     mockGetInvitations.mockResolvedValue({ invitations: [] });
 
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
 
     await waitFor(() => {
       expect(screen.getByText('No pending invitations')).toBeInTheDocument();
@@ -114,7 +116,7 @@ describe('InvitationsSection', () => {
   it('displays error message on fetch failure', async () => {
     mockGetInvitations.mockRejectedValue(new Error('Network error'));
 
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
 
     await waitFor(() => {
       expect(screen.getByText('Network error')).toBeInTheDocument();
@@ -122,7 +124,7 @@ describe('InvitationsSection', () => {
   });
 
   it('opens invitation modal when invite button clicked', async () => {
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
 
     await waitFor(() => {
       expect(screen.queryByText('Loading invitations...')).not.toBeInTheDocument();
@@ -135,10 +137,54 @@ describe('InvitationsSection', () => {
     expect(screen.getByLabelText(/email address/i)).toBeInTheDocument();
   });
 
+  it('offers no invitation to someone who can read invitations but not send them', async () => {
+    render(
+      <InvitationsSection
+        orgId={orgId}
+        workspaces={mockWorkspaces}
+        access={{ create: false, revoke: true }}
+      />
+    );
+
+    expect(await screen.findByText('invitee1@test.com')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /invite member/i })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Revoke' }).length).toBeGreaterThan(0);
+  });
+
+  it('offers no empty-state invitation to someone who cannot send one', async () => {
+    mockGetInvitations.mockResolvedValue({ invitations: [] });
+
+    render(
+      <InvitationsSection
+        orgId={orgId}
+        workspaces={mockWorkspaces}
+        access={{ create: false, revoke: false }}
+      />
+    );
+
+    expect(await screen.findByText('No pending invitations')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /send an invitation/i })).not.toBeInTheDocument();
+  });
+
+  it('offers no revoke to someone who can read invitations but not delete them', async () => {
+    render(
+      <InvitationsSection
+        orgId={orgId}
+        workspaces={mockWorkspaces}
+        access={{ create: true, revoke: false }}
+      />
+    );
+
+    expect(await screen.findByText('invitee1@test.com')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Revoke' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'Actions' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /invite member/i })).toBeInTheDocument();
+  });
+
   it('submits org-only invitation', async () => {
     mockCreateInvitation.mockResolvedValue(mockInvitations[1]);
 
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
 
     await waitFor(() => {
       expect(screen.queryByText('Loading invitations...')).not.toBeInTheDocument();
@@ -173,7 +219,7 @@ describe('InvitationsSection', () => {
   it('submits invitation with workspace', async () => {
     mockCreateInvitation.mockResolvedValue(mockInvitations[0]);
 
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
 
     await waitFor(() => {
       expect(screen.queryByText('Loading invitations...')).not.toBeInTheDocument();
@@ -212,7 +258,7 @@ describe('InvitationsSection', () => {
   it('displays error when invitation creation fails', async () => {
     mockCreateInvitation.mockRejectedValue(new Error('Email already invited'));
 
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
 
     await waitFor(() => {
       expect(screen.queryByText('Loading invitations...')).not.toBeInTheDocument();
@@ -234,10 +280,10 @@ describe('InvitationsSection', () => {
   });
 
   it('revokes invitation when revoke button clicked', async () => {
-    mockRevokeInvitation.mockResolvedValue();
+    mockRevokeInvitation.mockResolvedValue(undefined);
     window.confirm = mock(() => true) as typeof window.confirm;
 
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
 
     await waitFor(() => {
       expect(screen.getByText('invitee1@test.com')).toBeInTheDocument();
@@ -259,7 +305,7 @@ describe('InvitationsSection', () => {
   it('does not revoke invitation when user cancels confirmation', async () => {
     window.confirm = mock(() => false) as typeof window.confirm;
 
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
 
     await waitFor(() => {
       expect(screen.getByText('invitee1@test.com')).toBeInTheDocument();
@@ -279,7 +325,7 @@ describe('InvitationsSection', () => {
 
     mockGetInvitations.mockResolvedValue({ invitations: [expiredInvitation] });
 
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
 
     await waitFor(() => {
       expect(screen.getByText(/expired/i)).toBeInTheDocument();
@@ -291,7 +337,7 @@ describe('InvitationsSection', () => {
   });
 
   it('closes modal when close button clicked', async () => {
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
 
     await waitFor(() => {
       expect(screen.queryByText('Loading invitations...')).not.toBeInTheDocument();
@@ -312,7 +358,7 @@ describe('InvitationsSection', () => {
   });
 
   it('closes modal when cancel button clicked', async () => {
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
 
     await waitFor(() => {
       expect(screen.queryByText('Loading invitations...')).not.toBeInTheDocument();
@@ -330,7 +376,7 @@ describe('InvitationsSection', () => {
   });
 
   it('closes modal on Escape', async () => {
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
 
     await waitFor(() => {
       expect(screen.queryByText('Loading invitations...')).not.toBeInTheDocument();
@@ -347,7 +393,7 @@ describe('InvitationsSection', () => {
   });
 
   it('displays role badges with correct styling', async () => {
-    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
+    render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} access={MANAGER} />);
 
     await waitFor(() => {
       expect(screen.getByText('invitee1@test.com')).toBeInTheDocument();
