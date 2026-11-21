@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::auth::OrgAdmin;
+use crate::auth::{OrganizationPermit, Permission};
 use crate::db::audit::{actions, resources};
 use crate::db::{devices, sessions};
 use crate::error::ServerError;
@@ -58,9 +58,9 @@ pub struct UpdateDevicePolicyRequest {
 /// GET /api/organizations/:org_id/devices
 pub async fn list(
     State(state): State<AppState>,
-    admin: OrgAdmin,
+    OrganizationPermit(admin): OrganizationPermit<{ Permission::DevicesRead.index() }>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let listed = devices::list_for_organization(state.db(), admin.org_id)
+    let listed = devices::list_for_organization(state.db(), admin.organization_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "Failed to list devices");
@@ -69,24 +69,7 @@ pub async fn list(
 
     let devices = listed
         .into_iter()
-        .map(|row| {
-            let live = state.device_is_connected(row.device.id);
-            DeviceResponse {
-                id: row.device.id,
-                user_id: row.device.user_id,
-                email: row.email,
-                display_name: row.display_name,
-                name: row.device.name,
-                platform: row.device.platform.as_str().to_string(),
-                user_agent: row.device.user_agent,
-                last_ip: row.device.last_ip,
-                last_seen_at: row.device.last_seen_at,
-                status: row.device.status.as_str().to_string(),
-                connected: devices::is_connected(row.device.last_seen_at, live),
-                session_count: row.session_count,
-                created_at: row.device.created_at,
-            }
-        })
+        .map(|row| describe(&state, row))
         .collect();
 
     Ok(Json(ListDevicesResponse { devices }))
@@ -95,11 +78,11 @@ pub async fn list(
 /// PATCH /api/organizations/:org_id/devices/:device_id
 pub async fn update(
     State(state): State<AppState>,
-    admin: OrgAdmin,
+    OrganizationPermit(admin): OrganizationPermit<{ Permission::DevicesUpdate.index() }>,
     Path((_, device_id)): Path<(Uuid, Uuid)>,
     Json(request): Json<UpdateDeviceRequest>,
 ) -> Result<impl IntoResponse, ServerError> {
-    if !devices::belongs_to_organization(state.db(), admin.org_id, device_id)
+    if !devices::belongs_to_organization(state.db(), admin.organization_id, device_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "Failed to verify device membership");
@@ -148,7 +131,7 @@ pub async fn update(
         audit(
             state.db(),
             AuditEvent {
-                organization_id: Some(admin.org_id),
+                organization_id: Some(admin.organization_id),
                 workspace_id: None,
                 actor_id: admin.user_id,
                 actor_email: &admin.email,
@@ -178,7 +161,7 @@ pub async fn update(
         audit(
             state.db(),
             AuditEvent {
-                organization_id: Some(admin.org_id),
+                organization_id: Some(admin.organization_id),
                 workspace_id: None,
                 actor_id: admin.user_id,
                 actor_email: &admin.email,
@@ -192,7 +175,7 @@ pub async fn update(
         .await;
     }
 
-    let listed = devices::list_for_organization(state.db(), admin.org_id)
+    let listed = devices::list_for_organization(state.db(), admin.organization_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "Failed to load device");
@@ -202,28 +185,13 @@ pub async fn update(
         .into_iter()
         .find(|row| row.device.id == device_id)
         .ok_or_else(|| ServerError::NotFound("Device not found".to_string()))?;
-    let live = state.device_is_connected(row.device.id);
-    Ok(Json(DeviceResponse {
-        id: row.device.id,
-        user_id: row.device.user_id,
-        email: row.email,
-        display_name: row.display_name,
-        name: row.device.name,
-        platform: row.device.platform.as_str().to_string(),
-        user_agent: row.device.user_agent,
-        last_ip: row.device.last_ip,
-        last_seen_at: row.device.last_seen_at,
-        status: row.device.status.as_str().to_string(),
-        connected: devices::is_connected(row.device.last_seen_at, live),
-        session_count: row.session_count,
-        created_at: row.device.created_at,
-    }))
+    Ok(Json(describe(&state, row)))
 }
 
 /// GET /api/organizations/:org_id/device-policy
 pub async fn get_policy(
     State(state): State<AppState>,
-    _admin: OrgAdmin,
+    _: OrganizationPermit<{ Permission::DevicesRead.index() }>,
 ) -> Result<impl IntoResponse, ServerError> {
     let mode = devices::policy(state.db()).await.map_err(|error| {
         tracing::error!(%error, "Failed to load device policy");
@@ -237,7 +205,7 @@ pub async fn get_policy(
 /// PUT /api/organizations/:org_id/device-policy
 pub async fn set_policy(
     State(state): State<AppState>,
-    admin: OrgAdmin,
+    OrganizationPermit(admin): OrganizationPermit<{ Permission::DevicesUpdate.index() }>,
     Json(request): Json<UpdateDevicePolicyRequest>,
 ) -> Result<impl IntoResponse, ServerError> {
     let mode = match request.mode.as_str() {
@@ -262,7 +230,7 @@ pub async fn set_policy(
     audit(
         state.db(),
         AuditEvent {
-            organization_id: Some(admin.org_id),
+            organization_id: Some(admin.organization_id),
             workspace_id: None,
             actor_id: admin.user_id,
             actor_email: &admin.email,
@@ -277,6 +245,25 @@ pub async fn set_policy(
     Ok(Json(DevicePolicyResponse {
         mode: mode.as_str().to_string(),
     }))
+}
+
+fn describe(state: &AppState, row: devices::ListedDevice) -> DeviceResponse {
+    let live = state.device_is_connected(row.device.id);
+    DeviceResponse {
+        id: row.device.id,
+        user_id: row.device.user_id,
+        email: row.email,
+        display_name: row.display_name,
+        name: row.device.name,
+        platform: row.device.platform.as_str().to_string(),
+        user_agent: row.device.user_agent,
+        last_ip: row.device.last_ip,
+        last_seen_at: row.device.last_seen_at,
+        status: row.device.status.as_str().to_string(),
+        connected: devices::is_connected(row.device.last_seen_at, live),
+        session_count: row.session_count,
+        created_at: row.device.created_at,
+    }
 }
 
 async fn refuse_last_admin_block(
