@@ -16,6 +16,7 @@ name = "zone-license"
 path = "src/main.rs"
 
 [dependencies]
+abnegate-http = { workspace = true }
 abnegate-notify = { workspace = true, features = ["smtp"] }
 abnegate-secret = { workspace = true }
 async-trait = { workspace = true }

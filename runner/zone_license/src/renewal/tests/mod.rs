@@ -23,6 +23,10 @@ fn period_end() -> DateTime<Utc> {
     at("2027-11-18T11:59:58Z")
 }
 
+fn settled() -> DateTime<Utc> {
+    period_start() + SETTLEMENT
+}
+
 fn signer() -> Signer {
     Signer::new(PrivateKey::new([7; 32]), KEY_ID)
 }
@@ -67,7 +71,11 @@ fn products() -> Vec<String> {
 }
 
 fn verdict(license: &License, subscription: &OrderSubscription) -> Verdict {
-    decide(license, Some(subscription), &products())
+    verdict_at(license, subscription, settled())
+}
+
+fn verdict_at(license: &License, subscription: &OrderSubscription, now: DateTime<Utc>) -> Verdict {
+    decide(license, Some(subscription), &products(), now)
 }
 
 fn renewed(verdict: Verdict) -> Terms {
@@ -194,7 +202,7 @@ fn every_other_status_has_ended() {
 #[test]
 fn a_missing_subscription_has_ended() {
     assert_eq!(
-        decide(&expiring(), None, &products()),
+        decide(&expiring(), None, &products(), settled()),
         Verdict::Ended(Reason::Missing)
     );
 }
@@ -224,7 +232,7 @@ fn an_unlisted_or_missing_product_has_ended() {
     };
     assert_eq!(verdict(&expiring(), &none), Verdict::Ended(Reason::Product));
     assert_eq!(
-        decide(&expiring(), Some(&subscription()), &[]),
+        decide(&expiring(), Some(&subscription()), &[], settled()),
         Verdict::Ended(Reason::Product)
     );
 }
@@ -255,10 +263,99 @@ fn a_scheduled_cancellation_still_renews_to_the_current_end() {
 }
 
 #[test]
+fn a_new_period_is_settling_until_polar_has_had_time_to_collect() {
+    for now in [
+        period_start(),
+        period_start() + TimeDelta::hours(1),
+        settled() - TimeDelta::seconds(1),
+    ] {
+        assert_eq!(
+            verdict_at(&expiring(), &subscription(), now),
+            Verdict::Settling,
+            "{now}"
+        );
+    }
+}
+
+#[test]
+fn a_new_period_renews_once_settled() {
+    for now in [settled(), settled() + TimeDelta::days(30)] {
+        let terms = renewed(verdict_at(&expiring(), &subscription(), now));
+        assert_eq!(terms.expires_at, period_end(), "{now}");
+    }
+}
+
+#[test]
+fn a_new_period_settles_from_its_start_in_whole_seconds() {
+    let precise = OrderSubscription {
+        current_period_start: at("2026-11-18T11:59:58.9Z"),
+        ..subscription()
+    };
+    assert!(matches!(
+        verdict_at(&expiring(), &precise, settled()),
+        Verdict::Renew(_)
+    ));
+}
+
+#[test]
+fn a_period_starting_after_the_key_expired_is_still_settling() {
+    let lapsed = license(period_start() - TimeDelta::days(20), 5);
+    assert_eq!(
+        verdict_at(&lapsed, &subscription(), period_start()),
+        Verdict::Settling
+    );
+}
+
+#[test]
+fn a_seat_change_in_the_same_period_is_not_held() {
+    let terms = renewed(verdict_at(
+        &license(period_end(), 3),
+        &subscription(),
+        period_start() + TimeDelta::hours(1),
+    ));
+    assert_eq!(terms.seats, 5);
+}
+
+#[test]
+fn a_seat_change_in_a_period_the_key_already_reaches_into_is_not_held() {
+    let partway = license(period_start() + TimeDelta::days(1), 3);
+    assert!(matches!(
+        verdict_at(&partway, &subscription(), period_start()),
+        Verdict::Renew(_)
+    ));
+}
+
+#[test]
+fn a_trialing_subscription_is_current_while_settling() {
+    let trialing = OrderSubscription {
+        status: SubscriptionStatus::Trialing,
+        ..subscription()
+    };
+    assert_eq!(
+        verdict_at(&expiring(), &trialing, period_start()),
+        Verdict::Current
+    );
+}
+
+#[test]
+fn a_key_covering_the_period_is_current_while_settling() {
+    assert_eq!(
+        verdict_at(&license(period_end(), 5), &subscription(), period_start()),
+        Verdict::Current
+    );
+}
+
+#[test]
+fn the_settlement_window_is_three_days() {
+    assert_eq!(SETTLEMENT, TimeDelta::days(3));
+}
+
+#[test]
 fn the_reasons_have_fixed_wire_names() {
     assert_eq!(Reason::Missing.as_str(), "missing");
     assert_eq!(Reason::Status.as_str(), "status");
     assert_eq!(Reason::Ended.as_str(), "ended");
     assert_eq!(Reason::Product.as_str(), "product");
     assert_eq!(Reason::Product.to_string(), super::PRODUCT);
+    assert_eq!(SETTLING, "settling");
 }

@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, HeaderValue};
 use reqwest::redirect::Policy;
-use reqwest::{Response, StatusCode};
 use uuid::Uuid;
 
 use super::access_token::AccessToken;
@@ -81,7 +81,9 @@ impl Client {
             return Ok(None);
         }
         if status.is_success() {
-            let body = body(response).await?;
+            let body = abnegate_http::read_capped(response, BODY_LIMIT)
+                .await
+                .map_err(unreadable)?;
             return serde_json::from_slice(&body).map(Some).map_err(malformed);
         }
         if is_unavailable(status) {
@@ -99,29 +101,21 @@ fn is_unavailable(status: StatusCode) -> bool {
         || status.is_server_error()
 }
 
-async fn body(mut response: Response) -> Result<Vec<u8>, ApiError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > BODY_LIMIT as u64)
-    {
-        return Err(oversize());
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(unavailable)? {
-        if body.len() + chunk.len() > BODY_LIMIT {
-            return Err(oversize());
+fn unreadable(error: abnegate_http::Error) -> ApiError {
+    match error {
+        abnegate_http::Error::OversizedBody { .. } => {
+            tracing::warn!(
+                limit = BODY_LIMIT,
+                "Polar answered with a body over the limit"
+            );
+            ApiError::Malformed
         }
-        body.extend_from_slice(&chunk);
+        abnegate_http::Error::UnreadableBody(error) => unavailable(error),
+        error => {
+            tracing::warn!(cause = %error, "Polar's answer could not be read");
+            ApiError::Unavailable
+        }
     }
-    Ok(body)
-}
-
-fn oversize() -> ApiError {
-    tracing::warn!(
-        limit = BODY_LIMIT,
-        "Polar answered with a body over the limit"
-    );
-    ApiError::Malformed
 }
 
 fn malformed(error: serde_json::Error) -> ApiError {

@@ -2,6 +2,7 @@ use std::net::TcpListener;
 use std::time::Instant;
 
 use chrono::{TimeZone, Utc};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -109,6 +110,38 @@ async fn a_body_over_the_limit_is_malformed() {
         fetch(ResponseTemplate::new(200).set_body_string(body)).await,
         Err(ApiError::Malformed)
     );
+}
+
+async fn raw(response: String) -> Result<Option<OrderSubscription>, ApiError> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        let _ = stream.read(&mut request).await.unwrap();
+        if stream.write_all(response.as_bytes()).await.is_ok() {
+            let _ = stream.shutdown().await;
+        }
+    });
+    let fetched = client(&format!("http://{address}"))
+        .subscription(id())
+        .await;
+    server.await.unwrap();
+    fetched
+}
+
+#[tokio::test]
+async fn a_streamed_body_over_the_limit_is_malformed() {
+    let chunk = format!("{:x}\r\n{}\r\n", BODY_LIMIT, " ".repeat(BODY_LIMIT));
+    let response =
+        format!("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n{chunk}{chunk}0\r\n\r\n");
+    assert_eq!(raw(response).await, Err(ApiError::Malformed));
+}
+
+#[tokio::test]
+async fn a_body_cut_short_is_unavailable() {
+    let response = "HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n{\"id\"".to_owned();
+    assert_eq!(raw(response).await, Err(ApiError::Unavailable));
 }
 
 #[tokio::test]

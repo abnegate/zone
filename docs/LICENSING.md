@@ -435,19 +435,34 @@ At startup, `serve` logs `renewal = true` when `POLAR_ACCESS_TOKEN` is set and
 | `unauthorized`, `unexpected` or `misconfigured` | `502`: Polar refused the access token (`401` or `403`), answered something else unexpected, or the subscription has no seats |
 | `unavailable` | `503` |
 
-Once the key verifies, the line carries its `license` id, and from then on
-its `subscription` id too, except for `unsubscribed`, whose key has none. Once
-Polar returns the subscription, the line carries its Polar `status`; a
-subscription Polar has no record of (`404`) has no `status`. Once a new key
-is signed, its id is logged as `renewed`. A subscription that won't renew
-(`ended`) also logs the `reason`: `missing` (Polar has no such subscription),
-`ended` (it has ended), `product` (its product isn't in
-`POLAR_PRODUCT_IDS`) or `status` (it isn't `active` or `trialing`).
-`misconfigured` also logs the subscription's `product` id. Polar refusing the
-access token (`unauthorized`), a subscription without seats
-(`misconfigured`) and a failed signing (`unsignable`) are logged as errors,
-since every renewal fails until you fix them; the other outcomes are logged
-at `info`, or `warn` when Polar couldn't be read.
+Besides the `outcome`, each line carries these fields:
+
+| `outcome` | Level | Fields |
+|---|---|---|
+| `disabled`, `unreadable` or `oversize` | `info` | None |
+| `unverified` | `info` | `error`: why the key doesn't verify, as `license_malformed`, `license_unknown_key`, `license_signature_invalid` or `license_payload_invalid` |
+| `unsubscribed` | `info` | `license` |
+| `malformed` | `info` | `license` and `subscription` |
+| `unauthorized` | `error` | `license`, `subscription` and `error`, which says what Polar answered |
+| `unexpected` or `unavailable` | `warn` | `license`, `subscription`, `error`, and `retryable`: `true` when asking again later may succeed |
+| `current` | `info` | `license`, `subscription`, `status`, and `reason` `settling` when the new period is [still settling](#waiting-for-payment) |
+| `ended` | `info` | `license`, `subscription`, `status` and `reason` |
+| `misconfigured` | `error` | `license`, `subscription`, `status` and the subscription's `product` id |
+| `unsignable` | `error` | `license`, `subscription`, `status`, `renewed` and `error`, the signing failure's code |
+| `renewed` | `info` | `license`, `subscription`, `status`, `renewed` and `seats` |
+
+`license` is the posted key's id and `subscription` its subscription id.
+`status` is the subscription's Polar status; a subscription Polar has no
+record of (`404`) has none. `renewed` is the id of the key that was, or would
+have been, signed, and `seats` its seat count. `reason` says why an `ended`
+subscription is not renewing: `missing` (Polar has no such subscription),
+`ended` (it has ended), `product` (its product isn't in `POLAR_PRODUCT_IDS`)
+or `status` (it isn't `active` or `trialing`, such as `past_due` after a failed
+charge). The errors are the outcomes every renewal keeps failing with until
+you fix them. When Polar can't be reached or its answer can't be read, the
+Polar client also logs a `warn` line of its own before the outcome: the
+`cause` of a failed request, the `limit` for a body over 1 MiB, or where a body
+failed to parse (`category`, `line` and `column`).
 
 The logs never contain the license key, the webhook secret, the access token,
 the private key, the SMTP password, or the customer's name or email address.
@@ -556,7 +571,7 @@ space, and the email shows exactly the name the license carries.
 | A new subscription is paid | A key for the seats bought, expiring at the end of the first year. |
 | A renewal is paid | A new key for the next year, by email. A server that [renews automatically](#automatic-renewal) installs the same license itself; any other server needs the new key pasted before the old one's grace period ends. |
 | The seat count changes, with `invoice` proration | A new key with the new seat count and the same expiry, as soon as the change is billed. |
-| A renewal payment fails | Nothing until Polar collects it. If it does, the key arrives then. |
+| A renewal payment fails | Nothing until Polar collects it. If it does, the key arrives then, by email and to a server that [renews automatically](#automatic-renewal); see [Waiting for payment](#waiting-for-payment). |
 | The subscription is cancelled | Nothing. The current key runs to its expiry and then its 30-day grace period. |
 | The subscription is revoked or refunded | Nothing. The current key still runs to its expiry; see [Revocation](#revocation). |
 
@@ -583,8 +598,10 @@ anywhere and is renewed by pasting, as before.
 3. The signer verifies the key and reads its subscription from Polar. When
    the subscription is `active` and its current period ends later than the
    key, or ends at the same time with a different seat count, it signs a key
-   for that period and returns it. Otherwise it answers that there's nothing
-   newer, or that the subscription won't renew.
+   for that period and returns it. A period that starts at or after the key's
+   expiry is signed only once it's three days old, so that Polar has
+   [collected its payment](#waiting-for-payment). Otherwise it answers that
+   there's nothing newer yet, or that the subscription is not renewing.
 4. zone-server checks the new key and installs it in place of the old one,
    just as a pasted key is installed: no restart, and the Enterprise features
    carry on. It writes a `license.renewed` entry to the audit log with no
@@ -596,13 +613,56 @@ anywhere and is renewed by pasting, as before.
 
 A due license is asked about every day, whatever the last answer was, until
 it's renewed or replaced. Polar starts the next period only at the end of the
-current one, so for most of the 14 days the answer is `current`; the renewed
-key arrives within a day of Polar starting the new period. A seat change
-mid-year still arrives only by email, because the key isn't due then. Paste
-that key, or let the next renewal carry the new seat count.
+current one, so for the 14 days the answer is `current`, and for three days
+after that while the new period settles. The renewed key arrives within about
+three days of the period rolling over, plus up to a day for the next check.
+The old key has expired by then, but its 30-day grace period covers the wait
+and nothing stops working. A seat change mid-year still arrives only by
+email, because the key isn't due then. Paste that key, or let the next
+renewal carry the new seat count.
 
 The first check runs about a minute after the server starts, and then every
 24 hours.
+
+### Waiting for payment
+
+When a period ends, Polar moves the subscription into its next period first,
+still `active`, and only then creates the renewal order and charges it. A
+failed charge turns the subscription `past_due`. So for a short while after
+the period rolls over, an `active` subscription says nothing about whether
+the new year has been paid for, and the key's `expires_at` tells anyone
+holding it exactly when that moment is. The same holds when a trial converts
+to a paid subscription.
+
+The signer therefore holds a new period for three days after it starts,
+answering `204` (`current`, logged with `reason` `settling`). By then Polar
+has either collected the payment, and the next check gets the new key, or
+turned the subscription `past_due`, which the signer answers with `410`
+(`ended`). If Polar collects later, the subscription is `active` again and
+the next daily check renews.
+
+Only a period that starts at or after the key's expiry is held. A seat change
+within the period the key already covers is signed at once, and so is any
+period once it's three days old. That leaves one gap: a mid-period seat
+increase is signed before Polar has collected any prorated invoice for it.
+Seats are soft, so the worst case is a key that counts more seats than were
+paid for, in a period that was.
+
+### A leaked key
+
+The signer has no database and renews any key it signed, for whoever posts
+it, while the key's subscription is `active`. A key that leaks to someone
+else's server therefore keeps renewing alongside the customer's, for as long
+as the subscription is paid for. Each renewed key carries the old key's
+customer and the subscription's seats and period, so a leak gains nothing
+beyond what the customer pays for, but it can't be stopped key by key.
+
+To end it, cancel or revoke the subscription in Polar and have the customer
+subscribe again. Once the old subscription has ended the signer answers its
+keys with `410`, so the leaked key runs only to its expiry and grace period.
+The new subscription has a new id, which the new keys carry and the leaked key
+can never reach. The customer pastes the key the new subscription's order
+emails them, and their server renews it from then on.
 
 ### What Zone sends
 
@@ -652,15 +712,16 @@ the old one.
 | Status | Body | Meaning | Zone records |
 |---|---|---|---|
 | `200` | `{"license":"<new key>"}` | A new key was signed. | `renewed`, or `rejected` if the body can't be read or the key fails Zone's check |
-| `204` | | Nothing newer to issue: the subscription is `active` but the key already covers its current period and seats, or it's `trialing`. | `current` |
+| `204` | | Nothing newer to issue yet: the subscription is `active` but the key already covers its current period and seats, its new period is less than three days old and [still settling](#waiting-for-payment), or it's `trialing`. | `current` |
 | `400` | | The body can't be read: invalid JSON, no `license` field, or a missing or non-JSON `Content-Type`. | `refused` |
 | `404` | | Renewal is off on this signer: `POLAR_ACCESS_TOKEN` is unset. | `unreachable` |
-| `410` | | The subscription won't renew: Polar has no such subscription, it has ended, its product isn't in `POLAR_PRODUCT_IDS`, or its status is anything but `active` or `trialing`. | `ended` |
+| `410` | | The subscription is not renewing: Polar has no such subscription, it has ended, its product isn't in `POLAR_PRODUCT_IDS`, or its status is anything but `active` or `trialing`, such as `past_due` after a failed charge. | `ended` |
 | `413` | | The body is over 16 KiB. | `refused` |
 | `422` | | The key doesn't verify, has no `subscription`, or its subscription id isn't a UUID. | `refused` |
 | `500` | | Signing failed. | `unreachable` |
 | `502` | | Polar refused the access token (`401` or `403`), answered something unexpected, or the subscription has no seats (`misconfigured`). | `unreachable` |
 | `503` | | Polar timed out, couldn't be reached, or answered `408`, `429` or `5xx`. | `unreachable` |
+| Any other `2xx`, or a `3xx` | | Never sent by the signer; something in front of it answered. Zone follows no redirects. | `unreachable` |
 
 ### What Zone records
 
@@ -668,10 +729,10 @@ the old one.
 |---|---|---|
 | `renewed` | A new key was installed. | Nothing. |
 | `current` | The signer had nothing newer yet. | Nothing; Zone asks again the next day. |
-| `ended` | The subscription won't renew: it was cancelled, isn't paid, or has ended. | The key runs to its expiry and its grace period. Paste a new key if you buy again. |
+| `ended` | The subscription is not renewing: it was cancelled or has ended, a payment failed, or its product isn't sold any more. | The key runs to its expiry and its grace period. Zone keeps asking daily while the key is due, so a failed payment that's settled in Polar renews by itself. Otherwise paste a new key if you buy again. |
 | `refused` | The signer, or something in front of it, refused the request with a `4xx` other than `404`, `408`, `410` or `429`. | Usually a proxy or bot filter between the server and the signer. Otherwise ask whoever sold you the license. |
 | `rejected` | The signer answered `200` with a body Zone can't read, or with a key Zone won't install: it doesn't verify with this release's keyring, names another customer or subscription, expires earlier than the installed key, has the same id, or has already lapsed. Zone keeps the installed key. | If the seller has moved to a new signing key, upgrade Zone to a release that trusts it. Otherwise ask the seller. |
-| `unreachable` | No usable answer: the signer couldn't be reached, timed out, answered a redirect, `404`, `408`, `429` or `5xx`, or sent more than 64 KiB. | Check that the server can reach `ZONE_LICENSE_RENEWAL_URL`, through the proxy if it has one. Zone asks again the next day. |
+| `unreachable` | No usable answer: the signer couldn't be reached, timed out, answered a redirect, a `2xx` other than `200` or `204`, `404`, `408`, `429` or `5xx`, or sent more than 64 KiB. | Check that the server can reach `ZONE_LICENSE_RENEWAL_URL`, through the proxy if it has one. Zone asks again the next day. |
 
 zone-server logs each attempt with its outcome and the license ids involved,
 never the key itself. A renewed key that arrives after an admin pasted or
@@ -822,7 +883,10 @@ expiry and Zone's grace period follows.
 server asks rather than Polar telling. It reads the subscription's current
 state from Polar's API at the moment of the request, and signs only for an
 `active` subscription to a listed product whose current period runs past the
-key.
+key, and only once a new period has had [three days to
+settle](#waiting-for-payment), since an `active` subscription at the moment
+the period rolls over is in the same unpaid state `subscription.cycled`
+reports.
 
 ### The key's terms
 
@@ -905,7 +969,9 @@ redeliver the order once it's fixed.
 | Renewals get `502` with an error in the log | Polar refused the access token, which has expired, been revoked or lacks `subscriptions:read`; or a subscription has no seats (`misconfigured`) | Create a new token with `subscriptions:read`. For `misconfigured`, make the product seat-based. |
 | Renewals get `503` | Polar is down, slow or rate-limiting the signer | Nothing; servers ask again the next day. |
 | Renewals get `422` | The key doesn't verify with the signer's release, carries no subscription, or carries a subscription id that isn't a UUID | Run a signer built from a release that trusts every key you've signed with. Re-sign a hand-signed key with the right `--subscription`. |
-| Renewals get `410` for a paying customer | Its product isn't in `POLAR_PRODUCT_IDS`, or the subscription isn't `active` or `trialing` in Polar; the log's `reason` and `status` say which | Add the product, or settle the subscription in Polar. Until then, the customer pastes the key they're emailed. |
+| Renewals get `410` for a paying customer | Its product isn't in `POLAR_PRODUCT_IDS`, or the subscription isn't `active` or `trialing` in Polar, such as `past_due` after a failed charge; the log's `reason` and `status` say which | Add the product, or settle the subscription in Polar. Until then, the customer pastes the key they're emailed. |
+| Renewals get `204` with `reason` `settling` | The subscription's new period started less than three days ago, so the signer is [waiting for payment](#waiting-for-payment) | Nothing; the key arrives on the first check after the three days. |
+| A customer's key renews on servers that aren't theirs | The key leaked; the signer renews any key it signed while its subscription is `active` | Cancel or revoke the subscription and have the customer subscribe again. See [A leaked key](#a-leaked-key). |
 | Every delivery gets `401` | Wrong `POLAR_WEBHOOK_SECRET`, a proxy changing the body, or the host clock more than five minutes off | Copy the secret from the endpoint again, pass the body through unchanged, run NTP. |
 | Deliveries get `503` | The relay is down, slow, or refusing mail for now | Fix the relay; the `undelivered` log line gives the failure and the SMTP status. Polar retries, and you can redeliver anything that ran out of attempts. |
 | Deliveries get `422` with an `unsendable` log line | The relay refused the message for good, such as an unknown recipient or a refused sender, or the order's address can't be parsed | If the sender or the relay account is at fault, fix it and redeliver. If the recipient is, [hand-sign](#hand-signing-a-stuck-order) the key and send it to a corrected address. |

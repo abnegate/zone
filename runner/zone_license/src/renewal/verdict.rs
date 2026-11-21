@@ -5,6 +5,7 @@ use crate::terms::Terms;
 pub enum Verdict {
     Renew(Terms),
     Current,
+    Settling,
     Ended(Reason),
     Misconfigured,
 }

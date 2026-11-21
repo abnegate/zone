@@ -4,6 +4,7 @@ pub const MISSING: &str = "missing";
 pub const STATUS: &str = "status";
 pub const ENDED: &str = "ended";
 pub const PRODUCT: &str = "product";
+pub const SETTLING: &str = "settling";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
