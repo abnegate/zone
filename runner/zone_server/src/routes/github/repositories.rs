@@ -10,7 +10,7 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::auth::OrgMember;
+use crate::auth::OrganizationMember;
 use crate::db::github_installations::{self, InstallationRow, InstallationStatus};
 use crate::error::ServerError;
 use crate::services::github_app::{self, Failure};
@@ -217,7 +217,7 @@ pub fn select(
 }
 
 pub async fn list(
-    member: OrgMember,
+    member: OrganizationMember,
     State(state): State<AppState>,
     search: Result<Query<Search>, QueryRejection>,
 ) -> Result<Json<Listing>, ServerError> {
@@ -226,7 +226,7 @@ pub async fn list(
     let page = page_of(search.page)?;
     let per_page = per_page_of(search.per_page)?;
 
-    let mut installations = github_installations::list(state.db(), member.org_id).await?;
+    let mut installations = github_installations::list(state.db(), member.organization_id).await?;
     if let Some(chosen) = search.installation_id {
         installations.retain(|installation| installation.id == chosen);
         if installations.is_empty() {
@@ -234,12 +234,11 @@ pub async fn list(
         }
     }
 
-    let outcomes = join_all(
-        installations
-            .iter()
-            .map(|installation| listed(&state, member.org_id, installation, search.refresh)),
-    )
-    .await;
+    let outcomes =
+        join_all(installations.iter().map(|installation| {
+            listed(&state, member.organization_id, installation, search.refresh)
+        }))
+        .await;
 
     let mut rows = Vec::new();
     let mut listed_installations = Vec::with_capacity(installations.len());
@@ -292,7 +291,7 @@ async fn listed(
 }
 
 pub async fn branches(
-    member: OrgMember,
+    member: OrganizationMember,
     State(state): State<AppState>,
     path: Result<Path<BranchPath>, PathRejection>,
     search: Result<Query<BranchSearch>, QueryRejection>,
@@ -310,7 +309,7 @@ pub async fn branches(
 
     let provider = state.github();
     let credential = provider
-        .organization_installation(state.db(), member.org_id, path.id)
+        .organization_installation(state.db(), member.organization_id, path.id)
         .await
         .map_err(|error| credential_refusal(path.id, error))?;
 

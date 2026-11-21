@@ -13,7 +13,7 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::auth::OrgAdmin;
+use crate::auth::{OrganizationPermit, Permission};
 use crate::db::audit::{actions, resources};
 use crate::db::github_apps::{self, AppRow};
 use crate::db::github_connection_states::{self, Purpose};
@@ -78,16 +78,16 @@ struct Removed {
 
 pub async fn create(
     State(state): State<AppState>,
-    admin: OrgAdmin,
+    OrganizationPermit(admin): OrganizationPermit<{ Permission::GitHubUpdate.index() }>,
     path: Result<Path<(Uuid, Uuid)>, PathRejection>,
 ) -> Result<Json<InstallationUrl>, ServerError> {
     let Path((_, app_id)) = path.map_err(|_| app_not_found())?;
-    let app = github_apps::get(state.db(), admin.org_id, app_id)
+    let app = github_apps::get(state.db(), admin.organization_id, app_id)
         .await?
         .ok_or_else(app_not_found)?;
     let issued = github_connection_states::issue(
         state.db(),
-        admin.org_id,
+        admin.organization_id,
         admin.user_id,
         Purpose::Installation,
         Some(app.id),
@@ -103,9 +103,9 @@ pub async fn create(
 /// listing finished revokes what GitHub no longer lists.
 pub async fn sync(
     State(state): State<AppState>,
-    admin: OrgAdmin,
+    OrganizationPermit(admin): OrganizationPermit<{ Permission::GitHubUpdate.index() }>,
 ) -> Result<StatusCode, ServerError> {
-    let apps = github_apps::list(state.db(), admin.org_id).await?;
+    let apps = github_apps::list(state.db(), admin.organization_id).await?;
     if apps.is_empty() {
         return Ok(StatusCode::NO_CONTENT);
     }
@@ -128,7 +128,7 @@ pub async fn sync(
     audit(
         state.db(),
         AuditEvent {
-            organization_id: Some(admin.org_id),
+            organization_id: Some(admin.organization_id),
             workspace_id: None,
             actor_id: admin.user_id,
             actor_email: &admin.email,
@@ -158,21 +158,21 @@ pub async fn sync(
 /// Uninstalling asks GitHub first, so a refusal keeps the installation in Zone.
 pub async fn delete(
     State(state): State<AppState>,
-    admin: OrgAdmin,
+    OrganizationPermit(admin): OrganizationPermit<{ Permission::GitHubUpdate.index() }>,
     path: Result<Path<(Uuid, Uuid)>, PathRejection>,
     removal: Result<Query<Removal>, QueryRejection>,
 ) -> Result<StatusCode, ServerError> {
     let Path((_, id)) = path.map_err(|_| installation_not_found())?;
     let Query(removal) =
         removal.map_err(|_| ServerError::BadRequest(INVALID_UNINSTALL.to_string()))?;
-    let installation = github_installations::get(state.db(), admin.org_id, id)
+    let installation = github_installations::get(state.db(), admin.organization_id, id)
         .await?
         .ok_or_else(installation_not_found)?;
 
     if removal.uninstall {
         uninstall(&state, &installation).await?;
     }
-    if !github_installations::delete(state.db(), admin.org_id, id).await? {
+    if !github_installations::delete(state.db(), admin.organization_id, id).await? {
         return Err(installation_not_found());
     }
 
@@ -185,7 +185,7 @@ pub async fn delete(
     audit(
         state.db(),
         AuditEvent {
-            organization_id: Some(admin.org_id),
+            organization_id: Some(admin.organization_id),
             workspace_id: None,
             actor_id: admin.user_id,
             actor_email: &admin.email,
