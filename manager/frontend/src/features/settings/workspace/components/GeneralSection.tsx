@@ -48,6 +48,7 @@ const DEFAULT_FONT: FontFamily = 'nunito';
 const DEFAULT_FONT_SIZE = '16';
 const DEFAULT_RADIUS: BorderRadius = 'large';
 const FLASH_DURATION = 3000;
+const READ_ONLY_HINT = "Your role can't change the workspace theme.";
 
 export default function GeneralSection({ editable }: { editable: boolean }) {
   const { isAuthenticated } = useAuth();
@@ -313,7 +314,7 @@ export default function GeneralSection({ editable }: { editable: boolean }) {
           </div>
         </div>
 
-        {!editable && <p className="form-hint">Viewers can't change the workspace theme.</p>}
+        {!editable && <p className="form-hint">{READ_ONLY_HINT}</p>}
 
         <fieldset disabled={!editable} className="settings-fieldset">
           <div className="settings-card">

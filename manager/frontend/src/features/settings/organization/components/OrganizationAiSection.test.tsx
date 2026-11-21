@@ -586,7 +586,9 @@ describe('OrganizationAiSection', () => {
 
       mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'member' };
       render(<OrganizationAiSection editable />, { wrapper: Providers });
-      expect(await screen.findByText('Ask an organization admin to sign in.')).toBeInTheDocument();
+      expect(
+        await screen.findByText("Your role can't sign agents in. Ask someone whose role can.")
+      ).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Sign in with Claude' })).toBeNull();
     });
   });
@@ -639,7 +641,9 @@ describe('OrganizationAiSection', () => {
       };
       render(<OrganizationAiSection editable={false} />, { wrapper: Providers });
 
-      expect(await screen.findByText('Ask an organization admin to sign in.')).toBeInTheDocument();
+      expect(
+        await screen.findByText("Your role can't sign agents in. Ask someone whose role can.")
+      ).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Sign in with Claude' })).toBeNull();
     });
   });

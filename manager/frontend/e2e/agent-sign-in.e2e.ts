@@ -934,7 +934,9 @@ test.describe('Coding agent sign-in', () => {
     const panel = page.getByRole('region', { name: 'Codex sign-in' });
     await expect(panel.getByText('Not signed in', { exact: true })).toBeVisible();
     await expect(panel.getByText('Signing in', { exact: true })).toHaveCount(0);
-    await expect(panel.getByText('Ask an organization admin to sign in.')).toBeVisible();
+    await expect(
+      panel.getByText("Your role can't sign agents in. Ask someone whose role can.")
+    ).toBeVisible();
     await expect(panel.getByRole('button')).toHaveCount(0);
     await expect(panel.getByRole('link')).toHaveCount(0);
     await expect(panel.getByText('ABCD-EFGHI')).toHaveCount(0);

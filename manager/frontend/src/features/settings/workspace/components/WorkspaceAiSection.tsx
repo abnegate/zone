@@ -83,6 +83,7 @@ const KEY_SET = 'Set';
 const KEY_NOT_SET = 'Not set';
 const SAVE_LABEL = 'Save';
 const FLASH_DURATION = 3000;
+const READ_ONLY_HINT = "Your role can't change AI settings.";
 
 function isChatField(field: InheritableField): field is ChatField {
   return CHAT_FIELDS.includes(field);
@@ -530,7 +531,7 @@ export default function WorkspaceAiSection({
         {headerActions}
       </div>
 
-      {!editable && <p className="form-hint">Only workspace admins can change AI settings.</p>}
+      {!editable && <p className="form-hint">{READ_ONLY_HINT}</p>}
       {error && <div className="alert alert-error">{error}</div>}
       {warning && <div className="alert alert-warning">{warning}</div>}
       {success && <div className="alert alert-success">{success}</div>}

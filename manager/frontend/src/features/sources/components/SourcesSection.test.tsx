@@ -1153,7 +1153,7 @@ describe('SourcesSection', () => {
       for (const name of WRITE_ACTIONS) {
         expect(screen.queryByRole('button', { name })).toBeNull();
       }
-      expect(screen.getByText("Viewers can't change sources.")).toBeInTheDocument();
+      expect(screen.getByText("Your role can't change sources.")).toBeInTheDocument();
     });
 
     it('heads the skeleton and the loaded table without an Actions column', async () => {
@@ -1210,7 +1210,7 @@ describe('SourcesSection', () => {
       for (const name of ['Save', 'Verify', 'Cancel']) {
         expect(within(editor).queryByRole('button', { name })).toBeNull();
       }
-      expect(screen.getByText("Viewers can't change sources.")).toBeInTheDocument();
+      expect(screen.getByText("Your role can't change sources.")).toBeInTheDocument();
 
       fireEvent.click(within(editor).getByRole('button', { name: 'Close' }));
       await waitFor(() => {
@@ -1230,7 +1230,7 @@ describe('SourcesSection', () => {
       for (const name of ['Verify', 'Enable', 'Delete']) {
         expect(within(row).getByRole('button', { name })).toBeInTheDocument();
       }
-      expect(screen.queryByText("Viewers can't change sources.")).toBeNull();
+      expect(screen.queryByText("Your role can't change sources.")).toBeNull();
     });
   });
 });

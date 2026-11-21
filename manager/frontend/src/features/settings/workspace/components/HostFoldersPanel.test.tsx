@@ -73,7 +73,7 @@ describe('HostFoldersPanel', () => {
     expect(screen.getByRole('button', { name: 'Add folder' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Remove' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
-    expect(screen.queryByText("Viewers can't change host folders.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Your role can't change host folders.")).not.toBeInTheDocument();
   });
 
   it('shows saved folders without editing controls when read-only', async () => {
@@ -85,7 +85,7 @@ describe('HostFoldersPanel', () => {
       ],
     });
     render(<HostFoldersPanel workspaceId="ws-1" orgId="org-1" readOnly />);
-    expect(await screen.findByText("Viewers can't change host folders.")).toBeInTheDocument();
+    expect(await screen.findByText("Your role can't change host folders.")).toBeInTheDocument();
     expect(screen.getByLabelText('Folder 1')).toBeDisabled();
     expect(screen.getByLabelText('Folder 1')).toHaveValue('/Users/jake/Local/jbs');
     expect(screen.getByLabelText('Folder 2')).toBeDisabled();

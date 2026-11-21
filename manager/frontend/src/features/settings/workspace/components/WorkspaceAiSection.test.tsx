@@ -813,7 +813,7 @@ describe('WorkspaceAiSection', () => {
     await renderSection({ editable: false });
 
     expect(screen.queryAllByRole('button')).toHaveLength(0);
-    expect(screen.getByText('Only workspace admins can change AI settings.')).toBeInTheDocument();
+    expect(screen.getByText("Your role can't change AI settings.")).toBeInTheDocument();
     expect(within(row('Fast Model')).getByText('llama3.1:8b')).toBeInTheDocument();
   });
 
@@ -879,7 +879,9 @@ describe('WorkspaceAiSection', () => {
 
       const panel = (await screen.findByText('Codex sign-in')).closest('section');
       expect(panel).not.toBeNull();
-      expect(await screen.findByText('Ask an organization admin to sign in.')).toBeInTheDocument();
+      expect(
+        await screen.findByText("Your role can't sign agents in. Ask someone whose role can.")
+      ).toBeInTheDocument();
       expect(panel?.querySelectorAll('button')).toHaveLength(0);
       expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
     });
@@ -1008,12 +1010,16 @@ describe('WorkspaceAiSection', () => {
       const panel = await screen.findByRole('region', { name: 'Claude Code sign-in' });
       expect(await within(panel).findByText('Not signed in')).toBeInTheDocument();
       expect(within(panel).queryAllByRole('button')).toHaveLength(0);
-      expect(within(panel).queryByText('Ask an organization admin to sign in.')).toBeNull();
+      expect(
+        within(panel).queryByText("Your role can't sign agents in. Ask someone whose role can.")
+      ).toBeNull();
 
       resolvingRole = false;
       rerender(<WorkspaceAiSection editable />);
 
-      expect(within(panel).getByText('Ask an organization admin to sign in.')).toBeInTheDocument();
+      expect(
+        within(panel).getByText("Your role can't sign agents in. Ask someone whose role can.")
+      ).toBeInTheDocument();
       expect(within(panel).queryAllByRole('button')).toHaveLength(0);
     });
 
