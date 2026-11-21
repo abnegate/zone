@@ -87,10 +87,13 @@ fn the_body_limit_is_sixty_four_kibibytes() {
 }
 
 #[test]
-fn a_client_builds_with_the_system_proxy() {
-    let settings = Settings::default();
-    assert!(Client::new(&settings, Proxy::System).is_ok());
-    assert!(Client::new(&settings, Proxy::Direct).is_ok());
+fn a_client_is_configured_only_while_renewal_is_on() {
+    assert!(Client::configured(&Settings::default()).is_some());
+    let off = Settings {
+        enabled: false,
+        ..Settings::default()
+    };
+    assert!(Client::configured(&off).is_none());
 }
 
 #[test]

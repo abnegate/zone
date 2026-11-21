@@ -25,6 +25,20 @@ pub struct Client {
 }
 
 impl Client {
+    pub fn configured(settings: &Settings) -> Option<Self> {
+        if !settings.enabled {
+            tracing::info!("License renewal is off on this server");
+            return None;
+        }
+        match Self::new(settings, Proxy::System) {
+            Ok(client) => Some(client),
+            Err(error) => {
+                tracing::error!(%error, "License renewal cannot start: its HTTP client did not build");
+                None
+            }
+        }
+    }
+
     pub fn new(settings: &Settings, proxy: Proxy) -> Result<Self, reqwest::Error> {
         Self::with_timeouts(settings, proxy, TIMEOUT, CONNECT_TIMEOUT)
     }
