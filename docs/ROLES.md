@@ -25,13 +25,15 @@ Members**.
 
 Creating, editing and deleting custom roles, and assigning a custom role to a
 member, need a Zone Enterprise license that verifies and is either active or
-in its 30-day grace period after expiry. You install the license under
-**Settings → This server → License**.
+in its 30-day grace period after expiry. A Zone Team license doesn't include
+custom roles. You install the license under **Settings → This server →
+License**.
 
 | License state | Enforcement | Roles page | Assigning roles |
 |---|---|---|---|
 | Enterprise, active or in grace | Enforced | Editable by holders of `roles:update` | Built-in and custom roles |
 | Lapsed (past grace) | Still enforced | Read-only, with a renewal notice | Built-in roles only |
+| Team, in any state | Still enforced | Read-only, with an upgrade notice | Built-in roles only |
 | Removed, or never installed (Community) | Still enforced | Read-only, with an upgrade notice | Built-in roles only |
 
 Enforcement never looks at the license. A member who holds a custom role keeps
@@ -41,10 +43,10 @@ until someone gives them another role. This differs from
 role takes the place of a built-in role, so there is no built-in role Zone
 could safely fall back to.
 
-Without an active or grace license, every create, edit and delete of a role,
-and every custom assignment, is refused with `license_required`. Reading roles
-and assigning built-in roles always work, so on any license an admin can move
-people off a custom role. Deleting a role needs the license, but a role
+Without an Enterprise license that is active or in grace, every create, edit
+and delete of a role, and every custom assignment, is refused with
+`license_required`. Reading roles and assigning built-in roles always work, so
+on any license an admin can move people off a custom role. Deleting a role needs the license, but a role
 nobody holds grants nothing.
 
 A stored license key that doesn't verify counts as no license at all: the
@@ -416,7 +418,7 @@ body (400 with one of the codes above), then the name (409
 |---|---|
 | `entitled` | The license allows editing: Enterprise, active or in grace. |
 | `editable` | The license allows editing and you hold `roles:update`. |
-| `edition` | `community` or `enterprise`. |
+| `edition` | `community`, `team` or `enterprise`. |
 | `status` | `community`, `active`, `grace` or `lapsed`. |
 | `catalogue` | Every organization and workspace permission, with its scope and whether a custom role may include it. Server permissions aren't listed. |
 | `roles` | The organization's custom roles. `permissions` includes the base permission, and `members` counts the active organization and workspace memberships that hold the role. |
