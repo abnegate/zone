@@ -599,8 +599,8 @@ anywhere and is renewed by pasting, as before.
 3. The signer verifies the key and reads its subscription from Polar. When
    the subscription is `active` and its current period ends later than the
    key, or ends at the same time with a different seat count, it signs a key
-   for that period and returns it. A period that starts at or after the key's
-   expiry is signed only once it's three days old, so that Polar has
+   for that period and returns it. Any period other than the one the key was
+   issued for is signed only once it's three days old, so that Polar has
    [collected its payment](#waiting-for-payment). Otherwise it answers that
    there's nothing newer yet, or that the subscription is not renewing.
 4. zone-server checks the new key and installs it in place of the old one,
@@ -740,7 +740,7 @@ the old one.
 
 | Status | Body | Meaning | Zone records |
 |---|---|---|---|
-| `200` | `{"license":"<new key>"}` | A new key was signed. | `renewed`, or `rejected` if the body can't be read or the key fails Zone's check |
+| `200` | `{"license":"<new key>"}` | A new key was signed. | `renewed`; `rejected` if the body isn't a renewed key or the key fails Zone's check; `unreachable` if the body is over 64 KiB or can't be read in full |
 | `204` | | Nothing newer to issue yet: the subscription is `active` but the key already covers its current period and seats, its new period is less than three days old and [still settling](#waiting-for-payment), or it's `trialing`. | `current` |
 | `400` | | The body can't be read: invalid JSON, no `license` field, or a missing or non-JSON `Content-Type`. | `refused` |
 | `404` | | Renewal is off on this signer: `POLAR_ACCESS_TOKEN` is unset. | `unreachable` |
@@ -760,8 +760,8 @@ the old one.
 | `current` | The signer had nothing newer yet. | Nothing; Zone asks again the next day. |
 | `ended` | The subscription is not renewing: it was cancelled or has ended, a payment failed, or its product isn't sold any more. | The key runs to its expiry and its grace period. Zone keeps asking daily while the key is due, so a failed payment that's settled in Polar renews by itself. Otherwise paste a new key if you buy again. |
 | `refused` | The signer, or something in front of it, refused the request with a `4xx` other than `404`, `408`, `410` or `429`. | Usually a proxy or bot filter between the server and the signer. Otherwise ask whoever sold you the license. |
-| `rejected` | The signer answered `200` with a body Zone can't read, or with a key Zone won't install: it doesn't verify with this release's keyring, names another customer or subscription, expires earlier than the installed key, has the same id, or has already lapsed. Zone keeps the installed key. | If the seller has moved to a new signing key, upgrade Zone to a release that trusts it. Otherwise ask the seller. |
-| `unreachable` | No usable answer: the signer couldn't be reached, timed out, answered a redirect, a `2xx` other than `200` or `204`, `404`, `408`, `429` or `5xx`, or sent more than 64 KiB. | Check that the server can reach `ZONE_LICENSE_RENEWAL_URL`, through the proxy if it has one. Zone asks again the next day. |
+| `rejected` | The signer answered `200` with a body that isn't a renewed key, or with a key Zone won't install: it doesn't verify with this release's keyring, names another customer or subscription, expires earlier than the installed key, has the same id, or has already lapsed. Zone keeps the installed key. | If the seller has moved to a new signing key, upgrade Zone to a release that trusts it. Otherwise ask the seller. |
+| `unreachable` | No usable answer: the signer couldn't be reached, timed out, answered a redirect, a `2xx` other than `200` or `204`, `404`, `408`, `429` or `5xx`, or sent a `200` body over 64 KiB or one Zone couldn't read in full. | Check that the server can reach `ZONE_LICENSE_RENEWAL_URL`, through the proxy if it has one. Zone asks again the next day. |
 
 zone-server logs each attempt with its outcome and the license ids involved,
 never the key itself. A renewed key that arrives after an admin pasted or
