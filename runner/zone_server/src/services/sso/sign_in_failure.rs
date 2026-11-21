@@ -23,6 +23,8 @@ pub enum SignInFailure {
     Stale,
     #[error("Too many sign-ins are waiting for the identity provider")]
     Busy,
+    #[error("Too many SAML responses are being checked at once")]
+    Overloaded,
     #[error("The SAML response check stopped before it finished: {0}")]
     Interrupted(tokio::task::JoinError),
 }

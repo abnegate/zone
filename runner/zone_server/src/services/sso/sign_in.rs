@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::http::HeaderMap;
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -62,9 +64,11 @@ pub async fn authorize(state: &AppState, provider_id: Uuid) -> Result<Start, Sig
     }
 }
 
-/// A refused response discards its attempt, so it can't be retried against the same request.
+/// The post claims its attempt before anything else, so a request has one response checked however
+/// many posts carry its state. A refused response discards the attempt, so it can't be retried
+/// against the same request; a post dropped mid-check leaves it claimed until it expires.
 pub async fn assert(state: &AppState, posted: &Posted<'_>) -> Result<Handoff, SignInFailure> {
-    let attempt = attempts::requested(state.db(), posted.state)
+    let attempt = attempts::claim(state.db(), posted.state)
         .await?
         .ok_or(Error::StateInvalid)?;
     match hand_off(state, &attempt, posted.response).await {
@@ -96,8 +100,13 @@ async fn hand_off(
     let request_id = attempt.request_id.clone().ok_or(Error::StateInvalid)?;
     let service = service_provider(&state.config().app_base_url);
     let response = response.to_owned();
+    let permit = Arc::clone(state.saml_semaphore())
+        .try_acquire_owned()
+        .map_err(|_| SignInFailure::Overloaded)?;
     let consumed = tokio::task::spawn_blocking(move || {
-        saml::consume(&provider, &service, &request_id, &response, Utc::now())
+        let consumed = saml::consume(&provider, &service, &request_id, &response, Utc::now());
+        drop(permit);
+        consumed
     })
     .await
     .map_err(SignInFailure::Interrupted)??;

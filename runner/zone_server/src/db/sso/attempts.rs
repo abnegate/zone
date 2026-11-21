@@ -100,11 +100,14 @@ pub async fn issue_request(
     .await
 }
 
-pub async fn requested(executor: impl PgExecutor<'_>, state: &str) -> DbResult<Option<Attempt>> {
+/// `None` unless the request is live and no post has claimed it yet: the first post for a state
+/// takes it, so posts racing with the same state can't each have their response checked.
+pub async fn claim(executor: impl PgExecutor<'_>, state: &str) -> DbResult<Option<Attempt>> {
     let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM sso_attempts \
+        "UPDATE sso_attempts SET claimed_at = now() \
          WHERE state_hash = $1 AND expires_at > now() \
-           AND request_id IS NOT NULL AND code_hash IS NULL"
+           AND request_id IS NOT NULL AND claimed_at IS NULL \
+         RETURNING {COLUMNS}"
     )))
     .bind(hash_token(state))
     .fetch_optional(executor)
@@ -112,7 +115,8 @@ pub async fn requested(executor: impl PgExecutor<'_>, state: &str) -> DbResult<O
     Ok(row.map(Attempt::from))
 }
 
-/// False when the attempt is gone, expired or already asserted: a response is accepted once.
+/// False when the attempt is gone, expired, unclaimed or already asserted: a response is accepted
+/// once, and only from the post that claimed the attempt.
 pub async fn assert(
     executor: impl PgExecutor<'_>,
     id: Uuid,
@@ -125,7 +129,7 @@ pub async fn assert(
         "UPDATE sso_attempts \
          SET code_hash = $2, subject = $3, email = $4, display_name = $5, \
              expires_at = least(expires_at, now() + make_interval(secs => $6)) \
-         WHERE id = $1 AND request_id IS NOT NULL AND code_hash IS NULL AND expires_at > now()",
+         WHERE id = $1 AND claimed_at IS NOT NULL AND code_hash IS NULL AND expires_at > now()",
     )
     .bind(id)
     .bind(hash_token(code))
@@ -138,8 +142,7 @@ pub async fn assert(
     Ok(result.rows_affected() == 1)
 }
 
-/// Leaves an asserted attempt alone: a second post for the same request is refused, and must not
-/// take the first post's handoff with it.
+/// Leaves an asserted attempt alone: its handoff is the console's to redeem.
 pub async fn discard(executor: impl PgExecutor<'_>, id: Uuid) -> DbResult<bool> {
     let result = sqlx::query("DELETE FROM sso_attempts WHERE id = $1 AND code_hash IS NULL")
         .bind(id)

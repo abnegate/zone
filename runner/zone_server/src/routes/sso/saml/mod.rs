@@ -123,6 +123,9 @@ pub fn log(failure: &SignInFailure) {
         SignInFailure::Refused(error) => {
             tracing::warn!(?error, code = error.code(), "Refused a SAML sign-in");
         }
+        SignInFailure::Overloaded => {
+            tracing::warn!("Refused a SAML response: every response check is already running");
+        }
         failure => tracing::error!(%failure, "Failed to complete a SAML sign-in"),
     }
 }

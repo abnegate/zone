@@ -606,6 +606,7 @@ CREATE TABLE sso_attempts (
     subject text,
     email text,
     display_name text,
+    claimed_at timestamp with time zone,
     expires_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT sso_attempts_flow_check CHECK (
@@ -617,6 +618,10 @@ CREATE TABLE sso_attempts (
         AND (subject IS NULL) = (email IS NULL)
         AND (code_hash IS NULL OR request_id IS NOT NULL)
         AND (display_name IS NULL OR subject IS NOT NULL)
+    ),
+    CONSTRAINT sso_attempts_claimed_check CHECK (
+        (claimed_at IS NULL OR request_id IS NOT NULL)
+        AND (code_hash IS NULL OR claimed_at IS NOT NULL)
     )
 );
 CREATE INDEX sso_attempts_expires_at_idx ON sso_attempts (expires_at);

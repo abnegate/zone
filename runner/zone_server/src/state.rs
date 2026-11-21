@@ -8,6 +8,7 @@ use abnegate_secret::MasterKey;
 use chrono::Utc;
 use dashmap::DashMap;
 use sqlx::PgPool;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::OnceCell;
@@ -54,6 +55,10 @@ const MAX_CONCURRENT_TRAIN: usize = 1;
 const MAX_CONCURRENT_FRAME_EXTRACT: usize = 4;
 /// Without a sweep, every client the rate limiter has ever seen stays in it.
 const RATE_LIMITER_CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
+
+fn max_concurrent_saml() -> usize {
+    std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
+}
 
 /// The adapters a source can be verified and fetched with.
 ///
@@ -128,6 +133,9 @@ struct AppStateInner {
     /// Clip extracts queue here instead of 429ing, so a dump of hundreds of
     /// videos can run a few ffmpeg jobs at a time.
     pub frame_semaphore: Arc<Semaphore>,
+    /// SAML responses are parsed on the blocking pool, holding many times their size in memory
+    /// before any signature is checked, so one permit per core bounds that peak.
+    pub saml_semaphore: Arc<Semaphore>,
     /// The process's MCP hubs: the instance layer, connected once, and one
     /// per organization, each shared across chat turns.
     pub mcp: Hubs,
@@ -264,6 +272,7 @@ impl AppState {
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
+                saml_semaphore: Arc::new(Semaphore::new(max_concurrent_saml())),
                 mcp,
                 github: OnceLock::new(),
                 network_denial: OnceCell::new(),
@@ -354,6 +363,11 @@ impl AppState {
     /// Permits for clip extracts. Waiters queue rather than 429.
     pub fn frame_semaphore(&self) -> &Arc<Semaphore> {
         &self.inner.frame_semaphore
+    }
+
+    /// Permits for checking SAML responses. A post that finds none is refused, not queued.
+    pub fn saml_semaphore(&self) -> &Arc<Semaphore> {
+        &self.inner.saml_semaphore
     }
 
     /// Get the sync registry
@@ -1045,6 +1059,10 @@ mod tests {
         assert_eq!(
             state.frame_semaphore().available_permits(),
             MAX_CONCURRENT_FRAME_EXTRACT
+        );
+        assert_eq!(
+            state.saml_semaphore().available_permits(),
+            max_concurrent_saml()
         );
         assert_eq!(
             state

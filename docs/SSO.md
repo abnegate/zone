@@ -839,9 +839,17 @@ there and refresh the metadata in Zone again. See
 4. The server runs the checks in [What Zone checks](#what-zone-checks) and
    applies the provider's policy (email present, in an allowed domain). It
    does the XML parsing and signature checks on a blocking worker thread,
-   so a slow response never holds up other requests. Each attempt can be
-   answered once: if a check fails, the attempt is discarded, unless another
-   post for the same attempt already succeeded, whose handoff is kept.
+   so a slow response never holds up other requests. Each attempt admits
+   one post: the first post for a `RelayState` claims the attempt before its
+   response is read, and any other post for it, even one arriving at the
+   same moment, gets `sso_state_invalid` without its response being parsed.
+   If a check fails, the claimed attempt is discarded. If the browser drops
+   the connection mid-check, the attempt stays claimed and simply expires.
+   The server checks at most one response per CPU core at a time, across
+   every provider, because parsing holds many times the response's size in
+   memory before its signature is known. A post that arrives while every
+   check is running isn't queued: its attempt is discarded and the browser
+   gets `sso_sign_in_failed`, and the person starts again.
 5. On success, the server redirects the browser with `303 See Other` to
    `{APP_BASE_URL}/sso/callback?state=…&code=…`, with a one-time handoff
    code that expires after 2 minutes. On failure, it redirects to
@@ -1127,11 +1135,11 @@ each one.
 | `sso_client_id_invalid` | The client ID is empty or longer than 255 characters. | Copy the client ID from the provider again. |
 | `sso_client_secret_invalid` | The client secret is empty. | Paste the secret's value. |
 | `sso_domain_invalid` | An allowed domain isn't a plain domain name. | Use domains such as `acme.com`, without `@` or `*`. |
-| `sso_state_invalid` | The sign-in attempt is unknown, was already used, or is more than 10 minutes old. For SAML, also: the response wasn't started from Zone (IdP-initiated), it was posted twice, the post was over 1 MiB or its `RelayState` over 80 bytes, the handoff code was wrong or more than 2 minutes old, or an admin changed the provider's entity ID, single sign-on URL or certificates before the console redeemed the code. | Start again from Zone's sign-in page, not from the identity provider's dashboard. |
+| `sso_state_invalid` | The sign-in attempt is unknown, was already used, or is more than 10 minutes old. For SAML, also: the response wasn't started from Zone (IdP-initiated), it was posted twice (including twice at once), the post was over 1 MiB or its `RelayState` over 80 bytes, the handoff code was wrong or more than 2 minutes old, or an admin changed the provider's entity ID, single sign-on URL or certificates before the console redeemed the code. | Start again from Zone's sign-in page, not from the identity provider's dashboard. |
 | `sso_metadata_invalid` | Zone couldn't fetch or use the SAML metadata. The message names the problem. | The metadata URL uses `https` and doesn't redirect. The document is a single `EntityDescriptor` with an `IDPSSODescriptor`, an HTTP-Redirect `SingleSignOnService` and an RSA signing certificate of at least 2048 bits. See [Metadata](#metadata). Send either a metadata URL or metadata XML, not both. |
 | `sso_assertion_invalid` | The SAML response failed a check: its signature, audience, recipient, destination, issuer, time limits, subject, or it was replayed or encrypted. The person sees a general message and the server log has the reason. | See [What Zone checks](#what-zone-checks). The identity provider uses Zone's exact entity ID and ACS URL, signs with SHA-256 and doesn't encrypt. The metadata in Zone is current after a certificate change. The Zone server's clock is correct. |
 | `sso_sign_in_refused` | The identity provider answered with a status other than Success. The server log has the status. | The person is assigned to the app at the identity provider. |
-| `sso_sign_in_failed` | Zone couldn't finish a SAML sign-in for a reason on the server's side, such as its database being unavailable or a stored provider setting it can't read. | The server log. Try again. |
+| `sso_sign_in_failed` | Zone couldn't finish a SAML sign-in for a reason on the server's side, such as its database being unavailable, a stored provider setting it can't read, or every SAML response check (one per CPU core) already running. | The server log. Try again. |
 | `sso_domain_required` | A SAML provider was saved without allowed domains. | Add at least one allowed domain. |
 | `sso_verified_email_unsupported` | A SAML provider was saved with `require_verified_email: true`. | Leave it out or set it to `false`. See [Allowed domains and verified email for SAML](#allowed-domains-and-verified-email-for-saml). |
 | `sso_protocol_mismatch` | A request set a field that belongs to the other protocol, such as a client secret on a SAML provider or a metadata URL on an OIDC provider. | Send only the fields for the provider's protocol. See [API](#api). |

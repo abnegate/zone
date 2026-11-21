@@ -222,6 +222,7 @@ async fn a_refusal_names_its_code_and_every_other_failure_is_a_failed_sign_in() 
         ),
         (SignInFailure::Stale, SIGN_IN_FAILED),
         (SignInFailure::Busy, SIGN_IN_FAILED),
+        (SignInFailure::Overloaded, SIGN_IN_FAILED),
         (SignInFailure::Interrupted(interrupted), SIGN_IN_FAILED),
     ];
     for (failure, expected) in cases {
@@ -239,6 +240,13 @@ fn a_refused_status_is_logged_escaped() {
     assert!(!logged.contains('\u{1b}'), "{logged}");
     assert!(logged.contains("urn:x\\n2026"), "{logged}");
     assert!(logged.contains(SIGN_IN_REFUSED), "{logged}");
+}
+
+#[test]
+fn an_overloaded_check_is_logged_as_a_warning() {
+    let ((), logged) = captured(|| log(&SignInFailure::Overloaded));
+    assert!(logged.contains("WARN"), "{logged}");
+    assert!(!logged.contains("ERROR"), "{logged}");
 }
 
 #[test]

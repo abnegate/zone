@@ -3,7 +3,8 @@
 //! seen and the enforcement setting.
 
 use abnegate_secret::{MasterKey, SecretValue};
-use chrono::{TimeDelta, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
+use futures::future::join_all;
 use reqwest::Url;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -36,6 +37,7 @@ const CONNECTION_CHECK: &str = "sso_providers_connection_check";
 const PROTOCOL_CHECK: &str = "sso_providers_protocol_check";
 const FLOW_CHECK: &str = "sso_attempts_flow_check";
 const ASSERTED_CHECK: &str = "sso_attempts_asserted_check";
+const CLAIMED_CHECK: &str = "sso_attempts_claimed_check";
 const REQUEST_ID_KEY: &str = "sso_attempts_request_id_key";
 const OIDC: &str = "oidc";
 const SAML: &str = "saml";
@@ -47,6 +49,7 @@ const METADATA_URL: &str = "https://acme.okta.com/app/exk1zone/sso/saml/metadata
 const CERTIFICATE: &str = "MIIDazCCAlOgAwIBAgIUZone";
 const ROTATED_CERTIFICATE: &str = "MIIDazCCAlOgAwIBAgIURotated";
 const REQUEST_ID: &str = "_8f2c1d0e9b7a";
+const CLAIMANTS: usize = 16;
 const HANDOFF_CODE: &str = "one-time-handoff-code";
 const SUBJECT: &str = "00u1ada";
 const EMAIL: &str = "ada@acme.com";
@@ -1076,26 +1079,23 @@ async fn a_request_attempt_is_asserted_once_then_consumed_with_what_was_asserted
         .unwrap();
     assert_eq!(hashes, [hash_token(&state)]);
 
-    let requested = attempts::requested(fixture.pool(), &state)
+    let claimed = attempts::claim(fixture.pool(), &state)
         .await
         .unwrap()
         .expect("a live request");
-    assert_eq!(requested.provider_id, provider.id);
-    assert_eq!(requested.request_id.as_deref(), Some(REQUEST_ID));
-    assert_eq!(requested.nonce, None);
-    assert_eq!(requested.verifier, None);
-    assert_eq!(requested.asserted, None);
-    assert_eq!(requested.expires_at, expires_at);
+    assert_eq!(claimed.provider_id, provider.id);
+    assert_eq!(claimed.request_id.as_deref(), Some(REQUEST_ID));
+    assert_eq!(claimed.nonce, None);
+    assert_eq!(claimed.verifier, None);
+    assert_eq!(claimed.asserted, None);
+    assert_eq!(claimed.expires_at, expires_at);
     assert_eq!(
-        attempts::requested(fixture.pool(), &state)
-            .await
-            .unwrap()
-            .as_ref(),
-        Some(&requested),
-        "looking a request up leaves it in place"
+        attempts::claim(fixture.pool(), &state).await.unwrap(),
+        None,
+        "a request is claimed once"
     );
     assert_eq!(
-        attempts::requested(fixture.pool(), "an-unknown-state")
+        attempts::claim(fixture.pool(), "an-unknown-state")
             .await
             .unwrap(),
         None
@@ -1104,7 +1104,7 @@ async fn a_request_attempt_is_asserted_once_then_consumed_with_what_was_asserted
     assert!(
         attempts::assert(
             fixture.pool(),
-            requested.id,
+            claimed.id,
             HANDOFF_CODE,
             SUBJECT,
             EMAIL,
@@ -1116,7 +1116,7 @@ async fn a_request_attempt_is_asserted_once_then_consumed_with_what_was_asserted
     assert!(
         !attempts::assert(
             fixture.pool(),
-            requested.id,
+            claimed.id,
             "a-second-code",
             "another-subject",
             "eve@acme.com",
@@ -1127,7 +1127,7 @@ async fn a_request_attempt_is_asserted_once_then_consumed_with_what_was_asserted
         "a request is asserted once"
     );
     assert_eq!(
-        attempts::requested(fixture.pool(), &state).await.unwrap(),
+        attempts::claim(fixture.pool(), &state).await.unwrap(),
         None,
         "an asserted request is no longer waiting for a response"
     );
@@ -1136,7 +1136,7 @@ async fn a_request_attempt_is_asserted_once_then_consumed_with_what_was_asserted
         .await
         .unwrap()
         .expect("an asserted attempt");
-    assert_eq!(consumed.id, requested.id);
+    assert_eq!(consumed.id, claimed.id);
     assert_eq!(consumed.request_id.as_deref(), Some(REQUEST_ID));
     assert_eq!(consumed.nonce, None);
     assert_eq!(
@@ -1164,6 +1164,89 @@ async fn a_request_attempt_is_asserted_once_then_consumed_with_what_was_asserted
 }
 
 #[tokio::test]
+async fn racing_claims_for_one_request_admit_exactly_one() {
+    let fixture = Fixture::new().await;
+    let provider = fixture.provider("0oa1").await;
+    let state = authorization().state;
+    attempts::issue_request(fixture.pool(), provider.id, &state, REQUEST_ID)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let claims = join_all((0..CLAIMANTS).map(|_| attempts::claim(fixture.pool(), &state))).await;
+
+    let claimed: Vec<_> = claims.into_iter().filter_map(Result::unwrap).collect();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].request_id.as_deref(), Some(REQUEST_ID));
+    let stamped: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT claimed_at FROM sso_attempts WHERE id = $1")
+            .bind(claimed[0].id)
+            .fetch_one(fixture.pool())
+            .await
+            .unwrap();
+    assert!(stamped.is_some());
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_unclaimed_request_cannot_be_asserted() {
+    let fixture = Fixture::new().await;
+    let provider = fixture.provider("0oa1").await;
+    let state = authorization().state;
+    attempts::issue_request(fixture.pool(), provider.id, &state, REQUEST_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    let id: Uuid = sqlx::query_scalar("SELECT id FROM sso_attempts WHERE state_hash = $1")
+        .bind(hash_token(&state))
+        .fetch_one(fixture.pool())
+        .await
+        .unwrap();
+
+    assert!(
+        !attempts::assert(fixture.pool(), id, HANDOFF_CODE, SUBJECT, EMAIL, None)
+            .await
+            .unwrap(),
+        "only the post that claimed a request asserts it"
+    );
+    assert!(
+        attempts::claim(fixture.pool(), &state)
+            .await
+            .unwrap()
+            .is_some(),
+        "the refused assert left the request waiting"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_claimed_request_left_unasserted_never_hands_off() {
+    let fixture = Fixture::new().await;
+    let provider = fixture.provider("0oa1").await;
+    let state = authorization().state;
+    attempts::issue_request(fixture.pool(), provider.id, &state, REQUEST_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    attempts::claim(fixture.pool(), &state)
+        .await
+        .unwrap()
+        .expect("a live request");
+
+    assert_eq!(
+        attempts::claim(fixture.pool(), &state).await.unwrap(),
+        None,
+        "a post dropped mid-check can't be followed by another"
+    );
+    let consumed = attempts::consume(fixture.pool(), &state)
+        .await
+        .unwrap()
+        .expect("the claimed attempt until it expires");
+    assert_eq!(consumed.asserted, None, "nothing for the console to redeem");
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn an_assertion_without_a_display_name_is_stored_without_one() {
     let fixture = Fixture::new().await;
     let provider = fixture.provider("0oa1").await;
@@ -1172,7 +1255,7 @@ async fn an_assertion_without_a_display_name_is_stored_without_one() {
         .await
         .unwrap()
         .expect("room for the attempt");
-    let requested = attempts::requested(fixture.pool(), &state)
+    let claimed = attempts::claim(fixture.pool(), &state)
         .await
         .unwrap()
         .unwrap();
@@ -1180,7 +1263,7 @@ async fn an_assertion_without_a_display_name_is_stored_without_one() {
     assert!(
         attempts::assert(
             fixture.pool(),
-            requested.id,
+            claimed.id,
             HANDOFF_CODE,
             SUBJECT,
             EMAIL,
@@ -1213,7 +1296,7 @@ async fn the_handoff_never_outlives_the_request_it_came_from() {
         .execute(fixture.pool())
         .await
         .unwrap();
-    let requested = attempts::requested(fixture.pool(), &state)
+    let claimed = attempts::claim(fixture.pool(), &state)
         .await
         .unwrap()
         .unwrap();
@@ -1221,7 +1304,7 @@ async fn the_handoff_never_outlives_the_request_it_came_from() {
     assert!(
         attempts::assert(
             fixture.pool(),
-            requested.id,
+            claimed.id,
             HANDOFF_CODE,
             SUBJECT,
             EMAIL,
@@ -1235,7 +1318,7 @@ async fn the_handoff_never_outlives_the_request_it_came_from() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(consumed.expires_at, requested.expires_at);
+    assert_eq!(consumed.expires_at, claimed.expires_at);
     fixture.cleanup().await;
 }
 
@@ -1253,7 +1336,7 @@ async fn only_a_live_request_attempt_can_be_asserted() {
         .await
         .unwrap()
         .unwrap();
-    let expired_id: Uuid = attempts::requested(fixture.pool(), &expired)
+    let expired_id: Uuid = attempts::claim(fixture.pool(), &expired)
         .await
         .unwrap()
         .unwrap()
@@ -1270,14 +1353,12 @@ async fn only_a_live_request_attempt_can_be_asserted() {
         .unwrap();
 
     assert_eq!(
-        attempts::requested(fixture.pool(), &oidc.state)
-            .await
-            .unwrap(),
+        attempts::claim(fixture.pool(), &oidc.state).await.unwrap(),
         None,
         "an OIDC attempt is never waiting for a SAML response"
     );
     assert_eq!(
-        attempts::requested(fixture.pool(), &expired).await.unwrap(),
+        attempts::claim(fixture.pool(), &expired).await.unwrap(),
         None
     );
     for id in [oidc_id, expired_id, Uuid::new_v4()] {
@@ -1311,26 +1392,15 @@ async fn a_discarded_request_attempt_is_gone() {
         .await
         .unwrap()
         .unwrap();
-    let requested = attempts::requested(fixture.pool(), &state)
+    let claimed = attempts::claim(fixture.pool(), &state)
         .await
         .unwrap()
         .unwrap();
 
-    assert!(
-        attempts::discard(fixture.pool(), requested.id)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !attempts::discard(fixture.pool(), requested.id)
-            .await
-            .unwrap()
-    );
+    assert!(attempts::discard(fixture.pool(), claimed.id).await.unwrap());
+    assert!(!attempts::discard(fixture.pool(), claimed.id).await.unwrap());
 
-    assert_eq!(
-        attempts::requested(fixture.pool(), &state).await.unwrap(),
-        None
-    );
+    assert_eq!(attempts::claim(fixture.pool(), &state).await.unwrap(), None);
     assert_eq!(
         attempts::consume(fixture.pool(), &state).await.unwrap(),
         None
@@ -1348,14 +1418,14 @@ async fn discarding_an_asserted_attempt_keeps_its_handoff() {
         .await
         .unwrap()
         .unwrap();
-    let requested = attempts::requested(fixture.pool(), &state)
+    let claimed = attempts::claim(fixture.pool(), &state)
         .await
         .unwrap()
         .unwrap();
     assert!(
         attempts::assert(
             fixture.pool(),
-            requested.id,
+            claimed.id,
             HANDOFF_CODE,
             SUBJECT,
             EMAIL,
@@ -1366,9 +1436,7 @@ async fn discarding_an_asserted_attempt_keeps_its_handoff() {
     );
 
     assert!(
-        !attempts::discard(fixture.pool(), requested.id)
-            .await
-            .unwrap(),
+        !attempts::discard(fixture.pool(), claimed.id).await.unwrap(),
         "a refused second post must not end the first post's sign-in"
     );
 
@@ -1390,14 +1458,14 @@ async fn clearing_a_provider_ends_only_its_own_attempts() {
         .await
         .unwrap()
         .unwrap();
-    let requested = attempts::requested(fixture.pool(), &asserted)
+    let claimed = attempts::claim(fixture.pool(), &asserted)
         .await
         .unwrap()
         .unwrap();
     assert!(
         attempts::assert(
             fixture.pool(),
-            requested.id,
+            claimed.id,
             HANDOFF_CODE,
             SUBJECT,
             EMAIL,
@@ -1502,6 +1570,16 @@ async fn an_attempt_row_is_either_an_oidc_or_a_saml_flow() {
             "'n', 'v', 'h', 's', 'e'",
             ASSERTED_CHECK,
         ),
+        (
+            "nonce, code_verifier, claimed_at",
+            "'n', 'v', now()",
+            CLAIMED_CHECK,
+        ),
+        (
+            "request_id, code_hash, subject, email",
+            "'_r7', 'h', 's', 'e'",
+            CLAIMED_CHECK,
+        ),
     ];
     for (columns, values, constraint) in refusals {
         let error = insert(columns, values).await.unwrap_err();
@@ -1512,15 +1590,18 @@ async fn an_attempt_row_is_either_an_oidc_or_a_saml_flow() {
         );
     }
     insert(
-        "request_id, code_hash, subject, email",
-        "'_r7', 'h', 's', 'e'",
+        "request_id, claimed_at, code_hash, subject, email",
+        "'_r8', now(), 'h', 's', 'e'",
     )
     .await
     .expect("an asserted request without a display name");
+    insert("request_id, claimed_at", "'_r9', now()")
+        .await
+        .expect("a claimed request waiting for its response check");
     insert("nonce, code_verifier", "'n', 'v'")
         .await
         .expect("an OIDC attempt");
-    assert_eq!(fixture.count("sso_attempts").await, 2);
+    assert_eq!(fixture.count("sso_attempts").await, 3);
     fixture.cleanup().await;
 }
 
@@ -1585,7 +1666,7 @@ async fn recording_an_assertion_prunes_the_expired_ones() {
             .await
             .unwrap();
     assert_eq!(kept, [ASSERTION_ID, "_assertion-3"]);
-    let renewed: chrono::DateTime<Utc> =
+    let renewed: DateTime<Utc> =
         sqlx::query_scalar("SELECT expires_at FROM sso_assertions WHERE assertion_id = $1")
             .bind(ASSERTION_ID)
             .fetch_one(fixture.pool())

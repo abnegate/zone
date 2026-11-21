@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -11,6 +12,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{TimeDelta, Utc};
 use flate2::read::DeflateDecoder;
+use futures::future::join_all;
 use reqwest::Url;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -22,10 +24,11 @@ use zone_enterprise::sso::saml::{Certificate, Document, ServiceProvider, service
 use zone_enterprise::sso::testing::{EMAIL, SUBJECT};
 use zone_enterprise::sso::{
     ASSERTION_INVALID, DISPLAY_NAME_INVALID, DOMAIN_NOT_ALLOWED, DOMAIN_REQUIRED, EMAIL_CONFLICT,
-    METADATA_INVALID, PROTOCOL_MISMATCH, PROVIDER_DUPLICATE, PROVIDER_NOT_FOUND, SIGN_IN_REFUSED,
-    SSO_REQUIRED, STATE_INVALID, VERIFIED_EMAIL_UNSUPPORTED,
+    METADATA_INVALID, PROTOCOL_MISMATCH, PROVIDER_DUPLICATE, PROVIDER_NOT_FOUND, SIGN_IN_FAILED,
+    SIGN_IN_REFUSED, SSO_REQUIRED, STATE_INVALID, VERIFIED_EMAIL_UNSUPPORTED,
 };
 use zone_server::db::audit::actions;
+use zone_server::db::sso::attempts;
 use zone_server::routes::sso::saml::{BODY_LIMIT, RELAY_STATE_LIMIT};
 use zone_server::utils::crypto::hash_token;
 
@@ -60,6 +63,7 @@ const ASSERTION_START: &str = "<saml2:Assertion ";
 const ASSERTION_END: &str = "</saml2:Assertion>";
 const ATTACKER: &str = "attacker";
 const ATTACKER_EMAIL: &str = "attacker@acme.com";
+const CONCURRENT_POSTS: usize = 16;
 
 type Adjustment = Box<dyn FnOnce(Options) -> Options>;
 
@@ -1028,6 +1032,87 @@ async fn a_relay_state_is_asserted_only_once() {
     let again = server.answer(&started, unchanged).await;
 
     assert_failed(&again, &started.state, STATE_INVALID);
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn concurrent_posts_for_one_relay_state_check_only_one_response() {
+    let server = Server::new().await;
+    let started = server.start().await;
+    let response = testing::response(&options(&started));
+
+    let posted =
+        join_all((0..CONCURRENT_POSTS).map(|_| server.acs(Some(&started.state), &response))).await;
+
+    let redirects: Vec<Redirect> = posted.iter().map(redirected).collect();
+    let (handed_off, refused): (Vec<&Redirect>, Vec<&Redirect>) = redirects
+        .iter()
+        .partition(|redirect| redirect.parameters.contains_key(CODE));
+    assert_eq!(
+        handed_off.len(),
+        1,
+        "{:?}",
+        redirects
+            .iter()
+            .map(|redirect| &redirect.parameters)
+            .collect::<Vec<_>>()
+    );
+    for redirect in refused {
+        assert_failed(redirect, &started.state, STATE_INVALID);
+    }
+    server
+        .callback(&started.state, &handed_off[0].parameters[CODE])
+        .await
+        .assert_status(StatusCode::OK);
+    assert_eq!(server.users_with_email(EMAIL).await, 1);
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_sign_in_whose_post_was_dropped_mid_check_cannot_be_finished() {
+    let server = Server::new().await;
+    let started = server.start().await;
+    attempts::claim(server.fixture.pool(), &started.state)
+        .await
+        .unwrap()
+        .expect("a live request");
+
+    let posted = server.answer(&started, unchanged).await;
+
+    assert_failed(&posted, &started.state, STATE_INVALID);
+    refused(
+        &server.callback(&started.state, "a-guessed-code").await,
+        StatusCode::BAD_REQUEST,
+        STATE_INVALID,
+    );
+    assert_eq!(server.attempts(&started.state).await, 0);
+    assert_eq!(server.users_with_email(EMAIL).await, 0);
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_response_is_refused_unchecked_while_every_check_is_running() {
+    let server = Server::new().await;
+    let semaphore = Arc::clone(server.fixture.client.state().saml_semaphore());
+    let permits = semaphore.available_permits();
+    let started = server.start().await;
+    let held = Arc::clone(&semaphore)
+        .acquire_many_owned(u32::try_from(permits).unwrap())
+        .await
+        .unwrap();
+
+    let busy = server.answer(&started, unchanged).await;
+
+    assert_failed(&busy, &started.state, SIGN_IN_FAILED);
+    assert_eq!(server.attempts(&started.state).await, 0);
+    assert_eq!(server.users_with_email(EMAIL).await, 0);
+    drop(held);
+    assert_eq!(semaphore.available_permits(), permits);
+    let retried = server.answer(&started, unchanged).await;
+    assert_failed(&retried, &started.state, STATE_INVALID);
+
+    server.signed_in(unchanged).await;
+    assert_eq!(semaphore.available_permits(), permits);
     server.cleanup().await;
 }
 
