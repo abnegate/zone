@@ -1176,6 +1176,23 @@ fn several_email_values_mean_no_email() {
 }
 
 #[test]
+fn an_email_with_several_ats_or_whitespace_means_no_email() {
+    for email in [
+        "attacker@evil.test@acme.com",
+        "@@acme.com",
+        "jane doe@acme.com",
+        "jane@acme.com&#10;x@acme.com",
+        "jane&#9;@acme.com",
+    ] {
+        let xml = spliced(
+            &format!("<saml2:AttributeValue xsi:type=\"xs:string\">{EMAIL}</saml2:AttributeValue>"),
+            &format!("<saml2:AttributeValue xsi:type=\"xs:string\">{email}</saml2:AttributeValue>"),
+        );
+        assert_eq!(consume_xml(&xml), Err(Error::EmailMissing), "{email}");
+    }
+}
+
+#[test]
 fn an_email_outside_the_allowed_domains_is_refused() {
     assert_eq!(
         outcome(&Options {
