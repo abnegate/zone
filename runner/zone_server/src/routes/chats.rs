@@ -272,7 +272,7 @@ async fn chat_with_messages(
     chat: chats::ChatRow,
 ) -> ChatWithMessagesResponse {
     let route = match chat.workspace_id {
-        Some(_) => Some(Route::for_chat(state, &chat).await),
+        Some(_) => Some(Route::preview_chat(state, &chat).await),
         None => None,
     };
     chat_on_route(state, auth, chat, route).await
@@ -621,7 +621,7 @@ pub async fn create(
         Ok(choice) => choice,
         Err(refusal) => return provider::refused(refusal),
     };
-    let route = Route::for_workspace(&state, req.workspace_id).await;
+    let route = Route::preview_workspace(&state, req.workspace_id).await;
     if let Some(refusal) =
         workspace_refusal(&state, &route, &req.model_name, choice.is_some(), asked).await
     {
@@ -834,7 +834,7 @@ async fn model_refusal(
             );
         }
     };
-    let route = Route::for_workspace(state, workspace).await;
+    let route = Route::preview_workspace(state, workspace).await;
     let asked = Asked {
         workspace,
         actor,

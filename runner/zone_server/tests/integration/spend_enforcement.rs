@@ -1,13 +1,15 @@
 //! Budgets held against attributed LiteLLM traffic, end to end: a member's turn over a real
 //! WebSocket and the chat context route are sent under their own derived key and stopped once a
-//! hard budget covering them is used up; coding agents, unlicensed servers and soft budgets are
-//! never stopped; the pull request repair's fallback onto the instance is held like any other
-//! route; and the spend sweep ingests, settles and mails each admin once a month.
+//! hard budget covering them is used up; requests that send no completions, coding agents,
+//! unlicensed servers and soft budgets are never stopped; a key is registered once however many
+//! requests first need it; the pull request repair's fallback onto the instance is held like any
+//! other route; and the spend sweep ingests, settles and mails each admin once a month.
 
 use std::time::Duration;
 
 use abnegate_notify::Fanout;
 use chrono::{Months, TimeDelta, Utc};
+use futures_util::future::join_all;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio_tungstenite::{
@@ -15,7 +17,7 @@ use tokio_tungstenite::{
 };
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, Request, ResponseTemplate};
+use wiremock::{Mock, Request, Respond, ResponseTemplate};
 use zone_enterprise::spend::{BUDGET_EXHAUSTED, Exhausted, Month, Scope, Target};
 use zone_server::config::AgentConfig;
 use zone_server::db::ai_settings::PROVIDER_CLAUDE_CODE;
@@ -27,10 +29,14 @@ use zone_server::db::chats::{self, ChatRow};
 use zone_server::db::organization_members::OrgRole;
 use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::services::route::{Reason, Route};
+use zone_server::services::spend::Standing;
+use zone_server::services::spend::attribution::attribute;
 use zone_server::services::spend::sweep::Sweep;
 
+use crate::common::TestClient;
 use crate::common::agents;
-use crate::common::spend::{Fixture, GENERATE_PATH, MASTER, log};
+use crate::common::logs::capturing;
+use crate::common::spend::{Fixture, GENERATE_PATH, MASTER, Registers, log};
 use crate::common::sso::Account;
 
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -38,6 +44,9 @@ type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 const COMPLETIONS: &str = "/chat/completions";
 const ROUTES: &str = "/v2/model/info";
 const MODEL: &str = "gpt-4o";
+const OTHER_MODEL: &str = "gpt-4o-mini";
+const CONCURRENT: usize = 8;
+const REGISTRATION_DELAY: Duration = Duration::from_millis(200);
 const TITLING: &str = "concise chat title";
 const REPLY: &str = "The tide is in.";
 const FRAME_WAIT: Duration = Duration::from_secs(10);
@@ -170,6 +179,19 @@ impl Chatting {
         (response.status.as_u16(), response.json_value())
     }
 
+    fn http(&self) -> &TestClient {
+        &self.fixture.policy.sso.client
+    }
+
+    /// The owner's chat as `GET /api/chats/{id}` answers it.
+    async fn opened(&self) -> (u16, Value) {
+        let response = self
+            .http()
+            .get_auth(&format!("/api/chats/{}", self.chat), &self.owner().token)
+            .await;
+        (response.status.as_u16(), response.json_value())
+    }
+
     /// The completions the turns asked LiteLLM for, titles left out.
     async fn completions(&self) -> Vec<Request> {
         self.fixture
@@ -287,6 +309,103 @@ async fn a_used_up_hard_workspace_budget_stops_a_members_turn_and_their_draft() 
         "a stopped turn reached LiteLLM"
     );
     chatting.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_used_up_budget_refuses_nothing_that_sends_no_completions() {
+    let chatting = Chatting::new("spend_unsent").await;
+    let fixture = &chatting.fixture;
+    fixture.licensed().await;
+    fixture.charge(&fixture.automation(), OVER).await;
+    fixture.budget(workspace(fixture), LIMIT, true).await;
+    let token = &chatting.owner().token;
+
+    let created = chatting
+        .http()
+        .post_json_auth(
+            "/api/chats",
+            &json!({"workspace_id": fixture.policy.workspace, "title": "Another", "model_name": MODEL}),
+            token,
+        )
+        .await;
+    let changed = chatting
+        .http()
+        .put_json_auth(
+            &format!("/api/chats/{}", chatting.chat),
+            &json!({"model_name": OTHER_MODEL}),
+            token,
+        )
+        .await;
+    let (status, opened) = chatting.opened().await;
+    let frames = chatting.turn("Hello").await;
+
+    assert_eq!(created.status.as_u16(), 201, "{}", created.json_value());
+    assert_eq!(changed.status.as_u16(), 200, "{}", changed.json_value());
+    assert_eq!(status, 200, "{opened}");
+    assert!(
+        !opened["chat"]["context"].is_null(),
+        "an opened chat lost its context to a used-up budget: {opened}"
+    );
+    assert_eq!(last(&frames)["message"], WORKSPACE_SPENT, "{frames:?}");
+    assert!(
+        fixture.received(GENERATE_PATH).await.is_empty(),
+        "a request refused or sending no completions registered a key"
+    );
+    chatting.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_refused_request_is_logged_with_whose_budget_refused_it() {
+    let fixture = Fixture::new("spend_logged").await;
+    fixture.mount_register().await;
+    fixture.licensed().await;
+    fixture.charge(&fixture.automation(), OVER).await;
+    fixture.budget(workspace(&fixture), LIMIT, true).await;
+
+    let (captured, guard) = capturing("zone_server::services::route=info");
+    let route = Route::for_workspace(fixture.state(), fixture.policy.workspace).await;
+    drop(guard);
+
+    assert_eq!(reason(&route), used_up(Scope::Workspace));
+    let logged = captured.text();
+    let line = logged
+        .lines()
+        .find(|line| line.contains("A used-up hard budget refused a request"))
+        .unwrap_or_else(|| panic!("the refusal was not logged: {logged}"));
+    assert!(
+        line.contains(&format!("workspace={}", fixture.policy.workspace))
+            && line.contains("user=None")
+            && line.contains("scope=Workspace"),
+        "{line}"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn concurrent_first_requests_for_one_key_register_it_once() {
+    let fixture = Fixture::new("spend_concurrent").await;
+    fixture.licensed().await;
+    Mock::given(method("POST"))
+        .and(path(GENERATE_PATH))
+        .respond_with(|request: &Request| Registers.respond(request).set_delay(REGISTRATION_DELAY))
+        .expect(1)
+        .mount(&fixture.litellm)
+        .await;
+    let standing = Standing::read(fixture.state()).await;
+    let subject = fixture.subject();
+
+    let endpoints = join_all(
+        (0..CONCURRENT)
+            .map(|_| attribute(fixture.state(), fixture.instance(), &subject, &standing)),
+    )
+    .await;
+
+    let key = fixture.key(&subject);
+    for endpoint in &endpoints {
+        assert_eq!(endpoint.key().expose(), key.secret.expose());
+    }
+    fixture.litellm.verify().await;
+    fixture.cleanup().await;
 }
 
 #[tokio::test]

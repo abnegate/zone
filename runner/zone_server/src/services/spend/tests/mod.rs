@@ -451,6 +451,29 @@ fn the_registry_is_kept_per_litellm_host() {
     assert_eq!(registry::tokens(&host), ["second"]);
 }
 
+#[tokio::test]
+async fn one_registration_runs_at_a_time_for_each_key() {
+    let host = format!("http://holding-{}", Uuid::new_v4());
+    let wait = Duration::from_millis(50);
+
+    let first = registry::hold(&host, "token").await;
+    let blocked = tokio::time::timeout(wait, registry::hold(&host, "token")).await;
+    let other = tokio::time::timeout(wait, registry::hold(&host, "other")).await;
+    drop(first);
+    let released = tokio::time::timeout(wait, registry::hold(&host, "token")).await;
+
+    assert!(blocked.is_err(), "a second registration of one key ran");
+    assert!(other.is_ok(), "another key's registration waited");
+    assert!(
+        released.is_ok(),
+        "a finished registration kept the key held"
+    );
+    assert!(
+        registry::tokens(&host).is_empty(),
+        "holding a key registered it"
+    );
+}
+
 #[test]
 fn a_subject_always_derives_the_same_key() {
     let member = Key::derive(&master(), WORKSPACE, Some(USER));
