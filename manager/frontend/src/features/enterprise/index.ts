@@ -80,6 +80,7 @@ export {
   UNVERIFIED_CODES,
   UnverifiedSchema,
 } from './schemas';
+export { ScimSection } from './scim';
 export { SpendPage } from './spend';
 export { SsoSection } from './sso';
 export type {

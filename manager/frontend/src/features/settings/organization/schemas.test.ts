@@ -108,6 +108,20 @@ describe('organization API schemas', () => {
     expect(AUDIT_RESOURCE_TYPES).toContain('role');
   });
 
+  it('offers the SCIM audit events and resources as filters', () => {
+    for (const action of [
+      'scim_token.created',
+      'scim_token.revoked',
+      'scim_group.mapped',
+      'scim_user.deactivated',
+      'workspace.owner_seated',
+    ] as const) {
+      expect(AUDIT_ACTIONS).toContain(action);
+    }
+    expect(AUDIT_RESOURCE_TYPES).toContain('scim_token');
+    expect(AUDIT_RESOURCE_TYPES).toContain('scim_group');
+  });
+
   it('accepts a members list wrapper', () => {
     const result = OrgMembersResponseSchema.parse({
       members: [
