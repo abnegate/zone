@@ -129,7 +129,7 @@ check, granting, minting, then one log line.
 |---|---|---|
 | `issued` | `200` | A token was minted, perhaps with empty `access` |
 | `disabled` | `404` | `ZONE_REGISTRY_SERVICE` is unset |
-| `unreadable` | `400` | `service` is missing or isn't `ZONE_REGISTRY_SERVICE`, or the query can't be parsed |
+| `unreadable` | `400` | `service` is missing, repeated or isn't `ZONE_REGISTRY_SERVICE`, or a `scope` can't be parsed. Other parameters, such as Docker's `account`, are ignored |
 | a [refusal](#who-gets-in) | `401` or `403` | The gate refused |
 | `limited` | `429` | A [rate limit](#rate-limits-and-client-addresses) tripped; `Retry-After` says how many seconds to wait |
 
@@ -283,7 +283,7 @@ These variables are all optional and add to the ones in
 [LICENSING.md](LICENSING.md#environment). Values are trimmed, a blank value
 counts as unset, and every invalid one is named in the startup error. With
 none of them set, the signer runs exactly as before and both routes answer
-`404`.
+`GET` with `404`; `/token` still answers every other method with `405`.
 
 | Variable | Default | Meaning |
 |---|---|---|
