@@ -174,19 +174,21 @@ pub async fn claim_due(
     .bind(claimant.runner)
     .fetch_all(&mut *transaction)
     .await?;
-    let claims =
-        match due.is_empty() {
-            true => Vec::new(),
-            false => sqlx::query_as::<_, Claim>(
-                "UPDATE projects SET auto_claimed_at = NOW(), auto_claim_id = gen_random_uuid(), \
-               auto_claim_runner_id = (SELECT id FROM fleet_runners WHERE id = $2) \
-             WHERE id = ANY($1) RETURNING id AS project_id, auto_claim_id AS owner",
-            )
-            .bind(&due)
-            .bind(claimant.runner)
-            .fetch_all(&mut *transaction)
-            .await?,
-        };
+    let claims = if due.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, Claim>(
+            "UPDATE projects \
+             SET auto_claimed_at = NOW(), auto_claim_id = gen_random_uuid(), \
+                 auto_claim_runner_id = (SELECT id FROM fleet_runners WHERE id = $2) \
+             WHERE id = ANY($1) \
+             RETURNING id AS project_id, auto_claim_id AS owner",
+        )
+        .bind(&due)
+        .bind(claimant.runner)
+        .fetch_all(&mut *transaction)
+        .await?
+    };
     transaction.commit().await?;
     Ok(claims)
 }

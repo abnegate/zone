@@ -17,6 +17,8 @@ pub enum Feature {
     Spend,
     /// Uncapped membership: without it a server admits at most the Community member cap.
     Members,
+    /// Runner fleet policy: cordoning and revoking runners, a minimum runner version, and the
+    /// labels unattended work needs. Without it every runner takes any work.
     FleetPolicy,
 }
 

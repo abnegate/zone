@@ -604,8 +604,8 @@ async fn a_shortfall_names_what_stops_the_runner() {
     );
     assert_eq!(
         judge(Some(lacking.id), Some(workspace), unattended).await,
-        Some(Shortfall::Missing {
-            labels: set("region=eu")
+        Some(Shortfall::LabelsMissing {
+            missing: set("region=eu")
         })
     );
     assert_eq!(

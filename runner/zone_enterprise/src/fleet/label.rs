@@ -18,9 +18,10 @@ impl Label {
                 || byte.is_ascii_digit()
                 || matches!(byte, b'.' | b'_' | b'-' | b'=' | b'/')
         });
-        match leads && follows && text.len() <= LONGEST {
-            true => Ok(Self(text.to_string())),
-            false => Err(Error::LabelInvalid(text.to_string())),
+        if leads && follows && text.len() <= LONGEST {
+            Ok(Self(text.to_string()))
+        } else {
+            Err(Error::LabelInvalid(text.to_string()))
         }
     }
 

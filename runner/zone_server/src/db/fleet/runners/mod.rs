@@ -21,12 +21,18 @@ use zone_enterprise::fleet::{Labels, Version};
 use crate::db::DbResult;
 use crate::db::fleet::state::State;
 use crate::db::fleet::transition::Transition;
+use crate::db::tasks::ACTIVE_RUN_STATUSES;
 
 /// How recently a runner must have been seen to count as connected.
 pub const CONNECTED: TimeDelta = TimeDelta::seconds(60);
 
-const RUNS: &str = "(SELECT COUNT(*) FROM task_runs run \
-     WHERE run.runner_id = runner.id AND run.status IN ('running', 'waiting')) AS runs";
+/// The live runs of `runner` (`fleet_runners`), as the `runs` column.
+fn runs() -> String {
+    format!(
+        "(SELECT COUNT(*) FROM task_runs run \
+         WHERE run.runner_id = runner.id AND run.status IN {ACTIVE_RUN_STATUSES}) AS runs"
+    )
+}
 
 /// Registers the process `instance` under `name`, or refreshes the row that already holds the
 /// name, keeping its state. `started_at` restarts only when another process takes the name over.
@@ -78,7 +84,8 @@ pub async fn get(executor: impl PgExecutor<'_>, id: Uuid) -> DbResult<Option<Run
 
 pub async fn list(executor: impl PgExecutor<'_>) -> DbResult<Vec<Listed>> {
     sqlx::query_as(AssertSqlSafe(format!(
-        "SELECT {COLUMNS}, {RUNS} FROM fleet_runners runner ORDER BY runner.name"
+        "SELECT {COLUMNS}, {} FROM fleet_runners runner ORDER BY runner.name",
+        runs()
     )))
     .fetch_all(executor)
     .await
@@ -87,7 +94,8 @@ pub async fn list(executor: impl PgExecutor<'_>) -> DbResult<Vec<Listed>> {
 /// Runner `id` as [`list`] gives it, with its live runs.
 pub async fn listed(executor: impl PgExecutor<'_>, id: Uuid) -> DbResult<Option<Listed>> {
     sqlx::query_as(AssertSqlSafe(format!(
-        "SELECT {COLUMNS}, {RUNS} FROM fleet_runners runner WHERE runner.id = $1"
+        "SELECT {COLUMNS}, {} FROM fleet_runners runner WHERE runner.id = $1",
+        runs()
     )))
     .bind(id)
     .fetch_optional(executor)
@@ -171,7 +179,7 @@ pub async fn forget(executor: impl PgExecutor<'_>, offline: TimeDelta) -> DbResu
            AND runner.last_seen_at <= now() - $1 \
            AND NOT EXISTS ( \
                SELECT 1 FROM task_runs run \
-               WHERE run.runner_id = runner.id AND run.status IN ('running', 'waiting') \
+               WHERE run.runner_id = runner.id AND run.status IN {ACTIVE_RUN_STATUSES} \
            ) \
            AND NOT EXISTS ( \
                SELECT 1 FROM chat_leases lease \

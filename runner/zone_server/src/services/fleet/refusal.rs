@@ -9,7 +9,7 @@ pub fn of(shortfall: Shortfall) -> Refusal {
         Shortfall::Cordoned => Refusal::Cordoned,
         Shortfall::Revoked => Refusal::Revoked,
         Shortfall::Outdated { version, minimum } => Refusal::Outdated { version, minimum },
-        Shortfall::Missing { labels } => Refusal::LabelsMissing { missing: labels },
+        Shortfall::LabelsMissing { missing } => Refusal::LabelsMissing { missing },
     }
 }
 
@@ -31,8 +31,8 @@ mod tests {
                 version: Version::parse("1.3.0").unwrap(),
                 minimum: Version::parse("1.4.0").unwrap(),
             },
-            Shortfall::Missing {
-                labels: Labels::parse_list("gpu").unwrap(),
+            Shortfall::LabelsMissing {
+                missing: Labels::parse_list("gpu").unwrap(),
             },
         ]
     }
@@ -43,7 +43,7 @@ mod tests {
             Shortfall::Cordoned => RUNNER_CORDONED,
             Shortfall::Revoked => RUNNER_REVOKED,
             Shortfall::Outdated { .. } => RUNNER_OUTDATED,
-            Shortfall::Missing { .. } => LABELS_MISSING,
+            Shortfall::LabelsMissing { .. } => LABELS_MISSING,
         }
     }
 

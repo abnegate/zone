@@ -8,7 +8,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::auth::Permission;
-use crate::db::fleet::claim::Claim;
+use crate::db::fleet::claim::Outcome;
 use crate::db::fleet::claimant::Claimant;
 use crate::db::fleet::eligibility::{self, PLACEMENT, UNATTENDED};
 use crate::db::fleet::mode::Mode;
@@ -1550,7 +1550,7 @@ pub async fn claim_task_run(
     run_id: Uuid,
     owner: Uuid,
     claimant: Claimant,
-) -> DbResult<Claim> {
+) -> DbResult<Outcome> {
     let mut transaction = pool.begin().await?;
     if let (true, Some(runner)) = (claimant.enforced, claimant.runner) {
         sqlx::query("SELECT 1 FROM fleet_runners WHERE id = $1 FOR SHARE")
@@ -1577,7 +1577,7 @@ pub async fn claim_task_run(
     .rows_affected()
         == 1;
     let claim = match claimed {
-        true => Claim::Claimed,
+        true => Outcome::Claimed,
         false => unclaimed(&mut transaction, run_id, claimant).await?,
     };
     transaction.commit().await?;
@@ -1590,9 +1590,9 @@ async fn unclaimed(
     connection: &mut PgConnection,
     run_id: Uuid,
     claimant: Claimant,
-) -> DbResult<Claim> {
+) -> DbResult<Outcome> {
     if !claimant.enforced {
-        return Ok(Claim::Unavailable);
+        return Ok(Outcome::Unavailable);
     }
     let workspace: Option<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT t.workspace_id FROM task_runs r JOIN tasks t ON t.id = r.task_id \
@@ -1602,7 +1602,7 @@ async fn unclaimed(
     .fetch_optional(&mut *connection)
     .await?;
     let Some(workspace) = workspace else {
-        return Ok(Claim::Unavailable);
+        return Ok(Outcome::Unavailable);
     };
     let shortfall = eligibility::shortfall(
         connection,
@@ -1611,7 +1611,7 @@ async fn unclaimed(
         Mode::Unattended,
     )
     .await?;
-    Ok(shortfall.map_or(Claim::Unavailable, Claim::Refused))
+    Ok(shortfall.map_or(Outcome::Unavailable, Outcome::Refused))
 }
 
 /// Refresh only the live lease held by this execution.

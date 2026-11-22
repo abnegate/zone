@@ -12,7 +12,7 @@ pub enum Shortfall {
     Cordoned,
     Revoked,
     Outdated { version: Version, minimum: Version },
-    Missing { labels: Labels },
+    LabelsMissing { missing: Labels },
 }
 
 impl Shortfall {
@@ -37,7 +37,7 @@ impl Shortfall {
             });
         }
         match mode {
-            Mode::Unattended if !missing.is_empty() => Some(Self::Missing { labels: missing }),
+            Mode::Unattended if !missing.is_empty() => Some(Self::LabelsMissing { missing }),
             Mode::Unattended | Mode::Interactive => None,
         }
     }
@@ -102,8 +102,8 @@ mod tests {
                 Some(&minimum),
                 labels("gpu"),
             ),
-            Some(Shortfall::Missing {
-                labels: labels("gpu")
+            Some(Shortfall::LabelsMissing {
+                missing: labels("gpu")
             })
         );
     }

@@ -4,13 +4,13 @@ use crate::db::fleet::shortfall::Shortfall;
 /// execution holds it, it ended, or its admission lapsed. `Refused` work is still there for a
 /// runner that meets fleet policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Claim {
+pub enum Outcome {
     Claimed,
     Unavailable,
     Refused(Shortfall),
 }
 
-impl Claim {
+impl Outcome {
     pub fn claimed(&self) -> bool {
         matches!(self, Self::Claimed)
     }

@@ -107,9 +107,10 @@ fn numbers(core: &str) -> Option<[i32; 3]> {
 fn number(text: &str) -> Option<i32> {
     let digits = !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
     let canonical = text == "0" || !text.starts_with('0');
-    match digits && canonical {
-        true => text.parse().ok(),
-        false => None,
+    if digits && canonical {
+        text.parse().ok()
+    } else {
+        None
     }
 }
 
