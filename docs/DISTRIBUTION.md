@@ -199,7 +199,8 @@ commit marker, then presigning.
 | `limited` | `429` | A rate limit tripped, with `Retry-After` |
 | `unavailable` | `503` | S3 can't be reached in 10 seconds, answers any other error code, or any other status |
 
-`POST` and `HEAD` answer `405` with `Allow: GET`.
+`POST` and `HEAD` answer `405` with `Allow: GET`. They presign nothing, never
+reach S3 and log no `issued` line.
 
 An `issued` response lists the three files, each URL valid for 900 seconds:
 
@@ -288,7 +289,7 @@ These variables are all optional and add to the ones in
 [LICENSING.md](LICENSING.md#environment). Values are trimmed, a blank value
 counts as unset, and every invalid one is named in the startup error. With
 none of them set, the signer runs exactly as before and both routes answer
-`GET` with `404`; `/token` still answers every other method with `405`.
+`GET` with `404`. Both still answer every other method with `405`.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -748,8 +749,9 @@ None of this is live yet. In order, after the code merges:
       same flags as before: `--network signer --restart unless-stopped
       --user 10001:10001 --env-file /etc/zone-license/signer.env` and the key
       mounted read-only at `/run/secrets/zone-license-key`.
-   8. Check the startup log lists the trusted proxies with no warning, and says
-      `Issuing registry tokens` with `kid` `registry-2026-2-1`.
+   8. Check the startup log lists the trusted proxies once with no warning,
+      says `Issuing registry tokens` with `kid` `registry-2026-2-1`, and says
+      `Serving air-gapped bundles` with your bucket.
    9. To roll back: `sudo docker rm -f zone-license`, restore the env backup,
       `sudo docker rename zone-license-previous zone-license && sudo docker start zone-license`.
 6. **Registry.** Copy `config.yml` to `/etc/zone-registry/` and start it as in
