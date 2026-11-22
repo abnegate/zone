@@ -269,12 +269,16 @@ tilt-down: ## Stop Tilt and clean up
 	@echo "$(GREEN)Tilt stopped. Kind cluster still running.$(NC)"
 	@echo "$(YELLOW)Run 'make kind-delete' to remove the cluster entirely.$(NC)"
 
+HELM_HA_APPS := --set highAvailability.externalValkey=true --set server.agentState.persistence.storageClass=test-rwx
+
 helm-lint: ## Lint and render Helm charts
 	@helm lint helm/zone-infra helm/zone-ai helm/zone-apps
 	@helm template zone-infra helm/zone-infra --namespace zone >/dev/null
 	@helm template zone-ai helm/zone-ai --namespace zone >/dev/null
 	@helm template zone-apps helm/zone-apps --namespace zone >/dev/null
 	@helm template zone-apps helm/zone-apps --namespace zone -f helm/zone-apps/examples/minimal.yaml >/dev/null
+	@helm lint helm/zone-apps -f helm/zone-apps/values-ha.yaml $(HELM_HA_APPS)
+	@helm template zone-apps helm/zone-apps --namespace zone -f helm/zone-apps/values-ha.yaml $(HELM_HA_APPS) >/dev/null
 	@echo "$(GREEN)Helm charts linted and rendered.$(NC)"
 
 ##@ Health & Monitoring

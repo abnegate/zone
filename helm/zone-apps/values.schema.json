@@ -54,9 +54,24 @@
         "encryptionKey": { "type": "string" },
         "litellmMasterKey": { "type": "string" },
         "redisPassword": { "type": "string" },
+        "redisUrl": {
+          "type": "string",
+          "pattern": "^(rediss?://.+)?$",
+          "description": "redis:// or rediss:// URL written to the secret's valkey-url"
+        },
         "stripeSecretKey": { "type": "string" },
         "smtpPassword": { "type": "string" },
         "keys": { "type": "object" }
+      }
+    },
+    "highAvailability": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "externalValkey": {
+          "type": "boolean",
+          "description": "The existing secret's redisUrl key points at an external, managed Redis or Valkey"
+        }
       }
     },
     "server": {
@@ -83,7 +98,8 @@
               "type": "string",
               "enum": ["ClusterIP", "NodePort", "LoadBalancer"]
             },
-            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "annotations": { "type": "object" }
           }
         },
         "autoscaling": {
@@ -95,6 +111,21 @@
             "targetCPUUtilization": { "type": "integer", "minimum": 1, "maximum": 100 }
           }
         },
+        "strategy": { "type": "object" },
+        "probes": {
+          "type": "object",
+          "properties": {
+            "startup": {
+              "allOf": [
+                { "$ref": "#/definitions/probe" },
+                { "properties": { "enabled": { "type": "boolean" } } }
+              ]
+            },
+            "liveness": { "$ref": "#/definitions/probe" },
+            "readiness": { "$ref": "#/definitions/probe" }
+          }
+        },
+        "terminationGracePeriodSeconds": { "type": ["integer", "null"], "minimum": 0 },
         "baseUrl": { "type": "string" },
         "agentState": {
           "type": "object",
@@ -103,12 +134,17 @@
               "type": "object",
               "properties": {
                 "enabled": { "type": "boolean" },
+                "accessMode": {
+                  "type": "string",
+                  "enum": ["ReadWriteOnce", "ReadWriteMany"]
+                },
                 "size": { "type": "string" },
                 "storageClass": { "type": "string" }
               }
             }
           }
-        }
+        },
+        "podDisruptionBudget": { "$ref": "#/definitions/podDisruptionBudget" }
       }
     },
     "manager": {
@@ -127,7 +163,18 @@
               "enum": ["Always", "IfNotPresent", "Never"]
             }
           }
-        }
+        },
+        "podDisruptionBudget": { "$ref": "#/definitions/podDisruptionBudget" }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "ingressNamespace": { "type": "string" },
+        "externalDatabaseCIDR": { "type": "string" },
+        "externalValkeyCIDR": { "type": "string" },
+        "externalValkeyPort": { "type": ["integer", "null"], "minimum": 1, "maximum": 65535 }
       }
     },
     "ingress": {
@@ -170,6 +217,26 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" }
+      }
+    }
+  },
+  "definitions": {
+    "probe": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "pattern": "^/" },
+        "initialDelaySeconds": { "type": ["integer", "null"], "minimum": 0 },
+        "periodSeconds": { "type": "integer", "minimum": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "failureThreshold": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": { "type": ["integer", "string"] },
+        "maxUnavailable": { "type": ["integer", "string", "null"] }
       }
     }
   }

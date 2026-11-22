@@ -47,6 +47,18 @@ The following table lists the configurable parameters and their default values.
 | `global.externalDatabase` | Use external database | `false` |
 | `global.securityContexts` | Enable security contexts | `true` |
 
+### High Availability
+
+`values-ha.yaml` is the supported HA topology: layer it over your values with `-f helm/zone-apps/values-ha.yaml`, and set `server.agentState.persistence.storageClass` to a ReadWriteMany class.
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `highAvailability.enabled` | Refuse a render whose replicas would not share one external Redis or Valkey: with `secrets.create`, `secrets.redisUrl` must name a host other than the in-cluster `valkey` service | `false` |
+| `highAvailability.externalValkey` | With `secrets.create` off, state that the existing secret's `secrets.keys.redisUrl` key points at an external, managed Redis or Valkey, which `helm template` cannot check | `false` |
+| `secrets.redisUrl` | `redis://` or `rediss://` URL written to the created secret's `valkey-url`, in place of `commonEnv.REDIS_URL` and the URL built from `VALKEY_HOST` | `""` |
+| `networkPolicy.externalValkeyCIDR` | CIDR of the external Redis or Valkey the server may reach; required with `networkPolicy.enabled` and `highAvailability.enabled` | `""` |
+| `networkPolicy.externalValkeyPort` | Its port, required with the CIDR | `null` |
+
 ### Server Configuration
 
 | Parameter | Description | Default |
@@ -62,9 +74,16 @@ The following table lists the configurable parameters and their default values.
 | `server.autoscaling.maxReplicas` | Maximum number of replicas | `10` |
 | `server.autoscaling.targetCPUUtilization` | Target CPU utilization percentage | `70` |
 | `server.baseUrl` | Origin a browser reaches Zone at, `scheme://host[:port]` with no path, passed to zone-server as `APP_BASE_URL`; see [Public Origin](#public-origin) | `""` (the first ingress host) |
-| `server.agentState.persistence.enabled` | Keep agent state (each sign-in's CLI home under `<state>/<org>/<agent>/logins/<id>`, with codex's login and the CLI's session files, and each agent's shared `work` directory) on a claim; applies only with one replica and autoscaling off. Claude tokens are in the database either way | `true` |
+| `server.agentState.persistence.enabled` | Keep agent state (each sign-in's CLI home under `<state>/<org>/<agent>/logins/<id>`, with codex's login and the CLI's session files, and each agent's shared `work` directory) on a claim; a ReadWriteOnce claim applies only with one replica and autoscaling off. Claude tokens are in the database either way | `true` |
+| `server.agentState.persistence.accessMode` | `ReadWriteOnce`, or `ReadWriteMany` for one claim, `<release>-shared-state`, that every replica mounts agent state, clones, artifacts and the chat workspace from as subPaths | `ReadWriteOnce` |
 | `server.agentState.persistence.size` | Size of the agent-state claim, which grows with every CLI turn; see [Coding Agent Sign-ins](#coding-agent-sign-ins) | `1Gi` |
-| `server.agentState.persistence.storageClass` | Storage class of the agent-state claim; empty uses the cluster default | `""` |
+| `server.agentState.persistence.storageClass` | Storage class of the agent-state claim; empty uses the cluster default, and is refused for `ReadWriteMany` | `""` |
+| `server.strategy` | Deployment strategy while the server holds no ReadWriteOnce claim, which always recreates | `{}` (rolling, 25%) |
+| `server.probes.startup.enabled` | Add a startup probe on `server.probes.startup.path`, which holds off liveness and readiness until it passes | `false` |
+| `server.probes.liveness.path`, `server.probes.readiness.path` | Paths of the liveness and readiness probes, each with `initialDelaySeconds`, `periodSeconds`, `timeoutSeconds` and `failureThreshold` | `/health` |
+| `server.terminationGracePeriodSeconds` | Seconds a terminating server pod has before it is killed | `null` (Kubernetes' 30) |
+| `server.service.annotations` | Extra annotations on the server Service, such as the ingress controller's session affinity | `{}` |
+| `server.podDisruptionBudget.maxUnavailable` | Replaces `minAvailable` when set; `manager.podDisruptionBudget.maxUnavailable` does the same for the console | `null` |
 | `server.env.ZONE_AGENT_USAGE_TTL_SECONDS` | Whole seconds a sign-in's usage reading stays fresh before zone-server reads it again to pick the account a chat or task starts on; anything else is refused at boot | `"60"` |
 | `server.env.ZONE_AGENT_NICENESS` | Nice value, `0` to `19`, the claude and codex CLIs and every build and test they run start at, so zone-server keeps its share of the pod's CPU; anything else is refused at boot | unset (`19`) |
 | `server.env.ZONE_CLAUDE_API_URL` | Where zone-server reads Claude sign-ins' usage and profile, for example through a proxy | unset (`https://api.anthropic.com`) |

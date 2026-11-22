@@ -9,6 +9,9 @@ metadata:
     prometheus.io/scrape: "true"
     prometheus.io/port: {{ .Values.server.service.port | quote }}
     prometheus.io/path: "/metrics"
+    {{- with .Values.server.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
   type: {{ .Values.server.service.type }}
   ports:

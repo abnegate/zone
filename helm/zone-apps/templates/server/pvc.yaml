@@ -1,5 +1,10 @@
 {{- $claim := include "zone-apps.server.agentStateClaim" . }}
 {{- if $claim }}
+{{- $persistence := .Values.server.agentState.persistence }}
+{{- $accessMode := $persistence.accessMode | default "ReadWriteOnce" }}
+{{- if and (eq $accessMode "ReadWriteMany") (not $persistence.storageClass) }}
+{{- fail "server.agentState.persistence.storageClass must name a ReadWriteMany storage class (NFSv4.1+, EFS, Filestore, Azure Files NFS or CephFS) when accessMode is ReadWriteMany" }}
+{{- end }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -10,11 +15,11 @@ metadata:
     helm.sh/resource-policy: keep
 spec:
   accessModes:
-    - ReadWriteOnce
-  {{- with .Values.server.agentState.persistence.storageClass }}
+    - {{ $accessMode }}
+  {{- with $persistence.storageClass }}
   storageClassName: {{ . | quote }}
   {{- end }}
   resources:
     requests:
-      storage: {{ .Values.server.agentState.persistence.size | quote }}
+      storage: {{ $persistence.size | quote }}
 {{- end }}
