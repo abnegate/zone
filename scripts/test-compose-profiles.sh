@@ -6,7 +6,7 @@ script=$root/scripts/compose.sh
 envfile=$root/.env.example
 ZONE_ENV_FILE=$envfile
 export ZONE_ENV_FILE
-unset ZONE_LTS_VERSION ZONE_LTS_REGISTRY
+unset ZONE_LTS_VERSION ZONE_LTS_REGISTRY ZONE_TRUSTED_PROXIES
 
 compose() {
     docker compose --env-file "$envfile" "$@"
@@ -652,6 +652,12 @@ for name, repository in (
     expected = f"registry.bitecode.ltd/{repository}:1.4-lts"
     if service.get("image") != expected:
         raise SystemExit(f"LTS {name} must run {expected}, got {service.get('image')!r}")
+trusted = services["manager"].get("environment", {}).get("ZONE_TRUSTED_PROXIES")
+if trusted != "172.31.0.250":
+    raise SystemExit(f"LTS manager must trust 172.31.0.250, got {trusted!r}")
+address = (services["traefik"].get("networks", {}).get("edge") or {}).get("ipv4_address")
+if address != "172.31.0.250":
+    raise SystemExit(f"LTS traefik must stay pinned to 172.31.0.250 on edge, got {address!r}")
 print("Compose LTS overlay checks passed")
 PY
 

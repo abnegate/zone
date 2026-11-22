@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-unset ZONE_AIRGAP_REGISTRY ZONE_LICENSE_RENEWAL COMPOSE_FILE COMPOSE_PROFILES
+unset ZONE_AIRGAP_REGISTRY ZONE_LICENSE_RENEWAL ZONE_TRUSTED_PROXIES ZONE_LTS_VERSION ZONE_LTS_REGISTRY COMPOSE_FILE COMPOSE_PROFILES
 
 shell='sh'
 if [ -n "${BASH_VERSION:-}" ]; then
@@ -25,7 +25,7 @@ installation=$directory/zone
 
 fail() {
     printf 'FAIL: %s\n' "$1" >&2
-    for log in run.log crane.log docker.log; do
+    for log in run.log crane.log docker.log compose.log; do
         if [ -s "$directory/$log" ]; then
             sed "s/^/  $log: /" "$directory/$log" >&2
         fi
@@ -118,7 +118,7 @@ set -eu
 if [ "$1" != -C ] || [ "$3" != archive ] || [ "$4" != --format=tar ] || [ "$5" != -o ] || [ "$7" != HEAD ]; then
     exit 1
 fi
-tar -cf "$6" -C "$2" docker-compose.yml scripts/env-file.sh
+tar -cf "$6" -C "$2" docker-compose.yml docker-compose.lts.yml scripts/env-file.sh
 GIT
 
 cat > "$directory/bin/docker" <<'DOCKER'
@@ -151,7 +151,9 @@ mkdir -p "$repository/scripts"
 for file in bundle.sh bundle-images.txt install-offline.sh env-file.sh; do
     cp "$scripts/$file" "$repository/scripts/$file"
 done
-cp "$root/docker-compose.yml" "$repository/docker-compose.yml"
+for file in docker-compose.yml docker-compose.lts.yml; do
+    cp "$root/$file" "$repository/$file"
+done
 for chart in "$root"/helm/*/Chart.yaml; do
     name=$(basename -- "$(dirname -- "$chart")")
     mkdir -p "$repository/helm/$name"
@@ -188,6 +190,31 @@ assert_pushed_everything() {
     done < "$bundle/images.txt"
     [ "$(grep -c '^push ' "$directory/crane.log")" -eq "$pushed" ] \
         || fail "Expected each image pushed exactly once by digest and once by tag into $prefix"
+}
+
+assert_trusted_proxies() {
+    label=$1
+    image=$2
+    shift 2
+    rendered=$directory/rendered.json
+    (cd -- "$installation" && docker compose --env-file .env "$@" config --format json) \
+        > "$rendered" 2> "$directory/compose.log" || fail "Expected docker compose config to render $label"
+    python3 - "$rendered" "$label" "$image" <<'PY' || fail "Expected $label to keep Traefik pinned and trusted"
+import json
+import sys
+
+rendered, label, image = sys.argv[1:]
+services = json.load(open(rendered, encoding="utf-8"))["services"]
+manager = services["manager"]
+if not manager.get("image", "").startswith(image):
+    raise SystemExit(f"{label}: manager must run from {image}, got {manager.get('image')!r}")
+trusted = manager.get("environment", {}).get("ZONE_TRUSTED_PROXIES")
+if trusted != "172.31.0.250":
+    raise SystemExit(f"{label}: manager must trust 172.31.0.250, got {trusted!r}")
+address = (services["traefik"].get("networks", {}).get("edge") or {}).get("ipv4_address")
+if address != "172.31.0.250":
+    raise SystemExit(f"{label}: traefik must stay pinned to 172.31.0.250 on edge, got {address!r}")
+PY
 }
 
 extract_bundle() {
@@ -292,6 +319,14 @@ cmp -s "$bundle/compose/docker-compose.airgap.yml" "$installation/docker-compose
 for line in KEEP=me ZONE_AIRGAP_REGISTRY=127.0.0.1:5000 ZONE_LICENSE_RENEWAL=false; do
     grep -qxF -- "$line" "$installation/.env" || fail "Expected $line in .env"
 done
+if grep -q 'ZONE_TRUSTED_PROXIES' "$installation/.env"; then
+    fail 'Expected compose to leave ZONE_TRUSTED_PROXIES to the Compose default'
+fi
+assert_trusted_proxies 'the air-gapped override' 127.0.0.1:5000/zone/server@sha256: \
+    -f docker-compose.yml -f docker-compose.airgap.yml
+printf '%s\n' 'ZONE_LTS_VERSION=1.4-lts' >> "$installation/.env"
+assert_trusted_proxies 'the air-gapped LTS overlays' 127.0.0.1:5000/zone/server@sha256: \
+    -f docker-compose.yml -f docker-compose.lts.yml -f docker-compose.airgap.yml
 helper=$(sed -n 's/^volume create \(zone-airgap-registry-[0-9]*\)$/\1/p' "$directory/docker.log")
 [ -n "$helper" ] || fail 'Expected a temporary registry volume'
 assert_docker "rm --force --volumes $helper"
