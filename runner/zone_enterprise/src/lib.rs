@@ -7,6 +7,7 @@ mod entitlement;
 mod error;
 #[cfg(test)]
 mod fixtures;
+pub mod fleet;
 mod header;
 mod key_error;
 mod keyring;

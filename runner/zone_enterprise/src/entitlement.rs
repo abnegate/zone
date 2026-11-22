@@ -17,10 +17,11 @@ pub enum Feature {
     Spend,
     /// Uncapped membership: without it a server admits at most the Community member cap.
     Members,
+    FleetPolicy,
 }
 
 impl Feature {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Sso,
         Self::Policy,
         Self::AuditExport,
@@ -29,6 +30,7 @@ impl Feature {
         Self::CustomRoles,
         Self::Spend,
         Self::Members,
+        Self::FleetPolicy,
     ];
 
     pub fn plan(self) -> Plan {
@@ -39,7 +41,8 @@ impl Feature {
             | Self::AuditExport
             | Self::AuditStreaming
             | Self::AuditRetention
-            | Self::CustomRoles => Plan::Enterprise,
+            | Self::CustomRoles
+            | Self::FleetPolicy => Plan::Enterprise,
         }
     }
 
@@ -86,6 +89,7 @@ mod tests {
         let listed: HashSet<Feature> = Feature::ALL.into_iter().collect();
         assert_eq!(listed.len(), Feature::ALL.len());
         assert!(listed.contains(&Feature::CustomRoles));
+        assert!(listed.contains(&Feature::FleetPolicy));
     }
 
     #[test]
