@@ -8,7 +8,7 @@ use std::io::Read;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
+use axum::http::{Method, Request, StatusCode, header};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use flate2::read::DeflateDecoder;
@@ -23,11 +23,13 @@ use zone_server::auth::hash_password;
 use zone_server::db::audit::actions;
 use zone_server::db::organization_members::{self, OrgRole};
 use zone_server::db::password_reset;
-use zone_server::db::scim::{Link, users};
+use zone_server::db::scim::{Link, NewToken, tokens, users};
 use zone_server::services::account::provision;
+use zone_server::services::scim::secret;
 use zone_server::utils::crypto::generate_token;
 
 use crate::common::identity_provider::IdentityProvider;
+use crate::common::scim::{self, CONTENT_TYPE, USER_SCHEMA};
 use crate::common::sso::Fixture;
 use crate::common::{TestResponse, test_password};
 
@@ -47,6 +49,7 @@ const SAML_RESPONSE: &str = "SAMLResponse";
 const RELAY_STATE: &str = "RelayState";
 const LOCK_WAIT: Duration = Duration::from_secs(30);
 const LOCK_POLL: Duration = Duration::from_millis(20);
+const TOKEN_NAME: &str = "Identity provider";
 
 /// Where starting a sign-in sends the browser, and the state the console keeps.
 struct Authorization {
@@ -139,6 +142,48 @@ impl Server {
         link.provisioned_password = Some(password_hash);
         users::upsert(self.fixture.pool(), &link).await.unwrap();
         user.id
+    }
+
+    /// An account an identity provider created through `POST /Users`, with a token of its own.
+    async fn pushed(&self, email: &str) -> Uuid {
+        let secret = secret::generate();
+        tokens::create(
+            self.fixture.pool(),
+            &NewToken {
+                organization_id: self.organization,
+                name: TOKEN_NAME,
+                token_hash: &secret::hash(&secret),
+                hint: &secret::hint(&secret),
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let body = json!({
+            "schemas": [USER_SCHEMA],
+            "userName": email,
+            "emails": [{ "value": email, "type": "work", "primary": true }],
+            "active": true,
+        });
+        let response = self
+            .fixture
+            .client
+            .send_request(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("{}/Users", scim::base(self.organization)))
+                    .header(header::CONTENT_TYPE, CONTENT_TYPE)
+                    .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await;
+        response.assert_status(StatusCode::CREATED);
+        response.json_value()["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
     }
 
     async fn authorize(&self, provider: Uuid) -> Authorization {
@@ -371,6 +416,21 @@ async fn a_pristine_scim_account_signs_in_over_saml_as_itself() {
         vec![(server.saml, user, SUBJECT.to_owned())]
     );
     assert_eq!(signed_in(&server.saml_sign_in(SUBJECT, EMAIL).await), user);
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_account_pushed_through_scim_signs_in_over_saml_as_itself() {
+    let server = Server::new().await;
+    let user = server.pushed(EMAIL).await;
+
+    assert_eq!(signed_in(&server.saml_sign_in(SUBJECT, EMAIL).await), user);
+
+    assert_eq!(server.users_with_email(EMAIL).await, 1);
+    assert_eq!(
+        server.identities().await,
+        vec![(server.saml, user, SUBJECT.to_owned())]
+    );
     server.cleanup().await;
 }
 
