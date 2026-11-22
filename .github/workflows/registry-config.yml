@@ -1,0 +1,42 @@
+name: Registry Config
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'runner/zone_license/deploy/**'
+      - 'scripts/test-registry-config.py'
+      - '.github/workflows/registry-config.yml'
+  pull_request:
+    paths:
+      - 'runner/zone_license/deploy/**'
+      - 'scripts/test-registry-config.py'
+      - '.github/workflows/registry-config.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Registry configs and Caddyfiles
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Install PyYAML
+        run: python -m pip install pyyaml==6.0.3
+
+      - name: Check the registry configs and Caddyfiles
+        run: python scripts/test-registry-config.py -v
