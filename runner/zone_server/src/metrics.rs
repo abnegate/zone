@@ -26,7 +26,9 @@ use axum::extract::Request;
 use axum::http::header;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
+use metrics::{
+    Gauge, counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram,
+};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 
 const HTTP_REQUESTS_TOTAL: &str = "http_requests_total";
@@ -86,6 +88,7 @@ const AGENT_FAILURES: &str = "zone_agent_failures";
 const AGENT_COMPLETION_SECONDS: &str = "zone_agent_completion_seconds";
 const AGENT_REGRESSIONS: &str = "zone_agent_regression_checks_total";
 const REPORT_DELIVERIES: &str = "zone_report_deliveries_total";
+const CLUSTER_BUS_CONNECTED: &str = "zone_cluster_bus_connected";
 
 const HTTP_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
@@ -205,6 +208,10 @@ fn handle() -> PrometheusHandle {
             describe_counter!(
                 REPORT_DELIVERIES,
                 "Scheduled report deliveries by channel and outcome"
+            );
+            describe_gauge!(
+                CLUSTER_BUS_CONNECTED,
+                "1 while the cluster bus is subscribed on Valkey, 0 while it is disconnected or on the in-process loopback"
             );
             describe_gauge!(
                 PROCESS_RSS,
@@ -387,6 +394,12 @@ pub fn record_regression(checker: &'static str, verdict: &'static str) {
 pub fn record_report_delivery(channel: &str, status: &'static str) {
     init();
     counter!(REPORT_DELIVERIES, "channel" => channel.to_string(), "status" => status).increment(1);
+}
+
+/// The gauge the cluster bus reports its Valkey subscription on.
+pub fn cluster_bus_connected() -> Gauge {
+    init();
+    gauge!(CLUSTER_BUS_CONNECTED)
 }
 
 fn process_rss_bytes() -> Option<u64> {
@@ -736,7 +749,10 @@ fn is_dynamic_segment(segment: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{SearchObs, normalize_path, record_embedding, record_searxng};
+    use super::{
+        SearchObs, cluster_bus_connected, normalize_path, record_embedding, record_searxng,
+        rendered,
+    };
     use abnegate_search::Outcome;
     use std::time::Duration;
 
@@ -763,6 +779,18 @@ mod tests {
             "/api/organizations/{id}/audit-logs"
         );
         assert_eq!(normalize_path("/api/chats/42"), "/api/chats/{id}");
+    }
+
+    #[test]
+    fn the_cluster_bus_gauge_renders_in_scrape() {
+        cluster_bus_connected().set(1.0);
+
+        let body = rendered();
+        assert!(
+            body.contains("# TYPE zone_cluster_bus_connected gauge"),
+            "{body}"
+        );
+        assert!(body.contains("zone_cluster_bus_connected 1"), "{body}");
     }
 
     #[test]

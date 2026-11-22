@@ -18,6 +18,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use zone_context::context::ContextService;
 use zone_server::cache::Cache;
+use zone_server::cluster::Bus;
 use zone_server::config::Config;
 use zone_server::db::reminders::Sweep;
 use zone_server::db::sealing::Options;
@@ -36,6 +37,7 @@ use zone_server::state::default_adapter_registry;
 
 #[tokio::main]
 async fn main() {
+    zone_server::cluster::install_tls_provider();
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let mode = mode(&arguments).expect(USAGE);
 
@@ -94,12 +96,16 @@ async fn main() {
         Err(error) => tracing::warn!("Failed to stop abandoned subagents: {error}"),
     }
 
-    // Connect to cache
-    let cache = Cache::connect(&config.redis_url)
-        .await
-        .expect("Failed to connect to cache");
-
-    tracing::info!("Connected to cache");
+    let cache = match Cache::connect(&config.redis_url).await {
+        Ok(cache) => {
+            tracing::info!("Connected to cache");
+            Some(cache)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Could not connect to the cache at REDIS_URL; running without it");
+            None
+        }
+    };
 
     // Initialize zone_context services
     // Note: These are optional and will only be initialized if we can get default settings
@@ -196,15 +202,21 @@ async fn main() {
         AppState::new_with_all_services(
             config.clone(),
             db,
-            Some(cache),
+            cache,
             adapter_registry,
             embedding_service,
             context_service,
             mail,
         )
     } else {
-        AppState::new_with_mail(config.clone(), db, Some(cache), mail)
+        AppState::new_with_mail(config.clone(), db, cache, mail)
     };
+    let bus = Bus::connect(
+        &config.redis_url,
+        state.master_key(),
+        zone_server::metrics::cluster_bus_connected(),
+    );
+    let state = state.with_bus(bus);
     state.prepare().await;
 
     zone_server::workers::housekeeping::spawn(state.clone());
