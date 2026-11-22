@@ -224,6 +224,7 @@ describe('the fleet codes match the server', () => {
     expect(FleetCode.LabelInvalid).toBe(server.get('LABEL_INVALID') ?? '');
     expect(FleetCode.StateInvalid).toBe(server.get('STATE_INVALID') ?? '');
     expect(FleetCode.RunnerOnline).toBe(server.get('RUNNER_ONLINE') ?? '');
+    expect(FleetCode.RunnerBusy).toBe(server.get('RUNNER_BUSY') ?? '');
     expect(FleetCode.NoRunnerLeft).toBe(server.get('NO_RUNNER_LEFT') ?? '');
   });
 

@@ -20,6 +20,7 @@ export const FleetCode = {
   LabelInvalid: 'fleet_label_invalid',
   StateInvalid: 'fleet_state_invalid',
   RunnerOnline: 'fleet_runner_online',
+  RunnerBusy: 'fleet_runner_busy',
   NoRunnerLeft: 'fleet_no_runner_left',
 } as const;
 
@@ -44,6 +45,7 @@ export const FLEET_CHANGE_CODES = [
   FleetCode.LabelInvalid,
   FleetCode.StateInvalid,
   FleetCode.RunnerOnline,
+  FleetCode.RunnerBusy,
   FleetCode.NoRunnerLeft,
 ] as const;
 

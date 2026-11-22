@@ -8,10 +8,13 @@ import {
   ORGANIZATION_ID,
   ORGANIZATION_LABELS,
   UNMATCHED_WORKSPACE_LABELS,
+  UNVERIFIED_ORGANIZATION_LABELS,
+  UNVERIFIED_WORKSPACE_LABELS,
   WORKSPACE_ID,
   WORKSPACE_LABELS,
 } from '../fixtures';
 import {
+  ADD_LABEL,
   AVAILABLE_LABEL,
   CHATS_IGNORE_LABELS,
   EFFECTIVE_LABEL,
@@ -23,6 +26,7 @@ import {
   ORGANIZATION_REQUIRED_LABEL,
   PLACEMENT_LAPSED,
   PLACEMENT_TITLE,
+  PLACEMENT_UNVERIFIED,
   REQUIRED_LABEL,
   SAVE_LABELS,
   WORKSPACE_REQUIRED_LABEL,
@@ -203,6 +207,26 @@ describe('RunnerPlacementCard', () => {
       expect(screen.queryByRole('button', { name: SAVE_LABELS })).not.toBeInTheDocument();
     });
 
+    it('names the entry and its Add button apart', async () => {
+      await loaded(ORGANIZATION, fromOrganization(ORGANIZATION_LABELS));
+
+      expect(screen.getAllByLabelText(ENTRY_LABEL)).toHaveLength(1);
+      expect(screen.getByRole('button', { name: ADD_LABEL })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: ENTRY_LABEL })).not.toBeInTheDocument();
+    });
+
+    it('keeps the requirement of a key that no longer verifies read-only and says it is still enforced', async () => {
+      await loaded(ORGANIZATION, fromOrganization(UNVERIFIED_ORGANIZATION_LABELS));
+
+      expect(within(card()).getByText(PLACEMENT_UNVERIFIED)).toBeInTheDocument();
+      expect(chips(REQUIRED_LABEL)).toEqual(['region=eu']);
+      expect(screen.getByText(matchingText(2))).toBeInTheDocument();
+      expect(screen.queryByText(PLACEMENT_LAPSED)).not.toBeInTheDocument();
+      expect(screen.queryByRole('textbox', { name: ENTRY_LABEL })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: SAVE_LABELS })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Remove region=eu' })).not.toBeInTheDocument();
+    });
+
     it('stays out of the way on Community', async () => {
       labels.mockResolvedValue(fromOrganization(COMMUNITY_ORGANIZATION_LABELS));
       renderCard(ORGANIZATION);
@@ -230,6 +254,16 @@ describe('RunnerPlacementCard', () => {
       expect(labels).toHaveBeenCalledWith(WORKSPACE);
     });
 
+    it('shows the workspace requirement of a key that no longer verifies read-only', async () => {
+      await loaded(WORKSPACE, fromWorkspace(UNVERIFIED_WORKSPACE_LABELS));
+
+      expect(within(card()).getByText(PLACEMENT_UNVERIFIED)).toBeInTheDocument();
+      expect(chips(ORGANIZATION_REQUIRED_LABEL)).toEqual(['region=eu']);
+      expect(chips(WORKSPACE_REQUIRED_LABEL)).toEqual(['gpu']);
+      expect(screen.queryByRole('button', { name: 'Remove gpu' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: SAVE_LABELS })).not.toBeInTheDocument();
+    });
+
     it('names the permission a member needs to change the workspace labels', async () => {
       await loaded(WORKSPACE, fromWorkspace({ ...WORKSPACE_LABELS, editable: false }));
 
@@ -250,7 +284,7 @@ describe('RunnerPlacementCard', () => {
       ]);
 
       type('region=eu');
-      fireEvent.click(screen.getByRole('button', { name: ENTRY_LABEL }));
+      fireEvent.click(screen.getByRole('button', { name: ADD_LABEL }));
       expect(await screen.findByRole('alert')).toHaveTextContent(inheritedAlready(['region=eu']));
     });
 

@@ -18,7 +18,12 @@ export const LAPSED_NOTICE =
 export const NOT_ENFORCED =
   'Nothing here is enforced, so every runner takes work whatever its state, version or labels. Saved states, the minimum version and label requirements are kept for when an Enterprise license is added.';
 
-export const READ_ONLY = 'Only server admins can change the fleet policy.';
+export const UNVERIFIED_NOTICE =
+  'The stored Zone license key no longer verifies. Fleet policy is still enforced, and changing it is blocked until a server admin replaces or removes the key.';
+
+export const LOADING_RUNNERS = 'Loading the runners...';
+
+export const RETRY_LABEL = 'Retry';
 
 export const UPDATED_LABEL = 'Last changed';
 
@@ -109,7 +114,7 @@ const CONSEQUENCES: Readonly<Record<RunnerAction, (name: string) => string>> = {
 };
 
 export const CURRENT_WARNING =
-  'This is the server answering this page, so you may need to reload to reach another one.';
+  'This is the server answering this page, so your own chats on it end too. Reload the page to reach another server.';
 
 export type StateAction = Exclude<RunnerAction, typeof RunnerAction.Remove>;
 
@@ -157,6 +162,8 @@ const REFUSALS: Readonly<Record<FleetAdminCode, string>> = {
   [FleetCode.StateInvalid]: "Zone couldn't read this runner state. Reload the page and try again.",
   [FleetCode.RunnerOnline]:
     'This runner is connected, so it would only register again. Stop its server first, or cordon or revoke it instead.',
+  [FleetCode.RunnerBusy]:
+    'This runner still holds live work. Remove it once that work ends, or revoke it to end the work now.',
   [FleetCode.NoRunnerLeft]:
     'This would leave no runner able to take work. Confirm to do it anyway.',
 };
@@ -221,8 +228,10 @@ export const CHATS_IGNORE_LABELS =
 export const PLACEMENT_LAPSED =
   'Your Zone license has lapsed. Label requirements are still enforced; changing them needs an active or grace license.';
 
-export const PLACEMENT_NOT_ENFORCED =
-  'Label requirements are saved but not enforced without a Zone Enterprise license.';
+export const PLACEMENT_UNVERIFIED =
+  'The stored Zone license key no longer verifies. Label requirements are still enforced; changing them is blocked until a server admin replaces or removes the key.';
+
+export const LOADING_PLACEMENT = 'Loading runner placement...';
 
 export const ORGANIZATION_PLACEMENT_READ_ONLY = `Changing the runner labels needs the ${Permission.PoliciesUpdate} permission in this organization.`;
 
@@ -272,8 +281,8 @@ export function matchingText(matching: number): string {
 
 export function noMatchWarning(effective: readonly string[]): string {
   return effective.length === 0
-    ? 'No connected runner can take unattended work right now, so it waits until one can.'
-    : `No connected runner carries ${effective.join(', ')}, so unattended work here waits until one does.`;
+    ? 'No active runner on the minimum version is connected, so unattended work waits until one is.'
+    : `No active runner on the minimum version carries ${effective.join(', ')}, so unattended work here waits until one does.`;
 }
 
 export function invalidLabels(labels: readonly string[]): string {

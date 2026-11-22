@@ -4,7 +4,7 @@ import { workspacePlacement } from '../../fleet/placement';
 import { Permission } from '../../roles/schemas';
 import { useUpdateWorkspacePolicy } from '../hooks';
 import { UPGRADE_NOTICE } from '../labels';
-import { community } from '../license';
+import { community, unverified } from '../license';
 import { PolicyScope } from '../source';
 import type { WorkspacePolicyResponse } from '../types';
 import { PolicyEditor } from './PolicyEditor';
@@ -21,7 +21,7 @@ interface WorkspacePolicyProps {
 export function WorkspacePolicy({ organizationId, workspaceId, policy }: WorkspacePolicyProps) {
   const update = useUpdateWorkspacePolicy(organizationId, workspaceId);
 
-  if (community(policy)) {
+  if (community(policy) && !unverified(policy)) {
     return <UpgradeNotice message={UPGRADE_NOTICE} className="policy-notice" />;
   }
 

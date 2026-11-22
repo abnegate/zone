@@ -86,8 +86,8 @@ describe('fleet messages', () => {
     expect(matchingText(1)).toBe('1 runner can take this work now.');
     expect(matchingText(3)).toBe('3 runners can take this work now.');
     expect(noMatchWarning(['gpu', 'region=eu'])).toBe(
-      'No connected runner carries gpu, region=eu, so unattended work here waits until one does.'
+      'No active runner on the minimum version carries gpu, region=eu, so unattended work here waits until one does.'
     );
-    expect(noMatchWarning([])).toContain('No connected runner can take unattended work');
+    expect(noMatchWarning([])).toContain('No active runner on the minimum version is connected');
   });
 });

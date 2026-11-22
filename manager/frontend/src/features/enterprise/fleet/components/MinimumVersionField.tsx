@@ -80,7 +80,7 @@ export function MinimumVersionField({ policy }: MinimumVersionFieldProps) {
             className="runners-minimum-input"
             aria-label={MINIMUM_LABEL}
             aria-invalid={failure ? true : undefined}
-            aria-describedby={failure ? errorId : undefined}
+            aria-describedby={failure && !confirming ? errorId : undefined}
             value={text}
             autoComplete="off"
             spellCheck={false}
@@ -115,7 +115,7 @@ export function MinimumVersionField({ policy }: MinimumVersionFieldProps) {
         <p className="runners-minimum-value">{saved ?? NO_MINIMUM}</p>
       )}
       {policy.editable && saved === null && !dirty && <p className="runners-hint">{NO_MINIMUM}</p>}
-      {failure && (
+      {failure && !confirming && (
         <p id={errorId} className="runners-error" role="alert">
           {failure}
         </p>
