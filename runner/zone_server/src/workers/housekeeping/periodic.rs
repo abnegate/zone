@@ -23,6 +23,7 @@ use super::sweep::Sweep;
 use super::warmup::Warmup;
 use crate::config::SourceIndexConfig;
 use crate::services::audit::retention;
+use crate::services::fleet;
 use crate::services::license::renewal::{self, Client};
 use crate::services::mcp_servers::load;
 use crate::services::spend;
@@ -55,11 +56,12 @@ pub enum Periodic {
     WorktreeCleanup,
     LicenseRenewal,
     SpendIngest,
+    RunnerRetention,
 }
 
 impl Periodic {
     /// Every sweep, in the order the server used to spawn them, then those added since.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::KnowledgeRefresh,
         Self::SourceResync,
         Self::AnswerPromotion,
@@ -75,6 +77,7 @@ impl Periodic {
         Self::WorktreeCleanup,
         Self::LicenseRenewal,
         Self::SpendIngest,
+        Self::RunnerRetention,
     ];
 
     pub fn name(self) -> &'static str {
@@ -94,6 +97,7 @@ impl Periodic {
             Self::WorktreeCleanup => "worktree-cleanup",
             Self::LicenseRenewal => "license-renewal",
             Self::SpendIngest => "spend-ingest",
+            Self::RunnerRetention => "runner-retention",
         }
     }
 
@@ -116,6 +120,7 @@ impl Periodic {
             Self::WorktreeCleanup => worktree::SWEEP_INTERVAL_SECONDS,
             Self::LicenseRenewal => renewal::INTERVAL_SECONDS,
             Self::SpendIngest => spend::sweep::INTERVAL_SECONDS,
+            Self::RunnerRetention => fleet::retention::SWEEP_INTERVAL_SECONDS,
         };
         Duration::from_secs(seconds)
     }
@@ -145,6 +150,8 @@ impl Periodic {
             Self::WorktreeCleanup => Warmup::Period,
             // The ingest cursor survives a restart, so a pass a period in reads all the server missed.
             Self::SpendIngest => Warmup::Period,
+            // A runner has to be gone a week before it is forgotten, so a day's wait costs nothing.
+            Self::RunnerRetention => Warmup::Period,
             // Long enough to be out of the way of start-up, short enough that a
             // server coming back up picks up files whose embeddings failed.
             Self::SourceResync => Warmup::After(source_resync::FIRST_POLL_DELAY),
@@ -191,7 +198,9 @@ impl Periodic {
             // The next pass asks about the license as it is stored then.
             | Self::LicenseRenewal
             // The next pass reads the logs from the cursor, whatever the turns it missed.
-            | Self::SpendIngest => Catchup::Skip,
+            | Self::SpendIngest
+            // The next pass forgets every runner gone a week by then, whatever the turns it missed.
+            | Self::RunnerRetention => Catchup::Skip,
             // These two never ticked on a grid at all. Both were `sleep` loops,
             // so the wait has always been measured from the end of the previous
             // pass rather than from a fixed alignment, and both queue work
@@ -256,6 +265,7 @@ pub fn periodic(state: AppState) -> Registry {
                 continue;
             }
             Periodic::SpendIngest => ingest_spend(schedule, state.clone(), Arc::clone(&fanout)),
+            Periodic::RunnerRetention => forget_runners(schedule, state.clone()),
         };
         registry.register(Arc::new(sweep));
     }
@@ -496,6 +506,22 @@ fn ingest_spend(schedule: Schedule, state: AppState, fanout: Arc<Fanout>) -> Swe
     })
 }
 
+fn forget_runners(schedule: Schedule, state: AppState) -> Sweep {
+    Sweep::new(Periodic::RunnerRetention.name(), schedule, move || {
+        let state = state.clone();
+        async move {
+            match fleet::retention::sweep(&state).await {
+                Ok(0) => Ok(()),
+                Ok(removed) => {
+                    tracing::info!(removed, "Removed runners offline past their retention");
+                    Ok(())
+                }
+                Err(error) => Err(Failure::new(error)),
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -527,11 +553,13 @@ mod tests {
                 "worktree-cleanup",
                 "license-renewal",
                 "spend-ingest",
+                "runner-retention",
             ],
             "main.rs spawned nine workers; eight of them are periodic sweeps and the ninth, \
              reminders, is a dispatch loop that stayed where it was. MCP convergence, the pull \
-             request watch, the audit retention sweep, the worktree cleanup and the license \
-             renewal and the spend ingest joined them later. Dropping one here would silently stop that background work."
+             request watch, the audit retention sweep, the worktree cleanup, the license \
+             renewal, the spend ingest and the runner retention joined them later. Dropping one \
+             here would silently stop that background work."
         );
     }
 
@@ -561,6 +589,7 @@ mod tests {
             (Periodic::WorktreeCleanup, 60 * 60),
             (Periodic::LicenseRenewal, 24 * 60 * 60),
             (Periodic::SpendIngest, 60),
+            (Periodic::RunnerRetention, 24 * 60 * 60),
         ] {
             assert_eq!(
                 periodic.period(&sources),
@@ -684,6 +713,30 @@ mod tests {
 
         assert!(!names.contains(&"spend-ingest"), "{names:?}");
         assert!(names.contains(&"audit-retention"), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn the_runner_retention_runs_daily_on_every_server() {
+        let mut config = test_config();
+        config.license_renewal.enabled = false;
+        config.model_backend = crate::config::ModelBackend::Cli {
+            agent: abnegate_agent_cli::AgentKind::Claude,
+            executable: None,
+        };
+        for state in [
+            AppState::for_tests(),
+            AppState::new(config, lazy_pool(), None),
+        ] {
+            state.disable_mcp();
+
+            let schedule = periodic(state)
+                .schedule("runner-retention")
+                .expect("the runner retention's schedule");
+
+            assert_eq!(schedule.period(), Duration::from_secs(24 * 60 * 60));
+            assert_eq!(schedule.warmup(), Warmup::Period);
+            assert_eq!(schedule.catchup(), Catchup::Skip);
+        }
     }
 
     #[test]

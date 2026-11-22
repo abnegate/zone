@@ -1,6 +1,8 @@
 use uuid::Uuid;
 use zone_enterprise::fleet::{Error, Labels, Version};
 
+use crate::services::fleet::misconfigured::Misconfigured;
+
 pub const NAME: &str = "ZONE_RUNNER_NAME";
 pub const LABELS: &str = "ZONE_RUNNER_LABELS";
 
@@ -32,11 +34,14 @@ impl Identity {
 
     /// [`Identity::detected`], with the name and labels the environment sets. Refuses labels
     /// that don't parse, so a misconfigured server can't boot into the wrong placement.
-    pub fn from_env() -> Result<Self, Error> {
-        Self::configured(
-            std::env::var(NAME).ok().as_deref(),
-            std::env::var(LABELS).ok().as_deref(),
-        )
+    pub fn from_env() -> Result<Self, Misconfigured> {
+        Self::read(|name| std::env::var(name).ok())
+    }
+
+    /// [`Identity::from_env`], reading each variable through `variable`.
+    pub fn read(variable: impl Fn(&str) -> Option<String>) -> Result<Self, Misconfigured> {
+        Self::configured(variable(NAME).as_deref(), variable(LABELS).as_deref())
+            .map_err(Misconfigured)
     }
 
     fn configured(name: Option<&str>, labels: Option<&str>) -> Result<Self, Error> {
@@ -138,6 +143,43 @@ mod tests {
         let refused = Identity::configured(Some("eu-1"), Some("gpu,GPU")).unwrap_err();
         assert_eq!(refused, Error::LabelInvalid("GPU".into()));
         assert_eq!(refused.code(), "fleet_label_invalid");
+    }
+
+    #[test]
+    fn invalid_labels_in_the_environment_refuse_to_boot_naming_the_variable_and_code() {
+        let environment = |name: &str| match name {
+            NAME => Some("eu-1".to_string()),
+            LABELS => Some("gpu, Region=EU".to_string()),
+            _ => None,
+        };
+
+        let refused = Identity::read(environment).unwrap_err();
+
+        assert_eq!(
+            refused,
+            Misconfigured(Error::LabelInvalid("Region=EU".into()))
+        );
+        assert_eq!(refused.code(), "fleet_label_invalid");
+        let message = refused.to_string();
+        assert!(message.starts_with("Refusing to start"), "{message}");
+        assert!(message.contains("ZONE_RUNNER_LABELS"), "{message}");
+        assert!(message.contains("fleet_label_invalid"), "{message}");
+        assert!(message.contains("\"Region=EU\""), "{message}");
+    }
+
+    #[test]
+    fn the_environment_is_read_by_its_documented_names() {
+        let environment = |name: &str| match name {
+            NAME => Some("eu-1".to_string()),
+            LABELS => Some("region=eu,gpu".to_string()),
+            _ => Some("unexpected".to_string()),
+        };
+
+        let identity = Identity::read(environment).unwrap();
+
+        assert_eq!(identity.name, "eu-1");
+        assert_eq!(identity.labels.to_vec(), ["gpu", "region=eu"]);
+        assert!(Identity::read(|_| None).unwrap().labels.is_empty());
     }
 
     #[test]

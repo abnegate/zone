@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
-use serde_json::{Value, json};
+use serde_json::json;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
@@ -16,7 +16,7 @@ use crate::auth::ServerAdmin;
 use crate::db::audit::{actions, resources};
 use crate::db::fleet::policy;
 use crate::db::fleet::revocation::{self, Revoked};
-use crate::db::fleet::runners::{self, Change, Removal, Runner};
+use crate::db::fleet::runners::{self, Change, Removal};
 use crate::db::fleet::state::State as RunnerState;
 use crate::db::fleet::transition::Transition;
 use crate::db::users::UserRow;
@@ -203,19 +203,10 @@ pub(super) async fn removal(
             action: actions::RUNNER_REMOVED,
             resource_type: resources::RUNNER,
             resource_id: Some(id),
-            old_values: Some(described(&runner)),
+            old_values: Some(runner.audited()),
             new_values: None,
         },
     )
     .await;
     Ok(())
-}
-
-fn described(runner: &Runner) -> Value {
-    json!({
-        "name": runner.name,
-        "version": runner.version.to_string(),
-        "labels": runner.labels.to_vec(),
-        "state": runner.state.as_str(),
-    })
 }

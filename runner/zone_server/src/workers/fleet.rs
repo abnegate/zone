@@ -1,33 +1,68 @@
-//! This server's part in its runner fleet: picking up task runs that the runner that admitted
-//! them may not take.
+//! This server's part in its runner fleet: keeping its registration alive, and picking up task
+//! runs that the runner that admitted them may not take.
 
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
-use tokio::time::MissedTickBehavior;
+use tokio::time::{Instant, Interval, MissedTickBehavior};
+use uuid::Uuid;
 
 use crate::db::fleet::candidate::Candidate;
 use crate::db::fleet::eligibility;
-use crate::services::fleet;
+use crate::services::fleet::{self, registration};
 use crate::state::AppState;
 use crate::workers::task;
 
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 pub const PICKUP_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Runs [`heartbeats`] and [`pickups`] for as long as the server does.
 pub fn spawn(state: AppState) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(PICKUP_INTERVAL);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            for candidate in pickup(&state, task::available()).await {
-                let state = state.clone();
-                tokio::spawn(async move {
-                    task::execute_task_run(&state, candidate.run, candidate.task).await;
-                });
-            }
-        }
+        tokio::join!(heartbeats(state.clone()), pickups(state));
     })
+}
+
+/// Registers this runner every [`HEARTBEAT_INTERVAL`], starting one interval in, since boot
+/// registered it. Registering is an upsert, so a row removed while the runner was online returns.
+async fn heartbeats(state: AppState) {
+    let mut interval = every(HEARTBEAT_INTERVAL, Instant::now() + HEARTBEAT_INTERVAL);
+    loop {
+        interval.tick().await;
+        heartbeat(&state).await;
+    }
+}
+
+async fn pickups(state: AppState) {
+    let mut interval = every(PICKUP_INTERVAL, Instant::now());
+    loop {
+        interval.tick().await;
+        for candidate in pickup(&state, task::available()).await {
+            let state = state.clone();
+            tokio::spawn(async move {
+                task::execute_task_run(&state, candidate.run, candidate.task).await;
+            });
+        }
+    }
+}
+
+fn every(period: Duration, start: Instant) -> Interval {
+    let mut interval = tokio::time::interval_at(start, period);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    interval
+}
+
+/// Registers this runner, or refreshes its registration. A failure is logged rather than
+/// returned, because the next heartbeat retries it: a server whose database was briefly
+/// unreachable as it booted registers once it can.
+pub async fn heartbeat(state: &AppState) -> Option<Uuid> {
+    match registration::register(state).await {
+        Ok(runner) => Some(runner),
+        Err(error) => {
+            tracing::warn!(%error, "Could not register as a runner; the next heartbeat retries");
+            None
+        }
+    }
 }
 
 /// The runs this runner should pick up, at most `capacity` of them. Without fleet policy there
@@ -63,8 +98,8 @@ mod tests {
     use crate::db::fleet::{labels, policy, runners};
     use crate::db::tasks::{self, TaskRunRow};
     use crate::services::fleet::identity::version;
-    use crate::services::fleet::registration;
     use crate::services::fleet::tests::Server;
+    use crate::state::{test_config, unreachable_pool};
 
     #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
     struct Refused {
@@ -177,6 +212,46 @@ mod tests {
             .await
             .unwrap()
         }
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_registers_the_runner_again_after_its_row_was_removed() {
+        let server = Server::new(None).await;
+        let first = heartbeat(&server.state).await.expect("a registered runner");
+        assert_eq!(heartbeat(&server.state).await, Some(first));
+        sqlx::query("DELETE FROM fleet_runners WHERE id = $1")
+            .bind(first)
+            .execute(&server.database.pool)
+            .await
+            .unwrap();
+
+        let returned = heartbeat(&server.state).await.expect("the runner again");
+
+        assert_ne!(returned, first);
+        assert_eq!(server.state.runner(), Some(returned));
+        let row = runners::get(&server.database.pool, returned)
+            .await
+            .unwrap()
+            .expect("the returned row");
+        assert_eq!(row.name, server.state.identity().name);
+        assert_eq!(row.labels, server.state.identity().labels);
+        assert_eq!(row.instance, server.state.instance());
+        server.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_that_cannot_reach_the_database_is_left_to_the_next_one() {
+        let state = AppState::new(test_config(), unreachable_pool(), None);
+        state.disable_mcp();
+
+        assert_eq!(heartbeat(&state).await, None);
+        assert_eq!(state.runner(), None);
+    }
+
+    #[test]
+    fn a_runner_heartbeats_well_inside_the_window_that_counts_it_connected() {
+        let connected = runners::CONNECTED.to_std().unwrap();
+        assert!(HEARTBEAT_INTERVAL * 3 < connected, "{HEARTBEAT_INTERVAL:?}");
     }
 
     #[tokio::test]

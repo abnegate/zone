@@ -34,7 +34,7 @@ pub async fn register(state: &AppState) -> DbResult<Uuid> {
     if registered.contested {
         tracing::warn!(
             runner = %runner.name,
-            "Another Zone server process held this runner's name within the last minute. That's expected right after a restart; otherwise give each server its own {NAME}, since servers sharing a name share its state"
+            "Another Zone server process held this runner's name within the last minute. A fast restart is expected to trigger this once, as the new process takes the name over from the old one. If it repeats, two servers share the name and so share its state: give each its own {NAME}"
         );
     }
     if first {
