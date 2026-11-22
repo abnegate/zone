@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use redis::aio::ConnectionManager;
 use tokio::sync::watch;
 
 use super::command::Command;
@@ -21,6 +22,13 @@ impl Transport {
         match self {
             Self::Loopback(loopback) => loopback.has_peers(),
             Self::Valkey(_) => true,
+        }
+    }
+
+    pub fn valkey(&self) -> Option<&ConnectionManager> {
+        match self {
+            Self::Loopback(_) => None,
+            Self::Valkey(valkey) => Some(valkey.manager()),
         }
     }
 

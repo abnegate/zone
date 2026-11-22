@@ -40,6 +40,7 @@ use crate::services::github::snapshots::Snapshots;
 use crate::services::github_app::Provider;
 use crate::services::license::renewal;
 use crate::services::license::{Licenses, Stored};
+use crate::services::limit::Limiter;
 use crate::services::mail::AccountMail;
 use crate::services::mcp_servers::hubs::Hubs;
 use crate::services::mcp_servers::status::Policy;
@@ -119,7 +120,7 @@ struct AppStateInner {
     pub embedding_service: Option<Arc<dyn EmbeddingService>>,
     pub context_service: Option<Arc<ContextService>>,
     pub mail: Option<Arc<AccountMail>>,
-    pub rate_limiter: Arc<RateLimiter<Uuid>>,
+    pub limiter: Limiter,
     pub sync_registry: SyncRegistry,
     pub pull_registry: PullRegistry,
     /// The one LoRA training run. Survives the HTTP request that started it.
@@ -244,8 +245,8 @@ impl AppState {
         let master_key = crate::secret::derive(config.encryption_key())
             .expect("Encryption key should be valid (validated in Config::from_env)");
 
-        let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::default()));
-        let cleaned = Arc::clone(&rate_limiter);
+        let local = RateLimiter::new(RateLimitConfig::default());
+        let cleaned = local.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(RATE_LIMITER_CLEANUP_INTERVAL);
             loop {
@@ -257,6 +258,7 @@ impl AppState {
 
         let github_snapshots = Snapshots::new(&config.github);
         let bus = Bus::loopback(&master_key);
+        let limiter = Limiter::new(local, bus.clone());
 
         let mcp = Hubs::new(
             zone_routing::proxy(),
@@ -275,7 +277,7 @@ impl AppState {
                 embedding_service,
                 context_service,
                 mail,
-                rate_limiter,
+                limiter,
                 sync_registry: SyncRegistry::new(Arc::clone(&master_key)),
                 pull_registry: PullRegistry::new(),
                 train_jobs: TrainRegistry::new(),
@@ -303,12 +305,14 @@ impl AppState {
         }
     }
 
-    /// Replaces the bus. It must be called before the state is cloned, while
-    /// nothing else can be holding the bus it replaces.
+    /// Replaces the bus, and with it the Valkey the rate limit counts in. It
+    /// must be called before the state is cloned, while nothing else can be
+    /// holding the bus it replaces.
     pub fn with_bus(mut self, bus: Bus) -> Self {
-        Arc::get_mut(&mut self.inner)
-            .expect("the bus is replaced before the state is shared")
-            .bus = bus;
+        let inner =
+            Arc::get_mut(&mut self.inner).expect("the bus is replaced before the state is shared");
+        inner.limiter = inner.limiter.with_bus(bus.clone());
+        inner.bus = bus;
         self
     }
 
@@ -373,9 +377,9 @@ impl AppState {
         self.inner.mail.as_ref()
     }
 
-    /// Get the rate limiter
-    pub fn rate_limiter(&self) -> &Arc<RateLimiter<Uuid>> {
-        &self.inner.rate_limiter
+    /// The context-gather rate limit, shared by every replica on the bus's Valkey.
+    pub fn limiter(&self) -> &Limiter {
+        &self.inner.limiter
     }
 
     /// Get the index semaphore for limiting concurrent indexing operations
@@ -1142,7 +1146,7 @@ mod tests {
                 .expose(),
             "ghp_sealed_by_the_state"
         );
-        let _ = state.rate_limiter();
+        assert_eq!(*state.limiter().config(), RateLimitConfig::default());
         let _ = state.sync_registry();
         let _ = state.pull_registry();
         assert!(state.train_jobs().current().is_none());

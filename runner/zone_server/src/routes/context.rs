@@ -20,10 +20,6 @@ use crate::db::workspace_members;
 use crate::state::AppState;
 use sqlx::PgPool;
 
-// ============================================================================
-// Request/Response Types
-// ============================================================================
-
 #[derive(Debug, Deserialize)]
 pub struct GatherRequest {
     source_ids: Vec<Uuid>,
@@ -203,10 +199,6 @@ pub struct KnowledgeListItem {
     indexed: bool,
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
 /// Verify that a user has access to a workspace
 async fn verify_workspace_access(
     pool: &PgPool,
@@ -237,10 +229,6 @@ async fn verify_source_ownership(
     workspace_members::verify_sources_in_workspace(pool, workspace_id, source_ids).await
 }
 
-// ============================================================================
-// Route Handlers
-// ============================================================================
-
 /// POST /api/context/gather
 /// Trigger context gathering for specified sources
 ///
@@ -265,8 +253,8 @@ pub async fn gather(
         }
     };
 
-    let rate_limiter = state.rate_limiter();
-    let decision = rate_limiter.check_rate_limit(user_id);
+    let limiter = state.limiter();
+    let decision = limiter.check(user_id).await;
     let reset_seconds = decision.reset_at.map_or(0, |reset_at| {
         reset_at
             .saturating_duration_since(std::time::Instant::now())
@@ -276,7 +264,7 @@ pub async fn gather(
     let mut headers = HeaderMap::new();
     headers.insert(
         HeaderName::from_static("x-ratelimit-limit"),
-        HeaderValue::from(rate_limiter.config().limit),
+        HeaderValue::from(limiter.config().limit),
     );
     headers.insert(
         HeaderName::from_static("x-ratelimit-remaining"),
