@@ -351,9 +351,9 @@ jobs:
             fi
             sh scripts/lts-tag.sh "$target" "$VERSION"
             digest=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$target:$VERSION" | jq -r .digest)
-            line=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$target:$LINE-lts" | jq -r .digest)
+            held=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$target:$LINE-lts" | jq -r .digest)
             tags="\`$VERSION\`"
-            if [ "$line" = "$digest" ]; then
+            if [ "$held" = "$digest" ]; then
               tags="$tags, \`$LINE-lts\`"
             fi
             printf '%s\t%s\t%s\n' "$repository" "$digest" "$tags" >> "$RUNNER_TEMP/published"

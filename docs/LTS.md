@@ -283,6 +283,8 @@ Pushing the tag starts the **LTS** workflow:
    a release older than the one it points at is published without moving it,
    with a notice in the job summary. Manifest jobs of one line run one at a
    time, so two patch releases approved together can't race on the tag.
+   GitHub keeps only one job waiting per group, so a third release queued
+   behind them cancels the waiting one; rerun it once the line is free.
 4. **Bundle** builds the [air-gapped bundle](AIRGAP.md) for the release.
 
 [DISTRIBUTION.md](DISTRIBUTION.md) covers the registry, its storage and the
