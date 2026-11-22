@@ -1,10 +1,10 @@
-import type { Price } from './Price.ts';
+import type { Plans } from './Plans.ts';
 
 export interface Site {
   readonly name: string;
   readonly domain: string;
   readonly repository: string;
-  readonly checkoutURL: string;
   readonly contactEmail: string;
-  readonly price: Price;
+  readonly currency: string;
+  readonly plans: Plans;
 }

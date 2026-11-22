@@ -1,71 +1,111 @@
 <section class="hero hero-compact">
   <div class="container hero-inner">
-    <h1>Free for everyone. Paid when a company needs control.</h1>
+    <h1>Free to start. Per seat when your team grows.</h1>
     <p class="lead">
-      Zone Community is free and has no caps. Zone Enterprise adds single sign-on, agent and model
-      policy, custom roles and audit export for the admins, security and finance teams who answer
-      for how a company uses AI.
+      Zone Community is free for up to {{ communityMemberLimit }} active members per server. Zone
+      Team removes the limit and adds spend reports and budgets. Zone Enterprise adds single sign-on,
+      agent and model policy, custom roles and audit export for the admins, security and finance
+      teams who answer for how a company uses AI.
     </p>
   </div>
 </section>
 
-<section class="section section-tight" aria-labelledby="plans-heading">
+<section class="section section-tight" id="plans" aria-labelledby="plans-heading" tabindex="-1">
   <div class="container">
-    <h2 id="plans-heading" class="visually-hidden">Editions</h2>
+    <h2 id="plans-heading" class="visually-hidden">Plans</h2>
     <div class="plans">
       <article class="plan" aria-labelledby="community-heading">
-        <h3 id="community-heading">Community</h3>
-        <p class="plan-price"><span class="amount">$0</span> <span class="unit">forever</span></p>
-        <p class="plan-summary">Free, MIT-licensed and self-hosted. No seat, workspace or usage caps.</p>
-        <ul class="checklist">
-          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Chats, agents, tasks, auto projects and reviews</li>
-          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Claude Code, Codex and API-key agents</li>
-          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Local models, ComfyUI, training, knowledge and search</li>
-          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>GitHub pull requests and releases</li>
-          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Organizations, workspaces, built-in roles and the audit log</li>
-          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Single-node Compose and Helm installs</li>
-        </ul>
-        <a class="button button-secondary plan-action" href="{{ root }}#get-started">Install Community</a>
-        <p class="plan-note">
-          No account and no key. Install it with Docker Compose or Helm, and paste a license later if
-          you need Enterprise.
-        </p>
+        <div class="plan-header">
+          <h3 id="community-heading">Community</h3>
+          <p class="plan-price"><span class="amount">$0</span> <span class="unit">forever</span></p>
+          <p class="plan-summary">
+            Free, MIT-licensed and self-hosted, for up to {{ communityMemberLimit }} active members
+            per server.
+          </p>
+        </div>
+        <div class="plan-body">
+          <ul class="checklist">
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Every product feature</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Chats, agents, tasks, auto projects and reviews</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Claude Code, Codex and API-key agents</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Local models, ComfyUI, training, knowledge and search</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>GitHub pull requests and releases</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Organizations, workspaces, built-in roles and the audit log</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Single-node Compose and Helm installs</li>
+          </ul>
+        </div>
+        <div class="plan-footer">
+          <a class="button button-secondary plan-action" href="{{ root }}#get-started">Install Community</a>
+          <p class="plan-note">No account and no key. Paste a license later to move up.</p>
+        </div>
+      </article>
+      <article class="plan" aria-labelledby="team-heading">
+        <div class="plan-header">
+          <h3 id="team-heading">Team</h3>
+          <p class="plan-price">
+            <span class="amount">{{ teamSeatMonthly }}</span>
+            <span class="unit">per seat per month</span>
+          </p>
+          <p class="plan-summary">
+            Or {{ teamSeatYearly }} per seat per year, saving {{ teamYearlySaving }} a seat. For
+            teams that share a server and need to see what AI costs.
+          </p>
+        </div>
+        <div class="plan-body">
+          <ul class="checklist">
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Everything in Community</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Unlimited members</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Spend reports per organization, workspace, user and model</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Monthly budgets with alerts and hard limits</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Email support</li>
+          </ul>
+        </div>
+        <div class="plan-footer">
+          <a class="button button-secondary plan-action" href="{{ teamCheckoutURL }}">Buy Zone Team</a>
+          <p class="plan-note">From one seat, billed monthly or yearly.</p>
+        </div>
       </article>
       <article class="plan plan-featured" aria-labelledby="enterprise-heading">
-        <h3 id="enterprise-heading">Zone Enterprise</h3>
-        <p class="plan-price">
-          <span class="amount">{{ seatMonthly }}</span>
-          <span class="unit">per seat per month</span>
-        </p>
-        <p class="plan-summary">
-          Or {{ seatYearly }} per seat per year, saving {{ yearlySaving }} a seat. Monthly or yearly,
-          for as few or as many seats as you need.
-          Self-hosted, on the same image as Community.
-        </p>
-        <ul class="checklist">
-          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Everything in Community</li>
-          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>SSO over OIDC, with SSO-only login and a break-glass admin</li>
-          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Agent and model policy per organization and workspace</li>
-          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Custom roles per organization and workspace</li>
-          <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Audit export, streaming to a webhook, S3 or syslog, and retention</li>
-        </ul>
-        <p class="plan-coming-heading"><span class="badge">Coming</span></p>
-        <ul class="coming-list">
-          <li>SAML</li>
-          <li>SCIM provisioning</li>
-          <li>Spend reports</li>
-          <li>HA reference architecture</li>
-          <li>LTS releases</li>
-          <li>Air-gapped install bundle</li>
-          <li>Support SLA</li>
-        </ul>
-        <a class="button button-primary plan-action" href="{{ checkoutURL }}">Buy Zone Enterprise</a>
-        <p class="plan-note">
-          Checkout is handled by Polar. Choose your seat count there; the license key is emailed to
-          your billing contact.
-        </p>
+        <div class="plan-header">
+          <h3 id="enterprise-heading">Enterprise</h3>
+          <p class="plan-price">
+            <span class="amount">{{ enterpriseSeatMonthly }}</span>
+            <span class="unit">per seat per month</span>
+          </p>
+          <p class="plan-summary">
+            Or {{ enterpriseSeatYearly }} per seat per year,
+            saving {{ enterpriseYearlySaving }} a seat. For companies that need control over
+            sign-in, agents and audit.
+          </p>
+        </div>
+        <div class="plan-body">
+          <ul class="checklist">
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Everything in Team</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>SSO over OIDC or SAML, with SSO-only login and a break-glass admin</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Agent and model policy per organization and workspace</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Custom roles per organization and workspace</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Audit export, streaming to a webhook, S3 or syslog, and retention</li>
+          </ul>
+          <p class="plan-coming-heading"><span class="badge">Coming</span></p>
+          <ul class="coming-list">
+            <li>SCIM provisioning</li>
+            <li>HA reference architecture</li>
+            <li>LTS releases</li>
+            <li>Air-gapped install bundle</li>
+            <li>Support SLA</li>
+          </ul>
+        </div>
+        <div class="plan-footer">
+          <a class="button button-primary plan-action" href="{{ enterpriseCheckoutURL }}">Buy Zone Enterprise</a>
+          <p class="plan-note">From one seat, billed monthly or yearly.</p>
+        </div>
       </article>
     </div>
+    <p class="contact-line">
+      Team and Enterprise check out through Polar, which emails the license key to your billing
+      contact. Servers that can reach the internet renew by themselves unless
+      <code>ZONE_LICENSE_RENEWAL=false</code>.
+    </p>
     <p class="contact-line">
       Buying for a large organization, or need an invoice instead of a card payment?
       <a href="{{ contactHref }}">Email {{ contactEmail }}</a>.
@@ -80,7 +120,7 @@
     <ol class="steps">
       <li>
         <h3>Check out</h3>
-        <p>Buy Zone Enterprise with Polar for the number of seats you need.</p>
+        <p>Buy Zone Team or Zone Enterprise with Polar, monthly or yearly, for the number of seats you need.</p>
       </li>
       <li>
         <h3>Get your key</h3>
@@ -88,7 +128,7 @@
       </li>
       <li>
         <h3>Paste it in</h3>
-        <p>An admin pastes the key into <strong>Settings &rarr; License</strong>. Enterprise features unlock in place: same image, same data, no reinstall.</p>
+        <p>An admin pastes the key into <strong>Settings &rarr; License</strong>. Your plan unlocks in place: same image, same data, no reinstall.</p>
       </li>
     </ol>
   </div>
@@ -99,8 +139,12 @@
     <div>
       <h2 id="seats-heading">What counts as a seat</h2>
       <p class="section-lead">
-        A seat is an organization member who signed in during the calendar month. Members who are
+        A seat is an active member: anyone who signed in during the calendar month. Members who are
         deactivated, or who did not sign in that month, are free.
+      </p>
+      <p class="section-lead">
+        Community counts members the same way and allows up to {{ communityMemberLimit }} active
+        members per server.
       </p>
     </div>
     <div class="callout">
@@ -109,9 +153,9 @@
         March. That is 32 seats for March.
       </p>
       <p>
-        Seats are soft-enforced. If you go over your licensed count, admins see a banner and the
-        difference is trued up at renewal. Nobody is ever blocked from signing in because of a seat
-        count.
+        On Team and Enterprise, seats are soft-enforced. If you go over your licensed count, admins
+        see a banner and the difference is trued up at renewal. Nobody is ever blocked from signing
+        in because of a seat count.
       </p>
     </div>
   </div>
@@ -132,7 +176,7 @@
         </p>
       </details>
       <details>
-        <summary>Does Zone Enterprise work in an air-gapped install?</summary>
+        <summary>Do Team and Enterprise work in an air-gapped install?</summary>
         <p>
           Yes. Because keys are verified offline, an install with no internet access verifies a key
           exactly like any other. Paste the key into Settings &rarr; License as usual. A packaged
@@ -143,16 +187,25 @@
         <summary>What happens when our license expires?</summary>
         <p>
           You get a 30-day grace period after the expiry date. After that, expiry still never locks
-          anyone out or loosens security: SSO login keeps working, and existing policies and custom
-          roles keep being enforced. What pauses until you renew is editing policies and custom
-          roles, and audit export and streaming.
+          anyone out or loosens security: SSO login keeps working, and existing policies, custom
+          roles and budget limits keep being enforced. What pauses until you renew is editing
+          policies, custom roles and budgets, and audit export and streaming. New people are held
+          to the Community limit of {{ communityMemberLimit }} active members again.
         </p>
       </details>
       <details>
         <summary>What if we use more seats than we bought?</summary>
         <p>
-          Nothing is blocked. Admins see a banner showing the overage, and the extra seats are trued
-          up at renewal at your per-seat price.
+          On Team and Enterprise, nothing is blocked. Admins see a banner showing the overage, and
+          the extra seats are trued up at renewal at your plan&rsquo;s per-seat price.
+        </p>
+      </details>
+      <details>
+        <summary>What happens at the Community member limit?</summary>
+        <p>
+          Once {{ communityMemberLimit }} members have signed in during a calendar month, nobody new
+          can join the server. Reaching the limit never signs anyone out. A Team or Enterprise key
+          removes the limit on the same install.
         </p>
       </details>
       <details>
@@ -161,8 +214,15 @@
           Yes. Renewals and seat changes go through Polar, and each one emails a new key to your
           billing contact. A server that can reach the internet installs it by itself, unless
           automatic renewal is turned off; otherwise paste it into Settings &rarr; License to
-          replace the old one. If you cancel, your current
-          key keeps working until it expires.
+          replace the old one. If you cancel, your current key keeps working until it expires.
+        </p>
+      </details>
+      <details>
+        <summary>Can we move from Team to Enterprise?</summary>
+        <p>
+          Yes. Change your plan in Polar, and a new key is emailed to your billing contact. A server
+          that can reach the internet picks it up when it next renews. To switch sooner, or if
+          automatic renewal is turned off, paste it into Settings &rarr; License.
         </p>
       </details>
       <details>
@@ -183,21 +243,22 @@
       <details>
         <summary>Do we need to reinstall to upgrade from Community?</summary>
         <p>
-          No. Community and Enterprise are the same image. Without a license Zone runs as Community;
-          pasting a license unlocks the Enterprise features on your existing install and data.
+          No. Community, Team and Enterprise are the same image. Without a license Zone runs as
+          Community; pasting a license unlocks your plan on your existing install and data.
         </p>
       </details>
       <details>
-        <summary>Can our security team read the Enterprise code?</summary>
+        <summary>Can our security team read the paid code?</summary>
         <p>
-          Yes. The Enterprise code, including the license check, is in the public repository under the
-          Zone Enterprise License. See <a href="{{ root }}licensing/">Licensing</a>.
+          Yes. The code behind Team and Enterprise, including the license check, is in the public
+          repository under the Zone Enterprise License. See <a href="{{ root }}licensing/">Licensing</a>.
         </p>
       </details>
       <details>
         <summary>Is anything in Community capped or time-limited?</summary>
         <p>
-          No. Community is MIT-licensed, with no seat, workspace or usage caps, and no expiry.
+          Community allows up to {{ communityMemberLimit }} active members per server. Nothing else
+          is capped, and it never expires.
         </p>
       </details>
     </div>
@@ -209,8 +270,8 @@
     <h2 id="contact-heading">Questions before you buy?</h2>
     <p class="section-lead">Talk to us about larger deals, invoicing or anything on this page.</p>
     <div class="actions">
-      <a class="button button-primary" href="{{ checkoutURL }}">Buy Zone Enterprise</a>
-      <a class="button button-secondary" href="{{ contactHref }}">Email {{ contactEmail }}</a>
+      <a class="button button-primary" href="{{ contactHref }}">Email {{ contactEmail }}</a>
+      <a class="button button-secondary" href="#plans">Compare plans</a>
     </div>
   </div>
 </section>
