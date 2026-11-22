@@ -5,23 +5,23 @@
 //! and a working Slack should get its digest on Slack, and the run should be
 //! recorded as delivered rather than retried into a duplicate.
 //!
-//! The last delivery per workspace is held in memory and seeded, on first
-//! sight, with the slot that has already passed. A workspace is therefore never
-//! sent a digest the previous process already sent, at the cost of losing at
-//! most one slot across a restart. Sending twice is worse than sending late.
+//! The last delivery per workspace is held in `report_deliveries`, seeded on
+//! first sight with the slot that has already passed, and claimed before each
+//! send. Every replica and every restart therefore agrees on what was sent, and
+//! a digest lost to a crash between claiming and sending is not sent twice.
+//! Sending twice is worse than sending late.
 
-use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use abnegate_notify::Fanout;
 use abnegate_notify::Report;
-use chrono::{NaiveDateTime, Utc, Weekday};
+use chrono::{NaiveDateTime, Weekday};
 use sqlx::PgPool;
-use uuid::Uuid;
 
+use super::claim::Claim;
 use super::digest::{Digest, generate};
-use super::schedule::{Cadence, Due, Schedule, due};
+use super::schedule::{Cadence, Due, Schedule};
 use crate::config::Environment;
 use crate::db::DbResult;
 use crate::db::analytics::{self, ReportableWorkspace};
@@ -159,23 +159,6 @@ impl ReportSettings {
     }
 }
 
-/// The last delivery per workspace, held across cycles.
-pub type Ledger = BTreeMap<Uuid, NaiveDateTime>;
-
-/// What a workspace is owed now, seeding an unseen workspace with the slot that
-/// has already gone by so a restart does not resend it.
-pub fn owed(
-    ledger: &mut Ledger,
-    workspace_id: Uuid,
-    schedule: &Schedule,
-    now: NaiveDateTime,
-) -> Option<Due> {
-    let last = *ledger
-        .entry(workspace_id)
-        .or_insert_with(|| schedule.slot_at_or_before(now));
-    due(schedule, Some(last), now)
-}
-
 /// Build one workspace's digest for the window it is owed.
 pub async fn build(
     pool: &PgPool,
@@ -249,64 +232,80 @@ fn worth_retrying(report: &Report) -> bool {
     report.retryable().next().is_some()
 }
 
-/// Look once at every workspace's schedule, and deliver whatever is owed.
+/// Look once at every workspace's schedule at `now`, and deliver whatever is owed.
 pub async fn run_cycle(
     state: &AppState,
     settings: &ReportSettings,
     checkers: &[Arc<dyn RegressionChecker>],
     fanout: &Fanout,
-    ledger: &mut Ledger,
+    now: NaiveDateTime,
 ) -> DbResult<()> {
     let pool = state.db();
-    let now = Utc::now().naive_utc();
     let period = settings.schedule.cadence.period();
     let since = now - chrono::Duration::days(period.days());
 
     for workspace in analytics::reportable_workspaces(pool, since).await? {
-        let Some(due) = owed(ledger, workspace.workspace_id, &settings.schedule, now) else {
-            continue;
-        };
-
-        let digest = match build(pool, &workspace, settings, checkers, &due, now).await {
-            Ok(digest) => digest,
-            Err(error) => {
-                tracing::warn!(
-                    workspace_id = %workspace.workspace_id,
-                    %error,
-                    "Digest could not be built; retrying next tick"
-                );
-                continue;
-            }
-        };
-
-        let report = deliver(fanout, &digest).await;
-        let delivered = delivered(&report);
-        if !delivered && !worth_retrying(&report) {
-            ledger.insert(workspace.workspace_id, due.slot);
-            tracing::error!(
-                workspace_id = %workspace.workspace_id,
-                slot = %due.slot,
-                "Every channel refused this report permanently; the slot is closed rather than \
-                 retried, so this digest is lost. Check the workspace's configured channels."
-            );
-            continue;
-        }
-        if delivered {
-            ledger.insert(workspace.workspace_id, due.slot);
-            tracing::info!(
-                workspace_id = %workspace.workspace_id,
-                slot = %due.slot,
-                missed = due.missed,
-                next = %settings.schedule.next_after(now),
-                "Scheduled report delivered"
-            );
-        } else {
+        if let Err(error) = settle(pool, &workspace, settings, checkers, fanout, now).await {
             tracing::warn!(
                 workspace_id = %workspace.workspace_id,
-                slot = %due.slot,
-                "No channel took the scheduled report; retrying next tick"
+                %error,
+                "Scheduled report could not be settled; retrying next tick"
             );
         }
+    }
+
+    Ok(())
+}
+
+/// Deliver what one workspace is owed, claiming it first so no other replica sends it too.
+async fn settle(
+    pool: &PgPool,
+    workspace: &ReportableWorkspace,
+    settings: &ReportSettings,
+    checkers: &[Arc<dyn RegressionChecker>],
+    fanout: &Fanout,
+    now: NaiveDateTime,
+) -> DbResult<()> {
+    let Some(claim) = Claim::owed(pool, workspace.workspace_id, &settings.schedule, now).await?
+    else {
+        return Ok(());
+    };
+    let due = claim.due();
+
+    let digest = build(pool, workspace, settings, checkers, due, now).await?;
+
+    if !claim.take(pool).await? {
+        tracing::debug!(
+            workspace_id = %workspace.workspace_id,
+            slot = %due.slot,
+            "Scheduled report was already claimed elsewhere"
+        );
+        return Ok(());
+    }
+
+    let report = deliver(fanout, &digest).await;
+    if delivered(&report) {
+        tracing::info!(
+            workspace_id = %workspace.workspace_id,
+            slot = %due.slot,
+            missed = due.missed,
+            next = %settings.schedule.next_after(now),
+            "Scheduled report delivered"
+        );
+    } else if worth_retrying(&report) {
+        claim.release(pool).await?;
+        tracing::warn!(
+            workspace_id = %workspace.workspace_id,
+            slot = %due.slot,
+            "No channel took the scheduled report; retrying next tick"
+        );
+    } else {
+        tracing::error!(
+            workspace_id = %workspace.workspace_id,
+            slot = %due.slot,
+            "Every channel refused this report permanently; the slot is closed rather than \
+             retried, so this digest is lost. Check the workspace's configured channels."
+        );
     }
 
     Ok(())
@@ -331,7 +330,7 @@ pub fn announce(settings: &ReportSettings, fanout: &Fanout) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::digest::fixtures::{digest, moment};
+    use super::super::digest::fixtures::digest;
     use super::*;
     use abnegate_notify::Channel;
     use abnegate_notify::Error;
@@ -422,48 +421,6 @@ mod tests {
         assert_eq!(
             settings.schedule.day_of_month,
             Schedule::default().day_of_month
-        );
-    }
-
-    #[test]
-    fn a_workspace_seen_for_the_first_time_waits_for_the_next_slot() {
-        let schedule = Schedule {
-            cadence: Cadence::Daily,
-            hour: 8,
-            ..Schedule::default()
-        };
-        let mut ledger = Ledger::new();
-        let workspace_id = Uuid::from_u128(1);
-
-        assert_eq!(
-            owed(&mut ledger, workspace_id, &schedule, moment(8, 12)),
-            None,
-            "the slot that already passed is assumed covered"
-        );
-        assert_eq!(ledger.get(&workspace_id), Some(&moment(8, 8)));
-
-        let next = owed(&mut ledger, workspace_id, &schedule, moment(9, 9))
-            .expect("the next slot is owed");
-        assert_eq!(next.slot, moment(9, 8));
-        assert_eq!(next.missed, 0);
-    }
-
-    #[test]
-    fn recording_a_delivery_stops_the_same_slot_going_out_twice() {
-        let schedule = Schedule {
-            cadence: Cadence::Daily,
-            hour: 8,
-            ..Schedule::default()
-        };
-        let workspace_id = Uuid::from_u128(1);
-        let mut ledger = Ledger::from([(workspace_id, moment(7, 8))]);
-
-        let due = owed(&mut ledger, workspace_id, &schedule, moment(8, 9)).expect("owed");
-        ledger.insert(workspace_id, due.slot);
-
-        assert_eq!(
-            owed(&mut ledger, workspace_id, &schedule, moment(8, 23)),
-            None
         );
     }
 

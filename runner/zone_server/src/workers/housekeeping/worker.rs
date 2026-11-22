@@ -6,28 +6,39 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::task::{Id, JoinHandle, JoinSet};
+use tokio::task::{AbortHandle, Id, JoinHandle, JoinSet};
 use tokio::time::{Instant, sleep_until};
 
 use super::jitter::Jitter;
 use super::job::Failure;
+use super::leader::Leadership;
 use super::outcome::Outcome;
 use super::periodic::periodic;
 use super::registry::Registry;
 use super::report::Report;
+use super::scope::Scope;
 use super::slot::Slot;
 use crate::state::AppState;
 
 /// Start the housekeeping worker for this server.
-pub fn spawn(state: AppState) -> JoinHandle<()> {
-    Worker::new(periodic(state)).spawn()
+pub fn spawn(state: AppState, leadership: Leadership) -> JoinHandle<()> {
+    Worker::new(periodic(state), leadership).spawn()
 }
 
-/// Which job a running sweep belongs to, and when it started.
-#[derive(Debug, Clone, Copy)]
+/// Which job a running sweep belongs to, when it started, and how to stop it.
+#[derive(Debug)]
 struct Dispatch {
     index: usize,
+    scope: Scope,
     started: Instant,
+    handle: AbortHandle,
+    aborted: bool,
+}
+
+impl Dispatch {
+    fn needs_leadership(&self) -> bool {
+        self.scope == Scope::Cluster && !self.aborted
+    }
 }
 
 /// Runs a [`Registry`] of periodic jobs on one timer.
@@ -38,16 +49,24 @@ struct Dispatch {
 /// back to its job through the task id, and neither reaches the loop's own
 /// stack. This is the same arrangement [`abnegate_notify::Fanout`] uses to keep one
 /// broken webhook from costing a notification its other channels.
+///
+/// A [`Scope::Cluster`] job is dispatched only while `leadership` leads, checked at the moment
+/// of dispatch, and is aborted as soon as it stops leading. A turn that falls due while a new
+/// leader sits out its wait is held until the wait ends, so a single server still runs its
+/// start-up sweeps. A follower's cluster turns are reported as [`Outcome::Skipped`] and its
+/// slots keep their cadence.
 pub struct Worker {
     registry: Registry,
+    leadership: Leadership,
     jitter: Jitter,
     reports: Option<UnboundedSender<Report>>,
 }
 
 impl Worker {
-    pub fn new(registry: Registry) -> Self {
+    pub fn new(registry: Registry, leadership: Leadership) -> Self {
         Self {
             registry,
+            leadership,
             jitter: Jitter::default(),
             reports: None,
         }
@@ -102,17 +121,16 @@ impl Worker {
 
         loop {
             let wake = slots.iter().filter_map(Slot::due).min();
+            let leading = owners.values().any(Dispatch::needs_leadership);
 
             tokio::select! {
                 () = waiting(wake) => self.dispatch(&mut slots, &mut sweeps, &mut owners),
+                () = self.leadership.lost(), if leading => self.abort(&mut owners),
                 Some(joined) = sweeps.join_next_with_id(), if !sweeps.is_empty() => {
                     let (id, outcome) = match joined {
                         Ok((id, result)) => (id, Outcome::from(result)),
                         Err(error) if error.is_panic() => (error.id(), Outcome::Panicked),
-                        Err(error) => (
-                            error.id(),
-                            Outcome::Failed(Failure::new("sweep was cancelled")),
-                        ),
+                        Err(error) => (error.id(), Outcome::Aborted),
                     };
                     self.settle(&mut slots, &mut owners, id, outcome);
                 }
@@ -133,15 +151,46 @@ impl Worker {
                 continue;
             }
             let job = Arc::clone(&self.registry.jobs()[index]);
+            let scope = job.scope();
+            if scope == Scope::Cluster && !self.leadership.leads() {
+                if let Some(ready) = self.leadership.ready() {
+                    slot.defer(ready);
+                    continue;
+                }
+                let schedule = job.schedule();
+                slot.settle(&schedule, now);
+                self.publish(
+                    Report::new(job.name(), Outcome::Skipped, Duration::ZERO),
+                    schedule.period(),
+                );
+                continue;
+            }
             tracing::debug!(job = job.name(), "Housekeeping sweep started");
             let handle = sweeps.spawn(job.sweep());
             owners.insert(
                 handle.id(),
                 Dispatch {
                     index,
+                    scope,
                     started: now,
+                    handle,
+                    aborted: false,
                 },
             );
+        }
+    }
+
+    fn abort(&self, owners: &mut HashMap<Id, Dispatch>) {
+        for dispatch in owners
+            .values_mut()
+            .filter(|dispatch| dispatch.needs_leadership())
+        {
+            tracing::warn!(
+                job = self.registry.jobs()[dispatch.index].name(),
+                "This replica stopped leading; aborting its cluster sweep"
+            );
+            dispatch.handle.abort();
+            dispatch.aborted = true;
         }
     }
 
@@ -188,6 +237,15 @@ impl Worker {
                 job = report.job(),
                 "Housekeeping sweep panicked; retrying on its next turn"
             ),
+            Outcome::Skipped => tracing::trace!(
+                job = report.job(),
+                "Housekeeping cluster sweep skipped; another replica leads"
+            ),
+            Outcome::Aborted => tracing::warn!(
+                job = report.job(),
+                elapsed_seconds = report.elapsed().as_secs(),
+                "Housekeeping cluster sweep aborted when this replica stopped leading"
+            ),
         }
 
         if let Some(reports) = &self.reports {
@@ -212,12 +270,257 @@ mod tests {
     use tokio::sync::mpsc::{self, UnboundedReceiver};
 
     use super::super::catchup::Catchup;
+    use super::super::leader::Timing;
     use super::super::schedule::Schedule;
     use super::super::sweep::Sweep;
     use super::super::warmup::Warmup;
     use super::*;
 
     const PERIOD: Duration = Duration::from_secs(60);
+
+    fn follower() -> Leadership {
+        Leadership::manual(Timing::default())
+    }
+
+    fn leader() -> Leadership {
+        let leadership = follower();
+        leadership.promote(Instant::now() - Timing::default().wait);
+        leadership
+    }
+
+    /// Answer a ping every `ping` interval for as long as the test runs.
+    fn confirming(leadership: &Leadership) -> JoinHandle<()> {
+        let leadership = leadership.clone();
+        tokio::spawn(async move {
+            loop {
+                leadership.confirm(Instant::now());
+                tokio::time::sleep(leadership.timing().ping).await;
+            }
+        })
+    }
+
+    fn cluster(name: &'static str, seconds: u64, turns: &Arc<AtomicUsize>) -> Sweep {
+        let turns = Arc::clone(turns);
+        Sweep::new(
+            name,
+            every(seconds, Catchup::Skip),
+            Scope::Cluster,
+            move || {
+                let turns = Arc::clone(&turns);
+                async move {
+                    turns.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+    }
+
+    fn lingering(name: &'static str, finished: &Arc<AtomicUsize>) -> Sweep {
+        let finished = Arc::clone(finished);
+        Sweep::new(name, every(60, Catchup::Skip), Scope::Cluster, move || {
+            let finished = Arc::clone(&finished);
+            async move {
+                tokio::time::sleep(Duration::from_secs(600)).await;
+                finished.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_follower_skips_cluster_turns_but_keeps_their_cadence() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let clustered = Arc::new(AtomicUsize::new(0));
+        let local = Arc::new(AtomicUsize::new(0));
+        let registry = Registry::new()
+            .with(cluster("clustered", 60, &clustered))
+            .with(counting("local", every(60, Catchup::Skip), &local));
+
+        let handle = Worker::new(registry, follower())
+            .with_jitter(Jitter::none())
+            .reporting_to(sender)
+            .spawn();
+        tokio::time::sleep(Duration::from_secs(185)).await;
+        handle.abort();
+
+        assert_eq!(
+            clustered.load(Ordering::SeqCst),
+            0,
+            "a follower never runs a cluster sweep"
+        );
+        assert_eq!(
+            local.load(Ordering::SeqCst),
+            3,
+            "a replica sweep runs on every replica"
+        );
+        let skipped = drain(&mut receiver)
+            .into_iter()
+            .filter(|report| report.outcome() == &Outcome::Skipped)
+            .map(|report| report.job())
+            .collect::<Vec<_>>();
+        assert_eq!(skipped, ["clustered", "clustered", "clustered"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_leader_runs_its_cluster_turns() {
+        let clustered = Arc::new(AtomicUsize::new(0));
+        let leadership = leader();
+        let pinging = confirming(&leadership);
+
+        let handle = Worker::new(
+            Registry::new().with(cluster("clustered", 60, &clustered)),
+            leadership,
+        )
+        .with_jitter(Jitter::none())
+        .spawn();
+        tokio::time::sleep(Duration::from_secs(185)).await;
+        handle.abort();
+        pinging.abort();
+
+        assert_eq!(clustered.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_leader_sits_out_its_wait_before_the_first_cluster_sweep() {
+        let clustered = Arc::new(AtomicUsize::new(0));
+        let leadership = follower();
+        leadership.promote(Instant::now());
+        let pinging = confirming(&leadership);
+
+        let handle = Worker::new(
+            Registry::new().with(cluster("clustered", 1, &clustered)),
+            leadership,
+        )
+        .with_jitter(Jitter::none())
+        .spawn();
+        tokio::time::sleep(Duration::from_millis(19_500)).await;
+        let waiting = clustered.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        handle.abort();
+        pinging.abort();
+
+        assert_eq!(
+            waiting, 0,
+            "no cluster sweep may start inside the wait after acquiring"
+        );
+        assert!(clustered.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_due_during_the_wait_runs_when_the_wait_ends_rather_than_a_period_later() {
+        let turns = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Mutex::new(None));
+        let leadership = follower();
+        let promoted = Instant::now();
+        leadership.promote(promoted);
+        let pinging = confirming(&leadership);
+        let sweep = {
+            let turns = Arc::clone(&turns);
+            let started = Arc::clone(&started);
+            Sweep::new("start-up", immediately(600), Scope::Cluster, move || {
+                let turns = Arc::clone(&turns);
+                let started = Arc::clone(&started);
+                async move {
+                    started
+                        .lock()
+                        .expect("no sweep panics")
+                        .get_or_insert(Instant::now());
+                    turns.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            })
+        };
+
+        let handle = Worker::new(Registry::new().with(sweep), leadership)
+            .with_jitter(Jitter::none())
+            .spawn();
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        handle.abort();
+        pinging.abort();
+
+        assert_eq!(turns.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *started.lock().expect("no sweep panics"),
+            Some(promoted + Timing::default().wait),
+            "a single server's start-up sweep waits out the election, not a whole period"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn demotion_aborts_a_running_cluster_sweep_and_spares_replica_sweeps() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let finished = Arc::new(AtomicUsize::new(0));
+        let local = Arc::new(AtomicUsize::new(0));
+        let leadership = leader();
+        let pinging = confirming(&leadership);
+        let registry = Registry::new()
+            .with(lingering("lingering", &finished))
+            .with(counting("local", every(60, Catchup::Skip), &local));
+
+        let handle = Worker::new(registry, leadership.clone())
+            .with_jitter(Jitter::none())
+            .reporting_to(sender)
+            .spawn();
+        tokio::time::sleep(Duration::from_secs(90)).await;
+        pinging.abort();
+        leadership.demote();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let aborted: Vec<_> = drain(&mut receiver)
+            .into_iter()
+            .filter(|report| report.outcome() == &Outcome::Aborted)
+            .map(|report| report.job())
+            .collect();
+        assert_eq!(
+            aborted,
+            ["lingering"],
+            "demotion stops the cluster sweep at once"
+        );
+
+        tokio::time::sleep(Duration::from_secs(1_200)).await;
+        handle.abort();
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            0,
+            "an aborted sweep never finishes"
+        );
+        assert!(
+            local.load(Ordering::SeqCst) >= 20,
+            "replica sweeps keep running after demotion"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_leader_whose_pings_stop_being_answered_aborts_without_being_told() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let finished = Arc::new(AtomicUsize::new(0));
+        let leadership = leader();
+        let pinging = confirming(&leadership);
+
+        let handle = Worker::new(
+            Registry::new().with(lingering("lingering", &finished)),
+            leadership.clone(),
+        )
+        .with_jitter(Jitter::none())
+        .reporting_to(sender)
+        .spawn();
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        pinging.abort();
+        let confirmed = leadership
+            .tenure()
+            .expect("still recorded as held")
+            .confirmed();
+
+        let report = receiver.recv().await.expect("the sweep is reported");
+        handle.abort();
+
+        assert_eq!(report.outcome(), &Outcome::Aborted);
+        assert!(leadership.tenure().is_some(), "nobody demoted it");
+        assert!(
+            Instant::now() <= confirmed + Timing::default().freshness,
+            "the sweep must stop by the freshness deadline, not after it"
+        );
+    }
 
     fn every(seconds: u64, catchup: Catchup) -> Schedule {
         Schedule::new(Duration::from_secs(seconds), Warmup::Period, catchup)
@@ -233,7 +536,7 @@ mod tests {
 
     fn counting(name: &'static str, schedule: Schedule, turns: &Arc<AtomicUsize>) -> Sweep {
         let turns = Arc::clone(turns);
-        Sweep::new(name, schedule, move || {
+        Sweep::new(name, schedule, Scope::Replica, move || {
             let turns = Arc::clone(&turns);
             async move {
                 turns.fetch_add(1, Ordering::SeqCst);
@@ -256,17 +559,16 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_empty_registry_stops_instead_of_spinning() {
-        Worker::new(Registry::new()).run().await;
+        Worker::new(Registry::new(), follower()).run().await;
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_job_sweeps_once_per_period() {
         let turns = Arc::new(AtomicUsize::new(0));
-        let worker = Worker::new(Registry::new().with(counting(
-            "counted",
-            every(60, Catchup::Skip),
-            &turns,
-        )))
+        let worker = Worker::new(
+            Registry::new().with(counting("counted", every(60, Catchup::Skip), &turns)),
+            follower(),
+        )
         .with_jitter(Jitter::none());
 
         let handle = worker.spawn();
@@ -283,11 +585,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_warm_up_period_keeps_the_first_sweep_off_the_start_up_path() {
         let turns = Arc::new(AtomicUsize::new(0));
-        let worker = Worker::new(Registry::new().with(counting(
-            "counted",
-            every(60, Catchup::Skip),
-            &turns,
-        )))
+        let worker = Worker::new(
+            Registry::new().with(counting("counted", every(60, Catchup::Skip), &turns)),
+            follower(),
+        )
         .with_jitter(Jitter::none());
 
         let handle = worker.spawn();
@@ -302,9 +603,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_immediate_job_sweeps_without_waiting_for_a_period() {
         let turns = Arc::new(AtomicUsize::new(0));
-        let worker =
-            Worker::new(Registry::new().with(counting("counted", immediately(60), &turns)))
-                .with_jitter(Jitter::none());
+        let worker = Worker::new(
+            Registry::new().with(counting("counted", immediately(60), &turns)),
+            follower(),
+        )
+        .with_jitter(Jitter::none());
 
         let handle = worker.spawn();
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -316,11 +619,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn jitter_delays_a_first_sweep_without_disturbing_the_period() {
         let turns = Arc::new(AtomicUsize::new(0));
-        let worker = Worker::new(Registry::new().with(counting(
-            "counted",
-            every(60, Catchup::Skip),
-            &turns,
-        )))
+        let worker = Worker::new(
+            Registry::new().with(counting("counted", every(60, Catchup::Skip), &turns)),
+            follower(),
+        )
         .with_jitter(Jitter::new(1.0));
 
         let handle = worker.spawn();
@@ -352,7 +654,7 @@ mod tests {
             let inside = Arc::clone(&inside);
             let peak = Arc::clone(&peak);
             let turns = Arc::clone(&turns);
-            Sweep::new("slow", every(1, Catchup::Skip), move || {
+            Sweep::new("slow", every(1, Catchup::Skip), Scope::Replica, move || {
                 let inside = Arc::clone(&inside);
                 let peak = Arc::clone(&peak);
                 let turns = Arc::clone(&turns);
@@ -367,7 +669,7 @@ mod tests {
             })
         };
 
-        let handle = Worker::new(Registry::new().with(sweep))
+        let handle = Worker::new(Registry::new().with(sweep), follower())
             .with_jitter(Jitter::none())
             .spawn();
         tokio::time::sleep(Duration::from_secs(120)).await;
@@ -392,13 +694,14 @@ mod tests {
             .with(Sweep::new(
                 "panicking",
                 every(60, Catchup::Skip),
+                Scope::Replica,
                 || async {
                     panic!("a panicking sweep must not take the housekeeping worker with it")
                 },
             ))
             .with(counting("surviving", every(60, Catchup::Skip), &survivor));
 
-        let handle = Worker::new(registry)
+        let handle = Worker::new(registry, follower())
             .with_jitter(Jitter::none())
             .reporting_to(sender)
             .spawn();
@@ -423,12 +726,14 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_failing_sweep_is_reported_and_comes_back_next_turn() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
-        let registry =
-            Registry::new().with(Sweep::new("failing", every(60, Catchup::Skip), || async {
-                Err(Failure::new("pool timed out"))
-            }));
+        let registry = Registry::new().with(Sweep::new(
+            "failing",
+            every(60, Catchup::Skip),
+            Scope::Replica,
+            || async { Err(Failure::new("pool timed out")) },
+        ));
 
-        let handle = Worker::new(registry)
+        let handle = Worker::new(registry, follower())
             .with_jitter(Jitter::none())
             .reporting_to(sender)
             .spawn();
@@ -451,16 +756,23 @@ mod tests {
         let mut registry = Registry::new();
         for name in ["first", "second", "third"] {
             let recorded = Arc::clone(&order);
-            registry = registry.with(Sweep::new(name, every(60, Catchup::Skip), move || {
-                let recorded = Arc::clone(&recorded);
-                async move {
-                    recorded.lock().expect("no sweep panics").push(name);
-                    Ok(())
-                }
-            }));
+            registry = registry.with(Sweep::new(
+                name,
+                every(60, Catchup::Skip),
+                Scope::Replica,
+                move || {
+                    let recorded = Arc::clone(&recorded);
+                    async move {
+                        recorded.lock().expect("no sweep panics").push(name);
+                        Ok(())
+                    }
+                },
+            ));
         }
 
-        let handle = Worker::new(registry).with_jitter(Jitter::none()).spawn();
+        let handle = Worker::new(registry, follower())
+            .with_jitter(Jitter::none())
+            .spawn();
         tokio::time::sleep(Duration::from_secs(61)).await;
         handle.abort();
 
@@ -474,14 +786,20 @@ mod tests {
     async fn each_job_keeps_its_own_period() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let registry = Registry::new()
-            .with(Sweep::new("fast", every(60, Catchup::Skip), || async {
-                Ok(())
-            }))
-            .with(Sweep::new("slow", every(300, Catchup::Skip), || async {
-                Ok(())
-            }));
+            .with(Sweep::new(
+                "fast",
+                every(60, Catchup::Skip),
+                Scope::Replica,
+                || async { Ok(()) },
+            ))
+            .with(Sweep::new(
+                "slow",
+                every(300, Catchup::Skip),
+                Scope::Replica,
+                || async { Ok(()) },
+            ));
 
-        let handle = Worker::new(registry)
+        let handle = Worker::new(registry, follower())
             .with_jitter(Jitter::none())
             .reporting_to(sender)
             .spawn();
@@ -501,13 +819,14 @@ mod tests {
         let registry = Registry::new().with(Sweep::new(
             "delaying",
             every(60, Catchup::Delay),
+            Scope::Replica,
             || async {
                 tokio::time::sleep(Duration::from_secs(90)).await;
                 Ok(())
             },
         ));
 
-        let handle = Worker::new(registry)
+        let handle = Worker::new(registry, follower())
             .with_jitter(Jitter::none())
             .reporting_to(sender)
             .spawn();
@@ -525,13 +844,17 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_skipping_job_rejoins_its_grid_after_overrunning() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
-        let registry =
-            Registry::new().with(Sweep::new("skipping", every(60, Catchup::Skip), || async {
+        let registry = Registry::new().with(Sweep::new(
+            "skipping",
+            every(60, Catchup::Skip),
+            Scope::Replica,
+            || async {
                 tokio::time::sleep(Duration::from_secs(90)).await;
                 Ok(())
-            }));
+            },
+        ));
 
-        let handle = Worker::new(registry)
+        let handle = Worker::new(registry, follower())
             .with_jitter(Jitter::none())
             .reporting_to(sender)
             .spawn();
@@ -549,12 +872,17 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_report_measures_how_long_its_sweep_took() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
-        let registry = Registry::new().with(Sweep::new("timed", immediately(600), || async {
-            tokio::time::sleep(Duration::from_secs(7)).await;
-            Ok(())
-        }));
+        let registry = Registry::new().with(Sweep::new(
+            "timed",
+            immediately(600),
+            Scope::Replica,
+            || async {
+                tokio::time::sleep(Duration::from_secs(7)).await;
+                Ok(())
+            },
+        ));
 
-        let handle = Worker::new(registry)
+        let handle = Worker::new(registry, follower())
             .with_jitter(Jitter::none())
             .reporting_to(sender)
             .spawn();
@@ -571,12 +899,19 @@ mod tests {
     async fn the_worker_reports_every_job_it_was_given() {
         let worker = Worker::new(
             Registry::new()
-                .with(Sweep::new("one", every(60, Catchup::Skip), || async {
-                    Ok(())
-                }))
-                .with(Sweep::new("two", every(60, Catchup::Skip), || async {
-                    Ok(())
-                })),
+                .with(Sweep::new(
+                    "one",
+                    every(60, Catchup::Skip),
+                    Scope::Replica,
+                    || async { Ok(()) },
+                ))
+                .with(Sweep::new(
+                    "two",
+                    every(60, Catchup::Skip),
+                    Scope::Replica,
+                    || async { Ok(()) },
+                )),
+            follower(),
         );
 
         assert_eq!(worker.registry().names(), ["one", "two"]);

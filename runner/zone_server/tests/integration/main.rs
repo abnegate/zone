@@ -85,6 +85,7 @@ mod github_connection_routes;
 mod github_sources;
 mod gitlab_sources;
 mod host_directories;
+mod housekeeping_election;
 mod indexing;
 mod invitations;
 mod invitations_routes;

@@ -12,6 +12,10 @@ pub enum Outcome {
     Completed,
     Failed(Failure),
     Panicked,
+    /// A cluster turn on a replica that does not lead.
+    Skipped,
+    /// A cluster sweep stopped because this replica stopped leading.
+    Aborted,
 }
 
 impl Outcome {
@@ -22,7 +26,7 @@ impl Outcome {
     pub fn failure(&self) -> Option<&Failure> {
         match self {
             Self::Failed(failure) => Some(failure),
-            Self::Completed | Self::Panicked => None,
+            Self::Completed | Self::Panicked | Self::Skipped | Self::Aborted => None,
         }
     }
 }
