@@ -97,6 +97,7 @@ pub struct Change<'a> {
 #[derive(Debug)]
 pub enum Creation {
     Created(Box<CustomRoleRow>),
+    Forbidden,
     NameTaken,
 }
 
@@ -220,6 +221,8 @@ where
     row.map(CustomRoleRow::try_from).transpose()
 }
 
+/// The creator is judged as [`update`] judges an editor, after the organization is held against
+/// deletion, which locks the organization before its members.
 pub async fn create(
     pool: &PgPool,
     organization_id: Uuid,
@@ -228,6 +231,14 @@ pub async fn create(
 ) -> DbResult<Creation> {
     let grant = Grant::stored(definition.scope, definition.grant.names());
     let mut transaction = pool.begin().await?;
+
+    if !super::organizations::hold(&mut transaction, organization_id).await?
+        || lock_editor(&mut transaction, organization_id, created_by)
+            .await?
+            .is_none()
+    {
+        return Ok(Creation::Forbidden);
+    }
 
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
@@ -561,7 +572,8 @@ pub(crate) mod testing {
     use crate::db::organization_members::OrgRole;
     use crate::db::workspace_members::WorkspaceRole;
 
-    /// A fresh custom role of `scope` in `organization` holding `granted` and the scope's base.
+    /// A fresh custom role of `scope` in `organization` holding `granted` and the scope's base,
+    /// created by `creator`, who must be an owner or admin of `organization`.
     pub async fn role(
         pool: &PgPool,
         organization: Uuid,
@@ -586,8 +598,30 @@ pub(crate) mod testing {
             .expect("the role is created")
         {
             Creation::Created(role) => role.id,
+            Creation::Forbidden => panic!("the creator does not hold roles:update"),
             Creation::NameTaken => panic!("a fresh role name was taken"),
         }
+    }
+
+    /// A fresh account seated as an owner of `organization`.
+    async fn owner(pool: &PgPool, organization: Uuid) -> Uuid {
+        let owner: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash) VALUES ($1, 'test-only') RETURNING id",
+        )
+        .bind(format!("{}@zone.test", Uuid::new_v4()))
+        .fetch_one(pool)
+        .await
+        .expect("a user");
+        sqlx::query(
+            "INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, $3)",
+        )
+        .bind(organization)
+        .bind(owner)
+        .bind(OrgRole::Owner.as_str())
+        .execute(pool)
+        .await
+        .expect("an owner is seated");
+        owner
     }
 
     /// Gives an organization member `role`, with the built-in column pinned to member as every
@@ -623,6 +657,8 @@ pub(crate) mod testing {
     }
 
     /// Moves a workspace member onto a fresh workspace custom role holding `granted` and the base.
+    /// An owner seated only to create the role is removed again, so the organization keeps the
+    /// members the test gave it.
     pub async fn hold(
         pool: &PgPool,
         organization: Uuid,
@@ -630,7 +666,13 @@ pub(crate) mod testing {
         user: Uuid,
         granted: &[Permission],
     ) {
-        let role = role(pool, organization, user, Scope::Workspace, granted).await;
+        let creator = owner(pool, organization).await;
+        let role = role(pool, organization, creator, Scope::Workspace, granted).await;
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(creator)
+            .execute(pool)
+            .await
+            .expect("the creator is removed");
         assign_workspace(pool, workspace, user, role).await;
     }
 }

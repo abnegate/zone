@@ -799,7 +799,7 @@ describe('WorkspaceAiSection', () => {
 
   it('shows the reason the server refused the reset', async () => {
     const message =
-      'Failed to reset workspace AI settings: Only workspace admins can change AI settings';
+      'Failed to reset workspace AI settings: This needs the workspace_ai_settings:update permission in this workspace.';
     mockClient.resetWorkspaceAiSettings.mockRejectedValue(new ApiError(message, 403));
     const user = await renderSection();
 

@@ -13,7 +13,9 @@ use uuid::Uuid;
 use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 use zone_enterprise::spend::{Budget, Microdollars, Month, Scope, State, Target};
+use zone_server::auth::{self, Grant, Permission};
 use zone_server::db::audit::lock::Lock;
+use zone_server::db::custom_roles::{self, Creation, Definition};
 use zone_server::db::migrations;
 use zone_server::db::organization_members::OrgRole;
 use zone_server::db::spend::budgets::{self, Announcement, BudgetRow, CreateError, Crossing};
@@ -1246,6 +1248,103 @@ async fn a_budget_notice_goes_to_active_accounts_only() {
     ];
     expected.sort();
     assert_eq!(mailed, expected, "deactivated accounts get no notice");
+
+    fixture.cleanup().await;
+}
+
+async fn custom_organization_role(fixture: &Fixture, granted: &[Permission]) -> Uuid {
+    let names: Vec<String> = granted
+        .iter()
+        .map(|permission| permission.name().to_owned())
+        .collect();
+    let grant = Grant::compose(auth::Scope::Organization, &names).unwrap();
+    let name = format!("Spend {}", Uuid::new_v4());
+    let definition = Definition {
+        name: &name,
+        description: None,
+        scope: auth::Scope::Organization,
+        grant: &grant,
+    };
+    match custom_roles::create(
+        fixture.pool(),
+        fixture.policy.organization,
+        &definition,
+        fixture.policy.owner.id,
+    )
+    .await
+    .unwrap()
+    {
+        Creation::Created(role) => role.id,
+        other => panic!("the owner creates the role: {other:?}"),
+    }
+}
+
+async fn hold_organization_role(fixture: &Fixture, user: Uuid, role: Uuid) {
+    sqlx::query(
+        "UPDATE organization_members SET role = 'member', custom_role_id = $1 \
+         WHERE organization_id = $2 AND user_id = $3",
+    )
+    .bind(role)
+    .bind(fixture.policy.organization)
+    .bind(user)
+    .execute(fixture.pool())
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_budget_notice_reaches_custom_roles_that_hold_spend_read() {
+    let fixture = Fixture::new("spend_notice_custom").await;
+    let admin = fixture.policy.member(OrgRole::Admin, None).await;
+    let reader = fixture.policy.member(OrgRole::Member, None).await;
+    let auditor = fixture.policy.member(OrgRole::Member, None).await;
+    fixture.policy.member(OrgRole::Member, None).await;
+    let reading = custom_organization_role(&fixture, &[Permission::SpendRead]).await;
+    let auditing = custom_organization_role(&fixture, &[Permission::AuditLogsRead]).await;
+    hold_organization_role(&fixture, reader.id, reading).await;
+    hold_organization_role(&fixture, auditor.id, auditing).await;
+    fixture
+        .record(Spend {
+            occurred_at: inside(),
+            ..fixture.spend()
+        })
+        .await;
+    let mut connection = fixture.pool().acquire().await.unwrap();
+    let created = budgets::create(
+        &mut connection,
+        fixture.policy.organization,
+        &organization_wide(),
+        &budget(1, false),
+        fixture.policy.owner.id,
+        month(),
+    )
+    .await
+    .unwrap();
+    drop(connection);
+
+    let crossings = budgets::settle(fixture.pool(), month()).await.unwrap();
+    let crossing = crossings
+        .iter()
+        .find(|crossing| crossing.row.id == created.id)
+        .expect("the budget is used up");
+    assert!(
+        notice::announce(fixture.state(), &Fanout::new(), crossing, month())
+            .await
+            .unwrap()
+    );
+
+    let mut mailed = fixture.mailed();
+    mailed.sort();
+    let mut expected = vec![
+        fixture.policy.owner.email.clone(),
+        admin.email,
+        reader.email,
+    ];
+    expected.sort();
+    assert_eq!(
+        mailed, expected,
+        "spend:read holders get the notice, built-in or custom, and nobody else"
+    );
 
     fixture.cleanup().await;
 }

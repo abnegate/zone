@@ -117,20 +117,27 @@ async fn editor(pool: &PgPool, organization: Uuid, role: OrgRole) -> Uuid {
 
 async fn composed(pool: &PgPool, organization: Uuid, scope: Scope, granted: &[Permission]) -> Uuid {
     let grant = Grant::compose(scope, &names(granted)).expect("the role composes");
-    let creator = user(pool).await;
+    let creator = editor(pool, organization, OrgRole::Owner).await;
     let definition = Definition {
         name: &format!("Role {}", Uuid::new_v4()),
         description: None,
         scope,
         grant: &grant,
     };
-    match custom_roles::create(pool, organization, &definition, creator)
+    let created = match custom_roles::create(pool, organization, &definition, creator)
         .await
         .expect("the role is created")
     {
         Creation::Created(role) => role.id,
+        Creation::Forbidden => panic!("an owner holds roles:update"),
         Creation::NameTaken => panic!("a fresh name is never taken"),
-    }
+    };
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(creator)
+        .execute(pool)
+        .await
+        .expect("the owner seated to create the role leaves");
+    created
 }
 
 /// A role written straight into the tables, past `Grant::compose`, so the
@@ -1070,7 +1077,8 @@ async fn roles_are_created_listed_read_and_named_uniquely() {
     let pool = create_test_pool().await;
     let organization = organization(&pool).await;
     let elsewhere = self::organization(&pool).await;
-    let creator = user(&pool).await;
+    let creator = editor(&pool, organization, OrgRole::Owner).await;
+    let distant = editor(&pool, elsewhere, OrgRole::Owner).await;
     let grant = Grant::compose(
         Scope::Workspace,
         &names(&[Permission::WorkspaceWrite, Permission::ProjectSyncsUpdate]),
@@ -1088,6 +1096,7 @@ async fn roles_are_created_listed_read_and_named_uniquely() {
         .expect("the role is created")
     {
         Creation::Created(role) => role,
+        Creation::Forbidden => panic!("the owner holds roles:update"),
         Creation::NameTaken => panic!("the name is free"),
     };
     assert_eq!(created.name, "Release Managers");
@@ -1110,7 +1119,7 @@ async fn roles_are_created_listed_read_and_named_uniquely() {
     ));
     assert!(
         matches!(
-            custom_roles::create(&pool, elsewhere, &definition, creator)
+            custom_roles::create(&pool, elsewhere, &definition, distant)
                 .await
                 .expect("answered"),
             Creation::Created(_)
@@ -1142,7 +1151,7 @@ async fn roles_are_created_listed_read_and_named_uniquely() {
 async fn create_stores_only_what_a_role_of_its_scope_may_carry() {
     let pool = create_test_pool().await;
     let organization = organization(&pool).await;
-    let creator = user(&pool).await;
+    let creator = editor(&pool, organization, OrgRole::Owner).await;
     let owner = Grant::workspace(WorkspaceRole::Owner);
     let definition = Definition {
         name: "Everything",

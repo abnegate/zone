@@ -377,7 +377,9 @@ fn caller(auth: &AuthUser) -> Result<Uuid, Box<Response>> {
 
 fn access_error(error: ai_settings::AccessError) -> Box<Response> {
     match error {
-        ai_settings::AccessError::Forbidden(message) => denied(StatusCode::FORBIDDEN, message),
+        ai_settings::AccessError::Forbidden(permission) => {
+            denied(StatusCode::FORBIDDEN, &permission.refusal())
+        }
         ai_settings::AccessError::NotFound(message) => denied(StatusCode::NOT_FOUND, message),
         ai_settings::AccessError::Invalid(message) => denied(StatusCode::BAD_REQUEST, &message),
         ai_settings::AccessError::Database(error) => database_error(error),

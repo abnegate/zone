@@ -13,10 +13,10 @@ use serde::Serialize;
 use zone_enterprise::policy::Denial;
 
 use super::kind::Kind;
+use crate::auth::Permission;
 use crate::db::ai_settings::AccessError;
 use crate::services::login::error::Error;
 
-const ADMINS_ONLY: &str = "Only organization admins can sign in to coding agents";
 const INTERNAL: &str = "Internal server error";
 
 #[derive(Debug)]
@@ -46,8 +46,8 @@ impl Failure {
         }
     }
 
-    pub(super) fn admins_only() -> Self {
-        Self::new(StatusCode::FORBIDDEN, ADMINS_ONLY)
+    pub(super) fn forbidden(permission: Permission) -> Self {
+        Self::new(StatusCode::FORBIDDEN, permission.refusal())
     }
 
     pub(super) fn denied(denial: Denial) -> Self {
@@ -91,7 +91,7 @@ impl Failure {
 impl From<AccessError> for Failure {
     fn from(error: AccessError) -> Self {
         match error {
-            AccessError::Forbidden(_) => Self::admins_only(),
+            AccessError::Forbidden(permission) => Self::forbidden(permission),
             AccessError::NotFound(message) => Self::new(StatusCode::NOT_FOUND, message),
             AccessError::Invalid(message) => Self::new(StatusCode::BAD_REQUEST, message),
             AccessError::Database(error) => Self::database(error),
@@ -179,12 +179,13 @@ mod tests {
                 (status, message, None)
             );
         }
-        let forbidden = Failure::from(AccessError::Forbidden(
-            "Only organization admins can manage AI settings",
-        ));
+        let forbidden = Failure::from(AccessError::Forbidden(Permission::AgentLoginsUpdate));
         assert_eq!(
             (forbidden.status, forbidden.message.as_ref()),
-            (StatusCode::FORBIDDEN, ADMINS_ONLY)
+            (
+                StatusCode::FORBIDDEN,
+                Permission::AgentLoginsUpdate.refusal().as_str()
+            )
         );
     }
 
@@ -216,8 +217,11 @@ mod tests {
             )
         );
         assert_eq!(
-            sent(Failure::admins_only()).await,
-            (StatusCode::FORBIDDEN, json!({ "error": ADMINS_ONLY }))
+            sent(Failure::forbidden(Permission::AgentLoginsUpdate)).await,
+            (
+                StatusCode::FORBIDDEN,
+                json!({ "error": Permission::AgentLoginsUpdate.refusal() })
+            )
         );
     }
 

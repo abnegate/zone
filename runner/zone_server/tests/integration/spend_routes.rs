@@ -11,6 +11,7 @@ use zone_enterprise::spend::{
     BODY_INVALID, BUDGET_EXISTS, LIMIT_INVALID, Month, RANGE_INVALID, SCOPE_INVALID,
     THRESHOLD_INVALID,
 };
+use zone_server::auth::Permission;
 use zone_server::auth::entitlement::TEAM_MESSAGE;
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::organization_members::OrgRole;
@@ -22,13 +23,20 @@ use crate::common::sso::grace;
 
 const PREFIX: &str = "spend_routes";
 const LICENSE_REQUIRED: &str = "license_required";
-const FORBIDDEN: &str = "Only organization owners and admins can see spend or change budgets";
 const ORGANIZATION_MISSING: &str = "Organization not found";
 const BUDGET_MISSING: &str = "Budget not found";
 const LIMIT: i64 = 50_000_000;
 const OCTOBER: &str = "from=2026-10-01&to=2026-10-03";
 const CSV_HEADER: &str = "date,workspace_id,workspace,user_id,user_email,automated,model,provider,requests,prompt_tokens,completion_tokens,spend_usd\r\n";
 const CSV_TYPE: &str = "text/csv; charset=utf-8";
+const NEEDED: [Permission; 6] = [
+    Permission::SpendRead,
+    Permission::SpendRead,
+    Permission::SpendRead,
+    Permission::SpendUpdate,
+    Permission::SpendUpdate,
+    Permission::SpendUpdate,
+];
 
 fn at(text: &str) -> DateTime<Utc> {
     text.parse().unwrap()
@@ -172,14 +180,35 @@ async fn only_owners_and_admins_reach_spend_and_strangers_are_told_it_does_not_e
     let admin = fixture.policy.member(OrgRole::Admin, None).await;
     let stranger = fixture.policy.stranger().await;
 
-    for (token, status, message) in [
-        (&member.token, StatusCode::FORBIDDEN, FORBIDDEN),
-        (&stranger.token, StatusCode::NOT_FOUND, ORGANIZATION_MISSING),
-    ] {
-        for response in every_route(&fixture, budget, token).await {
-            assert_eq!(response.status, status, "{}", response.text());
-            assert_eq!(response.json_value(), json!({ "error": message }));
-        }
+    for (response, needed) in every_route(&fixture, budget, &member.token)
+        .await
+        .into_iter()
+        .zip(NEEDED)
+    {
+        assert_eq!(
+            response.status,
+            StatusCode::FORBIDDEN,
+            "{}",
+            response.text()
+        );
+        assert_eq!(response.json_value(), json!({ "error": needed.refusal() }));
+        assert!(
+            response.text().contains(needed.name()),
+            "a refusal names the permission the route needs: {}",
+            response.text()
+        );
+    }
+    for response in every_route(&fixture, budget, &stranger.token).await {
+        assert_eq!(
+            response.status,
+            StatusCode::NOT_FOUND,
+            "{}",
+            response.text()
+        );
+        assert_eq!(
+            response.json_value(),
+            json!({ "error": ORGANIZATION_MISSING })
+        );
     }
     let organization = fixture.policy.organization;
     for path in [

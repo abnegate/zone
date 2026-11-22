@@ -14,8 +14,9 @@ use zone_server::auth::jwt::create_session_access_token;
 use zone_server::auth::{Grant, Permission, Scope};
 use zone_server::db::custom_roles::{self, Creation, Definition};
 use zone_server::db::knowledge::discovery::CATEGORY;
+use zone_server::db::organization_members::{self, OrgRole};
 use zone_server::db::workspace_members::WorkspaceRole;
-use zone_server::db::{sessions, task_access, tasks, workspace_members};
+use zone_server::db::{sessions, task_access, tasks, users, workspace_members};
 use zone_server::state::AppState;
 
 const BACKEND: &str = "SELECT pg_backend_pid()";
@@ -924,12 +925,24 @@ async fn hold(
         scope: Scope::Workspace,
         grant: &grant,
     };
-    let Creation::Created(role) = custom_roles::create(pool, organization, &definition, user)
+    let creator = users::create_user(pool, &common::test_email(), "unused", None, false)
+        .await
+        .expect("a creator")
+        .id;
+    organization_members::add_member(pool, organization, creator, OrgRole::Owner, None)
+        .await
+        .expect("the creator owns the organization");
+    let Creation::Created(role) = custom_roles::create(pool, organization, &definition, creator)
         .await
         .expect("the role is created")
     else {
-        panic!("a fresh role name was taken");
+        panic!("an owner creates a role with a fresh name");
     };
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(creator)
+        .execute(pool)
+        .await
+        .expect("the owner seated to create the role leaves");
     sqlx::query(
         "UPDATE workspace_members SET role = $3, custom_role_id = $4 \
          WHERE workspace_id = $1 AND user_id = $2",

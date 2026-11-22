@@ -251,6 +251,18 @@ give a custom role afterwards. It needs `members:create` or
   `workspace_members:create` but not `workspace:write` can add viewers but
   not members.
 
+These role checks come first. Then, on a Community server at its
+[member cap](LICENSING.md#the-community-member-cap), adding or reactivating
+someone who isn't already an active member is refused with 403
+`member_cap_reached`. So an add that is beyond your permissions reads
+`role_exceeds`, not `member_cap_reached`, however full the server is, and an
+organization add of an admin or owner by someone without
+`administrators:update` is refused with a plain 403 before the cap is
+counted.
+
+A workspace takes only members of its organization: adding anyone else is
+refused with 409 `outside_organization`. Add them to the organization first.
+
 ### Invitations
 
 An invitation names an organization role (`org_role`), and optionally a
@@ -269,11 +281,18 @@ workspace role (`workspace_role`) and the workspaces it applies to
   This is the reach organization admins have always had, so give
   `invitations:create` only to people you'd trust to add members to every
   workspace.
+- On a Community server at its member cap, the cap is checked when the
+  invitation is sent and again when it is accepted, each time with 403
+  `member_cap_reached` for someone who isn't already an active member. The
+  role checks above come first, so inviting beyond your permissions reads
+  `role_exceeds` on a full server too.
 
 ### Editing a role
 
 Creating, editing and deleting roles needs `roles:update`, which only
-built-in organization admins and owners hold, and the license.
+built-in organization admins and owners hold, and the license. Each change
+checks `roles:update` again while it holds your membership, so a change
+that races your demotion is refused with 403 rather than saved.
 
 Narrowing a role, so that it holds fewer permissions, is always allowed.
 Widening a **workspace** role that active members hold needs
@@ -375,6 +394,8 @@ choosing **Manage budgets** chooses **See spend**.
 | `name_reserved` | 400 | The name is a built-in role's. |
 | `role_name_taken` | 409 | Another role in the organization has this name, ignoring case. |
 | `role_in_use` | 409 | Active members hold the role. The response's `members` says how many. |
+| `member_cap_reached` | 403 | The Community member cap is reached, and the person added, reactivated or invited isn't already an active member. See [Adding and reactivating members](#adding-and-reactivating-members). |
+| `outside_organization` | 409 | The person added to a workspace isn't a member of its organization. |
 
 A refusal without a code carries its reason in `error`, such as
 "Organization admin access required".

@@ -4,6 +4,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use zone_enterprise::spend::{BODY_INVALID, Error};
 
+use crate::auth::Permission;
 use crate::auth::entitlement::Unentitled;
 use crate::db::spend::budgets::CreateError;
 use crate::error::ServerError;
@@ -16,7 +17,7 @@ const UNAUTHENTICATED: &str = "Invalid user ID in token";
 pub enum Refusal {
     Unauthenticated,
     Missing(&'static str),
-    Forbidden(&'static str),
+    Forbidden(Permission),
     Unentitled(Unentitled),
     Body(JsonRejection),
     Invalid(Error),
@@ -59,9 +60,11 @@ impl IntoResponse for Refusal {
             Self::Missing(message) => {
                 (StatusCode::NOT_FOUND, Json(ErrorResponse::new(message))).into_response()
             }
-            Self::Forbidden(message) => {
-                (StatusCode::FORBIDDEN, Json(ErrorResponse::new(message))).into_response()
-            }
+            Self::Forbidden(permission) => (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse::new(permission.refusal())),
+            )
+                .into_response(),
             Self::Unentitled(refusal) => refusal.into_response(),
             Self::Body(rejection) => (
                 StatusCode::BAD_REQUEST,
@@ -166,9 +169,12 @@ mod tests {
         let missing = Refusal::Missing("Budget not found").into_response();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         assert_eq!(body(missing).await, json!({ "error": "Budget not found" }));
-        let forbidden = Refusal::Forbidden("Only admins").into_response();
+        let forbidden = Refusal::Forbidden(Permission::SpendUpdate).into_response();
         assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
-        assert_eq!(body(forbidden).await, json!({ "error": "Only admins" }));
+        assert_eq!(
+            body(forbidden).await,
+            json!({ "error": Permission::SpendUpdate.refusal() })
+        );
     }
 
     #[tokio::test]
