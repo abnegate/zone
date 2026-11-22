@@ -1,4 +1,5 @@
 import { UpgradeNotice } from '../../components/UpgradeNotice';
+import { Permission } from '../../roles/schemas';
 import { useUpdateWorkspacePolicy } from '../hooks';
 import { UPGRADE_NOTICE } from '../labels';
 import { community } from '../license';
@@ -7,8 +8,7 @@ import type { WorkspacePolicyResponse } from '../types';
 import { PolicyEditor } from './PolicyEditor';
 import { PolicyStatus } from './PolicyStatus';
 
-export const WORKSPACE_READ_ONLY =
-  "Only workspace admins and organization admins can change this workspace's agent policy.";
+export const WORKSPACE_READ_ONLY = `Changing this workspace's agent policy needs the ${Permission.WorkspacePoliciesUpdate} permission in this workspace.`;
 
 interface WorkspacePolicyProps {
   organizationId: string;
