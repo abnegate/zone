@@ -2,6 +2,8 @@ use std::fmt;
 
 use axum::http::StatusCode;
 
+use crate::gate::UNADDRESSABLE;
+
 pub const ISSUED: &str = "issued";
 pub const DISABLED: &str = "disabled";
 pub const UNKNOWN: &str = "unknown";
@@ -17,15 +19,17 @@ pub enum BundleOutcome {
     Unknown,
     Limited,
     Unavailable,
+    Unaddressable,
 }
 
 impl BundleOutcome {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Issued,
         Self::Disabled,
         Self::Unknown,
         Self::Limited,
         Self::Unavailable,
+        Self::Unaddressable,
     ];
 
     pub fn status(self) -> StatusCode {
@@ -34,6 +38,7 @@ impl BundleOutcome {
             Self::Disabled | Self::Unknown => StatusCode::NOT_FOUND,
             Self::Limited => StatusCode::TOO_MANY_REQUESTS,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Unaddressable => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -44,6 +49,7 @@ impl BundleOutcome {
             Self::Unknown => UNKNOWN,
             Self::Limited => LIMITED,
             Self::Unavailable => UNAVAILABLE,
+            Self::Unaddressable => UNADDRESSABLE,
         }
     }
 }

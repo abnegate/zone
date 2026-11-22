@@ -597,8 +597,28 @@ fn the_gate_resolves_the_client_through_its_proxies() {
     assert_eq!(gate.proxies(), &proxies("172.18.0.0/16"));
     assert_eq!(
         gate.client(peer("172.18.0.2"), &forwarded(&["203.0.113.9"])),
-        Some(address("203.0.113.9"))
+        Ok(address("203.0.113.9"))
     );
+}
+
+#[test]
+fn the_gate_cannot_address_a_request_without_a_peer() {
+    assert_eq!(
+        gate().client(None, &forwarded(&["203.0.113.9"])),
+        Err(Unaddressable)
+    );
+}
+
+#[tokio::test]
+async fn an_unaddressable_request_is_a_server_error_in_the_registry_shape() {
+    let response = Unaddressable.respond();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(response.headers().get(WWW_AUTHENTICATE).is_none());
+    assert_eq!(
+        body(response).await,
+        json!({ "errors": [{ "code": "UNKNOWN", "message": "The client address can't be read." }] })
+    );
+    assert_eq!(UNADDRESSABLE, "unaddressable");
 }
 
 #[test]

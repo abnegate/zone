@@ -5,7 +5,14 @@ use crate::gate::Refusal;
 fn each_outcome_has_a_fixed_wire_name() {
     assert_eq!(
         BundleOutcome::ALL.map(BundleOutcome::as_str),
-        ["issued", "disabled", "unknown", "limited", "unavailable"]
+        [
+            "issued",
+            "disabled",
+            "unknown",
+            "limited",
+            "unavailable",
+            "unaddressable",
+        ]
     );
 }
 
@@ -13,7 +20,7 @@ fn each_outcome_has_a_fixed_wire_name() {
 fn each_outcome_answers_its_contracted_status() {
     assert_eq!(
         BundleOutcome::ALL.map(|outcome| outcome.status().as_u16()),
-        [200, 404, 404, 429, 503]
+        [200, 404, 404, 429, 503, 500]
     );
 }
 
@@ -34,4 +41,16 @@ fn no_outcome_shares_a_name_with_a_refusal() {
             "{outcome}"
         );
     }
+}
+
+#[test]
+fn unaddressable_answers_as_the_gate_does() {
+    assert_eq!(
+        BundleOutcome::Unaddressable.status(),
+        crate::gate::Unaddressable.status()
+    );
+    assert_eq!(
+        BundleOutcome::Unaddressable.as_str(),
+        crate::http::TokenOutcome::Unaddressable.as_str()
+    );
 }

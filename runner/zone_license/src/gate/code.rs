@@ -7,4 +7,5 @@ pub enum Code {
     Unauthorized,
     Denied,
     TooManyRequests,
+    Unknown,
 }

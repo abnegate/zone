@@ -133,6 +133,7 @@ check, granting, minting, then one log line.
 | `unreadable` | `400` | `service` is missing, repeated or isn't `ZONE_REGISTRY_SERVICE`, or a `scope` can't be parsed. Other parameters, such as Docker's `account`, are ignored |
 | a [refusal](#who-gets-in) | `401` or `403` | The gate refused |
 | `limited` | `429` | A [rate limit](#rate-limits-and-client-addresses) tripped; `Retry-After` says how many seconds to wait |
+| `unaddressable` | `500` | The signer can't read the peer address, so it can't apply the address limit. It mints nothing and logs at `error`; the body is `{"errors":[{"code":"UNKNOWN","message":"The client address can't be read."}]}` |
 
 `POST /token` and `HEAD /token` answer `405` with `Allow: GET`. They mint
 nothing and log no `issued` line. containerd and nerdctl POST to the realm
@@ -199,6 +200,7 @@ commit marker, then presigning.
 | a [refusal](#who-gets-in) | `401` or `403` | The gate refused |
 | `limited` | `429` | A rate limit tripped, with `Retry-After` |
 | `unavailable` | `503` | S3 can't be reached in 10 seconds, answers any other error code, or any other status |
+| `unaddressable` | `500` | The signer can't read the peer address, so it can't apply the address limit. It presigns nothing, never reaches S3 and logs at `error`, with the same body as on `/token` |
 
 `POST` and `HEAD` answer `405` with `Allow: GET`. They presign nothing, never
 reach S3 and log no `issued` line.

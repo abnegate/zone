@@ -153,19 +153,24 @@ fn line<'a>(logged: &'a str, needle: &str) -> &'a str {
 }
 
 #[tokio::test]
-async fn without_a_peer_address_it_refuses_rather_than_skip_the_address_limit() {
+async fn without_a_peer_address_it_fails_closed_and_mints_nothing() {
     let app = router(context(Some(registrar())));
 
     let logged = logging::capture(tracing::Level::INFO, async {
         let (status, body) = send(app, get(&format!("service={SERVICE}"))).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body, UNADDRESSED_MESSAGE.as_bytes());
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "errors": [{ "code": "UNKNOWN", "message": "The client address can't be read." }] })
+        );
     })
     .await;
 
-    let refused = line(&logged, "outcome=unreadable");
+    let refused = line(&logged, "outcome=unaddressable");
     assert!(refused.contains("ERROR"), "{refused}");
     assert!(!logged.contains("outcome=issued"), "{logged}");
+    assert!(!logged.contains("Issued a registry token"), "{logged}");
 }
 
 #[tokio::test]

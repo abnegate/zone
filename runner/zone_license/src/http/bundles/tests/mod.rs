@@ -267,17 +267,26 @@ async fn issued_links_are_never_cached_and_log_every_field_but_no_secret() {
 }
 
 #[tokio::test]
-async fn a_request_without_a_peer_is_still_answered_without_an_address() {
-    let storage = storage(ResponseTemplate::new(206)).await;
+async fn without_a_peer_address_it_fails_closed_and_presigns_nothing() {
+    let storage = untouched().await;
     let app = distributed(&storage, Duration::from_secs(10));
 
     let logged = logging::capture(tracing::Level::INFO, async {
         let response = app.oneshot(request(Method::GET, BUNDLE)).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "errors": [{ "code": "UNKNOWN", "message": "The client address can't be read." }] })
+        );
     })
     .await;
 
-    assert!(!line(&logged, "issued").contains("address="), "{logged}");
+    assert!(line(&logged, "unaddressable").contains("ERROR"), "{logged}");
+    assert!(!logged.contains("outcome=issued"), "{logged}");
+    assert!(!logged.contains("X-Amz-Signature"), "{logged}");
+    assert_untouched(&storage).await;
 }
 
 #[tokio::test]

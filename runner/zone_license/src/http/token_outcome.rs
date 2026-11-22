@@ -2,7 +2,7 @@ use std::fmt;
 
 use axum::http::StatusCode;
 
-use crate::gate::Refusal;
+use crate::gate::{Refusal, UNADDRESSABLE};
 
 pub const ISSUED: &str = "issued";
 pub const DISABLED: &str = "disabled";
@@ -16,10 +16,11 @@ pub enum TokenOutcome {
     Unreadable,
     Refused(Refusal),
     Limited,
+    Unaddressable,
 }
 
 impl TokenOutcome {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Issued,
         Self::Disabled,
         Self::Unreadable,
@@ -31,6 +32,7 @@ impl TokenOutcome {
         Self::Refused(Refusal::Ineligible),
         Self::Refused(Refusal::Lapsed),
         Self::Limited,
+        Self::Unaddressable,
     ];
 
     pub fn status(self) -> StatusCode {
@@ -40,6 +42,7 @@ impl TokenOutcome {
             Self::Unreadable => StatusCode::BAD_REQUEST,
             Self::Refused(refusal) => refusal.status(),
             Self::Limited => StatusCode::TOO_MANY_REQUESTS,
+            Self::Unaddressable => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -50,6 +53,7 @@ impl TokenOutcome {
             Self::Unreadable => UNREADABLE,
             Self::Refused(refusal) => refusal.as_str(),
             Self::Limited => LIMITED,
+            Self::Unaddressable => UNADDRESSABLE,
         }
     }
 }

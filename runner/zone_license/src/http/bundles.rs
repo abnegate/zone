@@ -32,12 +32,19 @@ pub async fn respond(
         tracing::info!(%outcome, "Refused a bundle because bundles are off");
         return outcome.status().into_response();
     };
-    let address = distributor
-        .gate
-        .client(peer.ok().map(|ConnectInfo(peer)| peer), &headers);
-    if let Some(client) = address
-        && let Err(limited) = distributor.throttle.check_address(client)
-    {
+    let peer = peer.ok().map(|ConnectInfo(peer)| peer);
+    let address = match distributor.gate.client(peer, &headers) {
+        Ok(address) => address,
+        Err(unaddressable) => {
+            let outcome = BundleOutcome::Unaddressable;
+            tracing::error!(
+                %outcome,
+                "Refused a bundle with no peer address; the server must be run with connect info"
+            );
+            return unaddressable.respond();
+        }
+    };
+    if let Err(limited) = distributor.throttle.check_address(address) {
         return throttled(limited, None, address);
     }
     let license = match distributor.gate.admit(&headers) {
@@ -59,7 +66,7 @@ pub async fn respond(
         tracing::info!(
             %outcome,
             %license,
-            address = address.map(field::display),
+            %address,
             version = version.map(field::display),
             architecture = architecture.map(field::display),
             "Refused a bundle for a version or architecture that doesn't exist"
@@ -72,7 +79,7 @@ pub async fn respond(
 async fn distribute(
     distributor: &Distributor,
     license: Uuid,
-    address: Option<IpAddr>,
+    address: IpAddr,
     version: BundleVersion,
     architecture: Architecture,
 ) -> Response {
@@ -84,7 +91,7 @@ async fn distribute(
             tracing::info!(
                 %outcome,
                 %license,
-                address = address.map(field::display),
+                %address,
                 %version,
                 %architecture,
                 "Issued bundle download links"
@@ -96,7 +103,7 @@ async fn distribute(
             tracing::info!(
                 %outcome,
                 %license,
-                address = address.map(field::display),
+                %address,
                 %version,
                 %architecture,
                 code = code.as_deref(),
@@ -111,7 +118,7 @@ async fn distribute(
 fn unavailable(
     error: &StorageError,
     license: Uuid,
-    address: Option<IpAddr>,
+    address: IpAddr,
     version: BundleVersion,
     architecture: Architecture,
 ) -> Response {
@@ -120,7 +127,7 @@ fn unavailable(
         StorageError::Unreachable => tracing::warn!(
             %outcome,
             %license,
-            address = address.map(field::display),
+            %address,
             %version,
             %architecture,
             cause = %error,
@@ -129,7 +136,7 @@ fn unavailable(
         StorageError::Refused { code } => tracing::error!(
             %outcome,
             %license,
-            address = address.map(field::display),
+            %address,
             %version,
             %architecture,
             code = code.as_str(),
@@ -138,7 +145,7 @@ fn unavailable(
         StorageError::Unexpected { .. } => tracing::error!(
             %outcome,
             %license,
-            address = address.map(field::display),
+            %address,
             %version,
             %architecture,
             cause = %error,
@@ -148,23 +155,23 @@ fn unavailable(
     outcome.status().into_response()
 }
 
-fn throttled(limited: Limited, license: Option<Uuid>, address: Option<IpAddr>) -> Response {
+fn throttled(limited: Limited, license: Option<Uuid>, address: IpAddr) -> Response {
     let outcome = BundleOutcome::Limited;
     tracing::info!(
         %outcome,
         license = license.map(field::display),
-        address = address.map(field::display),
+        %address,
         retry_after = limited.retry_after(),
         "Refused a bundle over a rate limit"
     );
     limited.respond()
 }
 
-fn denied(denial: Denial, address: Option<IpAddr>) -> Response {
+fn denied(denial: Denial, address: IpAddr) -> Response {
     tracing::info!(
         outcome = %denial.refusal,
         license = denial.license.map(field::display),
-        address = address.map(field::display),
+        %address,
         plan = denial.plan.map(field::display),
         status = denial.status.map(field::display),
         error = denial.error,

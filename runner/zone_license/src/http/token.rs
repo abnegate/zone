@@ -19,8 +19,6 @@ use crate::registry::{Scopes, grant, mint};
 pub const SERVICE_PARAMETER: &str = "service";
 pub const SCOPE_PARAMETER: &str = "scope";
 
-const UNADDRESSED_MESSAGE: &str = "The client address can't be read.";
-
 /// The Docker registry token endpoint. Parameters other than `service` and
 /// `scope`, such as the `account`, `client_id` and `offline_token` that
 /// Docker adds, are ignored.
@@ -36,13 +34,16 @@ pub async fn respond(
         return outcome.status().into_response();
     };
     let peer = peer.ok().map(|ConnectInfo(peer)| peer);
-    let Some(address) = registrar.gate.client(peer, &headers) else {
-        let outcome = TokenOutcome::Unreadable;
-        tracing::error!(
-            %outcome,
-            "Refused a token request with no peer address; the server must be run with connect info"
-        );
-        return (outcome.status(), UNADDRESSED_MESSAGE).into_response();
+    let address = match registrar.gate.client(peer, &headers) {
+        Ok(address) => address,
+        Err(unaddressable) => {
+            let outcome = TokenOutcome::Unaddressable;
+            tracing::error!(
+                %outcome,
+                "Refused a token request with no peer address; the server must be run with connect info"
+            );
+            return unaddressable.respond();
+        }
     };
     if let Err(limited) = registrar.throttle.check_address(address) {
         let outcome = TokenOutcome::Limited;

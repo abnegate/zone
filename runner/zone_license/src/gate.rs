@@ -11,6 +11,7 @@ mod revoked;
 mod throttle;
 mod throttle_key;
 mod trusted_proxies;
+mod unaddressable;
 mod unparsable;
 
 use std::net::{IpAddr, SocketAddr};
@@ -37,6 +38,7 @@ pub use revoked::Revoked;
 pub use throttle::Throttle;
 pub use throttle_key::{IPV6_PREFIX, ThrottleKey};
 pub use trusted_proxies::TrustedProxies;
+pub use unaddressable::{UNADDRESSABLE, Unaddressable};
 pub use unparsable::Unparsable;
 
 /// Admits only a verified, unrevoked key presented under its own license ID,
@@ -68,8 +70,12 @@ impl Gate {
         &self.proxies
     }
 
-    pub fn client(&self, peer: Option<SocketAddr>, headers: &HeaderMap) -> Option<IpAddr> {
-        client_address(peer, headers, &self.proxies)
+    pub fn client(
+        &self,
+        peer: Option<SocketAddr>,
+        headers: &HeaderMap,
+    ) -> Result<IpAddr, Unaddressable> {
+        client_address(peer, headers, &self.proxies).ok_or(Unaddressable)
     }
 
     pub fn admit(&self, headers: &HeaderMap) -> Result<License, Denial> {
