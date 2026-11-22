@@ -917,7 +917,7 @@ test.describe('Coding agent sign-in', () => {
         if (method === 'GET' && path === '/codex') return { json: hidden };
         return {
           status: 403,
-          json: { error: 'Only organization admins can sign in to coding agents' },
+          json: { error: 'This needs the agent_logins:update permission in this organization.' },
         };
       },
     });
@@ -958,7 +958,7 @@ test.describe('Coding agent sign-in', () => {
         }
         return {
           status: 403,
-          json: { error: 'Only organization admins can sign in to coding agents' },
+          json: { error: 'This needs the agent_logins:update permission in this organization.' },
         };
       },
     });

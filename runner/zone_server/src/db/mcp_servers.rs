@@ -36,8 +36,6 @@ const REVISED: &str = "updated_at = GREATEST(now(), updated_at + interval '1 mic
 const ORGANIZATION_NOT_FOUND: &str = "Organization not found";
 const WORKSPACE_NOT_FOUND: &str = "Workspace not found";
 const SERVER_NOT_FOUND: &str = "MCP server not found";
-const ORGANIZATION_FORBIDDEN: &str = "Only organization admins can manage MCP servers";
-const WORKSPACE_FORBIDDEN: &str = "Only workspace admins can change MCP servers";
 const DUPLICATE_NAME: &str = "A server with this name already exists";
 const INVALID_NAME: &str =
     "A server name is 1 to 32 letters, digits, '-' or '_', with no '__' and no trailing '_'";
@@ -123,8 +121,8 @@ pub struct McpServerChanges {
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpServerError {
-    #[error("{0}")]
-    Forbidden(&'static str),
+    #[error("{}", .0.refusal())]
+    Forbidden(Permission),
     #[error("{0}")]
     NotFound(&'static str),
     #[error("{0}")]
@@ -296,7 +294,7 @@ async fn authorize_organization(
     match membership.map(|membership| membership.grant) {
         Some(grant) if grant.allows(permission) => Ok(()),
         Some(grant) if grant.allows(Permission::OrganizationRead) => {
-            Err(McpServerError::Forbidden(ORGANIZATION_FORBIDDEN))
+            Err(McpServerError::Forbidden(permission))
         }
         _ => Err(McpServerError::NotFound(ORGANIZATION_NOT_FOUND)),
     }
@@ -335,7 +333,7 @@ async fn authorize_workspace(
     match membership.map(|membership| membership.grant) {
         Some(grant) if grant.allows(required) => Ok(()),
         Some(grant) if grant.allows(Permission::WorkspaceRead) => {
-            Err(McpServerError::Forbidden(WORKSPACE_FORBIDDEN))
+            Err(McpServerError::Forbidden(required))
         }
         _ => Err(McpServerError::NotFound(WORKSPACE_NOT_FOUND)),
     }
