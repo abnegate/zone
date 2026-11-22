@@ -4,6 +4,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use zone_enterprise::policy::{self, BODY_INVALID, Denial};
 
+use crate::auth::Permission;
 use crate::auth::entitlement::Unentitled;
 use crate::error::ServerError;
 use crate::routes::common::ErrorResponse;
@@ -15,7 +16,7 @@ const UNAUTHENTICATED: &str = "Invalid user ID in token";
 pub enum Refusal {
     Unauthenticated,
     Missing(&'static str),
-    Forbidden(&'static str),
+    Forbidden(Permission),
     Unentitled(Unentitled),
     Body(JsonRejection),
     Invalid(policy::Error),
@@ -56,9 +57,11 @@ impl IntoResponse for Refusal {
             Self::Missing(message) => {
                 (StatusCode::NOT_FOUND, Json(ErrorResponse::new(message))).into_response()
             }
-            Self::Forbidden(message) => {
-                (StatusCode::FORBIDDEN, Json(ErrorResponse::new(message))).into_response()
-            }
+            Self::Forbidden(permission) => (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse::new(permission.refusal())),
+            )
+                .into_response(),
             Self::Unentitled(unentitled) => unentitled.into_response(),
             Self::Body(rejection) => (
                 StatusCode::BAD_REQUEST,
@@ -157,9 +160,14 @@ mod tests {
             body(missing).await,
             json!({ "error": "Workspace not found" })
         );
-        let forbidden = Refusal::Forbidden("Only admins").into_response();
+        let forbidden = Refusal::Forbidden(Permission::WorkspacePoliciesUpdate).into_response();
         assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
-        assert_eq!(body(forbidden).await, json!({ "error": "Only admins" }));
+        assert_eq!(
+            body(forbidden).await,
+            json!({
+                "error": "This needs the workspace_policies:update permission in this workspace."
+            })
+        );
     }
 
     #[tokio::test]
