@@ -66,7 +66,7 @@ Verified on `main` (`d3fb7cf`). Reuse is the default; each row says whether it's
 - The task workspace directory is never created and the repo is never cloned (`workers/task.rs:271-278`). Tasks without a repo run in the server's own cwd.
 - `tasks.status` never advances during a run; `tasks.created_by` (migration 006) is never written.
 - The prod image installs only `curl ca-certificates libssl3t64 libstdc++6` (`manager/Dockerfile:50`): no `git` (the PR worker is broken in prod), no `docker`, `kubectl`, `helm`. No docker socket on `manager`. Helm runs the server with `readOnlyRootFilesystem`.
-- No container registry anywhere; CI publishes binaries, never images. No `kube-rs`/`bollard`. `run_command`'s allowlist (`abnegate-agent` `DEFAULT_COMMANDS` in `src/tool/command/run/mod.rs:55` plus `EXTRA_COMMANDS` in `runner/zone_core/src/commands.rs:20`) has no deploy tooling and rejects `| > && ;`.
+- No container registry for Zone itself; CI publishes binaries and one image, the license signer (`ghcr.io/bitecodehq/zone-license` from 1.2.0, `ghcr.io/abnegate/zone-license` for 1.0.0 and 1.1.0; see [LICENSING.md](LICENSING.md#ci-and-publishing-the-image)), never the manager or runner. No `kube-rs`/`bollard`. `run_command`'s allowlist (`abnegate-agent` `DEFAULT_COMMANDS` in `src/tool/command/run/mod.rs:55` plus `EXTRA_COMMANDS` in `runner/zone_core/src/commands.rs:20`) has no deploy tooling and rejects `| > && ;`.
 
 ## 3. What we take from Imagine
 

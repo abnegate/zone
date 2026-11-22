@@ -98,7 +98,7 @@ zone_context
 
 ```bash
 # Clone the repository
-git clone https://github.com/zone-dev/zone.git
+git clone https://github.com/bitecodehq/zone.git
 cd zone/runner
 
 # Set up environment
