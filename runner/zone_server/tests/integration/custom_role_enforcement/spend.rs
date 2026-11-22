@@ -15,7 +15,6 @@ use crate::common::policy::Fixture;
 use crate::common::spend::{budget_path, budgets_path, exports_path, reports_path};
 use crate::common::sso::{self, Account};
 
-const FORBIDDEN: &str = "Only organization owners and admins can see spend or change budgets";
 const ORGANIZATION_MISSING: &str = "Organization not found";
 const LIMIT: i64 = 50_000_000;
 const PROMPTLY: Duration = Duration::from_secs(10);
@@ -43,6 +42,18 @@ fn changes(fixture: &Fixture, budget: Uuid) -> [Call; 3] {
     ]
 }
 
+/// Every spend route, with the permission a refusal of it names.
+fn every(fixture: &Fixture, budget: Uuid) -> impl Iterator<Item = (Call, Permission)> {
+    reads(fixture)
+        .into_iter()
+        .map(|call| (call, Permission::SpendRead))
+        .chain(
+            changes(fixture, budget)
+                .into_iter()
+                .map(|call| (call, Permission::SpendUpdate)),
+        )
+}
+
 async fn budget(fixture: &Fixture) -> Uuid {
     let call = Call::post(budgets_path(fixture.organization), organization_wide(LIMIT));
     let response = call.send(fixture, &fixture.owner.token).await;
@@ -65,6 +76,15 @@ fn refused(call: &Call, response: &TestResponse, status: StatusCode, message: &s
         response.json_value(),
         json!({ "error": message }),
         "{}",
+        describe(call, response)
+    );
+}
+
+fn forbidden(call: &Call, response: &TestResponse, needed: Permission) {
+    refused(call, response, StatusCode::FORBIDDEN, &needed.refusal());
+    assert!(
+        response.text().contains(needed.name()),
+        "a refusal names the permission the route needs: {}",
         describe(call, response)
     );
 }
@@ -109,7 +129,7 @@ async fn a_spend_reader_sees_reports_exports_and_budgets_and_changes_none() {
     );
     for call in changes(&fixture, budget) {
         let response = call.send(&fixture, &reader.token).await;
-        refused(&call, &response, StatusCode::FORBIDDEN, FORBIDDEN);
+        forbidden(&call, &response, Permission::SpendUpdate);
     }
 
     fixture.cleanup().await;
@@ -161,7 +181,6 @@ async fn a_stored_budget_editor_without_spend_changes_and_reads_nothing() {
     let held = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Organization,
         &[],
     )
@@ -174,9 +193,9 @@ async fn a_stored_budget_editor_without_spend_changes_and_reads_nothing() {
         .expect("a row from before spend:update needed spend:read");
     let editor = holding_organization(&fixture, held).await;
 
-    for call in reads(&fixture).into_iter().chain(changes(&fixture, budget)) {
+    for (call, needed) in every(&fixture, budget) {
         let response = call.send(&fixture, &editor.token).await;
-        refused(&call, &response, StatusCode::FORBIDDEN, FORBIDDEN);
+        forbidden(&call, &response, needed);
     }
 
     fixture.cleanup().await;
@@ -188,7 +207,6 @@ async fn a_budget_for_a_member_does_not_wait_for_an_edit_of_their_role() {
     let held = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Organization,
         &[Permission::AuditLogsRead],
     )
@@ -238,9 +256,9 @@ async fn a_holder_of_neither_is_refused_every_spend_route() {
     let budget = budget(&fixture).await;
     let auditor = organization_holder(&fixture, &[Permission::AuditLogsRead]).await;
 
-    for call in reads(&fixture).into_iter().chain(changes(&fixture, budget)) {
+    for (call, needed) in every(&fixture, budget) {
         let response = call.send(&fixture, &auditor.token).await;
-        refused(&call, &response, StatusCode::FORBIDDEN, FORBIDDEN);
+        forbidden(&call, &response, needed);
     }
 
     fixture.cleanup().await;
@@ -251,22 +269,8 @@ async fn a_membership_whose_role_grants_nothing_is_told_the_organization_does_no
     let fixture = licensed().await;
     let budget = budget(&fixture).await;
     let (elsewhere, _) = fixture.another_organization(&fixture.owner).await;
-    let foreign = role(
-        fixture.pool(),
-        elsewhere,
-        fixture.owner.id,
-        Scope::Organization,
-        &STEWARD,
-    )
-    .await;
-    let mis_scoped = role(
-        fixture.pool(),
-        fixture.organization,
-        fixture.owner.id,
-        Scope::Workspace,
-        &[],
-    )
-    .await;
+    let foreign = role(fixture.pool(), elsewhere, Scope::Organization, &STEWARD).await;
+    let mis_scoped = role(fixture.pool(), fixture.organization, Scope::Workspace, &[]).await;
 
     for pointed in [foreign, mis_scoped] {
         let member = organization_holder(&fixture, &[Permission::SpendRead]).await;

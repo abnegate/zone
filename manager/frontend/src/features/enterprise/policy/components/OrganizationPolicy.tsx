@@ -1,4 +1,5 @@
 import { UpgradeNotice } from '../../components/UpgradeNotice';
+import { Permission } from '../../roles/schemas';
 import { useUpdateOrganizationPolicy } from '../hooks';
 import { UPGRADE_NOTICE } from '../labels';
 import { community } from '../license';
@@ -7,8 +8,7 @@ import type { OrganizationPolicyResponse } from '../types';
 import { PolicyEditor } from './PolicyEditor';
 import { PolicyStatus } from './PolicyStatus';
 
-export const ORGANIZATION_READ_ONLY =
-  'Only organization owners and admins can change the agent policy.';
+export const ORGANIZATION_READ_ONLY = `Changing the agent policy needs the ${Permission.PoliciesUpdate} permission in this organization.`;
 
 interface OrganizationPolicyProps {
   organizationId: string;

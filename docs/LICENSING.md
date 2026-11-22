@@ -88,7 +88,18 @@ installed.
 The count follows the calendar month, so someone who hasn't signed in this
 month doesn't count until they do. A place is checked when the person is
 added, never reserved: an invitation sent under the cap can still be refused
-when it's accepted, and two sign-ups at the same moment can both get in.
+when it's accepted.
+
+The check and the change that adds the person are one step. Additions on a
+capped server take turns, so with one place left exactly one of several
+people joining at the same moment gets in and the rest are refused. A new
+account counts from the moment its sign-up or first single sign-on succeeds.
+If an addition waits more than about 5 seconds for its turn, it answers `503`
+instead, and changes nothing:
+
+```json
+{"error": "Too many people are joining this server at once. Try again in a moment.", "code": "member_admission_busy"}
+```
 
 **Settings → This server → License** shows the count on a capped server, and
 `GET /api/license` reports it as `members`: `active` (`null` when it can't be

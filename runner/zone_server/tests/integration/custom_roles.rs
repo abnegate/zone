@@ -13,7 +13,7 @@ use zone_server::db::workspace_members::{self, WorkspaceRole};
 
 use crate::common::TestResponse;
 use crate::common::policy::Fixture;
-use crate::common::sso::{Account, grace, lapsed};
+use crate::common::sso::{Account, grace, lapsed, team};
 
 const PREFIX: &str = "custom_roles";
 const LICENSE_REQUIRED: &str = "license_required";
@@ -119,6 +119,7 @@ async fn stored(fixture: &Fixture, name: &str, scope: Scope, permissions: &[Perm
     .unwrap()
     {
         Creation::Created(role) => role.id,
+        Creation::Forbidden => panic!("the owner holds roles:update"),
         Creation::NameTaken => panic!("{name} is already taken"),
     }
 }
@@ -294,6 +295,75 @@ async fn community_reads_roles_and_cannot_change_them() {
     ] {
         assert!(fixture.audits(action).await.is_empty(), "{action}");
     }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_team_license_reads_roles_and_refuses_changes() {
+    let fixture = Fixture::new(PREFIX).await;
+    fixture.install(&team()).await;
+    let role = stored(
+        &fixture,
+        "Writer",
+        Scope::Workspace,
+        &[Permission::WorkspaceWrite],
+    )
+    .await;
+
+    let response = list(&fixture, &fixture.owner.token).await;
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    assert_eq!(body["entitled"], false);
+    assert_eq!(body["editable"], false);
+    assert_eq!(body["edition"], "team");
+    assert_eq!(body["status"], "active");
+    assert_eq!(body["roles"][0]["id"], role.to_string());
+
+    for response in writes(&fixture, &fixture.owner.token, role).await {
+        refused(&response, StatusCode::FORBIDDEN, LICENSE_REQUIRED);
+    }
+    assert_eq!(listed(&fixture, role).await["name"], "Writer");
+    for action in [
+        actions::ROLE_CREATED,
+        actions::ROLE_UPDATED,
+        actions::ROLE_DELETED,
+    ] {
+        assert!(fixture.audits(action).await.is_empty(), "{action}");
+    }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_creator_without_roles_update_creates_nothing() {
+    let fixture = licensed().await;
+    let member = fixture.member(OrgRole::Member, None).await;
+    let stranger = fixture.stranger().await;
+    let grant = Grant::compose(Scope::Workspace, &[]).unwrap();
+
+    for (who, creator) in [("a member", member.id), ("a stranger", stranger.id)] {
+        let name = format!("Unheld {}", Uuid::new_v4());
+        let definition = Definition {
+            name: &name,
+            description: None,
+            scope: Scope::Workspace,
+            grant: &grant,
+        };
+        let outcome =
+            custom_roles::create(fixture.pool(), fixture.organization, &definition, creator)
+                .await
+                .unwrap();
+        assert!(
+            matches!(outcome, Creation::Forbidden),
+            "{who} without roles:update created a role: {outcome:?}"
+        );
+    }
+    let stored: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM custom_roles WHERE organization_id = $1")
+            .bind(fixture.organization)
+            .fetch_one(fixture.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, 0, "a refused creation stores nothing");
     fixture.cleanup().await;
 }
 

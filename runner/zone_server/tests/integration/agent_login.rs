@@ -37,6 +37,7 @@ use tempfile::TempDir;
 use uuid::Uuid;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+use zone_server::auth::Permission;
 use zone_server::config::{AgentConfig, Callback, Config, ModelBackend};
 use zone_server::services::login::claude::Sealed;
 use zone_server::services::login::{callback, devices};
@@ -69,7 +70,6 @@ const AUTHORIZE_PARAMETERS: [&str; 8] = [
     "code_challenge_method",
     "state",
 ];
-const ADMINS_ONLY: &str = "Only organization admins can sign in to coding agents";
 const NOT_INSTALLED: &str = "The codex CLI is not installed on this server";
 const UNREADABLE_CODE: &str =
     "Paste the code Claude showed, as code#state, or the whole callback URL";
@@ -104,8 +104,8 @@ const ON_HOLD: &str = "Your Claude account is on hold, so it cannot sign in to C
                        why, or appeal, at claude.ai/restricted.";
 const UNAVAILABLE: &str =
     "claude.com could not finish the sign-in just now. Try again in a few minutes.";
-const DEMOTED: &str = "Only organization admins can sign in to coding agents, and whoever \
-                       started this sign-in no longer is one. Start again.";
+const DEMOTED: &str = "This sign-in needs the agent_logins:update permission, and whoever \
+                       started it no longer holds it. Start again.";
 const CLOSE_AND_RETURN: &str = "You can close this tab and return to Zone.";
 /// The console every loopback sign-in here starts from, as its `Origin` names it and the server
 /// lists it: compose's.
@@ -1267,14 +1267,20 @@ async fn only_an_admin_may_start_finish_or_end_a_sign_in() {
         ];
         for refused in refusals {
             refused.assert_status(StatusCode::FORBIDDEN);
-            assert_eq!(refused.json_value(), json!({ "error": ADMINS_ONLY }));
+            assert_eq!(
+                refused.json_value(),
+                json!({ "error": Permission::AgentLoginsUpdate.refusal() })
+            );
         }
     }
     let submitted = stage
         .submit(organization, &format!("{CODE}#fake-state"), &member)
         .await;
     submitted.assert_status(StatusCode::FORBIDDEN);
-    assert_eq!(submitted.json_value(), json!({ "error": ADMINS_ONLY }));
+    assert_eq!(
+        submitted.json_value(),
+        json!({ "error": Permission::AgentLoginsUpdate.refusal() })
+    );
     assert_eq!(codex.starts(), 0, "a member started codex");
 }
 
@@ -3453,7 +3459,10 @@ async fn an_admin_signs_out_one_login_and_the_other_stays() {
         .sign_out_login(organization, "codex", leaving, &member)
         .await;
     refused.assert_status(StatusCode::FORBIDDEN);
-    assert_eq!(refused.json_value(), json!({ "error": ADMINS_ONLY }));
+    assert_eq!(
+        refused.json_value(),
+        json!({ "error": Permission::AgentLoginsUpdate.refusal() })
+    );
     for (agent, login) in [("codex", Uuid::new_v4()), ("claude", leaving)] {
         let unknown = stage
             .sign_out_login(organization, agent, login, &owner)
@@ -3632,7 +3641,10 @@ async fn cancelling_a_codex_device_sign_in_keeps_the_logins_already_held() {
 
     let refused = stage.cancel_codex(organization, &member).await;
     refused.assert_status(StatusCode::FORBIDDEN);
-    assert_eq!(refused.json_value(), json!({ "error": ADMINS_ONLY }));
+    assert_eq!(
+        refused.json_value(),
+        json!({ "error": Permission::AgentLoginsUpdate.refusal() })
+    );
     stage
         .cancel_codex(organization, &owner)
         .await

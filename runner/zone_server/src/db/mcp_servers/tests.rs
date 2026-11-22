@@ -623,9 +623,14 @@ async fn only_administrators_create() {
     assert!(
         matches!(
             member,
-            Err(McpServerError::Forbidden(ORGANIZATION_FORBIDDEN))
+            Err(McpServerError::Forbidden(Permission::McpServersUpdate))
         ),
         "{member:?}"
+    );
+    assert_eq!(
+        member.expect_err("a member is refused").to_string(),
+        Permission::McpServersUpdate.refusal(),
+        "the refusal names the permission"
     );
 
     let outsider = create_authorized(
@@ -1440,8 +1445,18 @@ async fn a_viewer_reads_overrides_and_cannot_write_them() {
     )
     .await;
     assert!(
-        matches!(write, Err(McpServerError::Forbidden(WORKSPACE_FORBIDDEN))),
+        matches!(
+            write,
+            Err(McpServerError::Forbidden(
+                Permission::WorkspaceMcpServersUpdate
+            ))
+        ),
         "{write:?}"
+    );
+    assert_eq!(
+        write.expect_err("a viewer is refused").to_string(),
+        Permission::WorkspaceMcpServersUpdate.refusal(),
+        "the refusal names the permission"
     );
 
     let outsider = workspace_list_authorized(
@@ -1928,7 +1943,7 @@ async fn a_custom_role_manages_servers_only_with_the_servers_permission() {
     assert!(
         matches!(
             refused,
-            Err(McpServerError::Forbidden(ORGANIZATION_FORBIDDEN))
+            Err(McpServerError::Forbidden(Permission::McpServersUpdate))
         ),
         "{refused:?}"
     );
@@ -2003,7 +2018,12 @@ async fn a_workspace_custom_role_writes_overrides_only_with_the_servers_permissi
     )
     .await;
     assert!(
-        matches!(refused, Err(McpServerError::Forbidden(WORKSPACE_FORBIDDEN))),
+        matches!(
+            refused,
+            Err(McpServerError::Forbidden(
+                Permission::WorkspaceMcpServersUpdate
+            ))
+        ),
         "{refused:?}"
     );
     let (servers, overrides) = workspace_list_authorized(

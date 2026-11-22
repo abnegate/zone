@@ -1210,6 +1210,7 @@ mod tests {
     use zone_core::servers::mask;
 
     use super::*;
+    use crate::auth::Permission;
     use crate::auth::jwt::Claims;
     use crate::db::mcp_servers::Secrets;
     use crate::services::mcp_servers::hubs::Hubs;
@@ -1936,7 +1937,10 @@ mod tests {
     #[test]
     fn a_storage_error_maps_to_its_status() {
         let statuses = [
-            (McpServerError::Forbidden("no"), StatusCode::FORBIDDEN),
+            (
+                McpServerError::Forbidden(Permission::McpServersUpdate),
+                StatusCode::FORBIDDEN,
+            ),
             (McpServerError::NotFound("gone"), StatusCode::NOT_FOUND),
             (
                 McpServerError::Invalid("bad".to_string()),

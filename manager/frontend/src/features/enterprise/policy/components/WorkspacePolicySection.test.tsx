@@ -260,7 +260,11 @@ describe('WorkspacePolicySection', () => {
   it('shows the workspace policy read-only to someone who cannot edit it', async () => {
     await loaded({ ...ACTIVE_WORKSPACE_OVERRIDDEN, editable: false });
 
-    expect(screen.getByText(WORKSPACE_READ_ONLY)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Changing this workspace's agent policy needs the workspace_policies:update permission in this workspace."
+      )
+    ).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Override|Use organization policy/ })).toBeNull();
     expect(
       within(field('Providers')).getByRole('checkbox', { name: 'Local models' })

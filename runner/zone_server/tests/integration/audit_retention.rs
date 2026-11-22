@@ -13,7 +13,6 @@ use zone_server::db::audit::retentions;
 use zone_server::db::audit::scope::Scope;
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::organization_members::OrgRole;
-use zone_server::routes::audit::access::FORBIDDEN;
 use zone_server::routes::audit::refusal::BODY_INVALID;
 use zone_server::services::audit::retention;
 
@@ -167,7 +166,10 @@ async fn admins_read_and_change_the_period_and_others_are_refused() {
 
     let forbidden = get(&fixture, &organization, &member.token).await;
     forbidden.assert_status(StatusCode::FORBIDDEN);
-    assert_eq!(forbidden.json_value()["error"], FORBIDDEN);
+    assert_eq!(
+        forbidden.json_value()["error"],
+        "This needs the audit:update permission in this organization."
+    );
     put(
         &fixture,
         &organization,

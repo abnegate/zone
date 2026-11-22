@@ -5,6 +5,7 @@ pub mod enforcement;
 pub mod failure;
 pub mod handoff;
 pub mod imported;
+pub mod parse_permit;
 pub mod posted;
 pub mod providers;
 pub mod revision;
@@ -12,6 +13,7 @@ pub mod settlement;
 pub mod sign_in;
 pub mod sign_in_failure;
 pub mod start;
+pub mod throttle;
 
 #[cfg(test)]
 mod tests;

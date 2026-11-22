@@ -167,7 +167,11 @@ describe('OrganizationPolicySection', () => {
     it('shows a member who cannot edit the policy read-only', async () => {
       await loaded({ ...ACTIVE_ORGANIZATION, editable: false });
 
-      expect(screen.getByText(ORGANIZATION_READ_ONLY)).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          'Changing the agent policy needs the policies:update permission in this organization.'
+        )
+      ).toBeInTheDocument();
       expect(screen.queryByRole('status')).not.toBeInTheDocument();
       for (const checkbox of within(field('Providers')).getAllByRole('checkbox')) {
         expect(checkbox).toBeDisabled();

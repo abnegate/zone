@@ -22,10 +22,10 @@ impl Access {
         self == Self::Write
     }
 
-    pub fn write(self, refused: &'static str) -> Result<(), Refusal> {
+    pub fn write(self, needed: Permission) -> Result<(), Refusal> {
         match self {
             Self::Write => Ok(()),
-            Self::Read => Err(Refusal::Forbidden(refused)),
+            Self::Read => Err(Refusal::Forbidden(needed)),
         }
     }
 }

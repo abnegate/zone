@@ -96,6 +96,7 @@
           }
         },
         "baseUrl": { "type": "string" },
+        "trustedProxies": { "type": "string" },
         "agentState": {
           "type": "object",
           "properties": {

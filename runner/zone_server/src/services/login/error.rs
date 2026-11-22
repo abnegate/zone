@@ -4,6 +4,8 @@ use std::borrow::Cow;
 
 use abnegate_agent_cli::AgentKind;
 
+use crate::auth::Permission;
+
 /// What an admin is told when Zone itself failed; the server's log has why.
 pub const UNSAVED: &str = "Zone could not finish the sign-in. Start again.";
 
@@ -18,6 +20,13 @@ pub enum Error {
     /// Whoever started the sign-in may no longer finish it.
     #[error("{0}")]
     Forbidden(&'static str),
+    /// Whoever started the sign-in no longer holds the permission it needs.
+    #[error(
+        "This sign-in needs the {} permission, and whoever started it no longer holds it. \
+         Start again.",
+        .0.name()
+    )]
+    Demoted(Permission),
     #[error("The {0} CLI is not installed on this server")]
     Unavailable(AgentKind),
     /// The organization was deleted while the request waited for its lock.
@@ -85,6 +94,11 @@ mod tests {
                 "Could not reach Claude's sign-in service: connection refused",
             ),
             (Error::Forbidden("demoted"), "demoted"),
+            (
+                Error::Demoted(Permission::AgentLoginsUpdate),
+                "This sign-in needs the agent_logins:update permission, and whoever started it \
+                 no longer holds it. Start again.",
+            ),
             (Error::Deleted, "Organization not found"),
         ] {
             assert!(!error.internal(), "{error:?}");
