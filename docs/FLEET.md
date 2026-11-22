@@ -72,7 +72,8 @@ That has consequences for how names are chosen:
   row shows whichever registered last. Sharing a name never bypasses
   placement: under enforcement a claim needs the row to hold the claiming
   process's own instance ID, so a process whose name another took over is
-  refused, registers again, and is then judged on its own version and labels.
+  refused until its next heartbeat (every 15 seconds) registers it again,
+  and is then judged on its own version and labels.
 - **A Kubernetes Deployment mints new pod names on every rollout.** The new
   pods register as new runners, and a cordon or revoke on an old pod's name
   doesn't carry over to them. The old names go offline and, unless revoked,
@@ -289,10 +290,11 @@ Labels have their own storage, apart from the agent policy, for two reasons:
    connected runner that may. When there is one, the run is left for it.
 3. **Pickup.** Every 5 seconds, each runner under enforcement looks for runs
    it may take that are at least 2 seconds old and still unclaimed, oldest
-   first, and claims them even when it is busy: a claimed run waits on that
-   runner for a free slot, as any queued run does. If the run is still
-   unclaimed about 30 seconds after it was left, the runner that left it
-   fails it with `fleet_no_runner`, as in the next step.
+   first, and claims them even when it is busy, up to a queue as deep as
+   its execution slots: a claimed run waits on that runner for a free slot,
+   heartbeating, as any queued run does. If the run is still unclaimed about
+   30 seconds after it was admitted, the runner that left it fails it with
+   `fleet_no_runner`, as in the next step.
 4. **No runner.** When no connected runner may take the run, it fails at
    once, and Zone records `fleet.run_refused` in the run's organization. The
    message names what a runner would need: "No runner in this server's fleet
@@ -377,7 +379,7 @@ now.
 
 Once a day, Zone forgets runners that haven't been seen for 7 days and hold
 no live work: no running or waiting task run and no unexpired chat lease.
-The first sweep runs a few minutes after a server starts, so a fleet that
+The first sweep runs 5 minutes after a server starts, so a fleet that
 redeploys every day still sweeps. Each removal is audited as
 `runner.removed` with no actor. Revoked runners are never forgotten, so a
 quarantined name stays quarantined.

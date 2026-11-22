@@ -40,7 +40,10 @@ again as soon as a Zone Enterprise license is installed.
 A stored license key that no longer verifies, for example after an upgrade
 changes the keys Zone trusts, isn't treated as removed. The saved policies stay
 enforced, and every change is refused with `license_required` until an admin
-installs a key that verifies or removes the license.
+installs a key that verifies or removes the license. The console shows the
+agent policy and runner placement read-only, with a notice that the key no
+longer verifies and the policy stays enforced until an admin replaces or
+removes the key.
 
 If Zone can't read the license or a policy when it needs it, it refuses
 instead of running unrestricted. The refusal is `policy_unreadable`; a task
