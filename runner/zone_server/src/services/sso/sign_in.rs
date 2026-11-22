@@ -316,9 +316,10 @@ async fn create(
     identity: &Identity,
     email_verified: bool,
 ) -> Result<Uuid, SignInFailure> {
-    members::admit(state, None).await?;
+    members::check(state, None).await?;
     let password_hash = unusable().await?;
     let mut transaction = state.db().begin().await?;
+    members::admit(state, &mut *transaction, None).await?;
     let user = provision::insert(
         &mut transaction,
         &identity.email,
@@ -336,8 +337,9 @@ async fn create(
         &identity.email,
     )
     .await?;
+    provision::furnish(&mut transaction, &user).await?;
+    users::update_last_login(&mut *transaction, user.id).await?;
     transaction.commit().await?;
-    provision::furnish(state.db(), &user).await;
     record(
         state,
         user.id,

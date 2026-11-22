@@ -142,6 +142,7 @@ fn failed(failure: SignInFailure) -> Response {
         SignInFailure::Refused(error) => refusal::respond(&error, Stage::SignIn),
         SignInFailure::Session(refusal) => refusal.into_response(),
         SignInFailure::Full { cap } => AdmissionError::Full { cap }.into_response(),
+        SignInFailure::AdmissionBusy => AdmissionError::Busy.into_response(),
         SignInFailure::Busy => {
             tracing::warn!("Refused a single sign-on start: too many are waiting for a callback");
             (
@@ -169,6 +170,7 @@ mod tests {
     use zone_enterprise::MEMBER_CAP_REACHED;
 
     use super::*;
+    use crate::services::members::MEMBER_ADMISSION_BUSY;
 
     #[tokio::test]
     async fn a_full_server_refuses_the_callback_with_the_member_cap_code() {
@@ -181,6 +183,22 @@ mod tests {
         assert_eq!(
             body["error"],
             json!(AdmissionError::Full { cap: 3 }.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_seat_lock_held_too_long_answers_the_callback_with_the_busy_code() {
+        let response = failed(SignInFailure::AdmissionBusy);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "error": AdmissionError::Busy.to_string(),
+                "code": MEMBER_ADMISSION_BUSY,
+            })
         );
     }
 

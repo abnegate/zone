@@ -11,7 +11,6 @@ use uuid::Uuid;
 use zone_enterprise::sso::{self, PasswordAccess};
 
 use crate::auth::{AuthUser, account, admin_guard, hash_password, verify_password};
-use crate::db::DbResult;
 use crate::db::audit::{actions, resources};
 use crate::db::users::UserRow;
 use crate::db::{password_reset, refresh_tokens, sessions, users};
@@ -107,7 +106,7 @@ pub async fn register(
         Ok(None) => {}
     }
 
-    if let Err(refusal) = members::admit(&state, None).await {
+    if let Err(refusal) = members::check(&state, None).await {
         return refusal.into_response();
     }
 
@@ -125,13 +124,10 @@ pub async fn register(
         Err(error) => return unavailable(&error),
     };
 
-    let user = match insert(&state, &request, &password_hash, is_admin).await {
+    let user = match enroll(&state, &request, &password_hash, is_admin).await {
         Ok(user) => user,
-        Err(error) if registered(&error) => return already_registered(),
-        Err(error) => return unavailable(&error),
+        Err(refusal) => return *refusal,
     };
-
-    provision::furnish(state.db(), &user).await;
 
     match session::issue(&state, user.id, &headers, Credential::Registration).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
@@ -139,13 +135,16 @@ pub async fn register(
     }
 }
 
-async fn insert(
+/// Admits, inserts and furnishes the account in one transaction, so the newcomer counts against
+/// the member cap from the moment it commits.
+async fn enroll(
     state: &AppState,
     request: &RegisterRequest,
     password_hash: &str,
     is_admin: bool,
-) -> DbResult<UserRow> {
-    let mut transaction = state.db().begin().await?;
+) -> Result<UserRow, Box<Response>> {
+    let mut transaction = state.db().begin().await.map_err(rejected)?;
+    members::admit(state, &mut *transaction, None).await?;
     let user = provision::insert(
         &mut transaction,
         &request.email,
@@ -154,9 +153,24 @@ async fn insert(
         is_admin,
         false,
     )
-    .await?;
-    transaction.commit().await?;
+    .await
+    .map_err(rejected)?;
+    provision::furnish(&mut transaction, &user)
+        .await
+        .map_err(rejected)?;
+    users::update_last_login(&mut *transaction, user.id)
+        .await
+        .map_err(rejected)?;
+    transaction.commit().await.map_err(rejected)?;
     Ok(user)
+}
+
+fn rejected(error: sqlx::Error) -> Box<Response> {
+    Box::new(if registered(&error) {
+        already_registered()
+    } else {
+        unavailable(&error)
+    })
 }
 
 /// POST /api/auth/login

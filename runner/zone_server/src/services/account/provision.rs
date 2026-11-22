@@ -1,4 +1,4 @@
-use sqlx::{PgConnection, PgPool};
+use sqlx::{Connection, PgConnection, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::organization_members::{self, OrgRole};
@@ -38,32 +38,47 @@ pub async fn insert(
     Ok(user)
 }
 
-/// A default organization and workspace the user owns. Best-effort: the user can create both
-/// by hand, so a failure is logged and never undoes the account.
-pub async fn furnish(pool: &PgPool, user: &UserRow) {
-    if let Err(error) = organization(pool, user).await {
-        tracing::error!(
-            user_id = %user.id,
-            %error,
-            "Failed to create the default organization and workspace; the user can create them by hand"
-        );
+/// A default organization and workspace the user owns, in a savepoint of `connection`'s
+/// transaction. Best-effort: the user can create both by hand, so a failure inside the savepoint
+/// is logged and rolled back, never undoing the account.
+pub async fn furnish(connection: &mut PgConnection, user: &UserRow) -> DbResult<()> {
+    let mut savepoint = connection.begin().await?;
+    match organization(&mut savepoint, user).await {
+        Ok(()) => savepoint.commit().await?,
+        Err(error) => {
+            savepoint.rollback().await?;
+            tracing::error!(
+                user_id = %user.id,
+                %error,
+                "Failed to create the default organization and workspace; the user can create them by hand"
+            );
+        }
     }
+    Ok(())
 }
 
-async fn organization(pool: &PgPool, user: &UserRow) -> DbResult<()> {
+async fn organization(savepoint: &mut Transaction<'_, Postgres>, user: &UserRow) -> DbResult<()> {
     let name = organization_name(user.display_name.as_deref());
     let slug = organization_slug(&name, user.id);
-    let organization = organizations::create_organization(pool, &name, &slug, None).await?;
-    organization_members::add_member(pool, organization.id, user.id, OrgRole::Owner, None).await?;
+    let organization = organizations::create_organization_tx(savepoint, &name, &slug, None).await?;
+    organization_members::add_member_tx(savepoint, organization.id, user.id, OrgRole::Owner, None)
+        .await?;
     let workspace = workspaces::create_workspace(
-        pool,
+        &mut **savepoint,
         organization.id,
         WORKSPACE_NAME,
         WORKSPACE_SLUG,
         Some(WORKSPACE_DESCRIPTION),
     )
     .await?;
-    workspace_members::add_member(pool, workspace.id, user.id, WorkspaceRole::Owner, None).await?;
+    workspace_members::add_member(
+        &mut **savepoint,
+        workspace.id,
+        user.id,
+        WorkspaceRole::Owner,
+        None,
+    )
+    .await?;
     tracing::info!(
         user_id = %user.id,
         organization_id = %organization.id,

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use zone_enterprise::{COMMUNITY_MEMBERS, MEMBER_CAP_REACHED};
 
-use super::{AdmissionError, admit, reactivate};
+use super::{AdmissionError, MEMBER_ADMISSION_BUSY, admit, check, reactivate};
 use crate::state::{AppState, test_config, unreachable_pool};
 
 async fn answered(error: AdmissionError) -> (StatusCode, Value) {
@@ -39,6 +39,20 @@ async fn a_full_server_refuses_with_the_code_and_a_message_naming_the_cap() {
 }
 
 #[tokio::test]
+async fn a_seat_lock_held_too_long_is_unavailable_with_the_busy_code() {
+    assert_eq!(
+        answered(AdmissionError::Busy).await,
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({
+                "error": "Too many people are joining this server at once. Try again in a moment.",
+                "code": MEMBER_ADMISSION_BUSY,
+            })
+        )
+    );
+}
+
+#[tokio::test]
 async fn a_database_error_is_an_internal_error_that_names_nothing() {
     assert_eq!(
         answered(AdmissionError::Database(sqlx::Error::PoolClosed)).await,
@@ -54,9 +68,15 @@ async fn a_state_that_never_opted_in_admits_without_reading_the_database() {
     let state = unreachable();
 
     assert!(!state.members_capped());
-    admit(&state, None).await.unwrap();
-    admit(&state, Some(Uuid::new_v4())).await.unwrap();
-    reactivate(&state, Uuid::new_v4()).await.unwrap();
+    check(&state, None).await.unwrap();
+    check(&state, Some(Uuid::new_v4())).await.unwrap();
+    admit(&state, state.db(), None).await.unwrap();
+    admit(&state, state.db(), Some(Uuid::new_v4()))
+        .await
+        .unwrap();
+    reactivate(&state, state.db(), Uuid::new_v4())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -66,11 +86,15 @@ async fn an_opted_in_state_reads_the_license_and_fails_closed_when_it_cannot() {
 
     assert!(state.members_capped());
     assert!(matches!(
-        admit(&state, None).await,
+        check(&state, None).await,
         Err(AdmissionError::Database(_))
     ));
     assert!(matches!(
-        reactivate(&state, Uuid::new_v4()).await,
+        admit(&state, state.db(), None).await,
+        Err(AdmissionError::Database(_))
+    ));
+    assert!(matches!(
+        reactivate(&state, state.db(), Uuid::new_v4()).await,
         Err(AdmissionError::Database(_))
     ));
 }

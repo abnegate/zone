@@ -63,7 +63,7 @@ pub struct OrganizationMemberRow {
 /// CRITICAL-7: This function now fails if the member already exists (active or inactive).
 /// Use `reactivate_member` to explicitly reactivate an inactive member.
 pub async fn add_member(
-    pool: &PgPool,
+    executor: impl Executor<'_, Database = Postgres>,
     organization_id: Uuid,
     user_id: Uuid,
     role: OrgRole,
@@ -83,7 +83,7 @@ pub async fn add_member(
         invited_by,
         now
     )
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     Ok(OrganizationMemberRow {
@@ -360,7 +360,7 @@ pub async fn remove_guarded(
 
 /// Get a member by organization and user ID
 pub async fn get_member(
-    pool: &PgPool,
+    executor: impl Executor<'_, Database = Postgres>,
     organization_id: Uuid,
     user_id: Uuid,
 ) -> DbResult<Option<OrganizationMemberRow>> {
@@ -374,7 +374,7 @@ pub async fn get_member(
         organization_id,
         user_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(row.map(|r| {

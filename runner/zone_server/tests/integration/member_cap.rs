@@ -16,6 +16,7 @@ use zone_enterprise::sso::{Claims, testing};
 use zone_enterprise::{COMMUNITY_MEMBERS, MEMBER_CAP_REACHED, period_start};
 use zone_server::db::seats;
 use zone_server::routes::workspaces::OUTSIDE_ORGANIZATION;
+use zone_server::services::members::{MEMBER_ADMISSION_BUSY, SEATS_LOCK};
 
 use crate::common::identity_provider::IdentityProvider;
 use crate::common::sso::{Fixture, active, grace, lapsed, lapsed_team, team};
@@ -31,8 +32,6 @@ const PUBLIC_PROVIDERS: &str = "/api/auth/sso/providers";
 const CALLBACKS: &str = "/api/auth/sso/callbacks";
 const UNVERIFIED_KEY: &str = "garbage";
 const ATTEMPTS: usize = 3;
-const SEATS_LOCK: i64 = 0x7A6F_6E65_5345_4154;
-const MEMBER_ADMISSION_BUSY: &str = "member_admission_busy";
 
 #[derive(Clone)]
 struct Member {
@@ -848,10 +847,16 @@ async fn concurrent_invitation_accepts_one_below_the_cap_admit_exactly_one() {
     }
     assert_eq!(server.active().await, COMMUNITY_MEMBERS - 1);
 
-    let responses = concurrently(invitees.iter().cloned().zip(tokens).map(|(invitee, token)| {
-        let server = server.clone();
-        async move { server.accept(&token, &invitee).await }
-    }))
+    let responses = concurrently(
+        invitees
+            .iter()
+            .cloned()
+            .zip(tokens)
+            .map(|(invitee, token)| {
+                let server = server.clone();
+                async move { server.accept(&token, &invitee).await }
+            }),
+    )
     .await;
 
     let admitted = admitted_once(&responses, StatusCode::OK);
