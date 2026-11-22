@@ -469,7 +469,7 @@ pub async fn finish(socket: &mut Socket) -> Vec<Value> {
         let frame = next(socket).await;
         let terminal = matches!(
             frame["type"].as_str(),
-            Some("message_end" | "error" | "cancelled")
+            Some("message_end" | "error" | "denied" | "cancelled")
         );
         frames.push(frame);
         if terminal {

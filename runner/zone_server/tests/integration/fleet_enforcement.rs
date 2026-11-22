@@ -10,9 +10,13 @@ use std::time::Duration;
 use abnegate_vcs::PullRequestService;
 use axum::http::StatusCode;
 use dashmap::DashMap;
-use serde_json::json;
+use futures_util::StreamExt;
+use serde_json::{Value, json};
+use tokio_tungstenite::tungstenite::Message as SocketMessage;
 use uuid::Uuid;
-use zone_enterprise::fleet::{Labels, NO_RUNNER, Refusal, Version};
+use zone_enterprise::fleet::{
+    Labels, NO_RUNNER, RUNNER_OUTDATED, RUNNER_REVOKED, Refusal, Version,
+};
 use zone_server::config::AutoProjectConfig;
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::auto_projects::{self, Kind, PlannedTask, ProjectPlan, Stage, WriteError};
@@ -29,7 +33,7 @@ use zone_server::state::AppState;
 use zone_server::workers::auto_project::driver::{Admission, Drive};
 use zone_server::workers::auto_project::{self, CLAIM_LEASE, PROJECTS_PER_TICK, Services, lease};
 
-use crate::common::context::successful;
+use crate::common::context::{Socket, successful};
 use crate::common::fleet::{
     ANSWER, COMPLETED, FAILED, Fleet, RUNNING, Spec, WAITING, refused_with,
 };
@@ -217,6 +221,18 @@ async fn until_answered(fleet: &Fleet, reminder: Uuid) {
         );
         tokio::time::sleep(POLL).await;
     }
+}
+
+/// Every frame `socket` receives within `window`.
+async fn frames_within(socket: &mut Socket, window: Duration) -> Vec<Value> {
+    let deadline = tokio::time::Instant::now() + window;
+    let mut frames = Vec::new();
+    while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, socket.next()).await {
+        if let SocketMessage::Text(text) = message {
+            frames.push(serde_json::from_str(&text).unwrap());
+        }
+    }
+    frames
 }
 
 /// Revokes `runner` as a revoke on another server process does: committed there, with no stop
@@ -743,7 +759,9 @@ async fn a_reminder_turn_is_left_owed_on_a_revoked_runner_and_runs_on_an_active_
         .expect("the owed turn is offered to an active runner");
 
     fleet.set_state(a.id, State::Revoked).await;
+    let mut watching = fleet.connect(&fleet.serve(&a.state).await).await;
     zone_server::workers::reminders::run(&a.state, turn.clone(), lease, claimant).await;
+    let told = frames_within(&mut watching, IDLE_FOR).await;
     let refused = owed(&fleet, reminder).await;
     let unanswered = fleet.messages().await;
     let reclaimed = reminders::claim_turn(
@@ -764,6 +782,12 @@ async fn a_reminder_turn_is_left_owed_on_a_revoked_runner_and_runs_on_an_active_
         refused,
         [(turn.attempts - 1, false)],
         "the refused turn gave its claim back without counting an attempt"
+    );
+    assert!(
+        !told
+            .iter()
+            .any(|frame| frame["type"] == "denied" || frame["type"] == "error"),
+        "a refused unattended turn tells whoever watches the chat nothing: {told:?}"
     );
     assert!(unanswered.is_empty(), "{unanswered:?}");
     assert!(
@@ -919,24 +943,29 @@ async fn a_chat_turn_is_refused_on_a_revoked_or_outdated_runner() {
     let asked = fleet.streamed().await;
     fleet.cleanup().await;
 
-    let revoked_message = Refusal::Revoked.message();
-    let outdated_message = Refusal::Outdated {
+    let revoked_refusal = Refusal::Revoked;
+    let outdated_refusal = Refusal::Outdated {
         version: outdated(),
         minimum: version(),
-    }
-    .message();
+    };
     assert!(
-        refused_with(&revoked, &revoked_message),
-        "a revoked runner refuses the turn: {revoked:?}"
+        refused_with(&revoked, &revoked_refusal),
+        "a revoked runner denies the turn with its code: {revoked:?}"
     );
-    revoked_post.assert_status(StatusCode::CONFLICT);
-    assert_eq!(revoked_post.json_value()["error"], revoked_message);
+    revoked_post.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        revoked_post.json_value(),
+        json!({"error": revoked_refusal.message(), "code": RUNNER_REVOKED})
+    );
     assert!(
-        refused_with(&outdated_turn, &outdated_message),
-        "an outdated runner refuses the turn: {outdated_turn:?}"
+        refused_with(&outdated_turn, &outdated_refusal),
+        "an outdated runner denies the turn with its code: {outdated_turn:?}"
     );
-    outdated_post.assert_status(StatusCode::CONFLICT);
-    assert_eq!(outdated_post.json_value()["error"], outdated_message);
+    outdated_post.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        outdated_post.json_value(),
+        json!({"error": outdated_refusal.message(), "code": RUNNER_OUTDATED})
+    );
     successful(&served_while_revoked);
     successful(&served_while_outdated);
     assert_eq!(
@@ -1080,8 +1109,9 @@ async fn a_lapsed_license_keeps_enforcing() {
         (None, None),
         "a lapsed license still refuses a revoked runner"
     );
-    posted.assert_status(StatusCode::CONFLICT);
+    posted.assert_status(StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(posted.json_value()["error"], Refusal::Revoked.message());
+    assert_eq!(posted.json_value()["code"], RUNNER_REVOKED);
     assert_eq!(handed.status, COMPLETED, "{:?}", handed.error_message);
     assert_eq!(handed_to, Some(b.id));
 }

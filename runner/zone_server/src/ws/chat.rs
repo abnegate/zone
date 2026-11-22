@@ -78,13 +78,11 @@ mod ending;
 pub mod job;
 mod queue;
 mod sent;
-mod turn;
 
 use confinement::Confinement;
 use ending::Ending;
 use queue::{Finished, Interrupted, Queued, Started};
-use sent::Sent;
-pub use turn::Turn;
+pub use sent::Sent;
 
 /// WebSocket polling interval in milliseconds
 const WS_POLL_INTERVAL_MS: u64 = 50;
@@ -809,8 +807,9 @@ pub enum ServerMessage {
     },
     /// Error message
     Error { message: String },
-    /// The organization's or workspace's agent policy refused the turn. `code` is the refusal's
-    /// `policy_*` code, which the console words and links to the policy by.
+    /// The organization's or workspace's agent policy, or the server's fleet policy, refused the
+    /// turn. `code` is the refusal's `policy_*` code, which the console words and links to the
+    /// policy by, or its `fleet_runner_*` code.
     Denied { message: String, code: String },
     /// Non-fatal progress (e.g. web search in progress)
     Status { message: String },
@@ -2743,7 +2742,9 @@ async fn handle_audio_generation(
 /// tools are below that tier and run either way, so a watch still works.
 /// Whether the user's message was saved: a queued turn stopped before then has
 /// left nothing in the chat, so the queue puts it back. A turn fleet policy
-/// refused the chat's lease saved nothing either, and says so.
+/// refused the chat's lease saved nothing either, and says so as a denial. An
+/// unattended one says nothing in the chat: it stays owed, and another runner
+/// takes it, so telling whoever watches to reload would be wrong.
 async fn handle_send_message(
     state: &AppState,
     stream: &Arc<ChatStream>,
@@ -2784,6 +2785,22 @@ async fn handle_send_message(
     let mut session = match Session::acquire(state, chat_id, workspace_id, request.message_id).await
     {
         Ok(session) => session,
+        Err(db::context::Error::Refused(shortfall)) => {
+            let refusal = crate::services::fleet::refusal::of(shortfall);
+            if unattended {
+                tracing::info!(%chat_id, code = refusal.code(), "Fleet policy refused this runner an unattended turn, so it stays owed for another runner");
+            } else {
+                publish(
+                    stream,
+                    ServerMessage::Denied {
+                        message: refusal.message(),
+                        code: refusal.code().to_string(),
+                    },
+                )
+                .await;
+            }
+            return Sent::Refused;
+        }
         Err(error) => {
             publish(
                 stream,
@@ -2792,10 +2809,7 @@ async fn handle_send_message(
                 },
             )
             .await;
-            return match error {
-                db::context::Error::Refused(_) => Sent::Refused,
-                _ => Sent::Unsaved,
-            };
+            return Sent::Unsaved;
         }
     };
     crate::agent::ApprovalPolicy::register(chat_id, request.approvals.clone());
@@ -3016,8 +3030,9 @@ pub(crate) async fn run_turn(
 
 /// [`run_turn`] with its answer's id chosen by the caller, so the caller can
 /// stop this turn and no other through [`cancel_turn`] while it runs. Says
-/// whether fleet policy refused this runner the chat, so the caller can leave
-/// the work owed rather than count it run.
+/// what became of the message, [`Sent::Refused`] when fleet policy refused this
+/// runner the chat, so the caller can leave the work owed rather than count it
+/// run.
 pub(crate) async fn run_turn_as(
     state: &AppState,
     message_id: Uuid,
@@ -3026,7 +3041,7 @@ pub(crate) async fn run_turn_as(
     user_id: Uuid,
     content: &str,
     metadata: Option<serde_json::Value>,
-) -> Turn {
+) -> Sent {
     let stream = ChatStream::of(chat_id);
     let generation = Generation::registered(chat_id, message_id);
     let sent = handle_send_message(
@@ -3053,10 +3068,7 @@ pub(crate) async fn run_turn_as(
         Some(None) => announce(&stream, None).await,
         None => {}
     }
-    match sent {
-        Sent::Refused => Turn::Refused,
-        Sent::Saved | Sent::Unsaved => Turn::Ran,
-    }
+    sent
 }
 
 /// Stops the one turn answering under `message_id` the way a person's Stop
