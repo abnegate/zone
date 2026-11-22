@@ -1,18 +1,26 @@
 import { Button } from '@zone/ui';
 import { useEffect, useId, useState } from 'react';
+import { LicenseStatus } from '../schemas';
+import type { LicenseStatus as LicenseStatusValue } from '../types';
 
 const COPIED_FOR_MS = 2000;
 
 export const LICENSE_ID_HINT = 'Quote this ID when you contact Zone support.';
+
+export const LICENSE_ID_LAPSED_HINT =
+  'This license has lapsed, so this server gets Community support on GitHub.';
+
+export const LICENSE_ID_COPIED = 'Copied the license ID to the clipboard.';
 
 export const LICENSE_ID_COPY_FAILED =
   'Could not copy to the clipboard. Select the license ID and copy it instead.';
 
 interface LicenseIdProps {
   id: string;
+  status: LicenseStatusValue;
 }
 
-export function LicenseId({ id }: LicenseIdProps) {
+export function LicenseId({ id, status }: LicenseIdProps) {
   const hintId = useId();
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,6 +44,8 @@ export function LicenseId({ id }: LicenseIdProps) {
     }
   };
 
+  const hint = status === LicenseStatus.Lapsed ? LICENSE_ID_LAPSED_HINT : LICENSE_ID_HINT;
+
   return (
     <div className="license-detail license-id">
       <dt>License ID</dt>
@@ -54,13 +64,12 @@ export function LicenseId({ id }: LicenseIdProps) {
           </Button>
         </div>
         <p id={hintId} className="license-id-hint">
-          {LICENSE_ID_HINT}
+          {hint}
         </p>
-        {error && (
-          <p className="field-error" role="alert">
-            {error}
-          </p>
-        )}
+        {error && <p className="field-error">{error}</p>}
+        <span className="sr-only license-id-announcement" aria-live="polite" aria-atomic="true">
+          {copied ? LICENSE_ID_COPIED : (error ?? '')}
+        </span>
       </dd>
     </div>
   );

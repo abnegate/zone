@@ -56,7 +56,7 @@ export function LicenseSummary({ response, changing, onRemove }: LicenseSummaryP
         </p>
       )}
       <dl className="license-details">
-        {license && <LicenseId id={license.id} />}
+        {license && <LicenseId id={license.id} status={status} />}
         {license && (
           <div className="license-detail">
             <dt>Customer</dt>

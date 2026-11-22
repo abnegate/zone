@@ -18,6 +18,7 @@ Zone and want to install a license you bought, you only need
 - [What the customer receives](#what-the-customer-receives)
 - [Automatic renewal](#automatic-renewal)
 - [Hand-signing a license](#hand-signing-a-license)
+- [Checking a license ID](#checking-a-license-id)
 - [Rotating the signing key](#rotating-the-signing-key)
 - [Why the signer listens only to `order.paid`](#why-the-signer-listens-only-to-orderpaid)
 - [Failure modes](#failure-modes)
@@ -619,7 +620,7 @@ lets through the paths it knows, allow these and nothing else:
 | `/webhooks/polar` | Any | Polar |
 | `/licenses/renew` | Any | Customers' Zone servers |
 | `/health` | Any | Your health check or uptime monitor |
-| `/token` | `GET`, `POST` and `HEAD` | Customers' Docker, containerd and Kubernetes hosts. Pass `POST` through rather than refusing it: containerd posts first and falls back to `GET` only on the signer's `405`. |
+| `/token` | `GET`, `POST` and `HEAD` | Customers' Docker, containerd and Kubernetes hosts. Pass `POST` through rather than refusing it: containerd posts first and falls back to `GET` on `405`, `404`, `401` or `400`, and the signer answers `405`. A proxy that refuses `POST` with another status, such as `403`, breaks containerd pulls. |
 | `/bundles/*` | `GET` and `HEAD` | Customers downloading an air-gapped bundle |
 
 The last two matter only once [distribution](DISTRIBUTION.md) is on. The
@@ -933,6 +934,12 @@ It prints the license string and nothing else, so it can be piped or copied as
 it is. The private key never goes on the command line, and `sign` refuses a
 key the release's keyring doesn't trust, exactly as `serve` does.
 
+On standard error, `sign` logs `signed a license` with the license's `id`,
+`key_id`, `seats`, `plan` and `expires_at`. Keep that line with the deal's
+record. A hand-signed ID is random, or whatever `--id` gave, so it appears in no signer log and can't
+be derived from Polar. That line is the only record of it, and support
+[checks the ID](#checking-a-license-id) against it.
+
 Send the key to the customer yourself, with the installation steps from
 [What the customer receives](#what-the-customer-receives).
 
@@ -943,6 +950,123 @@ A key given `--subscription` renews only while that subscription is `active`
 and its product is in `POLAR_PRODUCT_IDS`. Each renewed key keeps the customer
 name you signed it with, and carries the plan of the subscription's current
 product, whatever `--plan` you signed it with.
+
+## Checking a license ID
+
+[Support](SUPPORT.md#your-license-id) starts its response clock on a valid
+license ID. The ID isn't secret, so anyone can quote one, including a
+Community user who makes one up. Before treating a request as Team or
+Enterprise, confirm that the signer issued the ID, which plan it carries, and
+that it's active or in its grace period. The signer has no database, so its
+logs and Polar are the record.
+
+### 1. Find the ID in the signer's logs
+
+Every key the signer issues logs one line. The webhook logs `Sent a license`
+with the new key's ID in `license`. A renewal logs `Renewed a license` with the
+new key's ID in `renewed`; its `license` is the older key the server posted.
+Both lines carry `subscription`, `seats` and `plan`. `serve` writes one JSON
+object per line to standard error, with the event's fields under `fields`:
+
+```sh
+sudo docker logs zone-license 2>&1 | jq -cR --arg id '<license id>' '
+  fromjson?
+  | select((.fields.message == "Sent a license" and .fields.license == $id)
+        or (.fields.message == "Renewed a license" and .fields.renewed == $id))
+  | {timestamp, message: .fields.message, subscription: .fields.subscription,
+     plan: .fields.plan, seats: .fields.seats}'
+```
+
+A match prints a line such as:
+
+```json
+{"timestamp":"2026-11-18T12:00:03.123456Z","message":"Sent a license","subscription":"8c1d0c55-5a1c-4f0e-9a43-1b9b2f0c6e11","plan":"enterprise","seats":25}
+```
+
+Several matches for one ID are normal: a redelivered order or a server asking
+again logs the same ID. `fromjson?` skips anything that isn't a JSON line. A
+match proves the signer issued the ID and names its subscription and plan. It
+says nothing about whether the subscription is still paid, so go on to step 2.
+
+`/token` and `/bundles` lines also carry `license`, but only once the key
+verifies, and they don't name the subscription. No match means either the
+signer never issued the ID, or the line is gone: Docker keeps a container's
+logs only while that container exists, so a redeploy drops them (see
+[Logs and pull auditing](DISTRIBUTION.md#logs-and-pull-auditing)). In that
+case, use [When the logs are gone](#when-the-logs-are-gone).
+
+### 2. Look the subscription up in Polar
+
+Open the subscription in the Polar dashboard, or read it from the API with an
+organization access token that has `subscriptions:read`, such as the one in the
+signer's `POLAR_ACCESS_TOKEN`:
+
+```sh
+curl -fsS -H "Authorization: Bearer $POLAR_ACCESS_TOKEN" \
+  https://api.polar.sh/v1/subscriptions/<subscription id> \
+  | jq '{status, current_period_end, ended_at, seats, product: .product.name, email: .customer.email}'
+```
+
+Check that the product is one of the products in `POLAR_PRODUCT_IDS`, and
+that the plan `POLAR_PRODUCT_IDS` gives that product matches the log line's
+`plan`. `enterprise` gets the [severity targets](SUPPORT.md#enterprise-severity-levels);
+`team` gets best effort.
+
+### 3. Confirm it's active or in grace
+
+A license is active until its `expires_at`, then in its grace period for
+**30 days** (`GRACE_DAYS` in `runner/zone_enterprise/src/status.rs`), then
+lapsed. The grace period runs from the exact second of expiry. A key's
+`expires_at` is the `current_period_end` of the subscription period it was
+signed for, so:
+
+- **Active:** the subscription's `status` is `active` and `current_period_end`
+  is in the future.
+- **In grace:** the subscription is `canceled`, `past_due` or has ended, and
+  `current_period_end` was less than 30 days ago.
+- **Lapsed:** `current_period_end` was 30 days ago or more. The server runs
+  Community and gets Community support.
+
+The quoted ID can belong to an older period than Polar's current one, when the
+server hasn't installed its renewed key yet. The subscription being paid is
+what counts: help them, and point them at
+[Automatic renewal](#automatic-renewal) or the key in their latest email.
+
+### When the logs are gone
+
+A Polar license's ID is derived from its terms (see
+[The key's terms](#the-keys-terms)), so Polar alone can confirm one. Ask the
+customer for the billing email the license was bought with, or the Polar
+order reference from the receipt. [SUPPORT.md](SUPPORT.md#what-to-send) asks
+them to send one. Find the customer or order in Polar, open its subscription,
+and derive the ID of its current key from the subscription id, its
+`current_period_end`, its `seats` and its plan:
+
+```sh
+python3 - '<subscription id>' '<current_period_end>' '<seats>' '<team or enterprise>' <<'EOF'
+import sys, uuid
+from datetime import datetime
+subscription, period_end, seats, plan = sys.argv[1:]
+seconds = int(datetime.fromisoformat(period_end.replace('Z', '+00:00')).timestamp())
+name = f'{subscription}/{seconds}/{seats}' + ('/team' if plan == 'team' else '')
+print(uuid.uuid5(uuid.UUID('16eafa97-dd78-4dff-8550-01e045e0de9d'), name))
+EOF
+```
+
+This is the derivation in `runner/zone_license/src/license_id.rs`: a UUIDv5
+in that namespace over `<subscription>/<period end in Unix seconds>/<seats>`,
+with `/team` added for a Team key. If it prints the quoted ID, the ID is
+genuine. Then check steps 2 and 3. If it doesn't, the quoted ID may be from an
+earlier period or seat count. Ask for the **Expires** and **Seats** rows on the
+server's License page and derive again with those, or go by the subscription
+itself.
+
+A **hand-signed** key's ID can't be derived or found in the signer's logs. It
+was recorded when it was signed, in the `signed a license` line that
+[`zone-license sign`](#hand-signing-a-license) logs. Find that line in the
+deal's record and check its `plan` and `expires_at` there. A hand-signed key
+given `--subscription` gets derived IDs once it renews, so the steps above
+apply from its first renewal on.
 
 ## Rotating the signing key
 

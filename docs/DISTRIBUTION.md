@@ -137,9 +137,11 @@ check, granting, minting, then one log line.
 
 `POST /token` and `HEAD /token` answer `405` with `Allow: GET`. They mint
 nothing and log no `issued` line. containerd and nerdctl POST to the realm
-first, with an OAuth2 form, and fall back to `GET` on `405`, `404`, `401` or
-`400`, which is why Caddy must pass `POST /token` through to the signer instead
-of refusing it itself.
+first, with an OAuth2 form, whenever they have credentials, and fall back to
+`GET` on `405`, `404`, `401` or `400` (`405` only when there's a user name,
+which a license login always has; see `doBearerAuth` in containerd's
+`core/remotes/docker/authorizer.go`). That's why Caddy must pass `POST /token`
+through to the signer instead of refusing it itself.
 
 An `issued` response is:
 
@@ -800,8 +802,15 @@ fresh one-hour session.
 None of this is live yet. In order, after the code merges:
 
 1. **DNS.** An `A` record `registry.bitecode.ltd` → `3.24.143.182` in
-   Cloudflare, DNS only (not proxied), so Caddy can get its certificate and
-   sees real client addresses.
+   Cloudflare. It and `licenses.bitecode.ltd` must both be DNS only (not
+   proxied), so Caddy can get their certificates and sees each customer's own
+   address. Behind Cloudflare's proxy, every request reaches Caddy from a
+   Cloudflare edge address, so `X-Forwarded-For` names the edge and not the
+   customer. Customers behind the same edge would then share one
+   [address limit](#rate-limits-and-client-addresses), and the `address` in
+   the signer's logs and `http.request.remoteaddr` in the registry's would
+   name Cloudflare instead of the client. Check `licenses.bitecode.ltd` too:
+   it predates distribution and may have been proxied.
 2. **S3.** Create the bucket as in [The bucket](#the-bucket), once the egress
    cost is approved.
 3. **IAM.** The [instance role](#the-instance-role) with the hop limit raised
