@@ -2576,6 +2576,20 @@ On by default. Once a day, the server looks at its license, and when the license
 
 ---
 
+## Runner fleet
+
+Every Zone server process registers as a runner in its server's fleet, on every edition, and heartbeats every 15 seconds. Under a Zone Enterprise license, server admins can cordon or revoke a runner and set a minimum version, and organizations and workspaces can require runner labels for their unattended work. Both settings are read once at startup. See [FLEET.md](FLEET.md) for the whole policy.
+
+### `ZONE_RUNNER_NAME`
+- **Default**: the `HOSTNAME` environment variable, else `/etc/hostname`, else `zone-` followed by 8 random hex digits
+- **Description**: The name this server registers as. A runner's state belongs to its name, so a cordoned or revoked name stays that way when its server restarts. Give each server its own name: two live servers sharing one share its state, and Zone logs a warning when a name is taken over from a process seen in the last minute. Set it for a name that stays the same across a Kubernetes Deployment's rollouts, which give every new pod a new host name. Surrounding spaces are trimmed, and a blank value counts as unset.
+
+### `ZONE_RUNNER_LABELS`
+- **Default**: none
+- **Description**: The labels this runner carries, comma-separated, such as `region=eu,gpu`. Unattended work in a workspace (task runs, reminder turns and auto-project drives) runs only on runners that carry every label its organization and workspace require; chats ignore labels. A label is 1 to 63 characters of lowercase letters, digits and `.`, `_`, `-`, `=` and `/`, starting with a letter or digit. Spaces around an entry are trimmed, blank entries are skipped and repeats collapse. A label that breaks a rule, such as `GPU`, stops the server at startup with a message beginning `Refusing to start: ZONE_RUNNER_LABELS is invalid (fleet_label_invalid).` and naming the label, so a misconfigured server can't boot into the wrong placement.
+
+---
+
 ## 🔒 VPN Configuration - Optional
 
 **VPN is completely optional!** Enable it to send all stack internet traffic through Gluetun, including private web search.
@@ -2730,6 +2744,7 @@ Regenerate secrets for production:
 | Task evaluation | No | ✅ Yes (off) |
 | Workspace digests | No | ✅ Yes (off) |
 | License renewal | No | ✅ Yes (on) |
+| Runner fleet | No | Yes (host name, no labels) |
 
 *Security variables have insecure defaults. Change for production.
 
@@ -2795,6 +2810,7 @@ Need to find a specific config? Quick lookup:
 - **Task evaluation**: ZONE_TASK_EVALUATION, ZONE_TASK_EVALUATION_CATEGORIES, ZONE_TASK_EVALUATION_TOOL_TIMEOUT_SECONDS, ZONE_TASK_EVALUATION_BUDGET_SECONDS
 - **Workspace digests**: ZONE_REPORT_ENABLED, ZONE_REPORT_CADENCE, ZONE_REPORT_HOUR, ZONE_REPORT_WEEKDAY, ZONE_REPORT_DAY_OF_MONTH
 - **License renewal**: ZONE_LICENSE_RENEWAL, ZONE_LICENSE_RENEWAL_URL
+- **Runner fleet**: ZONE_RUNNER_NAME, ZONE_RUNNER_LABELS
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
 - **Timezone**: TZ
 - **VPN**: VPN_*, OPENVPN_*

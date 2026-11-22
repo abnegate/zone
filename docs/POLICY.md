@@ -473,6 +473,18 @@ Zone writes these entries to the organization's audit log.
 
 Saving a policy without changing it writes no entry.
 
+## Runner placement
+
+The **Agent policy** pages also hold the runner labels an organization or
+workspace requires of the runners that take its unattended work: task runs,
+reminder turns and auto-project drives. The same people edit them, with
+`policies:update` and `workspace_policies:update`, but they are part of
+[runner fleet policy](FLEET.md), not of the agent policy. They have their own
+API (`/runner-labels`), their own audit action (`runner_labels.updated`) and
+their own codes, and they combine differently: a workspace's labels add to
+its organization's, and `[]` requires nothing. Chats ignore them. See
+[Placement](FLEET.md#placement).
+
 ## Codes
 
 Refusals of something an agent or a person tried to use, where {provider} and
