@@ -323,9 +323,9 @@ server:
 
 | Chart | Keys |
 |---|---|
-| `zone-apps` | `server.image`, `migration.image`, `manager.image` (repository and tag), `initContainers.postgres.image` (one string) |
+| `zone-apps` | `server.image`, `manager.image` (repository and tag), `initContainers.postgres.image` (one string) |
 | `zone-infra` | `valkey.image` (repository and tag), `postgres.image` (one string) |
-| `zone-ai` | `ollama.image`, `ollama.init.image`, `litellm.image` (repository and tag) |
+| `zone-ai` | `ollama.image`, `ollama.init.image`, `litellm.image`, `litellm.waitImage` (repository and tag) |
 
 Only `zone-apps` has a registry-wide setting, `global.imageRegistry`, and it
 is joined to each repository with no separator, so a value there must end
@@ -366,14 +366,6 @@ kubectl -n zone patch serviceaccount default \
 
 That doesn't reach the PostgreSQL pods, which CloudNativePG runs under a
 service account of its own.
-
-One image isn't covered by values yet: the `wait-for-ollama` init container
-in `zone-ai`'s LiteLLM Deployment names
-`curlimages/curl:8.22.0@sha256:58adaa4e…` directly, so it ignores the
-generated values. `push` puts the same image in your registry as
-`curlimages/curl`. Until the chart takes it as a value, have your container
-runtime mirror `docker.io` to your registry, or rewrite the image with a Helm
-post-renderer.
 
 ## Licensing offline
 

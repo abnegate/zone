@@ -52,7 +52,7 @@ image_line() {
 write_images() {
     {
         image_line zone-server zone/server 1.4.3-lts "$server_digest" \
-            compose:manager,helm-split:zone-apps:server.image,helm-split:zone-apps:migration.image
+            compose:manager,helm-split:zone-apps:server.image
         image_line zone-manager zone/manager 1.4.3-lts "$manager_digest" \
             compose:console,helm-split:zone-apps:manager.image
         image_line zone-litellm zone/litellm 1.4.3-lts "$litellm_digest" compose:litellm
@@ -63,7 +63,8 @@ write_images() {
             compose:ollama,compose:ollama-init,helm-split:zone-ai:ollama.image
         image_line cloudnative-postgresql cloudnative-pg/postgresql 16.15 "$cloudnative_digest" \
             helm-string:zone-infra:postgres.image
-        image_line curl curlimages/curl 8.22.0 "$curl_digest" helm-split:zone-ai:ollama.init.image
+        image_line curl curlimages/curl 8.22.0 "$curl_digest" \
+            helm-split:zone-ai:ollama.init.image,helm-split:zone-ai:litellm.waitImage
         image_line litellm berriai/litellm v1.99.1 "$upstream_litellm_digest" helm-split:zone-ai:litellm.image
         image_line postgres library/postgres 15-alpine "$postgres_digest" \
             helm-string:zone-apps:initContainers.postgres.image
@@ -501,10 +502,6 @@ server:
   image:
     repository: "registry.example.internal:5443/mirror/zone/server"
     tag: "1.4.3-lts@$server_digest"
-migration:
-  image:
-    repository: "registry.example.internal:5443/mirror/zone/server"
-    tag: "1.4.3-lts@$server_digest"
 manager:
   image:
     repository: "registry.example.internal:5443/mirror/zone/manager"
@@ -531,6 +528,9 @@ ollama:
       repository: "registry.example.internal:5443/mirror/curlimages/curl"
       tag: "8.22.0@$curl_digest"
 litellm:
+  waitImage:
+    repository: "registry.example.internal:5443/mirror/curlimages/curl"
+    tag: "8.22.0@$curl_digest"
   image:
     repository: "registry.example.internal:5443/mirror/berriai/litellm"
     tag: "v1.99.1@$upstream_litellm_digest"
