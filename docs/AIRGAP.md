@@ -23,7 +23,7 @@ only for an Enterprise license that is active or in its grace period.
 | `source.tar` | The Zone source at the release tag, for Compose |
 | `compose/docker-compose.airgap.yml` | The Compose override that points every service at a digest-pinned image |
 | `helm/<chart>-<version>.tgz` | The `zone-apps`, `zone-infra` and `zone-ai` charts |
-| `images/registry.tar` | `registry:3.1.1`, used only while `install.sh compose` runs |
+| `images/registry.tar` | `registry:3.1.1`, used only while `install.sh compose` runs. `docker load` lists it as `registry:i-was-a-digest`, the name crane gives an image saved by digest |
 | `images/<name>/` | One OCI image layout per image, for the bundle's architecture only |
 | `images.txt` | One line per image: name, repository, tag, digest, layout and where it's used |
 | `SHA256SUMS` | The checksum of every other file |

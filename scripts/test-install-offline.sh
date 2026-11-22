@@ -2,7 +2,7 @@
 set -eu
 
 unset ZONE_AIRGAP_REGISTRY ZONE_LICENSE_RENEWAL COMPOSE_FILE COMPOSE_PROFILES COMPOSE_VERSION \
-    COMPOSE_PULL_STATUS CRANE_PUSH_STATUS CRANE_DIGEST DOCKER_RUN_STATUS
+    COMPOSE_PULL_STATUS CRANE_PUSH_STATUS CRANE_DIGEST DOCKER_RUN_STATUS DOCKER_LOADED
 
 shell='sh'
 if [ -n "${BASH_VERSION:-}" ]; then
@@ -177,7 +177,13 @@ case "$1" in
             *) exit 1 ;;
         esac
         ;;
-    load) printf '%s\n' 'Loaded image: registry:3.1.1' ;;
+    load)
+        case "${DOCKER_LOADED:-reference}" in
+            reference) printf '%s\n' 'Loaded image: registry:i-was-a-digest' ;;
+            id) printf '%s\n' 'Loaded image ID: sha256:5f1ee4f4d2b2d7e2ab7e8f3f0e0e4a1b1c7d0f8f4a6a2c3d9e8b7a6f5e4d3c2b' ;;
+            nothing) ;;
+        esac
+        ;;
     volume)
         if [ "$2" = create ]; then
             printf '%s\n' "$3"
@@ -353,7 +359,10 @@ cmp -s "$bundle/compose/docker-compose.airgap.yml" "$target/docker-compose.airga
 [ -f "$target/docker-compose.yml" ] || fail 'Expected source.tar to be extracted'
 assert_docker 'load --input '"$bundle"'/images/registry.tar'
 assert_docker_containing '--publish 127.0.0.1:5000:5000'
-assert_docker_containing ':/var/lib/registry registry:3.1.1'
+assert_docker_containing ':/var/lib/registry registry:i-was-a-digest'
+if grep -qF 'registry:3.1.1' "$sandbox/docker.log"; then
+    fail 'Expected compose to run the name docker load reported, not registry:3.1.1, which crane never tags'
+fi
 assert_docker 'compose -f docker-compose.yml -f docker-compose.airgap.yml config --profiles'
 assert_docker 'compose -f docker-compose.yml -f docker-compose.airgap.yml --profile bundled-ollama --profile monitoring --profile vpn pull manager console litellm traefik valkey ollama ollama-init'
 assert_docker "pull-environment ZONE_AIRGAP_REGISTRY=127.0.0.1:5000 directory=$target"
@@ -438,6 +447,16 @@ if run_installer_with 'DOCKER_RUN_STATUS=125' compose --directory "$target"; the
 fi
 assert_output 'Could not start the temporary registry on 127.0.0.1:5000'
 assert_registry_removed
+
+run_installer_with 'DOCKER_LOADED=id' compose --directory "$target" \
+    || fail 'Expected compose to run an image that docker load reports only by ID'
+assert_docker_containing ':/var/lib/registry sha256:5f1ee4f4d2b2d7e2ab7e8f3f0e0e4a1b1c7d0f8f4a6a2c3d9e8b7a6f5e4d3c2b'
+
+if run_installer_with 'DOCKER_LOADED=nothing' compose --directory "$target"; then
+    fail 'Expected compose to stop when docker load names no image'
+fi
+assert_output 'docker load did not name the image it loaded from images/registry.tar'
+assert_no_docker_containing 'run '
 
 if run_installer_with "CRANE_DIGEST=$manager_digest" compose --directory "$target"; then
     fail 'Expected a push that changes the digest to fail compose'
