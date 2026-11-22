@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use zone_enterprise::Keyring;
 
+use crate::bundle::{BundleSettings, Presigner};
 use crate::config::Config;
 use crate::gate::{self, Gate, Throttle, TrustedProxies};
-use crate::http::{Context, Registrar, Renewer, Server, router};
+use crate::http::{Context, Distributor, Registrar, Renewer, Server, router};
 use crate::mail::Relay;
 use crate::polar::{self, Proxy};
 use crate::registry::TokenKey;
@@ -37,8 +38,9 @@ pub async fn serve(
 }
 
 /// Builds the relay and the Polar client and binds the listener, without
-/// serving yet. Renewal is on only when `POLAR_ACCESS_TOKEN` is set, and
-/// registry tokens only when `ZONE_REGISTRY_SERVICE` is.
+/// serving yet. Renewal is on only when `POLAR_ACCESS_TOKEN` is set, registry
+/// tokens only when `ZONE_REGISTRY_SERVICE` is, and bundles only when
+/// `ZONE_BUNDLE_BUCKET` is.
 pub async fn start(config: Config) -> Result<Server, ServeError> {
     let relay = Relay::new(&config.smtp)?;
     let gate = Gate::new(
@@ -50,7 +52,14 @@ pub async fn start(config: Config) -> Result<Server, ServeError> {
         let key = TokenKey::derive(&config.signer, settings.generation);
         Registrar::new(gate.clone(), key, settings, Throttle::new(config.limits))
     });
-    announce(&config.proxies, registrar.is_some());
+    let distributor = config
+        .bundles
+        .map(|settings| distributor(settings, gate, Throttle::new(config.limits)))
+        .transpose()?;
+    announce(
+        &config.proxies,
+        registrar.is_some() || distributor.is_some(),
+    );
     if let Some(registrar) = &registrar {
         registrar.throttle().spawn_cleanup();
         tracing::info!(
@@ -90,6 +99,10 @@ pub async fn start(config: Config) -> Result<Server, ServeError> {
         Some(registrar) => context.with_registrar(registrar),
         None => context,
     };
+    let context = match distributor {
+        Some(distributor) => context.with_distributor(distributor),
+        None => context,
+    };
     let server = Server::bind(config.listen, router(context)).await?;
     tracing::info!(
         address = %config.listen,
@@ -107,6 +120,21 @@ fn announce(proxies: &TrustedProxies, gated: bool) {
     if gated {
         gate::announce(proxies);
     }
+}
+
+fn distributor(
+    settings: BundleSettings,
+    gate: Gate,
+    throttle: Throttle,
+) -> Result<Distributor, ServeError> {
+    tracing::info!(
+        bucket = settings.bucket.name(),
+        prefix = settings.prefix.as_str(),
+        "Serving air-gapped bundles"
+    );
+    let presigner = Presigner::new(settings, Proxy::System).map_err(ServeError::Storage)?;
+    drop(throttle.spawn_cleanup());
+    Ok(Distributor::new(gate, presigner, throttle))
 }
 
 /// The container runs the signer as PID 1, which the kernel gives no default

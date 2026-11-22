@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use crate::http::distributor::Distributor;
 use crate::http::registrar::Registrar;
 use crate::http::renewer::Renewer;
 use crate::mail::Outbox;
@@ -15,6 +16,7 @@ pub struct Context {
     pub(crate) outbox: Arc<dyn Outbox>,
     pub(crate) renewer: Option<Renewer>,
     pub(crate) registrar: Option<Registrar>,
+    pub(crate) distributor: Option<Distributor>,
 }
 
 impl Context {
@@ -31,6 +33,7 @@ impl Context {
             outbox,
             renewer: None,
             registrar: None,
+            distributor: None,
         }
     }
 
@@ -47,6 +50,13 @@ impl Context {
             ..self
         }
     }
+
+    pub fn with_distributor(self, distributor: Distributor) -> Self {
+        Self {
+            distributor: Some(distributor),
+            ..self
+        }
+    }
 }
 
 impl fmt::Debug for Context {
@@ -58,6 +68,7 @@ impl fmt::Debug for Context {
             .field("products", &self.products)
             .field("renewer", &self.renewer)
             .field("registrar", &self.registrar)
+            .field("distributor", &self.distributor)
             .finish_non_exhaustive()
     }
 }

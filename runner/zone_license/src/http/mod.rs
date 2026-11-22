@@ -1,5 +1,10 @@
 mod admitted;
+mod bundle_link;
+mod bundle_outcome;
+mod bundle_response;
+mod bundles;
 mod context;
+mod distributor;
 mod get_only;
 mod health;
 mod issued;
@@ -23,7 +28,11 @@ use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 
+pub use bundle_link::BundleLink;
+pub use bundle_outcome::BundleOutcome;
+pub use bundle_response::BundleResponse;
 pub use context::Context;
+pub use distributor::Distributor;
 pub use get_only::{ALLOWED, get_only};
 pub use health::{Health, OK};
 pub use issued::Issued;
@@ -43,6 +52,7 @@ pub const WEBHOOK_PATH: &str = "/webhooks/polar";
 pub const RENEW_PATH: &str = "/licenses/renew";
 pub const HEALTH_PATH: &str = "/health";
 pub const TOKEN_PATH: &str = "/token";
+pub const BUNDLES_PATH: &str = "/bundles/{version}/{architecture}";
 pub const RENEW_BODY_LIMIT: usize = 16 * 1024;
 
 /// Axum's default body limit of 2 MB applies to the webhook, far above any
@@ -56,6 +66,7 @@ pub fn router(context: Context) -> Router {
         )
         .route(HEALTH_PATH, get(health::check))
         .route(TOKEN_PATH, get_only(token::respond))
+        .route(BUNDLES_PATH, get_only(bundles::respond))
         .with_state(Arc::new(context))
 }
 

@@ -131,7 +131,7 @@ one is cut off, ask for fresh links and resume it with
 | Status | Meaning |
 |---|---|
 | `200` | The JSON above. |
-| `401` | The license ID or key is wrong, the key doesn't verify, or the ID doesn't match the key. |
+| `401` | The license ID or key is wrong, the key doesn't verify, the ID doesn't match the key, or the license has been revoked. |
 | `403` | The license isn't Enterprise, or it has lapsed past its grace period. |
 | `404` | No bundle for that version and architecture. |
 | `429` | Too many requests. Wait for the number of seconds in `Retry-After`. |

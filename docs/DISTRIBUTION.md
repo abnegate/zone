@@ -225,8 +225,13 @@ absent because S3 answers it, instead of `404`, for a missing key when the
 caller can't list the bucket, which the presigner user can't.
 
 `SignatureDoesNotMatch`, `InvalidAccessKeyId` and `ExpiredToken` mean the
-presigner's key is wrong or gone. They answer `503` like any other S3 error,
-but log at `error`, because every bundle download fails until you fix the key.
+presigner's key is wrong or gone. They answer `503`, and like every other S3
+error code and any status without one, they log at `error`, because bundle
+downloads keep failing until you fix the key or the bucket. Storage that can't
+be reached or doesn't answer within 10 seconds logs at `warn` instead.
+
+The `issued` response carries `Cache-Control: no-store`, so no proxy or browser
+keeps the presigned links.
 
 ## Rate limits and client addresses
 
@@ -320,9 +325,12 @@ customer name or email address.
 | `dropped` | `/token` | How many requested actions were dropped, each distinct type, name and action counted once, so `pull,push` on `zone/server` drops 1 |
 | `version`, `architecture` | `/bundles` | The bundle asked for |
 | `code` | `/bundles` | The S3 error code, when S3 gave one |
+| `cause` | `/bundles` | On `unavailable` without a code: that S3 was unreachable, or the status it answered |
+| `retry_after` | `/bundles` | On `limited`, the seconds sent in `Retry-After` |
 
 When `/token` is on, the startup log also says `Issuing registry tokens` with
-the `service` and the `kid` it signs with.
+the `service` and the `kid` it signs with. When `/bundles` is on, it says
+`Serving air-gapped bundles` with the `bucket` and `prefix`, never the keys.
 
 **Pull auditing.** The registry runs with JSON logs. Once a token checks out,
 every request it serves logs `authorized request` and then `response completed`,

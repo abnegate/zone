@@ -75,6 +75,36 @@ async fn start_never_logs_the_webhook_secret_or_the_private_key() {
     }
 }
 
+const BUNDLE_BUCKET: &str = "zone-distribution";
+const BUNDLE_ACCESS_KEY: &str = "AKIAZONESERVESTART01";
+const BUNDLE_SECRET: &str = "serve-start-bundle-secret";
+const BUNDLES: [(Variable, &str); 5] = [
+    (Variable::BundleBucket, BUNDLE_BUCKET),
+    (Variable::BundleRegion, "ap-southeast-2"),
+    (Variable::BundlePrefix, "zone/bundles"),
+    (Variable::BundleAccessKeyId, BUNDLE_ACCESS_KEY),
+    (Variable::BundleSecretAccessKey, BUNDLE_SECRET),
+];
+
+fn bundled(extra: &[(Variable, &str)]) -> Config {
+    let variables: Vec<(Variable, &str)> = BUNDLES.iter().chain(extra).copied().collect();
+    configured(ENTERPRISE, &variables)
+}
+
+fn announcements(logged: &str) -> usize {
+    logged
+        .lines()
+        .filter(|line| line.contains("proxies=172.18.0.0/16"))
+        .count()
+}
+
+fn warnings(logged: &str) -> usize {
+    logged
+        .lines()
+        .filter(|line| line.contains("WARN") && line.contains(Variable::TrustedProxies.name()))
+        .count()
+}
+
 #[tokio::test]
 async fn start_announces_registry_tokens_with_their_service_and_kid() {
     let config = configured(
@@ -103,11 +133,50 @@ async fn start_announces_registry_tokens_with_their_service_and_kid() {
         issuing.contains(&format!("kid=\"registry-{KEY_ID}-2\"")),
         "{issuing}"
     );
-    let announced = logged
+    assert_eq!(announcements(&logged), 1, "{logged}");
+    assert!(logged.contains("Listening for Polar webhooks"), "{logged}");
+}
+
+#[tokio::test]
+async fn start_logs_the_bundle_bucket_and_prefix_but_no_credential() {
+    let logged = logging::capture(tracing::Level::TRACE, async {
+        start(bundled(&[(Variable::TrustedProxies, "172.18.0.0/16")]))
+            .await
+            .unwrap();
+    })
+    .await;
+
+    let line = logged
         .lines()
-        .filter(|line| line.contains("proxies=172.18.0.0/16"))
-        .count();
-    assert_eq!(announced, 1, "{logged}");
+        .find(|line| line.contains("Serving air-gapped bundles"))
+        .unwrap_or_else(|| panic!("no bundle line in {logged}"));
+    assert!(
+        line.contains(&format!("bucket=\"{BUNDLE_BUCKET}\"")),
+        "{line}"
+    );
+    assert!(line.contains("prefix=\"zone/bundles\""), "{line}");
+    for secret in [BUNDLE_ACCESS_KEY, BUNDLE_SECRET] {
+        assert!(!logged.contains(secret), "{secret} logged in {logged}");
+    }
+    assert_eq!(announcements(&logged), 1, "{logged}");
+    assert!(logged.contains("Listening for Polar webhooks"), "{logged}");
+}
+
+#[tokio::test]
+async fn start_announces_proxies_once_with_both_gated_routes_on() {
+    let config = bundled(&[
+        (Variable::RegistryService, REGISTRY),
+        (Variable::TrustedProxies, "172.18.0.0/16"),
+    ]);
+
+    let logged = logging::capture(tracing::Level::INFO, async {
+        start(config).await.unwrap();
+    })
+    .await;
+
+    assert!(logged.contains("Issuing registry tokens"), "{logged}");
+    assert!(logged.contains("Serving air-gapped bundles"), "{logged}");
+    assert_eq!(announcements(&logged), 1, "{logged}");
     assert!(logged.contains("Listening for Polar webhooks"), "{logged}");
 }
 
@@ -120,15 +189,33 @@ async fn start_warns_once_when_registry_tokens_have_no_trusted_proxies() {
     })
     .await;
 
-    let warnings = logged
-        .lines()
-        .filter(|line| line.contains("WARN") && line.contains(Variable::TrustedProxies.name()))
-        .count();
-    assert_eq!(warnings, 1, "{logged}");
+    assert_eq!(warnings(&logged), 1, "{logged}");
 }
 
 #[tokio::test]
-async fn start_without_a_registry_service_neither_issues_tokens_nor_announces_proxies() {
+async fn start_warns_once_when_bundles_are_on_without_trusted_proxies() {
+    let logged = logging::capture(tracing::Level::INFO, async {
+        start(bundled(&[])).await.unwrap();
+    })
+    .await;
+
+    assert_eq!(warnings(&logged), 1, "{logged}");
+}
+
+#[tokio::test]
+async fn start_warns_once_when_both_gated_routes_have_no_trusted_proxies() {
+    let config = bundled(&[(Variable::RegistryService, REGISTRY)]);
+
+    let logged = logging::capture(tracing::Level::INFO, async {
+        start(config).await.unwrap();
+    })
+    .await;
+
+    assert_eq!(warnings(&logged), 1, "{logged}");
+}
+
+#[tokio::test]
+async fn start_with_neither_gated_route_on_announces_nothing_about_them() {
     let config = config(ENTERPRISE);
 
     let logged = logging::capture(tracing::Level::INFO, async {
@@ -137,9 +224,11 @@ async fn start_without_a_registry_service_neither_issues_tokens_nor_announces_pr
     .await;
 
     assert!(!logged.contains("Issuing registry tokens"), "{logged}");
+    assert!(!logged.contains("Serving air-gapped bundles"), "{logged}");
     assert!(
         !logged.contains(Variable::TrustedProxies.name()),
         "{logged}"
     );
     assert!(!logged.contains("X-Forwarded-For"), "{logged}");
+    assert!(!logged.contains("No trusted proxies"), "{logged}");
 }
