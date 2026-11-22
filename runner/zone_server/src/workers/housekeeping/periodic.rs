@@ -150,8 +150,10 @@ impl Periodic {
             Self::WorktreeCleanup => Warmup::Period,
             // The ingest cursor survives a restart, so a pass a period in reads all the server missed.
             Self::SpendIngest => Warmup::Period,
-            // A runner has to be gone a week before it is forgotten, so a day's wait costs nothing.
-            Self::RunnerRetention => Warmup::Period,
+            // Fleets redeploy more often than daily, and each process counts from its own start,
+            // so a period's wait could mean no sweep ever runs. A few minutes keeps it out of
+            // the way of start-up.
+            Self::RunnerRetention => Warmup::After(fleet::retention::FIRST_SWEEP_DELAY),
             // Long enough to be out of the way of start-up, short enough that a
             // server coming back up picks up files whose embeddings failed.
             Self::SourceResync => Warmup::After(source_resync::FIRST_POLL_DELAY),
@@ -716,7 +718,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_runner_retention_runs_daily_on_every_server() {
+    async fn the_runner_retention_runs_daily_and_first_a_few_minutes_after_start_on_every_server() {
         let mut config = test_config();
         config.license_renewal.enabled = false;
         config.model_backend = crate::config::ModelBackend::Cli {
@@ -734,7 +736,11 @@ mod tests {
                 .expect("the runner retention's schedule");
 
             assert_eq!(schedule.period(), Duration::from_secs(24 * 60 * 60));
-            assert_eq!(schedule.warmup(), Warmup::Period);
+            assert_eq!(
+                schedule.warmup(),
+                Warmup::After(Duration::from_secs(5 * 60)),
+                "a fleet that redeploys daily still sweeps"
+            );
             assert_eq!(schedule.catchup(), Catchup::Skip);
         }
     }
