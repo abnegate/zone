@@ -2,6 +2,8 @@
 //! and the removal audited at server scope. Revoked runners are kept, so a quarantined name stays
 //! quarantined.
 
+use std::time::Duration;
+
 use chrono::TimeDelta;
 use sqlx::PgPool;
 
@@ -11,6 +13,10 @@ use crate::db::fleet::runners::{self, Runner};
 use crate::state::AppState;
 
 pub const SWEEP_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
+/// How long after start the first sweep runs. Every server process starts its own countdown, so
+/// a fleet that redeploys more often than [`SWEEP_INTERVAL_SECONDS`] would never sweep if the
+/// first one waited a whole interval.
+pub const FIRST_SWEEP_DELAY: Duration = Duration::from_secs(5 * 60);
 pub const OFFLINE: TimeDelta = TimeDelta::days(7);
 
 /// Removes every runner offline for [`OFFLINE`] that [`runners::forget`] may remove, and audits

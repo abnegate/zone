@@ -8,7 +8,7 @@ use crate::db::reminders::PendingTurn;
 use crate::db::reminders::Sweep;
 use crate::services::fleet;
 use crate::state::AppState;
-use crate::ws::chat::Turn;
+use crate::ws::chat::Sent;
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -217,7 +217,7 @@ pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease, claimant: Cl
     let pool = state.db().clone();
     let (id, attempts, chat_id) = (turn.id, turn.attempts, turn.chat_id);
     let message_id = Uuid::new_v4();
-    let (ran, claim) = renewing(
+    let (sent, claim) = renewing(
         turn.reminder_id,
         lease.renewal,
         move || {
@@ -244,7 +244,7 @@ pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease, claimant: Cl
         ),
     )
     .await;
-    if ran == Turn::Refused {
+    if sent == Sent::Refused {
         match reminders::release_turn(state.db(), turn.id, turn.attempts).await {
             Ok(_) => tracing::info!(
                 reminder_id = %turn.reminder_id,

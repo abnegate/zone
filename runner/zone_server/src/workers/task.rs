@@ -57,7 +57,7 @@ use crate::agent::wait::Waited;
 use crate::agent::wait::Waiting;
 use crate::config::ModelBackend;
 use crate::db::audit::actions;
-use crate::db::fleet::claim::Claim;
+use crate::db::fleet::claim::Outcome;
 use crate::db::task_tool_calls;
 use crate::db::tasks;
 use crate::db::workspace_members;
@@ -91,15 +91,15 @@ use crate::workers::pr::create_pr_for_task;
 use zone_context::context::SearchResultWithAnalysis;
 
 mod halt;
-mod handoff;
+pub(crate) mod handoff;
 mod handover;
 mod meter;
+mod queue;
 mod seat;
 pub(crate) mod stop;
 mod unprepared;
 
 use halt::Halt;
-use handoff::Handoff;
 use handover::Handover;
 use meter::Meter;
 use seat::Seat;
@@ -177,15 +177,28 @@ fn get_semaphore() -> &'static Arc<Semaphore> {
     TASK_SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_TASKS)))
 }
 
-/// How many more task runs this process could execute right now.
-pub(crate) fn available() -> usize {
-    get_semaphore().available_permits()
+/// How many more task runs this process should take on: a slot for each free
+/// one, and a queue as deep as the slots less the executions already queued.
+/// A run claimed while every slot is busy waits for one, heartbeating.
+pub(crate) fn capacity() -> usize {
+    (get_semaphore().available_permits() + MAX_CONCURRENT_TASKS).saturating_sub(queue::queued())
 }
 
 /// Serializes every test that takes execution permits out of the shared
 /// semaphore, so none of them measures another's capacity as its own.
 #[cfg(test)]
-static EXECUTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static EXECUTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Every execution slot, for a test that holds [`EXECUTION`] and needs this
+/// process saturated.
+#[cfg(test)]
+pub(crate) async fn saturate() -> OwnedSemaphorePermit {
+    get_semaphore()
+        .clone()
+        .acquire_many_owned(MAX_CONCURRENT_TASKS as u32)
+        .await
+        .expect("the execution semaphore is never closed")
+}
 
 /// One execution slot out of [`MAX_CONCURRENT_TASKS`], given back while the run
 /// it belongs to is parked on a question.
@@ -197,7 +210,7 @@ struct Permit(std::sync::Mutex<Option<OwnedSemaphorePermit>>);
 
 impl Permit {
     async fn acquire() -> Result<Self, AcquireError> {
-        let permit = get_semaphore().clone().acquire_owned().await?;
+        let permit = queue::waiting(get_semaphore().clone().acquire_owned()).await?;
         Ok(Self(std::sync::Mutex::new(Some(permit))))
     }
 
@@ -209,7 +222,7 @@ impl Permit {
     async fn yielded<T>(&self, waiting: impl Future<Output = T>) -> Result<T, AcquireError> {
         drop(self.held().take());
         let value = waiting.await;
-        let reacquired = get_semaphore().clone().acquire_owned().await?;
+        let reacquired = queue::waiting(get_semaphore().clone().acquire_owned()).await?;
         *self.held() = Some(reacquired);
         Ok(value)
     }
@@ -984,13 +997,11 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
     let signal = stop::register(run_id);
     let claimant = fleet::claimant(state).await;
     match tasks::claim_task_run(state.db(), run.id, owner, claimant).await {
-        Ok(Claim::Claimed) => {}
-        Ok(Claim::Unavailable) => return,
-        Ok(Claim::Refused(shortfall)) => {
+        Ok(Outcome::Claimed) => {}
+        Ok(Outcome::Unavailable) => return,
+        Ok(Outcome::Refused(shortfall)) => {
             drop(signal);
-            if let Handoff::Failed(_) = handoff::hand_off(state, &run, claimant, shortfall).await {
-                crate::workers::auto_project::poke_task(state, task_id);
-            }
+            handoff::hand_off(state, &run, claimant, shortfall).await;
             return;
         }
         Err(error) => {
@@ -5262,6 +5273,33 @@ mod retry_tests {
     async fn semaphore_starts_with_every_permit_available() {
         let _execution = EXECUTION.lock().await;
         assert_eq!(get_semaphore().available_permits(), MAX_CONCURRENT_TASKS);
+    }
+
+    #[tokio::test]
+    async fn a_saturated_runner_still_takes_a_queue_as_deep_as_its_slots() {
+        let _execution = EXECUTION.lock().await;
+        let slots = saturate().await;
+        assert_eq!(capacity(), MAX_CONCURRENT_TASKS);
+
+        let waiting: Vec<_> = (0..MAX_CONCURRENT_TASKS)
+            .map(|_| tokio::spawn(Permit::acquire()))
+            .collect();
+        while queue::queued() < MAX_CONCURRENT_TASKS {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(capacity(), 0, "a full queue takes nothing more");
+
+        for execution in waiting {
+            execution.abort();
+            let _ = execution.await;
+        }
+        assert_eq!(
+            queue::queued(),
+            0,
+            "an execution dropped while queued leaves the queue"
+        );
+        drop(slots);
+        assert_eq!(capacity(), 2 * MAX_CONCURRENT_TASKS);
     }
 
     #[tokio::test]

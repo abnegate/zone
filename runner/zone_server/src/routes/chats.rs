@@ -6,6 +6,7 @@ mod snippet;
 pub(super) mod subagents;
 pub(super) mod tasks;
 pub(super) mod token_usage;
+mod unleased;
 
 use axum::{
     Json,
@@ -1059,7 +1060,7 @@ pub async fn create_message(
     .await
     {
         Ok(session) => session,
-        Err(error) => return ServerError::Conflict(error.to_string()).into_response(),
+        Err(error) => return unleased::response(error),
     };
     let result = session
         .store
@@ -1122,7 +1123,7 @@ pub async fn delete_message(
     .await
     {
         Ok(session) => session,
-        Err(error) => return ServerError::Conflict(error.to_string()).into_response(),
+        Err(error) => return unleased::response(error),
     };
     let result = session
         .store

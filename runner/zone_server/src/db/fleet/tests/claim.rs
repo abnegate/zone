@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use super::{Fleet, INSTANCE, set, version};
 use crate::db::fleet::candidate::Candidate;
-use crate::db::fleet::claim::Claim;
+use crate::db::fleet::claim::Outcome;
 use crate::db::fleet::claimant::Claimant;
 use crate::db::fleet::eligibility::{candidates, exists};
 use crate::db::fleet::shortfall::Shortfall;
@@ -41,7 +41,7 @@ impl Fleet {
         owner: Uuid,
         runner: Option<Uuid>,
         enforced: bool,
-    ) -> Claim {
+    ) -> Outcome {
         tasks::claim_task_run(
             self.pool(),
             run,
@@ -56,7 +56,7 @@ impl Fleet {
         .expect("the claim")
     }
 
-    async fn claim(&self, run: Uuid, runner: Option<Uuid>, enforced: bool) -> Claim {
+    async fn claim(&self, run: Uuid, runner: Option<Uuid>, enforced: bool) -> Outcome {
         self.claim_as(run, Uuid::new_v4(), runner, enforced).await
     }
 
@@ -110,7 +110,7 @@ async fn an_unenforced_claim_takes_a_run_on_any_runner_and_records_it() {
         let run = fleet.admit(workspace).await;
         assert_eq!(
             fleet.claim(run.id, runner, false).await,
-            Claim::Claimed,
+            Outcome::Claimed,
             "{runner:?}"
         );
         assert_eq!(fleet.held(run.id).await.runner_id, recorded, "{runner:?}");
@@ -148,8 +148,8 @@ async fn an_enforced_claim_is_refused_with_what_the_runner_lacks() {
         ),
         (
             Some(unlabelled.id),
-            Shortfall::Missing {
-                labels: set("region=eu"),
+            Shortfall::LabelsMissing {
+                missing: set("region=eu"),
             },
         ),
         (None, Shortfall::Unregistered),
@@ -157,7 +157,7 @@ async fn an_enforced_claim_is_refused_with_what_the_runner_lacks() {
     ] {
         assert_eq!(
             fleet.claim(run.id, runner, true).await,
-            Claim::Refused(shortfall),
+            Outcome::Refused(shortfall),
             "{runner:?}"
         );
         assert_eq!(
@@ -173,17 +173,17 @@ async fn an_enforced_claim_is_refused_with_what_the_runner_lacks() {
 
     assert_eq!(
         fleet.claim(run.id, Some(eligible.id), true).await,
-        Claim::Claimed
+        Outcome::Claimed
     );
     assert_eq!(fleet.held(run.id).await.runner_id, Some(eligible.id));
     assert_eq!(
         fleet.claim(run.id, Some(eligible.id), true).await,
-        Claim::Unavailable,
+        Outcome::Unavailable,
         "a claimed run is no one's to claim, so nothing falls short of it"
     );
     assert_eq!(
         fleet.claim(run.id, Some(cordoned.id), true).await,
-        Claim::Unavailable
+        Outcome::Unavailable
     );
     fleet.remove().await;
 }
@@ -209,13 +209,15 @@ async fn a_claim_is_judged_on_the_claiming_processs_own_registration() {
     assert_eq!(other.id, runner.id, "both processes share the runner's row");
     assert_eq!(
         taken_over,
-        Claim::Refused(Shortfall::Unregistered),
+        Outcome::Refused(Shortfall::Unregistered),
         "a process claimed on another process's labels"
     );
     assert_eq!(untouched.owner, None);
     assert_eq!(
         registered_again,
-        Claim::Refused(Shortfall::Missing { labels: set("gpu") }),
+        Outcome::Refused(Shortfall::LabelsMissing {
+            missing: set("gpu")
+        }),
         "a process registered again is judged on its own labels"
     );
 }
@@ -231,9 +233,9 @@ async fn a_run_whose_admission_lapsed_is_unavailable_to_every_claimant() {
 
     assert_eq!(
         fleet.claim(run.id, Some(cordoned.id), true).await,
-        Claim::Unavailable
+        Outcome::Unavailable
     );
-    assert_eq!(fleet.claim(run.id, None, false).await, Claim::Unavailable);
+    assert_eq!(fleet.claim(run.id, None, false).await, Outcome::Unavailable);
     fleet.remove().await;
 }
 
@@ -250,12 +252,12 @@ async fn another_organizations_labels_never_constrain_a_run() {
 
     assert_eq!(
         fleet.claim(ours.id, Some(plain.id), true).await,
-        Claim::Claimed
+        Outcome::Claimed
     );
     assert_eq!(
         fleet.claim(theirs.id, Some(plain.id), true).await,
-        Claim::Refused(Shortfall::Missing {
-            labels: set("gpu,ssd"),
+        Outcome::Refused(Shortfall::LabelsMissing {
+            missing: set("gpu,ssd"),
         })
     );
     fleet.remove().await;
@@ -276,7 +278,10 @@ async fn a_claim_racing_a_revoke_leaves_no_live_run_on_the_revoked_runner() {
             fleet.revoke(runner.id)
         );
         assert!(
-            matches!(claim, Claim::Claimed | Claim::Refused(Shortfall::Revoked)),
+            matches!(
+                claim,
+                Outcome::Claimed | Outcome::Refused(Shortfall::Revoked)
+            ),
             "{claim:?}"
         );
     }
@@ -307,8 +312,8 @@ async fn two_claims_of_one_run_take_it_once() {
             fleet.claim(run.id, Some(second.id), true)
         );
         let winner = match claims {
-            (Claim::Claimed, Claim::Unavailable) => first.id,
-            (Claim::Unavailable, Claim::Claimed) => second.id,
+            (Outcome::Claimed, Outcome::Unavailable) => first.id,
+            (Outcome::Unavailable, Outcome::Claimed) => second.id,
             claims => panic!("not exactly one claim: {claims:?}"),
         };
         assert_eq!(fleet.held(run.id).await.runner_id, Some(winner));
@@ -336,12 +341,12 @@ async fn failing_a_refused_run_leaves_a_pickup_its_claim() {
     let run = fleet.admit(workspace).await;
     assert!(matches!(
         fleet.claim(run.id, Some(refused.id), true).await,
-        Claim::Refused(Shortfall::Missing { .. })
+        Outcome::Refused(Shortfall::LabelsMissing { .. })
     ));
     let owner = Uuid::new_v4();
     assert_eq!(
         fleet.claim_as(run.id, owner, Some(picker.id), true).await,
-        Claim::Claimed
+        Outcome::Claimed
     );
     assert!(!fail(run.id).await, "the fail landed on a picked-up run");
     assert_eq!(
@@ -359,8 +364,8 @@ async fn failing_a_refused_run_leaves_a_pickup_its_claim() {
             tokio::join!(fail(run.id), fleet.claim(run.id, Some(picker.id), true));
         let held = fleet.held(run.id).await;
         match (failed, claim) {
-            (true, Claim::Unavailable) => assert_eq!(held.status, tasks::FAILED),
-            (false, Claim::Claimed) => assert_eq!(
+            (true, Outcome::Unavailable) => assert_eq!(held.status, tasks::FAILED),
+            (false, Outcome::Claimed) => assert_eq!(
                 (held.status.as_str(), held.runner_id),
                 ("running", Some(picker.id))
             ),
@@ -379,7 +384,7 @@ async fn a_resumed_run_keeps_its_runner_and_the_next_run_is_checked_again() {
     let owner = Uuid::new_v4();
     assert_eq!(
         fleet.claim_as(run.id, owner, Some(runner.id), true).await,
-        Claim::Claimed
+        Outcome::Claimed
     );
     assert!(
         tasks::park_task_run(fleet.pool(), run.id, owner, json!({"questions": []}))
@@ -420,7 +425,7 @@ async fn a_resumed_run_keeps_its_runner_and_the_next_run_is_checked_again() {
         .unwrap();
     assert_eq!(
         fleet.claim(next.id, Some(runner.id), true).await,
-        Claim::Refused(Shortfall::Cordoned)
+        Outcome::Refused(Shortfall::Cordoned)
     );
     fleet.remove().await;
 }

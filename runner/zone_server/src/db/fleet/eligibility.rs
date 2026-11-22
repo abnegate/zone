@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use chrono::TimeDelta;
 use sqlx::{AssertSqlSafe, PgConnection, PgExecutor};
 use uuid::Uuid;
@@ -13,27 +15,33 @@ use crate::db::fleet::shortfall::Shortfall;
 use crate::db::fleet::state::State;
 use crate::db::tasks::UNCLAIMED;
 
+macro_rules! current {
+    () => {
+        "(policy.minimum_version_key IS NULL OR runner.version_key >= policy.minimum_version_key)"
+    };
+}
+
 /// Whether `runner` meets the minimum version of `policy` (`fleet_policy`).
-pub const CURRENT: &str =
-    "(policy.minimum_version_key IS NULL OR runner.version_key >= policy.minimum_version_key)";
+pub const CURRENT: &str = current!();
 
 /// Whether `runner` (`fleet_runners`) may claim unattended work under `policy` (`fleet_policy`):
-/// it is active, current, and carries every label `ol` (`organization_runner_labels`) and `wl`
-/// (`workspace_runner_labels`) require.
+/// it is active, [`CURRENT`], and carries every label `ol` (`organization_runner_labels`) and
+/// `wl` (`workspace_runner_labels`) require.
 ///
 /// `ol` and `wl` must be joined from the work's own workspace and that workspace's
 /// organization, never from a parameter, or one organization's labels could place another's
 /// work. Either may be absent, which requires nothing.
-pub const UNATTENDED: &str = "runner.state = 'active' \
-     AND (policy.minimum_version_key IS NULL OR runner.version_key >= policy.minimum_version_key) \
-     AND (COALESCE(ol.labels, '{}') || COALESCE(wl.labels, '{}')) <@ runner.labels";
+pub const UNATTENDED: &str = concat!(
+    "runner.state = 'active' AND ",
+    current!(),
+    " AND (COALESCE(ol.labels, '{}') || COALESCE(wl.labels, '{}')) <@ runner.labels"
+);
 
 /// Whether `runner` (`fleet_runners`) may claim interactive work under `policy`
-/// (`fleet_policy`): it isn't revoked and is current. Labels don't apply, so no `ol` or `wl`
+/// (`fleet_policy`): it isn't revoked and is [`CURRENT`]. Labels don't apply, so no `ol` or `wl`
 /// join is needed; were one added, it must come from the work's own workspace as for
 /// [`UNATTENDED`].
-pub const INTERACTIVE: &str = "runner.state <> 'revoked' \
-     AND (policy.minimum_version_key IS NULL OR runner.version_key >= policy.minimum_version_key)";
+pub const INTERACTIVE: &str = concat!("runner.state <> 'revoked' AND ", current!());
 
 /// The task `t` with the labels its own workspace `w` and that workspace's organization require,
 /// as `ol` and `wl`, beside `policy` (`fleet_policy`): what [`UNATTENDED`] needs for a task's
@@ -180,6 +188,24 @@ pub async fn exists(
     .bind(CONNECTED)
     .fetch_one(executor)
     .await
+}
+
+/// How much longer task run `run` has until it has gone unclaimed for `after` since it was
+/// admitted, `Duration::ZERO` once it has, or `None` once a runner claimed it or it ended.
+pub async fn unclaimed_for(
+    executor: impl PgExecutor<'_>,
+    run: Uuid,
+    after: TimeDelta,
+) -> DbResult<Option<Duration>> {
+    let seconds: Option<f64> = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT GREATEST(EXTRACT(EPOCH FROM r.heartbeat_at + $2 - now()), 0)::float8 \
+         FROM task_runs r WHERE r.id = $1 AND {UNCLAIMED}"
+    )))
+    .bind(run)
+    .bind(after)
+    .fetch_optional(executor)
+    .await?;
+    Ok(seconds.map(Duration::from_secs_f64))
 }
 
 #[cfg(test)]

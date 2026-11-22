@@ -1440,6 +1440,24 @@ describe('useChat', () => {
     expect(result.current.denial).toBeNull();
   });
 
+  it('ends a turn the server fleet denied and shows its message without a policy link', async () => {
+    const revoked =
+      "This Zone server was revoked from its fleet, so it can't run chats. Reload the page to reach another server.";
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(lastSocket).not.toBeNull());
+    await act(async () => {
+      await result.current.sendMessage({ content: 'Hello' });
+    });
+
+    lastSocket?.emit({ type: 'denied', message: revoked, code: 'fleet_runner_revoked' });
+
+    await waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(result.current.error).toBe(revoked);
+    expect(result.current.denial).toBeNull();
+  });
+
   it('shows a denial with a code it does not know as a plain error', async () => {
     mockGetChat.mockResolvedValue(mockChat);
     const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });

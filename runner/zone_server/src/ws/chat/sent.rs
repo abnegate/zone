@@ -1,8 +1,10 @@
 /// What became of one message a turn was asked to answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Sent {
+pub enum Sent {
     Saved,
     Unsaved,
+    /// Fleet policy refused this runner the chat's lease, so nothing reached the chat and the
+    /// work is still owed.
     Refused,
 }
 

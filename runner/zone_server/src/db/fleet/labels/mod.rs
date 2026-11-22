@@ -130,16 +130,16 @@ async fn save(
     .await?
     .rows_affected()
         > 0;
-    let previous: Option<Stored> =
-        match created {
-            true => None,
-            false => sqlx::query_as(AssertSqlSafe(format!(
-                "SELECT labels, updated_by, updated_at FROM {table} WHERE {column} = $1 FOR UPDATE"
-            )))
-            .bind(id)
-            .fetch_optional(&mut **transaction)
-            .await?,
-        };
+    let previous: Option<Stored> = if created {
+        None
+    } else {
+        sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT labels, updated_by, updated_at FROM {table} WHERE {column} = $1 FOR UPDATE"
+        )))
+        .bind(id)
+        .fetch_optional(&mut **transaction)
+        .await?
+    };
     if saved::labels(previous.as_ref()) == *labels {
         if created {
             sqlx::query(AssertSqlSafe(format!(

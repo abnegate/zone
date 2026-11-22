@@ -16,7 +16,7 @@ use tokio_tungstenite::connect_async;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-use zone_enterprise::fleet::{Labels, Version};
+use zone_enterprise::fleet::{Labels, Refusal, Version};
 use zone_server::config::Config;
 use zone_server::db::fleet::minimum::Minimum;
 use zone_server::db::fleet::state::State;
@@ -542,7 +542,8 @@ impl Fleet {
         frames
     }
 
-    async fn connect(&self, address: &str) -> Socket {
+    /// A socket on the fixture's chat at `address`, signed in as the admin, past its first frame.
+    pub async fn connect(&self, address: &str) -> Socket {
         let (mut socket, _) = connect_async(format!("ws://{address}/ws/chats/{}", self.chat))
             .await
             .unwrap();
@@ -616,11 +617,13 @@ impl Fleet {
     }
 }
 
-/// Whether the frames of a turn carry an error saying `message`.
-pub fn refused_with(frames: &[Value], message: &str) -> bool {
-    frames
-        .iter()
-        .any(|frame| frame["type"] == "error" && frame["message"] == message)
+/// Whether the frames of a turn carry the denial `refusal` gives, with its message and code.
+pub fn refused_with(frames: &[Value], refusal: &Refusal) -> bool {
+    frames.iter().any(|frame| {
+        frame["type"] == "denied"
+            && frame["message"] == refusal.message()
+            && frame["code"] == refusal.code()
+    })
 }
 
 async fn provider(script: &Script) -> MockServer {

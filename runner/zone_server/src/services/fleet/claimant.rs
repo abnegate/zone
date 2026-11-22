@@ -1,3 +1,4 @@
+use uuid::Uuid;
 use zone_enterprise::Feature;
 
 use crate::db::fleet::claimant::Claimant;
@@ -23,17 +24,32 @@ pub async fn claimant(state: &AppState) -> Claimant {
     let runner = match (state.runner(), enforced) {
         (Some(runner), _) => Some(runner),
         (None, false) => None,
-        (None, true) => match registration::register(state).await {
-            Ok(runner) => Some(runner),
-            Err(error) => {
-                tracing::warn!(%error, "Could not register as a runner, so this server takes no work until it can");
-                None
-            }
-        },
+        (None, true) => register(state).await,
     };
     Claimant {
         runner,
         instance: state.instance(),
         enforced,
+    }
+}
+
+/// Registers this process lazily, once for every claim that asks at the same time: claims that
+/// queued behind an attempt take its outcome rather than each registering and warning again.
+async fn register(state: &AppState) -> Option<Uuid> {
+    let attempt = async {
+        if let Some(runner) = state.runner() {
+            return Some(runner);
+        }
+        match registration::register(state).await {
+            Ok(runner) => Some(runner),
+            Err(error) => {
+                tracing::warn!(%error, "Could not register as a runner, so this server takes no work until it can");
+                None
+            }
+        }
+    };
+    match state.registration().join(attempt).await {
+        Some(runner) => runner,
+        None => state.runner(),
     }
 }
