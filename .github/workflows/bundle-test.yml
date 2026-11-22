@@ -1,0 +1,44 @@
+name: Bundle Assembler
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/bundle.sh'
+      - 'scripts/test-bundle.sh'
+      - 'scripts/bundle-images.txt'
+      - '.github/workflows/bundle-test.yml'
+  pull_request:
+    paths:
+      - 'scripts/bundle.sh'
+      - 'scripts/test-bundle.sh'
+      - 'scripts/bundle-images.txt'
+      - '.github/workflows/bundle-test.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Air-gapped bundle against faked crane, helm and git
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint the assembler with the ShellCheck release used locally
+        run: |
+          docker run --rm -v "$PWD:/zone:ro" -w /zone \
+            koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d \
+            scripts/bundle.sh scripts/test-bundle.sh
+
+      - name: Verify the bundle layout, under dash and bash
+        run: |
+          sh scripts/test-bundle.sh
+          bash scripts/test-bundle.sh
