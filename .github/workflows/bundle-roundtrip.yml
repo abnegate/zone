@@ -1,0 +1,51 @@
+name: Bundle Round Trip
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/bundle.sh'
+      - 'scripts/bundle-images.txt'
+      - 'scripts/install-offline.sh'
+      - 'scripts/env-file.sh'
+      - 'scripts/test-bundle-roundtrip.sh'
+      - 'helm/*/Chart.yaml'
+      - '.github/workflows/bundle-roundtrip.yml'
+  pull_request:
+    paths:
+      - 'scripts/bundle.sh'
+      - 'scripts/bundle-images.txt'
+      - 'scripts/install-offline.sh'
+      - 'scripts/env-file.sh'
+      - 'scripts/test-bundle-roundtrip.sh'
+      - 'helm/*/Chart.yaml'
+      - '.github/workflows/bundle-roundtrip.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Bundle, extract and install against faked crane, helm, git and Docker
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint the round trip with the ShellCheck release used locally
+        run: |
+          docker run --rm -v "$PWD:/zone:ro" -w /zone \
+            koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d \
+            scripts/test-bundle-roundtrip.sh
+
+      - name: Run the round trip under dash
+        run: sh scripts/test-bundle-roundtrip.sh
+
+      - name: Run the round trip under bash
+        run: bash scripts/test-bundle-roundtrip.sh
