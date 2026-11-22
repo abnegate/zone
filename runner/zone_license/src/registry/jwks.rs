@@ -16,7 +16,7 @@ impl Jwks {
         let mut keys: Vec<Jwk> = Vec::with_capacity(generations.len());
         for generation in generations {
             let jwk = TokenKey::derive(signer, *generation).jwk();
-            if !keys.iter().any(|known| known.kid() == jwk.kid()) {
+            if !keys.iter().any(|known| known.key_id() == jwk.key_id()) {
                 keys.push(jwk);
             }
         }

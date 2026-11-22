@@ -15,7 +15,7 @@ use crate::signer::Signer;
 const KEY_ID: &str = "test-1";
 const SEED: [u8; 32] = [11; 32];
 const SERVICE: &str = "registry.example.test";
-const KNOWN_KID: &str = "registry-test-1-1";
+const KNOWN_KEY_ID: &str = "registry-test-1-1";
 const KNOWN_X: &str = "g1kcsJcjDfdiHO-H5SdA0bsEfEgsEA-7VBBJc1LBHlE";
 const KNOWN_SECOND_X: &str = "Fq5Iaj668aHaqj-0YFMQJ0fGRqDm5DOhDkKSMjqtxxY";
 
@@ -81,7 +81,7 @@ fn pull(name: &str) -> Access {
 #[test]
 fn derives_the_known_token_key() {
     let key = key();
-    assert_eq!(key.kid(), KNOWN_KID);
+    assert_eq!(key.key_id(), KNOWN_KEY_ID);
     assert_eq!(URL_SAFE_NO_PAD.encode(key.public()), KNOWN_X);
     assert_eq!(key.jwk().x(), KNOWN_X);
     assert_eq!(
@@ -91,11 +91,11 @@ fn derives_the_known_token_key() {
 }
 
 #[test]
-fn derives_with_the_documented_salt_and_kid_prefix() {
+fn derives_with_the_documented_salt_and_key_id_prefix() {
     assert_eq!(SALT, b"zone-license registry token");
-    assert_eq!(KID_PREFIX, "registry");
+    assert_eq!(KEY_ID_PREFIX, "registry");
     assert_eq!(
-        TokenKey::derive(&Signer::new(PrivateKey::new(SEED), "2026-2"), generation(7)).kid(),
+        TokenKey::derive(&Signer::new(PrivateKey::new(SEED), "2026-2"), generation(7)).key_id(),
         "registry-2026-2-7"
     );
 }
@@ -138,9 +138,9 @@ fn the_derived_key_is_not_the_license_key() {
 }
 
 #[test]
-fn debug_shows_the_kid_and_public_key_only() {
+fn debug_shows_the_key_id_and_public_key_only() {
     let shown = format!("{:?} {:#?}", key(), key());
-    assert!(shown.contains(KNOWN_KID), "{shown}");
+    assert!(shown.contains(KNOWN_KEY_ID), "{shown}");
     assert!(shown.contains(KNOWN_X), "{shown}");
     assert!(!shown.contains("11, 11"), "{shown}");
     assert!(!shown.contains(&PrivateKey::new(SEED).encode()), "{shown}");
@@ -155,7 +155,7 @@ fn the_jwk_has_the_go_jose_okp_shape() {
             "crv": "Ed25519",
             "alg": "EdDSA",
             "use": "sig",
-            "kid": KNOWN_KID,
+            "kid": KNOWN_KEY_ID,
             "x": KNOWN_X,
         })
     );
@@ -202,7 +202,7 @@ fn a_minted_token_has_the_contract_header() {
     let [header, _, _] = segments(&token);
     assert_eq!(
         decoded(header),
-        json!({"alg": "EdDSA", "typ": "JWT", "kid": KNOWN_KID})
+        json!({"alg": "EdDSA", "typ": "JWT", "kid": KNOWN_KEY_ID})
     );
     let raw = String::from_utf8(URL_SAFE_NO_PAD.decode(header).unwrap()).unwrap();
     assert_eq!(
@@ -351,7 +351,7 @@ fn a_minted_token_verifies_with_jsonwebtoken() {
     let data =
         jsonwebtoken::decode::<Value>(&token, &decoding_key(&key()), &validation(SERVICE)).unwrap();
     assert_eq!(data.header.alg, Algorithm::EdDSA);
-    assert_eq!(data.header.kid.as_deref(), Some(KNOWN_KID));
+    assert_eq!(data.header.kid.as_deref(), Some(KNOWN_KEY_ID));
     assert_eq!(data.claims["sub"], subject().to_string());
     assert_eq!(data.claims["exp"], now.timestamp() + LIFETIME_SECONDS);
 }

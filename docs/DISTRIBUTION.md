@@ -123,7 +123,7 @@ the key. The plan is checked before the status, so a lapsed Team key is
 `GET /token?service=<service>&scope=<scope>[&scope=…]` is the Docker registry
 token endpoint the registry's challenge points at. One `scope` value may hold
 several scopes separated by spaces. The signer works through each request in
-this order: the address limit, the license gate, the license limit, the service
+this order: the address limit, the license gate, the key limit, the service
 check, granting, minting, then one log line.
 
 | `outcome` | Status | When |
@@ -192,7 +192,7 @@ Checking `jti` would need shared state in front of every pull for no gain.
 `GET /bundles/{version}/{architecture}` returns presigned download URLs for
 one air-gapped bundle, such as `/bundles/1.4.3-lts/amd64`. The signer works
 through each request in this order: the address limit, the license gate, the
-license limit, parsing the version and architecture, a probe for the bundle's
+key limit, parsing the version and architecture, a probe for the bundle's
 commit marker, then presigning.
 
 | `outcome` | Status | When |
@@ -344,8 +344,9 @@ customer name or email address.
 | `retry_after` | `/bundles` | On `limited`, the seconds sent in `Retry-After` |
 
 When `/token` is on, the startup log also says `Issuing registry tokens` with
-the `service` and the `kid` it signs with. When `/bundles` is on, it says
-`Serving air-gapped bundles` with the `bucket` and `prefix`, never the keys.
+the `service` and the `key_id` it signs with, which is the JWT header's `kid`.
+When `/bundles` is on, it says `Serving air-gapped bundles` with the `bucket`
+and `prefix`, never the keys.
 
 **Pull auditing.** The registry runs with JSON logs. Once a token checks out,
 every request it serves logs `authorized request` and then `response completed`,

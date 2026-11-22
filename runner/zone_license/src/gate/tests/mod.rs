@@ -145,10 +145,10 @@ fn address(text: &str) -> IpAddr {
     text.parse().unwrap()
 }
 
-fn limits(address: u32, license: u32) -> Limits {
+fn limits(address: u32, key: u32) -> Limits {
     Limits {
         address: NonZeroU32::new(address).unwrap(),
-        license: NonZeroU32::new(license).unwrap(),
+        key: NonZeroU32::new(key).unwrap(),
     }
 }
 
@@ -753,7 +753,7 @@ fn the_default_limits_are_contracted() {
 }
 
 #[test]
-fn the_address_limit_trips_without_touching_the_license_limit() {
+fn the_address_limit_trips_without_touching_the_key_limit() {
     let throttle = Throttle::new(limits(2, 5));
     let client = address("203.0.113.9");
     assert_eq!(throttle.check_address(client), Ok(()));
@@ -762,17 +762,17 @@ fn the_address_limit_trips_without_touching_the_license_limit() {
     assert!(limited.retry_after() > 0);
     assert!(limited.retry_after() <= WINDOW.as_secs());
     assert_eq!(throttle.check_address(address("203.0.113.10")), Ok(()));
-    assert_eq!(throttle.check_license(LICENSE), Ok(()));
+    assert_eq!(throttle.check_key(LICENSE), Ok(()));
 }
 
 #[test]
-fn the_license_limit_trips_without_touching_the_address_limit() {
+fn the_key_limit_trips_without_touching_the_address_limit() {
     let throttle = Throttle::new(limits(5, 2));
-    assert_eq!(throttle.check_license(LICENSE), Ok(()));
-    assert_eq!(throttle.check_license(LICENSE), Ok(()));
-    let limited = throttle.check_license(LICENSE).expect_err("over the limit");
+    assert_eq!(throttle.check_key(LICENSE), Ok(()));
+    assert_eq!(throttle.check_key(LICENSE), Ok(()));
+    let limited = throttle.check_key(LICENSE).expect_err("over the limit");
     assert!(limited.retry_after() > 0);
-    assert_eq!(throttle.check_license(OTHER), Ok(()));
+    assert_eq!(throttle.check_key(OTHER), Ok(()));
     assert_eq!(throttle.check_address(address("203.0.113.9")), Ok(()));
 }
 
@@ -788,8 +788,8 @@ fn one_slash_64_shares_one_address_allowance() {
 fn a_clone_shares_its_counts() {
     let throttle = Throttle::new(limits(1, 1));
     let clone = throttle.clone();
-    assert_eq!(throttle.check_license(LICENSE), Ok(()));
-    assert!(clone.check_license(LICENSE).is_err());
+    assert_eq!(throttle.check_key(LICENSE), Ok(()));
+    assert!(clone.check_key(LICENSE).is_err());
 }
 
 #[test]

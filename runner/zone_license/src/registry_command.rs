@@ -40,10 +40,10 @@ fn jwks(
     let set = Jwks::derive(&signer, &arguments.generations);
     let text = serde_json::to_string_pretty(&set).expect("a key set has only string keys");
     writeln!(stdout, "{text}")?;
-    let kids: Vec<&str> = set.keys().iter().map(|key| key.kid()).collect();
+    let token_key_ids: Vec<&str> = set.keys().iter().map(|key| key.key_id()).collect();
     tracing::info!(
         key_id = signer.key_id(),
-        kids = %kids.join(" "),
+        token_key_ids = %token_key_ids.join(" "),
         "printed the registry key set"
     );
     Ok(())
@@ -109,7 +109,7 @@ mod tests {
         serde_json::from_str(&run_to_string(generations)).unwrap()
     }
 
-    fn kids(printed: &Value) -> Vec<&str> {
+    fn key_ids(printed: &Value) -> Vec<&str> {
         printed["keys"]
             .as_array()
             .unwrap()
@@ -142,18 +142,21 @@ mod tests {
                 })
             );
         }
-        assert_eq!(kids(&printed), ["registry-test-1-1", "registry-test-1-2"]);
+        assert_eq!(
+            key_ids(&printed),
+            ["registry-test-1-1", "registry-test-1-2"]
+        );
     }
 
     #[test]
     fn prints_a_single_generation() {
-        assert_eq!(kids(&printed(&[1])), ["registry-test-1-1"]);
+        assert_eq!(key_ids(&printed(&[1])), ["registry-test-1-1"]);
     }
 
     #[test]
     fn a_repeated_generation_is_printed_once() {
         assert_eq!(
-            kids(&printed(&[2, 1, 2])),
+            key_ids(&printed(&[2, 1, 2])),
             ["registry-test-1-2", "registry-test-1-1"]
         );
     }

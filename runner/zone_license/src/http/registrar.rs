@@ -37,11 +37,7 @@ impl Registrar {
         &self.settings.service
     }
 
-    pub fn kid(&self) -> &str {
-        self.key.kid()
-    }
-
-    pub fn throttle(&self) -> &Throttle {
-        &self.throttle
+    pub fn key_id(&self) -> &str {
+        self.key.key_id()
     }
 }

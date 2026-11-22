@@ -19,7 +19,7 @@ pub fn mint(
     now: DateTime<Utc>,
     jti: Uuid,
 ) -> String {
-    let mut token = encoded(&Header::new(key.kid()));
+    let mut token = encoded(&Header::new(key.key_id()));
     token.push(SEGMENT_SEPARATOR);
     token.push_str(&encoded(&Claims::new(service, subject, access, now, jti)));
     let signature = key.sign(token.as_bytes());

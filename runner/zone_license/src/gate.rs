@@ -28,7 +28,7 @@ pub use denial::Denial;
 pub use detail::Detail;
 pub use errors::Errors;
 pub use limited::Limited;
-pub use limits::{DEFAULT_ADDRESS_LIMIT, DEFAULT_LICENSE_LIMIT, Limits, WINDOW};
+pub use limits::{DEFAULT_ADDRESS_LIMIT, DEFAULT_KEY_LIMIT, Limits, WINDOW};
 pub use refusal::{
     ANONYMOUS, CHALLENGE, INELIGIBLE, LAPSED, MALFORMED, MISMATCHED, REVOKED, Refusal, UNVERIFIED,
 };

@@ -7,15 +7,16 @@ pub const TYPE: &str = "JWT";
 pub struct Header<'a> {
     pub alg: &'static str,
     pub typ: &'static str,
-    pub kid: &'a str,
+    #[serde(rename = "kid")]
+    pub key_id: &'a str,
 }
 
 impl<'a> Header<'a> {
-    pub fn new(kid: &'a str) -> Self {
+    pub fn new(key_id: &'a str) -> Self {
         Self {
             alg: ALGORITHM,
             typ: TYPE,
-            kid,
+            key_id,
         }
     }
 }

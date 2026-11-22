@@ -15,24 +15,25 @@ pub struct Jwk {
     alg: &'static str,
     #[serde(rename = "use")]
     usage: &'static str,
-    kid: String,
+    #[serde(rename = "kid")]
+    key_id: String,
     x: String,
 }
 
 impl Jwk {
-    pub fn new(kid: impl Into<String>, public: &[u8; 32]) -> Self {
+    pub fn new(key_id: impl Into<String>, public: &[u8; 32]) -> Self {
         Self {
             kty: KEY_TYPE,
             crv: CURVE,
             alg: ALGORITHM,
             usage: USAGE,
-            kid: kid.into(),
+            key_id: key_id.into(),
             x: URL_SAFE_NO_PAD.encode(public),
         }
     }
 
-    pub fn kid(&self) -> &str {
-        &self.kid
+    pub fn key_id(&self) -> &str {
+        &self.key_id
     }
 
     pub fn x(&self) -> &str {

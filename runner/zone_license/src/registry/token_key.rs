@@ -10,11 +10,11 @@ use crate::registry::jwk::Jwk;
 use crate::signer::Signer;
 
 pub const SALT: &[u8] = b"zone-license registry token";
-pub const KID_PREFIX: &str = "registry";
+pub const KEY_ID_PREFIX: &str = "registry";
 
 pub struct TokenKey {
     key: SigningKey,
-    kid: String,
+    key_id: String,
 }
 
 impl TokenKey {
@@ -23,12 +23,12 @@ impl TokenKey {
         let seed = signer.derive(SALT, format!("{key_id}:{generation}").as_bytes());
         Self {
             key: SigningKey::from_bytes(&seed),
-            kid: format!("{KID_PREFIX}-{key_id}-{generation}"),
+            key_id: format!("{KEY_ID_PREFIX}-{key_id}-{generation}"),
         }
     }
 
-    pub fn kid(&self) -> &str {
-        &self.kid
+    pub fn key_id(&self) -> &str {
+        &self.key_id
     }
 
     pub fn public(&self) -> [u8; 32] {
@@ -36,7 +36,7 @@ impl TokenKey {
     }
 
     pub fn jwk(&self) -> Jwk {
-        Jwk::new(self.kid.clone(), &self.public())
+        Jwk::new(self.key_id.clone(), &self.public())
     }
 
     pub(crate) fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_LENGTH] {
@@ -48,7 +48,7 @@ impl fmt::Debug for TokenKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TokenKey")
-            .field("kid", &self.kid)
+            .field("key_id", &self.key_id)
             .field("public", &URL_SAFE_NO_PAD.encode(self.public()))
             .finish_non_exhaustive()
     }

@@ -31,7 +31,7 @@ pub use scope::Scope;
 pub use scope_error::ScopeError;
 pub use scopes::Scopes;
 pub use settings::RegistrySettings;
-pub use token_key::{KID_PREFIX, SALT, TokenKey};
+pub use token_key::{KEY_ID_PREFIX, SALT, TokenKey};
 
 #[cfg(test)]
 mod tests;

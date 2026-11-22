@@ -539,7 +539,7 @@ async fn the_address_limit_answers_too_many_requests() {
 }
 
 #[tokio::test]
-async fn the_license_limit_follows_the_license_across_addresses() {
+async fn the_key_limit_follows_the_license_across_addresses() {
     let service = Service::start(&[
         (Variable::RegistryService, SERVICE),
         (Variable::TrustedProxies, PROXY),

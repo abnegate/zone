@@ -82,10 +82,10 @@ fn issue(registrar: &Registrar, license: &License, address: IpAddr, query: &str)
         plan: license.plan(),
         status: license.status(now),
     };
-    if let Err(limited) = registrar.throttle.check_license(admitted.license) {
+    if let Err(limited) = registrar.throttle.check_key(admitted.license) {
         admitted.refuse(
             TokenOutcome::Limited,
-            "Refused a token request over the license limit",
+            "Refused a token request over the key limit",
         );
         return limited.respond();
     }

@@ -100,7 +100,7 @@ fn announcements(logged: &str) -> usize {
 }
 
 #[tokio::test]
-async fn start_announces_registry_tokens_with_their_service_and_kid() {
+async fn start_announces_registry_tokens_with_their_service_and_key_id() {
     let config = configured(
         ENTERPRISE,
         &[
@@ -124,7 +124,7 @@ async fn start_announces_registry_tokens_with_their_service_and_kid() {
         "{issuing}"
     );
     assert!(
-        issuing.contains(&format!("kid=\"registry-{KEY_ID}-2\"")),
+        issuing.contains(&format!("key_id=\"registry-{KEY_ID}-2\"")),
         "{issuing}"
     );
     assert_eq!(announcements(&logged), 1, "{logged}");

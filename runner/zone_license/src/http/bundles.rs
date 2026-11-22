@@ -48,7 +48,7 @@ pub async fn respond(
         Ok(license) => license.id(),
         Err(denial) => return denied(denial, address),
     };
-    if let Err(limited) = distributor.throttle.check_license(license) {
+    if let Err(limited) = distributor.throttle.check_key(license) {
         return throttled(limited, Some(license), address);
     }
     let (version, architecture) = match path {

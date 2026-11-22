@@ -10,7 +10,7 @@ use zone_enterprise::Keyring;
 
 use crate::bundle::{BundleSettings, DEFAULT_PREFIX};
 use crate::config_error::ConfigError;
-use crate::gate::{DEFAULT_ADDRESS_LIMIT, DEFAULT_LICENSE_LIMIT, Limits, Revoked, TrustedProxies};
+use crate::gate::{DEFAULT_ADDRESS_LIMIT, DEFAULT_KEY_LIMIT, Limits, Revoked, TrustedProxies};
 use crate::polar::{AccessToken, WebhookSecret};
 use crate::private_key::PrivateKey;
 use crate::problem::Problem;
@@ -158,10 +158,10 @@ impl Config {
             DEFAULT_ADDRESS_LIMIT,
             &mut problems,
         );
-        let license_limit = limit(
+        let key_limit = limit(
             value(Variable::KeyLimit),
             Variable::KeyLimit,
-            DEFAULT_LICENSE_LIMIT,
+            DEFAULT_KEY_LIMIT,
             &mut problems,
         );
         let registry = registry(&value, &mut problems);
@@ -194,7 +194,7 @@ impl Config {
                 proxies: proxies?,
                 limits: Limits {
                     address: address_limit?,
-                    license: license_limit?,
+                    key: key_limit?,
                 },
                 registry: registry?,
                 bundles,
@@ -796,7 +796,7 @@ mod tests {
         assert!(config.proxies.is_empty());
         assert_eq!(config.limits, Limits::default());
         assert_eq!(config.limits.address.get(), 120);
-        assert_eq!(config.limits.license.get(), 240);
+        assert_eq!(config.limits.key.get(), 240);
     }
 
     #[test]
@@ -836,7 +836,7 @@ mod tests {
         assert!(config.proxies.trusts("172.18.4.2".parse().unwrap()));
         assert!(!config.proxies.trusts("10.0.0.6".parse().unwrap()));
         assert_eq!(config.limits.address.get(), 30);
-        assert_eq!(config.limits.license.get(), 60);
+        assert_eq!(config.limits.key.get(), 60);
     }
 
     #[test]

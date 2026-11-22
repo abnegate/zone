@@ -630,7 +630,7 @@ async fn the_address_limit_trips_before_the_key_is_checked() {
 }
 
 #[tokio::test]
-async fn the_license_limit_trips_per_license_once_it_is_admitted() {
+async fn the_key_limit_trips_per_license_once_it_is_admitted() {
     let keys = Keys::new();
     let storage = present().await;
     let service = Service::start(config(
