@@ -1,17 +1,20 @@
 import { Button } from '@zone/ui';
 import { useId, useState } from 'react';
 import { LapsedNotice } from '../../components/LapsedNotice';
+import { UnverifiedNotice } from '../../components/UnverifiedNotice';
 import { UpgradeNotice } from '../../components/UpgradeNotice';
-import { community, lapsed } from '../../policy/license';
+import { community, lapsed, unverified } from '../../policy/license';
 import { useFleetPolicy, useRunners } from '../hooks';
 import {
   LAPSED_NOTICE,
+  LOADING_RUNNERS,
   NOT_ENFORCED,
-  READ_ONLY,
+  RETRY_LABEL,
   RUNNERS_DESCRIPTION,
   RUNNERS_TITLE,
   RunnerAction,
   type StateAction,
+  UNVERIFIED_NOTICE,
   UPGRADE_NOTICE,
 } from '../messages';
 import type { FleetPolicyResponse, RunnerResponse, RunnersResponse } from '../types';
@@ -41,14 +44,17 @@ function Fleet({ policy, listed }: FleetProps) {
 
   return (
     <>
-      {community(policy) && <UpgradeNotice message={UPGRADE_NOTICE} className="runners-notice" />}
+      {unverified(policy) ? (
+        <UnverifiedNotice message={UNVERIFIED_NOTICE} className="runners-lapsed" />
+      ) : (
+        community(policy) && <UpgradeNotice message={UPGRADE_NOTICE} className="runners-notice" />
+      )}
       {lapsed(policy) && <LapsedNotice message={LAPSED_NOTICE} className="runners-lapsed" />}
       {!listed.enforced && (
         <p className="runners-hint" role="note">
           {NOT_ENFORCED}
         </p>
       )}
-      {policy.entitled && !policy.editable && <p className="runners-hint">{READ_ONLY}</p>}
       <MinimumVersionField key={policy.minimum_version ?? ''} policy={policy} />
       <RunnersTable
         runners={listed.runners}
@@ -78,7 +84,7 @@ export function RunnersSection() {
   const error = fleet.error ?? runners.error;
 
   if (fleet.loading || runners.loading) {
-    return <div className="loading-state">Loading the runners...</div>;
+    return <div className="loading-state">{LOADING_RUNNERS}</div>;
   }
 
   const retry = () => {
@@ -100,7 +106,7 @@ export function RunnersSection() {
         <div className="alert alert-error alert-inline" role="alert">
           <span>{error}</span>
           <Button type="button" variant="ghost" size="sm" onClick={retry}>
-            Retry
+            {RETRY_LABEL}
           </Button>
         </div>
       )}

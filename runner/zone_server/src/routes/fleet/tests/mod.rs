@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{FromRequest, Path};
@@ -7,22 +9,26 @@ use chrono::{TimeDelta, Utc};
 use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use sqlx::PgPool;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 use zone_enterprise::fleet::{
-    BODY_INVALID, Error, LABEL_INVALID, Labels, NO_RUNNER_LEFT, RUNNER_CORDONED, RUNNER_ONLINE,
-    RUNNER_OUTDATED, RUNNER_REVOKED, STATE_INVALID, VERSION_INVALID, Version,
+    BODY_INVALID, Error, LABEL_INVALID, Labels, NO_RUNNER_LEFT, RUNNER_BUSY, RUNNER_CORDONED,
+    RUNNER_ONLINE, RUNNER_OUTDATED, RUNNER_REVOKED, STATE_INVALID, VERSION_INVALID, Version,
 };
 use zone_enterprise::{Feature, Keyring, LICENSE_REQUIRED, Payload, Plan, SigningKey, TrustedKey};
 
 use super::refusal::Refusal;
 use super::requests::{UpdateFleetPolicyRequest, UpdateRunnerLabelsRequest, UpdateRunnerRequest};
-use super::{policy, runners};
+use super::{guard, policy, runners};
 use crate::auth::Permission;
 use crate::auth::entitlement::Unentitled;
 use crate::db::audit::{actions, resources};
 use crate::db::fleet::minimum::Minimum;
+use crate::db::fleet::policy as stored_policy;
 use crate::db::fleet::runners::{self as stored_runners, Change};
 use crate::db::fleet::state::State;
+use crate::db::fleet::transition::Transition;
 use crate::db::testing::Database;
 use crate::db::users::{self, UserRow};
 use crate::services::fleet::{Identity, registration};
@@ -156,6 +162,10 @@ async fn each_refusal_answers_with_its_status_and_code() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["code"], RUNNER_ONLINE);
 
+    let (status, body) = answered(Refusal::Busy).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], RUNNER_BUSY);
+
     let (status, body) = answered(Refusal::NoRunnerLeft { remaining: 0 }).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(
@@ -175,8 +185,9 @@ async fn each_refusal_answers_with_its_status_and_code() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body, json!({ "error": "Runner not found" }));
 
-    let response = Refusal::Database(sqlx::Error::PoolTimedOut).into_response();
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let (status, body) = answered(Refusal::Database(sqlx::Error::PoolTimedOut)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"], "Could not reach the runner fleet");
 }
 
 #[tokio::test]
@@ -354,7 +365,7 @@ impl Server {
             .map(|response| response.minimum_version)
     }
 
-    async fn transition(&self, runner: Uuid, request: Value) -> Result<&'static str, Refusal> {
+    async fn transition(&self, runner: Uuid, request: Value) -> Result<State, Refusal> {
         let request = parsed(request).unwrap();
         runners::write(
             &self.state,
@@ -474,7 +485,7 @@ async fn another_connected_current_runner_lets_a_tightening_change_through() {
             .transition(other.runner, json!({ "state": "cordoned" }))
             .await
             .unwrap(),
-        "cordoned"
+        State::Cordoned
     );
     server.remove().await;
     other.remove().await;
@@ -506,35 +517,35 @@ async fn cordoning_or_revoking_the_last_runner_needs_confirmation_and_loosening_
             .transition(runner, json!({ "state": "cordoned", "confirm": true }))
             .await
             .unwrap(),
-        "cordoned"
+        State::Cordoned
     );
     assert_eq!(
         server
             .transition(runner, json!({ "state": "active" }))
             .await
             .unwrap(),
-        "active"
+        State::Active
     );
     assert_eq!(
         server
             .transition(runner, json!({ "state": "revoked", "confirm": true }))
             .await
             .unwrap(),
-        "revoked"
+        State::Revoked
     );
     assert_eq!(
         server
             .transition(runner, json!({ "state": "cordoned" }))
             .await
             .unwrap(),
-        "cordoned"
+        State::Cordoned
     );
     assert_eq!(
         server
             .transition(runner, json!({ "state": "cordoned" }))
             .await
             .unwrap(),
-        "cordoned"
+        State::Cordoned
     );
 
     let updated = server.audited(actions::RUNNER_UPDATED).await;
@@ -686,5 +697,186 @@ async fn without_an_enterprise_license_the_fleet_reads_but_is_neither_editable_n
     let fleet = runners::listing(&server.state).await.unwrap();
     assert!(!fleet.editable && !fleet.enforced);
     assert_eq!(fleet.runners.len(), 1);
+    server.remove().await;
+}
+
+/// Waits until `change` has finished or is waiting on a lock another transaction holds.
+async fn blocked<T>(pool: &PgPool, change: &JoinHandle<T>) {
+    for _ in 0..400 {
+        if change.is_finished() {
+            return;
+        }
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the change neither finished nor waited on a lock");
+}
+
+fn spawn_transition(
+    server: &Server,
+    runner: Uuid,
+    request: Value,
+) -> JoinHandle<Result<State, Refusal>> {
+    let state = server.state.clone();
+    let admin = server.admin.clone();
+    let request: UpdateRunnerRequest = parsed(request).unwrap();
+    tokio::spawn(async move {
+        runners::write(&state, &admin, Ok(Path(runner)), Ok(Json(request)))
+            .await
+            .map(|response| response.state)
+    })
+}
+
+#[tokio::test]
+async fn a_change_to_a_fleet_already_left_with_no_runner_needs_no_confirmation() {
+    let server = Server::new(Some(Plan::Enterprise)).await;
+    server
+        .minimum(json!({ "minimum_version": "2.0.0", "confirm": true }))
+        .await
+        .unwrap();
+    let offline = server.seed("2.0.0", State::Active).await;
+    server.disconnect(offline).await;
+
+    assert_eq!(
+        server
+            .transition(offline, json!({ "state": "revoked" }))
+            .await
+            .unwrap(),
+        State::Revoked
+    );
+    assert_eq!(
+        server
+            .transition(server.runner, json!({ "state": "cordoned" }))
+            .await
+            .unwrap(),
+        State::Cordoned
+    );
+    assert_eq!(
+        server
+            .minimum(json!({ "minimum_version": "3.0.0" }))
+            .await
+            .unwrap(),
+        Some("3.0.0".into())
+    );
+    server.remove().await;
+}
+
+#[tokio::test]
+async fn two_admins_cannot_each_leave_the_others_runner_as_the_last_one() {
+    let server = Server::new(Some(Plan::Enterprise)).await;
+    let other = server.seed("1.4.0", State::Active).await;
+
+    let mut first = server.database.pool.begin().await.unwrap();
+    stored_policy::lock(&mut first).await.unwrap();
+    guard(&mut first, Change::Cordon(server.runner), false)
+        .await
+        .expect("another runner is left");
+    stored_runners::set_state(
+        &mut first,
+        server.runner,
+        Transition::Cordon,
+        server.admin.id,
+    )
+    .await
+    .unwrap();
+
+    let second = spawn_transition(&server, other, json!({ "state": "cordoned" }));
+    blocked(&server.database.pool, &second).await;
+    first.commit().await.unwrap();
+
+    let refused = second.await.unwrap();
+    assert!(
+        matches!(refused, Err(Refusal::NoRunnerLeft { remaining: 0 })),
+        "{refused:?}"
+    );
+    let listed = runners::listing(&server.state).await.unwrap();
+    let active = listed
+        .runners
+        .iter()
+        .filter(|runner| runner.state == State::Active)
+        .count();
+    assert_eq!(active, 1);
+    server.remove().await;
+}
+
+#[tokio::test]
+async fn a_change_audits_the_state_it_replaced_under_its_lock() {
+    let server = Server::new(Some(Plan::Enterprise)).await;
+    for (held, requested) in [
+        (State::Cordoned, State::Revoked),
+        (State::Revoked, State::Cordoned),
+    ] {
+        let runner = server.seed("1.4.0", State::Active).await;
+        let mut holder = server.database.pool.begin().await.unwrap();
+        sqlx::query("UPDATE fleet_runners SET state = $2 WHERE id = $1")
+            .bind(runner)
+            .bind(held.as_str())
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+
+        let change = spawn_transition(&server, runner, json!({ "state": requested }));
+        blocked(&server.database.pool, &change).await;
+        holder.commit().await.unwrap();
+
+        assert_eq!(change.await.unwrap().unwrap(), requested);
+        let (_, _, old, new) = server
+            .audited(actions::RUNNER_UPDATED)
+            .await
+            .pop()
+            .expect("the change is audited");
+        assert_eq!(old["state"], held.as_str(), "{held:?} → {requested:?}");
+        assert_eq!(new["state"], requested.as_str(), "{held:?} → {requested:?}");
+    }
+    server.remove().await;
+}
+
+#[tokio::test]
+async fn an_offline_runner_still_holding_live_work_is_not_removed() {
+    let server = Server::new(Some(Plan::Enterprise)).await;
+    let busy = server.seed("1.4.0", State::Active).await;
+    let organization: Uuid = sqlx::query_scalar(
+        "INSERT INTO organizations (name, slug) VALUES ('Fleet', gen_random_uuid()::text) \
+         RETURNING id",
+    )
+    .fetch_one(&server.database.pool)
+    .await
+    .unwrap();
+    let workspace: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (organization_id, name, slug) \
+         VALUES ($1, 'Fleet', gen_random_uuid()::text) RETURNING id",
+    )
+    .bind(organization)
+    .fetch_one(&server.database.pool)
+    .await
+    .unwrap();
+    let task: Uuid = sqlx::query_scalar(
+        "INSERT INTO tasks (workspace_id, title, description) VALUES ($1, 'Run', 'Run') \
+         RETURNING id",
+    )
+    .bind(workspace)
+    .fetch_one(&server.database.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO task_runs (task_id, status, runner_id) VALUES ($1, 'running', $2)")
+        .bind(task)
+        .bind(busy)
+        .execute(&server.database.pool)
+        .await
+        .unwrap();
+    server.disconnect(busy).await;
+
+    let refused = runners::removal(&server.state, &server.admin, Ok(Path(busy))).await;
+    assert!(matches!(refused, Err(Refusal::Busy)), "{refused:?}");
+    assert!(server.audited(actions::RUNNER_REMOVED).await.is_empty());
     server.remove().await;
 }

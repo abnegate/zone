@@ -10,6 +10,7 @@ use crate::db::fleet::mode::Mode;
 use crate::db::fleet::policy::Policy;
 use crate::db::fleet::runners::Listed;
 use crate::db::fleet::shortfall::Shortfall;
+use crate::db::fleet::state::State;
 use crate::routes::policy::access::Access;
 use crate::routes::policy::standing::Standing;
 use crate::services::fleet::refusal;
@@ -74,7 +75,7 @@ pub struct RunnerResponse {
     pub name: String,
     pub version: String,
     pub labels: Vec<String>,
-    pub state: &'static str,
+    pub state: State,
     pub connected: bool,
     pub outdated: bool,
     /// Connected and able to take unattended work under the fleet policy, labels aside.
@@ -109,7 +110,7 @@ impl RunnerResponse {
             name: runner.name.clone(),
             version: runner.version.to_string(),
             labels: runner.labels.to_vec(),
-            state: runner.state.as_str(),
+            state: runner.state,
             connected,
             outdated: minimum.is_some_and(|minimum| !minimum.admits(&runner.version)),
             serving: connected && shortfall.is_none(),

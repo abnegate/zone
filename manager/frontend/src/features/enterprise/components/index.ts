@@ -8,4 +8,5 @@ export { MemberCapRefusal } from './MemberCapRefusal';
 export { RemoveLicenseDialog } from './RemoveLicenseDialog';
 export { Switch } from './Switch';
 export { ToneBadge } from './ToneBadge';
+export { UnverifiedNotice } from './UnverifiedNotice';
 export { UpgradeNotice } from './UpgradeNotice';

@@ -93,7 +93,12 @@ async fn read_organization(
     let stored = labels::organization(&mut *transaction, organization).await?;
     transaction.commit().await?;
     let standing = standing(state).await?;
-    let (available, matching) = placement(state.db(), &requirement(stored.as_ref())).await?;
+    let (available, matching) = placement(
+        state.db(),
+        &requirement(stored.as_ref()),
+        standing.editable(access),
+    )
+    .await?;
     Ok(OrganizationRunnerLabelsResponse::new(
         standing,
         access,
@@ -140,7 +145,7 @@ async fn write_organization(
         )
         .await;
     }
-    let (available, matching) = placement(state.db(), &required).await?;
+    let (available, matching) = placement(state.db(), &required, standing.editable(access)).await?;
     Ok(OrganizationRunnerLabelsResponse::new(
         standing,
         access,
@@ -165,8 +170,12 @@ async fn read_workspace(
     let stored = labels::workspace(&mut *transaction, workspace).await?;
     transaction.commit().await?;
     let standing = standing(state).await?;
-    let (available, matching) =
-        placement(state.db(), &effective(outer.as_ref(), stored.as_ref())).await?;
+    let (available, matching) = placement(
+        state.db(),
+        &effective(outer.as_ref(), stored.as_ref()),
+        standing.editable(access),
+    )
+    .await?;
     Ok(WorkspaceRunnerLabelsResponse::new(
         standing,
         access,
@@ -218,6 +227,7 @@ async fn write_workspace(
     let (available, matching) = placement(
         state.db(),
         &effective(outer.as_ref(), saved.current.as_ref()),
+        standing.editable(access),
     )
     .await?;
     Ok(WorkspaceRunnerLabelsResponse::new(
@@ -230,12 +240,17 @@ async fn write_workspace(
     ))
 }
 
-/// The labels the fleet's runners carry, and how many runners could take work requiring
-/// `required`: counts only, never which runners.
+/// How many runners could take work requiring `required`, and, for someone who may edit the
+/// labels, which labels the fleet's runners carry: counts only, never which runners. The labels
+/// are the whole server's, so on a server shared by several organizations only editors see them.
 async fn placement(
     pool: &PgPool,
     required: &Labels,
+    editable: bool,
 ) -> Result<(Vec<AvailableLabel>, i64), Refusal> {
+    if !editable {
+        return Ok((Vec::new(), labels::matching(pool, required).await?));
+    }
     let (available, matching) =
         tokio::try_join!(labels::catalogue(pool), labels::matching(pool, required))?;
     Ok((

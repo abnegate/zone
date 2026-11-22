@@ -1,6 +1,6 @@
 import { Button } from '@zone/ui';
 import { type FormEvent, useId, useState } from 'react';
-import { community, lapsed } from '../../policy/license';
+import { community, lapsed, unverified } from '../../policy/license';
 import { licenseDate } from '../../status';
 import { useRunnerLabels, useUpdateRunnerLabels } from '../hooks';
 import {
@@ -9,12 +9,14 @@ import {
   failureText,
   inheritedAlready,
   invalidLabels,
+  LOADING_PLACEMENT,
   matchingText,
   noMatchWarning,
   ORGANIZATION_PLACEMENT_READ_ONLY,
   PLACEMENT_LAPSED,
-  PLACEMENT_NOT_ENFORCED,
   PLACEMENT_TITLE,
+  PLACEMENT_UNVERIFIED,
+  RETRY_LABEL,
   SAVE_LABELS,
   UPDATED_LABEL,
   WORKSPACE_PLACEMENT_READ_ONLY,
@@ -116,7 +118,7 @@ function PlacementEditor({ scope, placement }: PlacementEditorProps) {
   return (
     <>
       {lapsed(placement) && <p className="policy-hint">{PLACEMENT_LAPSED}</p>}
-      {!placement.enforced && <p className="policy-hint">{PLACEMENT_NOT_ENFORCED}</p>}
+      {unverified(placement) && <p className="policy-hint">{PLACEMENT_UNVERIFIED}</p>}
       {placement.entitled && !placement.editable && <p className="policy-hint">{readOnly}</p>}
       {placement.updated_at && (
         <p className="policy-hint">
@@ -174,7 +176,7 @@ export function RunnerPlacementCard({ scope }: RunnerPlacementCardProps) {
   const headingId = useId();
   const { placement, loading, error, refresh } = useRunnerLabels(scope);
 
-  if (placement !== undefined && community(placement)) {
+  if (placement !== undefined && community(placement) && !unverified(placement)) {
     return null;
   }
 
@@ -186,12 +188,12 @@ export function RunnerPlacementCard({ scope }: RunnerPlacementCardProps) {
         </h3>
         <p className="runner-placement-description">{CHATS_IGNORE_LABELS}</p>
       </div>
-      {loading && <p className="policy-hint">Loading runner placement...</p>}
+      {loading && <p className="policy-hint">{LOADING_PLACEMENT}</p>}
       {error && (
         <div className="alert alert-error alert-inline" role="alert">
           <span>{error}</span>
           <Button type="button" variant="ghost" size="sm" onClick={() => void refresh()}>
-            Retry
+            {RETRY_LABEL}
           </Button>
         </div>
       )}

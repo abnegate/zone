@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use zone_enterprise::LICENSE_REQUIRED;
 use zone_enterprise::fleet::{
-    BODY_INVALID, LABEL_INVALID, Labels, NO_RUNNER_LEFT, RUNNER_CORDONED, RUNNER_ONLINE,
-    RUNNER_OUTDATED, RUNNER_REVOKED, STATE_INVALID, VERSION_INVALID, Version,
+    BODY_INVALID, LABEL_INVALID, Labels, NO_RUNNER_LEFT, RUNNER_BUSY, RUNNER_CORDONED,
+    RUNNER_ONLINE, RUNNER_OUTDATED, RUNNER_REVOKED, STATE_INVALID, VERSION_INVALID, Version,
 };
 use zone_server::auth::admin_guard::REQUIRED;
 use zone_server::auth::{Grant, Permission, Scope};
@@ -26,6 +26,7 @@ use zone_server::services::fleet::Identity;
 use zone_server::services::fleet::registration;
 
 use crate::common::TestResponse;
+use crate::common::audit::UNVERIFIABLE;
 use crate::common::policy::Fixture;
 use crate::common::sso::{self, Account, lapsed, team};
 
@@ -95,6 +96,8 @@ enum License {
     Team,
     Enterprise,
     Lapsed,
+    /// A stored key that no longer verifies, as after a keyring change.
+    Unverified,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -159,6 +162,7 @@ impl Fleet {
             License::Team => fixture.install(&team()).await,
             License::Enterprise => fixture.license().await,
             License::Lapsed => fixture.store_license(&lapsed()).await,
+            License::Unverified => fixture.store_license(UNVERIFIABLE).await,
         }
         let runner = registration::register(fixture.state())
             .await
@@ -244,6 +248,27 @@ impl Fleet {
             self.disconnect(runner).await;
         }
         runner
+    }
+
+    /// A running task run recorded against `runner` in the fixture's workspace.
+    async fn live_run(&self, runner: Uuid) {
+        let pool = self.fixture.pool();
+        let task: Uuid = sqlx::query_scalar(
+            "INSERT INTO tasks (workspace_id, title, description) VALUES ($1, 'Run', 'Run') \
+             RETURNING id",
+        )
+        .bind(self.fixture.workspace)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_runs (task_id, status, runner_id) VALUES ($1, 'running', $2)",
+        )
+        .bind(task)
+        .bind(runner)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     async fn disconnect(&self, runner: Uuid) {
@@ -698,6 +723,7 @@ async fn without_an_entitled_license_the_fleet_reads_but_nothing_changes() {
         (License::Community, "community", "community", false),
         (License::Team, "team", "active", false),
         (License::Lapsed, "enterprise", "lapsed", true),
+        (License::Unverified, "community", "community", true),
     ] {
         let fleet = Fleet::new(license).await;
         let seeded = fleet.seed(Seed::active().offline()).await;
@@ -714,7 +740,10 @@ async fn without_an_entitled_license_the_fleet_reads_but_nothing_changes() {
         assert_eq!(listing["runners"].as_array().unwrap().len(), 2);
         let labels = answered(&fleet.get(&fleet.organization_labels(), fleet.admin()).await);
         assert_eq!(labels["entitled"], false, "{license:?}");
+        assert_eq!(labels["enforced"], enforced, "{license:?}");
         assert_eq!(labels["editable"], false, "{license:?}");
+        assert_eq!(labels["available"], json!([]), "{license:?}");
+        assert_eq!(labels["matching"], 1, "{license:?}");
 
         for response in [
             fleet
@@ -967,6 +996,10 @@ async fn only_an_offline_runner_is_removed_and_its_removal_is_audited() {
         StatusCode::CONFLICT,
         RUNNER_ONLINE,
     );
+    let busy = fleet.seed(Seed::active().offline()).await;
+    fleet.live_run(busy).await;
+    refused(&fleet.remove(busy).await, StatusCode::CONFLICT, RUNNER_BUSY);
+    assert_eq!(fleet.listed(busy).await["runs"], 1);
     assert!(fleet.entries(actions::RUNNER_REMOVED).await.is_empty());
 
     fleet
@@ -1019,6 +1052,8 @@ async fn members_read_the_organization_labels_and_only_the_policy_permission_cha
     assert_eq!(read["enforced"], true);
     assert_eq!(read["editable"], false);
     assert_eq!(read["labels"], json!([]));
+    assert_eq!(read["available"], json!([]));
+    assert_eq!(read["matching"], 1);
     assert_eq!(read["updated_at"], Value::Null);
     forbidden(
         &fleet
@@ -1060,6 +1095,7 @@ async fn members_read_the_organization_labels_and_only_the_policy_permission_cha
         .await;
     let editable = answered(&fleet.get(&fleet.organization_labels(), &holder.token).await);
     assert_eq!(editable["editable"], true);
+    assert_eq!(available(&editable), counted(&[(CARRIED, 1)]));
     let saved = answered(
         &fleet
             .patch(
@@ -1277,6 +1313,7 @@ async fn the_workspace_policy_permission_changes_the_workspace_labels() {
 
     let read = answered(&fleet.get(&fleet.workspace_labels(), &viewer.token).await);
     assert_eq!(read["editable"], false);
+    assert_eq!(read["available"], json!([]));
     forbidden(
         &fleet
             .patch(&fleet.workspace_labels(), &viewer.token, &change)

@@ -53,7 +53,7 @@ export function RunnerStateDialog({ runner, action, onClose }: RunnerStateDialog
     >
       <div className="runner-dialog">
         <p>{consequence(action, runner.name)}</p>
-        {runner.current && action !== RunnerAction.Activate && <p>{CURRENT_WARNING}</p>}
+        {runner.current && action === RunnerAction.Revoke && <p>{CURRENT_WARNING}</p>}
         {failure && (
           <div className="modal-error" role="alert">
             {failure}

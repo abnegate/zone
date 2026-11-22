@@ -19,10 +19,13 @@ import {
   OPEN_POLICY,
   OUTDATED_RUNNER,
   REVOKED_RUNNER,
+  UNVERIFIED_POLICY,
+  UNVERIFIED_RUNNERS,
 } from '../fixtures';
 import {
   CLEAR_MINIMUM,
   CURRENT_BADGE,
+  CURRENT_WARNING,
   consequence,
   LAPSED_NOTICE,
   MINIMUM_LABEL,
@@ -33,8 +36,10 @@ import {
   OFFLINE,
   OUTDATED_BADGE,
   RunnerAction,
+  refusalMessage,
   SAVE_MINIMUM,
   SERVING,
+  UNVERIFIED_NOTICE,
   UPGRADE_NOTICE,
   workReason,
 } from '../messages';
@@ -149,6 +154,21 @@ describe('RunnersSection', () => {
       expect(screen.getByText('1.4.0')).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: /^Revoke / })).not.toBeInTheDocument();
     });
+
+    it('says a stored key that no longer verifies keeps the fleet enforced and read-only', async () => {
+      await loaded(UNVERIFIED_POLICY, UNVERIFIED_RUNNERS);
+
+      const warning = screen.getByRole('status');
+      expect(warning).toHaveClass('alert-warning');
+      expect(warning).toHaveTextContent(UNVERIFIED_NOTICE);
+      expect(within(warning).getByRole('link')).toHaveAttribute('href', '/settings/server/license');
+      expect(screen.queryByText(UPGRADE_NOTICE)).not.toBeInTheDocument();
+      expect(screen.queryByText(LAPSED_NOTICE)).not.toBeInTheDocument();
+      expect(screen.queryByText(NOT_ENFORCED)).not.toBeInTheDocument();
+      expect(screen.getByText('1.4.0')).toBeInTheDocument();
+      expect(screen.queryByRole('textbox', { name: MINIMUM_LABEL })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^Revoke / })).not.toBeInTheDocument();
+    });
   });
 
   describe('the runners table', () => {
@@ -231,6 +251,18 @@ describe('RunnersSection', () => {
       expect(updateRunner).not.toHaveBeenCalled();
     });
 
+    it('warns that revoking this server ends chats on it, and says nothing of it on cordon', async () => {
+      await loaded(ACTIVE_POLICY, ACTIVE_RUNNERS);
+
+      fireEvent.click(screen.getByRole('button', { name: `Cordon ${CURRENT_RUNNER.name}` }));
+      expect(within(dialog()).queryByText(CURRENT_WARNING)).not.toBeInTheDocument();
+      fireEvent.click(within(dialog()).getByRole('button', { name: 'Cancel' }));
+
+      fireEvent.click(screen.getByRole('button', { name: `Revoke ${CURRENT_RUNNER.name}` }));
+      expect(within(dialog()).getByText(CURRENT_WARNING)).toBeInTheDocument();
+      expect(CURRENT_WARNING).toContain('Reload the page');
+    });
+
     it('asks again when the change would leave no runner, and resends it confirmed', async () => {
       updateRunner
         .mockRejectedValueOnce(new FleetRefusal(NO_RUNNER_LEFT, 409))
@@ -276,6 +308,23 @@ describe('RunnersSection', () => {
 
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
       expect(removeRunner).toHaveBeenCalledWith(OFFLINE_RUNNER.id);
+    });
+
+    it('explains why an offline runner that still holds live work is kept', async () => {
+      removeRunner.mockRejectedValue(
+        new FleetRefusal(
+          { error: 'This runner still holds live work.', code: FleetCode.RunnerBusy },
+          409
+        )
+      );
+      await loaded(ACTIVE_POLICY, ACTIVE_RUNNERS);
+
+      fireEvent.click(screen.getByRole('button', { name: `Remove ${OFFLINE_RUNNER.name}` }));
+      fireEvent.click(within(dialog()).getByRole('button', { name: 'Remove runner' }));
+
+      expect(await within(dialog()).findByRole('alert')).toHaveTextContent(
+        refusalMessage(FleetCode.RunnerBusy)
+      );
     });
   });
 
@@ -341,6 +390,30 @@ describe('RunnersSection', () => {
         [{ minimum_version: '9.0.0' }],
         [{ minimum_version: '9.0.0', confirm: true }],
       ]);
+    });
+
+    it('shows why a confirmed resend was refused once, inside its dialog', async () => {
+      updatePolicy
+        .mockRejectedValueOnce(new FleetRefusal(NO_RUNNER_LEFT, 409))
+        .mockRejectedValueOnce(
+          new FleetRefusal(
+            { error: 'Requires Zone Enterprise', code: FleetCode.LicenseRequired },
+            403
+          )
+        );
+      await loaded(ACTIVE_POLICY, ACTIVE_RUNNERS);
+
+      fireEvent.change(screen.getByRole('textbox', { name: MINIMUM_LABEL }), {
+        target: { value: '9.0.0' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: SAVE_MINIMUM }));
+      await screen.findByRole('heading', { name: NO_RUNNER_LEFT_TITLE });
+      fireEvent.click(within(dialog()).getByRole('button', { name: NO_RUNNER_LEFT_CONFIRM }));
+
+      expect(await within(dialog()).findByRole('alert')).toHaveTextContent(
+        'Changing the fleet policy needs a Zone Enterprise license'
+      );
+      expect(screen.getAllByRole('alert', { hidden: true })).toHaveLength(1);
     });
   });
 });

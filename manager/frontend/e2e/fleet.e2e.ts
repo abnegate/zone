@@ -12,6 +12,10 @@ import {
   ORGANIZATION_LABELS,
   OUTDATED_RUNNER,
   UNMATCHED_WORKSPACE_LABELS,
+  UNVERIFIED_ORGANIZATION_LABELS,
+  UNVERIFIED_POLICY,
+  UNVERIFIED_RUNNERS,
+  UNVERIFIED_WORKSPACE_LABELS,
   WORKSPACE_LABELS,
 } from '../src/features/enterprise/fleet/fixtures';
 import {
@@ -25,8 +29,10 @@ import {
   ORGANIZATION_REQUIRED_LABEL,
   OUTDATED_BADGE,
   PLACEMENT_TITLE,
+  PLACEMENT_UNVERIFIED,
   SAVE_LABELS,
   SAVE_MINIMUM,
+  UNVERIFIED_NOTICE,
   UPGRADE_NOTICE,
   WORKSPACE_REQUIRED_LABEL,
 } from '../src/features/enterprise/fleet/messages';
@@ -46,7 +52,13 @@ import type {
 import {
   ACTIVE_ORGANIZATION,
   ACTIVE_WORKSPACE_INHERITED,
+  UNVERIFIED_ORGANIZATION,
+  UNVERIFIED_WORKSPACE,
 } from '../src/features/enterprise/policy/fixtures';
+import type {
+  OrganizationPolicyResponse,
+  WorkspacePolicyResponse,
+} from '../src/features/enterprise/policy/types';
 import { expect, test } from './fixtures';
 import { routeWorkspaceRole, setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
@@ -144,10 +156,21 @@ async function serveFleet(
   return server;
 }
 
+interface Policies {
+  organization: OrganizationPolicyResponse;
+  workspace: WorkspacePolicyResponse;
+}
+
+const ACTIVE_POLICIES: Policies = {
+  organization: ACTIVE_ORGANIZATION,
+  workspace: ACTIVE_WORKSPACE_INHERITED,
+};
+
 async function serveLabels(
   page: Page,
   organization: OrganizationRunnerLabelsResponse,
-  workspace: WorkspaceRunnerLabelsResponse
+  workspace: WorkspaceRunnerLabelsResponse,
+  policies: Policies = ACTIVE_POLICIES
 ): Promise<UpdateRunnerLabelsRequest[]> {
   const saves: UpdateRunnerLabelsRequest[] = [];
   let organizationLabels = organization;
@@ -163,10 +186,10 @@ async function serveLabels(
     route.fulfill({ status: 200, json: workspace })
   );
   await routeApi(page, ORGANIZATION_POLICY_API, (route) =>
-    route.fulfill({ status: 200, json: ACTIVE_ORGANIZATION })
+    route.fulfill({ status: 200, json: policies.organization })
   );
   await routeApi(page, WORKSPACE_POLICY_API, (route) =>
-    route.fulfill({ status: 200, json: ACTIVE_WORKSPACE_INHERITED })
+    route.fulfill({ status: 200, json: policies.workspace })
   );
   return saves;
 }
@@ -309,6 +332,21 @@ test.describe('Runners', () => {
     await expect(page.getByRole('textbox', { name: MINIMUM_LABEL })).toHaveCount(0);
   });
 
+  test('says a key that no longer verifies keeps the fleet enforced and read-only', async ({
+    page,
+  }) => {
+    await signIn(page);
+    await serveFleet(page, UNVERIFIED_POLICY, UNVERIFIED_RUNNERS);
+    await openRunners(page);
+
+    await expect(page.getByRole('status').filter({ hasText: UNVERIFIED_NOTICE })).toBeVisible();
+    await expect(page.getByText(UPGRADE_NOTICE)).toHaveCount(0);
+    await expect(page.getByText(NOT_ENFORCED)).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /^(Cordon|Revoke|Activate) / })).toHaveCount(0);
+    await expect(page.getByRole('textbox', { name: MINIMUM_LABEL })).toHaveCount(0);
+    await shoot(page, 'runners-unverified');
+  });
+
   for (const viewport of WIDTHS) {
     test(`lays the runners out at ${viewport.width}px`, async ({ page }) => {
       await page.setViewportSize(viewport);
@@ -355,6 +393,29 @@ test.describe('Runner placement', () => {
     await expect(
       card.getByText(noMatchWarning(UNMATCHED_WORKSPACE_LABELS.effective))
     ).toBeVisible();
+  });
+
+  test('shows the placement of a key that no longer verifies read-only', async ({ page }) => {
+    await signIn(page);
+    await serveLabels(page, UNVERIFIED_ORGANIZATION_LABELS, UNVERIFIED_WORKSPACE_LABELS, {
+      organization: UNVERIFIED_ORGANIZATION,
+      workspace: UNVERIFIED_WORKSPACE,
+    });
+
+    await page.goto(ORGANIZATION_POLICY_PATH, { waitUntil: 'domcontentloaded' });
+    const organization = page.getByRole('region', { name: PLACEMENT_TITLE });
+    await expect(organization.getByText(PLACEMENT_UNVERIFIED)).toBeVisible();
+    await expect(organization.getByRole('button', { name: SAVE_LABELS })).toHaveCount(0);
+    await expect(organization.getByRole('button', { name: /^Remove / })).toHaveCount(0);
+    await organization.scrollIntoViewIfNeeded();
+    await shoot(page, 'organization-placement-unverified');
+
+    await page.goto(WORKSPACE_POLICY_PATH, { waitUntil: 'domcontentloaded' });
+    const workspace = page.getByRole('region', { name: PLACEMENT_TITLE });
+    await expect(workspace.getByText(PLACEMENT_UNVERIFIED)).toBeVisible();
+    await expect(workspace.getByRole('list', { name: WORKSPACE_REQUIRED_LABEL })).toHaveText('gpu');
+    await workspace.scrollIntoViewIfNeeded();
+    await shoot(page, 'workspace-placement-unverified');
   });
 
   for (const viewport of WIDTHS) {

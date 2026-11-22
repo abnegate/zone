@@ -39,6 +39,14 @@ export const LAPSED_POLICY: FleetPolicyResponse = {
   editable: false,
 };
 
+export const UNVERIFIED_POLICY: FleetPolicyResponse = {
+  ...ACTIVE_POLICY,
+  entitled: false,
+  edition: Edition.Community,
+  status: LicenseStatus.Community,
+  editable: false,
+};
+
 export const COMMUNITY_POLICY: FleetPolicyResponse = {
   entitled: false,
   enforced: false,
@@ -147,6 +155,8 @@ export const LAPSED_RUNNERS: RunnersResponse = {
   editable: false,
 };
 
+export const UNVERIFIED_RUNNERS: RunnersResponse = LAPSED_RUNNERS;
+
 export const AVAILABLE = [
   { label: 'gpu', runners: 1 },
   { label: 'region=eu', runners: 2 },
@@ -191,6 +201,22 @@ export const LAPSED_ORGANIZATION_LABELS: OrganizationRunnerLabelsResponse = {
   entitled: false,
   status: LicenseStatus.Lapsed,
   editable: false,
+  available: [],
+};
+
+export const UNVERIFIED_ORGANIZATION_LABELS: OrganizationRunnerLabelsResponse = {
+  ...LAPSED_ORGANIZATION_LABELS,
+  edition: Edition.Community,
+  status: LicenseStatus.Community,
+};
+
+export const UNVERIFIED_WORKSPACE_LABELS: WorkspaceRunnerLabelsResponse = {
+  ...WORKSPACE_LABELS,
+  entitled: false,
+  edition: Edition.Community,
+  status: LicenseStatus.Community,
+  editable: false,
+  available: [],
 };
 
 export const COMMUNITY_ORGANIZATION_LABELS: OrganizationRunnerLabelsResponse = {

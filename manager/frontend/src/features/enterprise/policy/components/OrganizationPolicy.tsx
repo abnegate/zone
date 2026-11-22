@@ -4,7 +4,7 @@ import { organizationPlacement } from '../../fleet/placement';
 import { Permission } from '../../roles/schemas';
 import { useUpdateOrganizationPolicy } from '../hooks';
 import { UPGRADE_NOTICE } from '../labels';
-import { community } from '../license';
+import { community, unverified } from '../license';
 import { PolicyScope } from '../source';
 import type { OrganizationPolicyResponse } from '../types';
 import { PolicyEditor } from './PolicyEditor';
@@ -20,7 +20,7 @@ interface OrganizationPolicyProps {
 export function OrganizationPolicy({ organizationId, policy }: OrganizationPolicyProps) {
   const update = useUpdateOrganizationPolicy(organizationId);
 
-  if (community(policy)) {
+  if (community(policy) && !unverified(policy)) {
     return <UpgradeNotice message={UPGRADE_NOTICE} className="policy-notice" />;
   }
 

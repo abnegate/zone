@@ -156,7 +156,6 @@ export function RunnerLabelsField({
               type="button"
               variant="secondary"
               size="sm"
-              aria-label={ENTRY_LABEL}
               disabled={pending.length === 0}
               onClick={onAdd}
             >
