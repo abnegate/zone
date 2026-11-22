@@ -1,9 +1,26 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+use super::SignInFailure;
+
+pub const PARSE_PERMIT_WAIT: Duration = Duration::from_secs(2);
+
+/// A post that finds every response check running waits `wait` for one to finish, so a burst
+/// queues briefly instead of failing at once, and is refused once the wait runs out.
+pub async fn acquire(
+    semaphore: &Arc<Semaphore>,
+    wait: Duration,
+) -> Result<OwnedSemaphorePermit, SignInFailure> {
+    match tokio::time::timeout(wait, Arc::clone(semaphore).acquire_owned()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) | Err(_) => Err(SignInFailure::Overloaded),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use tokio::sync::Semaphore;
     use tokio::time::Instant;
 
     use super::*;

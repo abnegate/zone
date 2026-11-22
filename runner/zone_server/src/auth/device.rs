@@ -1,6 +1,9 @@
 //! Device identity carried on login, refresh, and authenticated requests.
 
+use std::net::IpAddr;
+
 use axum::http::HeaderMap;
+use axum::http::header::USER_AGENT;
 use uuid::Uuid;
 
 use crate::db::devices::{self, Claim, Platform};
@@ -12,13 +15,14 @@ pub const PLATFORM: &str = "x-zone-device-platform";
 pub const PENDING: &str = "device_pending";
 pub const BLOCKED: &str = "device_blocked";
 
-pub fn claim(headers: &HeaderMap) -> Claim {
+/// `address` is the resolved client address; forwarding headers are never read here.
+pub fn claim(headers: &HeaderMap, address: Option<IpAddr>) -> Claim {
     Claim {
         public_id: header(headers, PUBLIC_ID).and_then(|value| Uuid::parse_str(value).ok()),
         name: header(headers, NAME).map(str::to_string),
         platform: header(headers, PLATFORM).map(Platform::parse),
-        user_agent: header(headers, "user-agent").map(str::to_string),
-        ip_address: client_ip(headers),
+        user_agent: header(headers, USER_AGENT.as_str()).map(str::to_string),
+        ip_address: address.map(|address| address.to_string()),
     }
 }
 
@@ -28,16 +32,6 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-}
-
-fn client_ip(headers: &HeaderMap) -> Option<String> {
-    header(headers, "x-forwarded-for")
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| header(headers, "x-real-ip").map(str::to_string))
-        .filter(|value| value.parse::<std::net::IpAddr>().is_ok())
 }
 
 pub fn info(claim: &Claim, device: &devices::Device) -> serde_json::Value {
@@ -54,7 +48,7 @@ pub fn info(claim: &Claim, device: &devices::Device) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, SocketAddr};
+    use std::net::SocketAddr;
 
     use axum::body::Body;
     use axum::extract::ConnectInfo;

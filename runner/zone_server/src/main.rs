@@ -262,8 +262,9 @@ async fn main() {
 
     let listener = TcpListener::bind(addr).await.expect("Failed to bind");
 
+    let service = app.into_make_service_with_connect_info::<SocketAddr>();
     let result = tokio::select! {
-        result = axum::serve(listener, app) => Some(result),
+        result = axum::serve(listener, service) => Some(result),
         () = shutdown_requested() => None,
     };
     drain(&background, BACKGROUND_DRAIN).await;

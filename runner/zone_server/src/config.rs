@@ -21,6 +21,7 @@ use zone_core::flag::Flag;
 use crate::services::hosts::Hosts;
 use crate::services::license::renewal;
 use crate::services::login::claude::ROOT_PATH;
+use crate::services::sso::parse_permit::PARSE_PERMIT_WAIT;
 use crate::workers::evaluation::EvaluationSettings;
 
 mod environment;
@@ -155,6 +156,13 @@ pub struct Config {
     pub evaluation: EvaluationSettings,
     /// Automatic renewal of an Enterprise license (`ZONE_LICENSE_RENEWAL*`).
     pub license_renewal: renewal::Settings,
+    /// The peers whose `X-Forwarded-For` names the client (`ZONE_TRUSTED_PROXIES`).
+    pub trusted_proxies: TrustedProxies,
+    /// Single sign-on starts and SAML posts one client address may make a minute
+    /// (`ZONE_SSO_REQUESTS_PER_MINUTE`).
+    pub sso_requests_per_minute: u32,
+    /// How long a SAML post waits for a response check to free up before it is refused.
+    pub saml_permit_wait: Duration,
 }
 
 /// The instance-wide default backend.
@@ -279,6 +287,11 @@ const MCP_ENABLED: &str = "ZONE_MCP_ENABLED";
 
 /// Whether the API may create MCP servers that run a host command.
 const MCP_COMMANDS: &str = "ZONE_MCP_COMMANDS";
+
+/// Single sign-on starts and SAML posts one client address may make a minute.
+const SSO_REQUESTS_PER_MINUTE: &str = "ZONE_SSO_REQUESTS_PER_MINUTE";
+
+pub const DEFAULT_SSO_REQUESTS_PER_MINUTE: u32 = 120;
 
 const DEFAULT_CALLBACK_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -646,6 +659,23 @@ fn endpoint(
         return Err(ConfigError::Invalid(carrying));
     }
     Ok(url)
+}
+
+fn sso_requests_per_minute(value: Option<String>) -> Result<u32, ConfigError> {
+    match value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None => Ok(DEFAULT_SSO_REQUESTS_PER_MINUTE),
+        Some(value) => value
+            .parse()
+            .ok()
+            .filter(|limit| *limit > 0)
+            .ok_or(ConfigError::Invalid(
+                "ZONE_SSO_REQUESTS_PER_MINUTE must be a whole number of at least 1",
+            )),
+    }
 }
 
 /// The configured whole number of seconds, else [`DEFAULT_USAGE_TTL`].
@@ -1475,6 +1505,11 @@ impl Config {
             evaluation: EvaluationSettings::from_process_environment(),
             license_renewal: renewal::Settings::from_process_environment()
                 .map_err(|error| ConfigError::Invalid(error.message()))?,
+            trusted_proxies: TrustedProxies::from_env()?,
+            sso_requests_per_minute: sso_requests_per_minute(
+                env::var(SSO_REQUESTS_PER_MINUTE).ok(),
+            )?,
+            saml_permit_wait: PARSE_PERMIT_WAIT,
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
@@ -1530,6 +1565,9 @@ impl std::fmt::Debug for Config {
             .field("mcp_commands", &self.mcp_commands)
             .field("evaluation", &self.evaluation)
             .field("license_renewal", &self.license_renewal)
+            .field("trusted_proxies", &self.trusted_proxies)
+            .field("sso_requests_per_minute", &self.sso_requests_per_minute)
+            .field("saml_permit_wait", &self.saml_permit_wait)
             .finish()
     }
 }
@@ -1545,6 +1583,10 @@ pub enum ConfigError {
     TooShort { name: &'static str, minimum: usize },
     #[error("Invalid configuration: GITHUB_API_URL is not a GitHub origin: {0}")]
     GitHubOrigin(PullRequestError),
+    #[error(
+        "Invalid configuration: ZONE_TRUSTED_PROXIES lists {0:?}, which is not an IP address or a network such as 172.31.0.0/24"
+    )]
+    TrustedProxy(String),
 }
 
 #[cfg(test)]
@@ -1700,6 +1742,9 @@ mod tests {
             mcp_commands: false,
             evaluation: EvaluationSettings::default(),
             license_renewal: renewal::Settings::default(),
+            trusted_proxies: TrustedProxies::default(),
+            sso_requests_per_minute: DEFAULT_SSO_REQUESTS_PER_MINUTE,
+            saml_permit_wait: PARSE_PERMIT_WAIT,
         }
     }
 
@@ -2540,7 +2585,10 @@ mod tests {
         required(&mut environment);
 
         let config = Config::from_env().expect("required values are present");
-        assert_eq!(config.sso_requests_per_minute, DEFAULT_SSO_REQUESTS_PER_MINUTE);
+        assert_eq!(
+            config.sso_requests_per_minute,
+            DEFAULT_SSO_REQUESTS_PER_MINUTE
+        );
         assert_eq!(config.sso_requests_per_minute, 120);
         assert_eq!(config.saml_permit_wait, PARSE_PERMIT_WAIT);
         assert_eq!(config.trusted_proxies, TrustedProxies::default());
@@ -2570,16 +2618,12 @@ mod tests {
         let edge: IpAddr = "172.31.0.7".parse().unwrap();
 
         environment.set(trusted_proxies::VARIABLE, "172.31.0.0/24");
-        let trusted = Config::from_env()
-            .expect("a valid list")
-            .trusted_proxies;
+        let trusted = Config::from_env().expect("a valid list").trusted_proxies;
         assert!(trusted.trusts(edge));
         assert!(!trusted.trusts(IpAddr::V4(Ipv4Addr::LOCALHOST)));
 
         environment.set(trusted_proxies::VARIABLE, "");
-        let trusted = Config::from_env()
-            .expect("an empty list")
-            .trusted_proxies;
+        let trusted = Config::from_env().expect("an empty list").trusted_proxies;
         assert!(!trusted.trusts(IpAddr::V4(Ipv4Addr::LOCALHOST)));
 
         environment.set(trusted_proxies::VARIABLE, "172.31.0.0/24,traefik");

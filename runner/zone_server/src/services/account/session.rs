@@ -7,6 +7,7 @@ use super::credential::Credential;
 use super::grant::Grant;
 use super::refusal::Refusal;
 use super::tokens::Tokens;
+use crate::auth::client_address::ClientAddress;
 use crate::auth::{create_refresh_token, create_session_access_token};
 use crate::db::devices::{self, Device};
 use crate::db::{refresh_tokens, sessions, users};
@@ -17,6 +18,7 @@ pub async fn issue(
     state: &AppState,
     user_id: Uuid,
     headers: &HeaderMap,
+    address: ClientAddress,
     credential: Credential<'_>,
 ) -> Result<AuthResponse, Refusal> {
     let user = match users::get_user_with_permissions(state.db(), user_id).await {
@@ -27,8 +29,16 @@ pub async fn issue(
             return Err(Refusal::Unavailable);
         }
     };
-    let device = admit_device(state, user_id, headers, None).await?;
-    let tokens = generate_tokens(state, &user, headers, &device, Grant::SignIn(credential)).await?;
+    let device = admit_device(state, user_id, headers, address, None).await?;
+    let tokens = generate_tokens(
+        state,
+        &user,
+        headers,
+        address,
+        &device,
+        Grant::SignIn(credential),
+    )
+    .await?;
     Ok(AuthResponse::new(
         &user,
         tokens,
@@ -40,9 +50,10 @@ pub async fn admit_device(
     state: &AppState,
     user_id: Uuid,
     headers: &HeaderMap,
+    address: ClientAddress,
     existing_device_id: Option<Uuid>,
 ) -> Result<Device, Refusal> {
-    let mut claim = crate::auth::device::claim(headers);
+    let mut claim = crate::auth::device::claim(headers, address.0);
     if claim.public_id.is_none()
         && let Some(device_id) = existing_device_id
     {
@@ -73,6 +84,7 @@ pub async fn generate_tokens(
     state: &AppState,
     user: &users::UserWithPermissions,
     headers: &HeaderMap,
+    address: ClientAddress,
     device: &Device,
     grant: Grant<'_>,
 ) -> Result<Tokens, Refusal> {
@@ -82,7 +94,7 @@ pub async fn generate_tokens(
     {
         tracing::warn!(user_id = %user.user.id, %error, "Failed to record the console's time zone");
     }
-    let claim = crate::auth::device::claim(headers);
+    let claim = crate::auth::device::claim(headers, address.0);
     let ip_address = claim.ip_address.as_deref();
     let user_agent = claim.user_agent.as_deref();
     let device_info = crate::auth::device::info(&claim, device);

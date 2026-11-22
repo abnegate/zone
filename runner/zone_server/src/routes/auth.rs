@@ -10,6 +10,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 use zone_enterprise::sso::{self, PasswordAccess};
 
+use crate::auth::client_address::ClientAddress;
 use crate::auth::{AuthUser, account, admin_guard, hash_password, verify_password};
 use crate::db::DbResult;
 use crate::db::audit::{actions, resources};
@@ -56,6 +57,7 @@ pub struct RefreshRequest {
 pub async fn register(
     State(state): State<AppState>,
     headers: HeaderMap,
+    address: ClientAddress,
     Json(request): Json<RegisterRequest>,
 ) -> impl IntoResponse {
     match enforcement::access(state.db(), false).await {
@@ -133,7 +135,7 @@ pub async fn register(
 
     provision::furnish(state.db(), &user).await;
 
-    match session::issue(&state, user.id, &headers, Credential::Registration).await {
+    match session::issue(&state, user.id, &headers, address, Credential::Registration).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(refusal) => refusal.into_response(),
     }
@@ -163,6 +165,7 @@ async fn insert(
 pub async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
+    address: ClientAddress,
     Json(request): Json<LoginRequest>,
 ) -> impl IntoResponse {
     let user = match users::get_user_by_email(state.db(), &request.email.to_lowercase()).await {
@@ -226,6 +229,7 @@ pub async fn login(
         &state,
         user.id,
         &headers,
+        address,
         Credential::Password(&user.password_hash),
     )
     .await
@@ -318,6 +322,7 @@ fn login_outcome(refusal: Refusal) -> &'static str {
 pub async fn refresh(
     State(state): State<AppState>,
     headers: HeaderMap,
+    address: ClientAddress,
     Json(request): Json<RefreshRequest>,
 ) -> impl IntoResponse {
     let token_hash = hash_token(&request.refresh_token);
@@ -376,13 +381,21 @@ pub async fn refresh(
         tracing::warn!(%error, "Failed to revoke old refresh token");
     }
 
-    let device = match session::admit_device(&state, user_id, &headers, current.device_id).await {
-        Ok(device) => device,
-        Err(refusal) => return refusal.into_response(),
-    };
+    let device =
+        match session::admit_device(&state, user_id, &headers, address, current.device_id).await {
+            Ok(device) => device,
+            Err(refusal) => return refusal.into_response(),
+        };
 
-    match session::generate_tokens(&state, &user, &headers, &device, Grant::Refresh(current.id))
-        .await
+    match session::generate_tokens(
+        &state,
+        &user,
+        &headers,
+        address,
+        &device,
+        Grant::Refresh(current.id),
+    )
+    .await
     {
         Ok(tokens) => Json(AuthResponse::new(
             &user,

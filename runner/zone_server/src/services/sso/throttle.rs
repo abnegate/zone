@@ -1,7 +1,39 @@
+use std::net::{IpAddr, Ipv4Addr};
+use std::time::Duration;
+
+use abnegate_http::{Decision, RateLimitConfig, RateLimiter};
+
+use crate::auth::client_address::key;
+
+pub const WINDOW: Duration = Duration::from_secs(60);
+
+const UNKNOWN: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+
+/// Counts single sign-on starts and SAML posts per client address. Requests whose peer is unknown
+/// share one bucket, so they are limited together rather than not at all.
+#[derive(Debug)]
+pub struct Throttle {
+    limiter: RateLimiter<IpAddr>,
+}
+
+impl Throttle {
+    pub fn new(requests_per_minute: u32) -> Self {
+        Self {
+            limiter: RateLimiter::new(RateLimitConfig::new(requests_per_minute, WINDOW)),
+        }
+    }
+
+    pub fn check(&self, address: Option<IpAddr>) -> Decision {
+        self.limiter.check_rate_limit(address.map_or(UNKNOWN, key))
+    }
+
+    pub fn cleanup(&self) {
+        self.limiter.cleanup();
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::net::IpAddr;
-
     use super::*;
 
     fn address(text: &str) -> Option<IpAddr> {

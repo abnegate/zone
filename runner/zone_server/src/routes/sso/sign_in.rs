@@ -12,6 +12,7 @@ use zone_enterprise::sso::Error;
 
 use super::refusal::{self, Stage};
 use super::unreadable;
+use crate::auth::client_address::ClientAddress;
 use crate::db::sso::{Listing, providers, settings};
 use crate::error::ServerError;
 use crate::routes::common::ErrorResponse;
@@ -121,6 +122,7 @@ pub async fn authorize(
 pub async fn callback(
     State(state): State<AppState>,
     headers: HeaderMap,
+    address: ClientAddress,
     body: Result<Json<CallbackRequest>, JsonRejection>,
 ) -> Response {
     let Json(request) = match body {
@@ -131,7 +133,7 @@ pub async fn callback(
         state: &request.state,
         code: &request.code,
     };
-    match sign_in::complete(&state, &callback, &headers).await {
+    match sign_in::complete(&state, &callback, &headers, address).await {
         Ok(response) => Json(response).into_response(),
         Err(failure) => failed(failure),
     }

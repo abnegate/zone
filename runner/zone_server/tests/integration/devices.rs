@@ -182,7 +182,10 @@ async fn a_forwarded_address_from_an_untrusted_peer_records_the_peer() {
     let account = register(&client, &phone).await;
 
     let body = listed_devices(&client, &account).await;
-    assert_eq!(device_named(&body, "Spoofed")["last_ip"], json!("203.0.113.9"));
+    assert_eq!(
+        device_named(&body, "Spoofed")["last_ip"],
+        json!("203.0.113.9")
+    );
 
     login(&client, &account, &phone)
         .await

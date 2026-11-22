@@ -26,6 +26,7 @@ pub const SIGN_IN_FAILED: &str = "sso_sign_in_failed";
 pub const DOMAIN_REQUIRED: &str = "sso_domain_required";
 pub const VERIFIED_EMAIL_UNSUPPORTED: &str = "sso_verified_email_unsupported";
 pub const PROTOCOL_MISMATCH: &str = "sso_protocol_mismatch";
+pub const RATE_LIMITED: &str = "sso_rate_limited";
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {

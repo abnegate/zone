@@ -74,7 +74,9 @@ async fn post_acs(client: &TestClient, peer: &str) -> TestResponse {
     client
         .send_request(
             connected(builder, Some(peer), None)
-                .body(Body::from("SAMLResponse=PHNhbWw%2B&RelayState=never-issued"))
+                .body(Body::from(
+                    "SAMLResponse=PHNhbWw%2B&RelayState=never-issued",
+                ))
                 .unwrap(),
         )
         .await
@@ -103,7 +105,9 @@ fn limited(response: &TestResponse) {
 
 fn redirected(response: &TestResponse) -> Vec<(String, String)> {
     response.assert_status(StatusCode::SEE_OTHER);
-    let location = response.header(header::LOCATION.as_str()).expect("a redirect");
+    let location = response
+        .header(header::LOCATION.as_str())
+        .expect("a redirect");
     Url::parse(location)
         .expect("an absolute callback")
         .query_pairs()

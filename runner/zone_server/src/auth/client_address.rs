@@ -1,14 +1,105 @@
+//! The address of the client a request came from: its peer, or, behind a trusted proxy, the hop
+//! that proxy saw.
+
+use std::convert::Infallible;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+
+use axum::extract::{ConnectInfo, FromRef, FromRequestParts};
+use axum::http::HeaderMap;
+use axum::http::request::Parts;
+
+use crate::config::TrustedProxies;
+use crate::state::AppState;
+
+pub const FORWARDED_FOR: &str = "x-forwarded-for";
+
+const SEPARATOR: char = ',';
+
+const NETWORK: u128 = u128::MAX << 64;
+
+/// The resolved client address, or `None` when the request carries no peer, as a request handed
+/// straight to the router does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientAddress(pub Option<IpAddr>);
+
+impl ClientAddress {
+    pub fn of(parts: &Parts, trusted: &TrustedProxies) -> Self {
+        Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(peer)| resolve(peer.ip(), &parts.headers, trusted)),
+        )
+    }
+}
+
+impl<S> FromRequestParts<S> for ClientAddress
+where
+    S: Send + Sync,
+    AppState: FromRef<S>,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self::of(
+            parts,
+            &AppState::from_ref(state).config().trusted_proxies,
+        ))
+    }
+}
+
+/// An untrusted peer is the client, whatever it forwards. Behind a trusted one, `X-Forwarded-For`
+/// is walked from the right past every trusted hop; the first untrusted hop is the client, the
+/// leftmost when every hop is trusted, and the last trusted hop when an entry is not an address.
+pub fn resolve(peer: IpAddr, headers: &HeaderMap, trusted: &TrustedProxies) -> IpAddr {
+    let mut client = peer.to_canonical();
+    if !trusted.trusts(client) {
+        return client;
+    }
+    for hop in hops(headers).into_iter().rev() {
+        let Some(hop) = hop else {
+            return client;
+        };
+        client = hop;
+        if !trusted.trusts(hop) {
+            return hop;
+        }
+    }
+    client
+}
+
+/// The key a client is counted under: IPv4 as itself, IPv6 by its /64, the smallest network a
+/// single subscriber is usually given.
+pub fn key(address: IpAddr) -> IpAddr {
+    match address.to_canonical() {
+        IpAddr::V6(address) => IpAddr::V6(Ipv6Addr::from(u128::from(address) & NETWORK)),
+        address => address,
+    }
+}
+
+fn hops(headers: &HeaderMap) -> Vec<Option<IpAddr>> {
+    let mut hops = Vec::new();
+    for value in headers.get_all(FORWARDED_FOR) {
+        match value.to_str() {
+            Ok(value) => hops.extend(value.split(SEPARATOR).map(|entry| {
+                entry
+                    .trim()
+                    .parse::<IpAddr>()
+                    .ok()
+                    .map(|hop| hop.to_canonical())
+            })),
+            Err(_) => hops.push(None),
+        }
+    }
+    hops
+}
+
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, SocketAddr};
-
     use axum::body::Body;
-    use axum::extract::ConnectInfo;
-    use axum::http::{HeaderMap, HeaderValue, Request};
+    use axum::http::{HeaderValue, Request};
 
     use super::*;
-    use crate::config::TrustedProxies;
-    use crate::state::AppState;
 
     const LOOPBACK: &str = "127.0.0.1";
 
@@ -51,7 +142,10 @@ mod tests {
 
     #[test]
     fn behind_a_trusted_peer_the_rightmost_untrusted_hop_is_the_client() {
-        assert_eq!(resolved(LOOPBACK, &["198.51.100.7"]), address("198.51.100.7"));
+        assert_eq!(
+            resolved(LOOPBACK, &["198.51.100.7"]),
+            address("198.51.100.7")
+        );
         assert_eq!(
             resolve(
                 address("172.31.0.3"),
@@ -164,12 +258,18 @@ mod tests {
 
     #[test]
     fn an_ipv6_client_is_keyed_by_its_network() {
-        assert_eq!(key(address("2001:db8:1:2:aaaa::1")), address("2001:db8:1:2::"));
+        assert_eq!(
+            key(address("2001:db8:1:2:aaaa::1")),
+            address("2001:db8:1:2::")
+        );
         assert_eq!(
             key(address("2001:db8:1:2:ffff:ffff:ffff:ffff")),
             key(address("2001:db8:1:2::9"))
         );
-        assert_ne!(key(address("2001:db8:1:2::1")), key(address("2001:db8:1:3::1")));
+        assert_ne!(
+            key(address("2001:db8:1:2::1")),
+            key(address("2001:db8:1:3::1"))
+        );
     }
 
     #[test]
