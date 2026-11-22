@@ -107,7 +107,7 @@ pub async fn in_organization(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -
 /// CRITICAL-7: This function now fails if the member already exists (active or inactive).
 /// Use `reactivate_member` to explicitly reactivate an inactive member.
 pub async fn add_member(
-    pool: &PgPool,
+    executor: impl Executor<'_, Database = Postgres>,
     workspace_id: Uuid,
     user_id: Uuid,
     role: WorkspaceRole,
@@ -124,7 +124,7 @@ pub async fn add_member(
     .bind(user_id)
     .bind(role.as_str())
     .bind(invited_by)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     Ok(id)

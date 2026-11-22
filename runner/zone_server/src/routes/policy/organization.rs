@@ -12,15 +12,14 @@ use super::access::{self, Access};
 use super::refusal::Refusal;
 use super::standing::Standing;
 use super::{caller, rules, serialized};
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, Permission};
 use crate::db::audit::{actions, resources};
 use crate::db::policies::{self, Stored};
 use crate::routes::common::{AuditEvent, audit};
 use crate::state::AppState;
 
 const MISSING: &str = "Organization not found";
-const FORBIDDEN: &str =
-    "Only organization owners and admins can change the organization's agent policy";
+const NEEDED: Permission = Permission::PoliciesUpdate;
 
 #[derive(Debug, Serialize)]
 pub struct OrganizationResponse {
@@ -109,7 +108,7 @@ async fn write(
     let license = state.stored_license().await;
     let mut transaction = state.db().begin().await?;
     let access = access::organization(&mut transaction, organization, user).await?;
-    access.write(FORBIDDEN)?;
+    access.write(NEEDED)?;
     let standing = Standing::of(&license?, Utc::now(), Feature::Policy);
     standing.require()?;
     let Json(patch) = body.map_err(Refusal::Body)?;

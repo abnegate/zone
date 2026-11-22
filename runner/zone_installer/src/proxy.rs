@@ -1,10 +1,12 @@
 //! Reverse-proxy the manager API and WebSockets to a Zone server.
 
+use std::net::SocketAddr;
+
 use axum::{
-    Json,
+    Extension, Json,
     body::Body,
     extract::{
-        State, WebSocketUpgrade,
+        ConnectInfo, State, WebSocketUpgrade,
         ws::{Message as AxumMessage, WebSocket},
     },
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header::ORIGIN},
@@ -29,6 +31,11 @@ const HOP_BY_HOP: &[&str] = &[
     "host",
     "content-length",
 ];
+
+/// Headers through which a client could claim another address. The upstream hears only the peer
+/// this proxy saw.
+const FORWARDING: &[&str] = &["x-forwarded-for", "x-real-ip", "forwarded"];
+const FORWARDED_FOR: &str = "x-forwarded-for";
 
 pub fn upstream_url(base: &str, uri: &Uri) -> String {
     let path = uri
@@ -118,6 +125,7 @@ pub async fn proxy_http(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     body: Body,
 ) -> Response {
     let url = upstream_url(&state.proxy_target(), &uri);
@@ -132,6 +140,7 @@ pub async fn proxy_http(
     let mut request = state.http.request(method, &url).body(bytes);
     for (name, value) in headers.iter() {
         if *name == ORIGIN
+            || FORWARDING.contains(&name.as_str())
             || HOP_BY_HOP
                 .iter()
                 .any(|h| name.as_str().eq_ignore_ascii_case(h))
@@ -139,6 +148,9 @@ pub async fn proxy_http(
             continue;
         }
         request = request.header(name, value);
+    }
+    if let Some(Extension(ConnectInfo(peer))) = peer {
+        request = request.header(FORWARDED_FOR, peer.ip().to_string());
     }
 
     match request.send().await {
@@ -260,7 +272,85 @@ pub fn http_client() -> Result<Client, reqwest::Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use axum::http::Request;
+    use tokio::net::TcpListener;
+    use tower::ServiceExt;
+
     use super::*;
+    use crate::frontend::AppMode;
+    use crate::serve::{ServeKind, router};
+
+    async fn recorder() -> String {
+        let app = axum::Router::new().route(
+            "/api/headers",
+            axum::routing::get(|headers: HeaderMap| async move {
+                let seen: serde_json::Map<String, serde_json::Value> = FORWARDING
+                    .iter()
+                    .copied()
+                    .filter_map(|name| {
+                        let values: Vec<serde_json::Value> = headers
+                            .get_all(name)
+                            .iter()
+                            .filter_map(|value| value.to_str().ok())
+                            .map(|value| json!(value))
+                            .collect();
+                        (!values.is_empty()).then(|| (name.to_string(), json!(values)))
+                    })
+                    .collect();
+                Json(serde_json::Value::Object(seen))
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    async fn forwarded(peer: Option<SocketAddr>) -> serde_json::Value {
+        let state = AppState::new(
+            AppMode::Console,
+            PathBuf::from("/tmp/zone-manager"),
+            recorder().await,
+        )
+        .expect("http client");
+        let mut request = Request::builder()
+            .uri("/api/headers")
+            .header("x-forwarded-for", "1.2.3.4")
+            .header("x-real-ip", "1.2.3.4")
+            .header("forwarded", "for=1.2.3.4")
+            .body(Body::empty())
+            .unwrap();
+        if let Some(peer) = peer {
+            request.extensions_mut().insert(ConnectInfo(peer));
+        }
+        let response = router(ServeKind::ConsoleOnly, state)
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn forwards_the_real_peer_and_drops_what_the_client_claims() {
+        let peer = SocketAddr::from(([203, 0, 113, 9], 40_000));
+        assert_eq!(
+            forwarded(Some(peer)).await,
+            json!({ "x-forwarded-for": ["203.0.113.9"] })
+        );
+    }
+
+    #[tokio::test]
+    async fn forwards_no_address_without_a_known_peer() {
+        assert_eq!(forwarded(None).await, json!({}));
+    }
 
     #[test]
     fn joins_http_paths() {

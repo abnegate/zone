@@ -12,6 +12,7 @@ use zone_enterprise::sso::Error;
 
 use super::refusal::{self, Stage};
 use super::unreadable;
+use crate::auth::client_address::ClientAddress;
 use crate::db::sso::{Listing, providers, settings};
 use crate::error::ServerError;
 use crate::routes::common::ErrorResponse;
@@ -121,6 +122,7 @@ pub async fn authorize(
 pub async fn callback(
     State(state): State<AppState>,
     headers: HeaderMap,
+    address: ClientAddress,
     body: Result<Json<CallbackRequest>, JsonRejection>,
 ) -> Response {
     let Json(request) = match body {
@@ -131,7 +133,7 @@ pub async fn callback(
         state: &request.state,
         code: &request.code,
     };
-    match sign_in::complete(&state, &callback, &headers).await {
+    match sign_in::complete(&state, &callback, &headers, address).await {
         Ok(response) => Json(response).into_response(),
         Err(failure) => failed(failure),
     }
@@ -142,6 +144,7 @@ fn failed(failure: SignInFailure) -> Response {
         SignInFailure::Refused(error) => refusal::respond(&error, Stage::SignIn),
         SignInFailure::Session(refusal) => refusal.into_response(),
         SignInFailure::Full { cap } => AdmissionError::Full { cap }.into_response(),
+        SignInFailure::AdmissionBusy => AdmissionError::Busy.into_response(),
         SignInFailure::Busy => {
             tracing::warn!("Refused a single sign-on start: too many are waiting for a callback");
             (
@@ -166,7 +169,7 @@ fn unavailable(error: &sqlx::Error) -> Response {
 mod tests {
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
-    use zone_enterprise::MEMBER_CAP_REACHED;
+    use zone_enterprise::{MEMBER_ADMISSION_BUSY, MEMBER_CAP_REACHED};
 
     use super::*;
 
@@ -181,6 +184,22 @@ mod tests {
         assert_eq!(
             body["error"],
             json!(AdmissionError::Full { cap: 3 }.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_seat_lock_held_too_long_answers_the_callback_with_the_busy_code() {
+        let response = failed(SignInFailure::AdmissionBusy);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "error": AdmissionError::Busy.to_string(),
+                "code": MEMBER_ADMISSION_BUSY,
+            })
         );
     }
 

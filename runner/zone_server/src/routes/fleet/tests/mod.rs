@@ -17,6 +17,7 @@ use zone_enterprise::{Feature, Keyring, LICENSE_REQUIRED, Payload, Plan, Signing
 use super::refusal::Refusal;
 use super::requests::{UpdateFleetPolicyRequest, UpdateRunnerLabelsRequest, UpdateRunnerRequest};
 use super::{policy, runners};
+use crate::auth::Permission;
 use crate::auth::entitlement::Unentitled;
 use crate::db::audit::{actions, resources};
 use crate::db::fleet::minimum::Minimum;
@@ -184,7 +185,7 @@ async fn access_refusals_answer_as_the_agent_policy_does() {
     let (status, body) = answered(AccessRefusal::Missing("Organization not found").into()).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body, json!({ "error": "Organization not found" }));
-    let (status, _) = answered(AccessRefusal::Forbidden("Only admins").into()).await;
+    let (status, _) = answered(AccessRefusal::Forbidden(Permission::PoliciesUpdate).into()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 

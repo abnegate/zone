@@ -313,6 +313,7 @@ impl Fleet {
         .expect("the role is created")
         {
             Creation::Created(role) => role.id,
+            Creation::Forbidden => panic!("the organization owner holds roles:update"),
             Creation::NameTaken => panic!("a fresh name is never taken"),
         };
         match scope {

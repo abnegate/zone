@@ -1,7 +1,7 @@
 //! Organization database queries
 
 use chrono::NaiveDateTime;
-use sqlx::{PgConnection, PgPool};
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use uuid::Uuid;
 
 use super::DbResult;
@@ -132,7 +132,7 @@ pub async fn create_organization_tx(
 
 /// Update an organization
 pub async fn update_organization(
-    pool: &PgPool,
+    executor: impl PgExecutor<'_>,
     id: Uuid,
     name: Option<&str>,
     description: Option<&str>,
@@ -153,7 +153,7 @@ pub async fn update_organization(
         description,
         is_active
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(row.map(|r| OrganizationRow {

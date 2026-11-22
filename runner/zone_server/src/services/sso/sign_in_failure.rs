@@ -30,6 +30,8 @@ pub enum SignInFailure {
     Interrupted(tokio::task::JoinError),
     #[error("The server is at its cap of {cap} active members")]
     Full { cap: u32 },
+    #[error("Too many people are joining the server at once")]
+    AdmissionBusy,
 }
 
 impl SignInFailure {
@@ -60,6 +62,7 @@ impl From<AdmissionError> for SignInFailure {
     fn from(error: AdmissionError) -> Self {
         match error {
             AdmissionError::Full { cap } => Self::Full { cap },
+            AdmissionError::Busy => Self::AdmissionBusy,
             AdmissionError::Database(error) => Self::Storage(error),
         }
     }
@@ -110,5 +113,14 @@ mod tests {
             SignInFailure::Storage(sqlx::Error::PoolClosed)
         ));
         assert!(!SignInFailure::Full { cap: 3 }.raced(&["users_email_key"]));
+    }
+
+    #[test]
+    fn a_seat_lock_held_too_long_is_an_admission_busy_failure_and_no_race() {
+        assert!(matches!(
+            SignInFailure::from(AdmissionError::Busy),
+            SignInFailure::AdmissionBusy
+        ));
+        assert!(!SignInFailure::AdmissionBusy.raced(&["users_email_key"]));
     }
 }

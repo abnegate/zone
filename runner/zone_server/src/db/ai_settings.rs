@@ -55,8 +55,8 @@ pub fn provider(agent: AgentKind) -> Option<&'static str> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AccessError {
-    #[error("{0}")]
-    Forbidden(&'static str),
+    #[error("{}", .0.refusal())]
+    Forbidden(Permission),
     #[error("{0}")]
     NotFound(&'static str),
     #[error("{0}")]
@@ -91,8 +91,6 @@ pub struct Update<'a> {
 }
 
 const RE_ENTER_KEY: &str = "Re-enter the key when changing the endpoint URL.";
-const ORGANIZATION_FORBIDDEN: &str = "Only organization admins can manage AI settings";
-const WORKSPACE_FORBIDDEN: &str = "Only workspace admins can change AI settings";
 const ORGANIZATION_MISSING: &str = "Organization not found";
 const WORKSPACE_MISSING: &str = "Workspace not found";
 
@@ -393,7 +391,7 @@ pub(crate) async fn authorize_organization(
     match membership.map(|membership| membership.grant) {
         Some(grant) if grant.allows(permission) => Ok(()),
         Some(grant) if grant.allows(Permission::OrganizationRead) => {
-            Err(AccessError::Forbidden(ORGANIZATION_FORBIDDEN))
+            Err(AccessError::Forbidden(permission))
         }
         _ => Err(AccessError::NotFound(ORGANIZATION_MISSING)),
     }
@@ -446,7 +444,7 @@ pub(crate) async fn authorize_workspace(
     match membership.map(|membership| membership.grant) {
         Some(grant) if grant.allows(required) => Ok(()),
         Some(grant) if grant.allows(Permission::WorkspaceRead) => {
-            Err(AccessError::Forbidden(WORKSPACE_FORBIDDEN))
+            Err(AccessError::Forbidden(required))
         }
         _ => Err(AccessError::NotFound(WORKSPACE_MISSING)),
     }
@@ -1506,8 +1504,13 @@ mod tests {
             );
             let refused = organization_access(&tenant, member, permission).await;
             assert!(
-                matches!(refused, Err(AccessError::Forbidden(ORGANIZATION_FORBIDDEN))),
+                matches!(refused, Err(AccessError::Forbidden(named)) if named == permission),
                 "{refused:?}"
+            );
+            assert_eq!(
+                refused.expect_err("a member is refused").to_string(),
+                permission.refusal(),
+                "the refusal names the permission"
             );
             let missing = organization_access(&tenant, outsider, permission).await;
             assert!(
@@ -1522,8 +1525,15 @@ mod tests {
         );
         let refused = organization_access(&tenant, reader, Permission::AiSettingsUpdate).await;
         assert!(
-            matches!(refused, Err(AccessError::Forbidden(ORGANIZATION_FORBIDDEN))),
+            matches!(
+                refused,
+                Err(AccessError::Forbidden(Permission::AiSettingsUpdate))
+            ),
             "{refused:?}"
+        );
+        assert_eq!(
+            refused.expect_err("a reader is refused").to_string(),
+            Permission::AiSettingsUpdate.refusal()
         );
         tenant.cleanup().await;
     }
@@ -1641,8 +1651,18 @@ mod tests {
         for user in [viewer, writer] {
             let refused = workspace_access(&tenant, user, true).await;
             assert!(
-                matches!(refused, Err(AccessError::Forbidden(WORKSPACE_FORBIDDEN))),
+                matches!(
+                    refused,
+                    Err(AccessError::Forbidden(
+                        Permission::WorkspaceAiSettingsUpdate
+                    ))
+                ),
                 "{refused:?}"
+            );
+            assert_eq!(
+                refused.expect_err("a writer is refused").to_string(),
+                Permission::WorkspaceAiSettingsUpdate.refusal(),
+                "the refusal names the permission"
             );
         }
         tenant.cleanup().await;

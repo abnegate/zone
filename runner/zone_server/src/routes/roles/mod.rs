@@ -272,6 +272,7 @@ async fn insert(
     };
     let created = match custom_roles::create(state.db(), organization, &definition, editor).await? {
         Creation::Created(created) => *created,
+        Creation::Forbidden => return Err(forbidden()),
         Creation::NameTaken => return Err(Refusal::NameTaken),
     };
     record(

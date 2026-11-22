@@ -1,5 +1,6 @@
 use uuid::Uuid;
-use zone_server::routes::audit::access::{self, FORBIDDEN, ORGANIZATION_MISSING};
+use zone_server::auth::Permission;
+use zone_server::routes::audit::access::{self, ORGANIZATION_MISSING};
 use zone_server::routes::audit::refusal::Refusal;
 
 use crate::common::audit::database;
@@ -55,7 +56,7 @@ async fn only_active_owners_and_admins_manage_an_organizations_audit_settings() 
     }
     assert!(matches!(
         access::organization(&mut connection, organization, member).await,
-        Err(Refusal::Forbidden(FORBIDDEN))
+        Err(Refusal::Forbidden(Permission::AuditUpdate))
     ));
     for user in [departed, Uuid::new_v4()] {
         assert!(matches!(

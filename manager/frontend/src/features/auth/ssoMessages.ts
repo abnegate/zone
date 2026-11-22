@@ -32,6 +32,8 @@ export const SSO_MESSAGES: Record<SsoCode, string> = {
     "Your identity provider refused the sign-in. Check that you're assigned to Zone there.",
   [SsoCode.SignInFailed]:
     "Zone couldn't finish signing you in. Try again in a moment, or ask a server admin to check the server logs.",
+  [SsoCode.RateLimited]:
+    'Too many sign-in attempts from your network. Wait a minute, then try again.',
 };
 
 function isSsoCode(code: string): code is SsoCode {

@@ -6,18 +6,18 @@ use crate::auth::Permission;
 use crate::db::organization_members;
 
 pub const ORGANIZATION_MISSING: &str = "Organization not found";
-pub const FORBIDDEN: &str =
-    "Only organization owners and admins can manage audit export, streaming and retention";
+const NEEDED: Permission = Permission::AuditUpdate;
 
-/// Someone outside the organization is told it doesn't exist; a member is told who may.
+/// Someone outside the organization is told it doesn't exist; a member is told which permission
+/// they lack.
 pub async fn organization(
     connection: &mut PgConnection,
     organization: Uuid,
     user: Uuid,
 ) -> Result<(), Refusal> {
     match organization_members::lock_membership(connection, organization, user).await? {
-        Some(membership) if membership.grant.allows(Permission::AuditUpdate) => Ok(()),
-        Some(_) => Err(Refusal::Forbidden(FORBIDDEN)),
+        Some(membership) if membership.grant.allows(NEEDED) => Ok(()),
+        Some(_) => Err(Refusal::Forbidden(NEEDED)),
         None => Err(Refusal::Missing(ORGANIZATION_MISSING)),
     }
 }

@@ -1,3 +1,4 @@
+import { Permission } from '../roles/schemas';
 import { MAXIMUM_DAYS } from './range';
 
 export const PAGE_TITLE = 'Spend';
@@ -131,7 +132,7 @@ export const LIMIT_TOO_LARGE = 'Enter a monthly limit under $9 billion.';
 
 export const THRESHOLD_LABEL = 'Warn at (% of the limit)';
 
-export const THRESHOLD_HELP = 'Owners and admins get a notice once spend reaches this share.';
+export const THRESHOLD_HELP = `Holders of ${Permission.SpendRead} in the organization, custom roles included, get a notice once spend reaches this share. For a workspace budget, so do its owners and admins.`;
 
 export const HARD_LABEL = 'Stop requests once the budget is used up';
 

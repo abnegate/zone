@@ -17,7 +17,7 @@ use super::responses::{
     requirement,
 };
 use super::{caller, standing};
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, Permission};
 use crate::db::audit::{actions, resources};
 use crate::db::fleet::labels::{self, Stored};
 use crate::routes::common::{AuditEvent, audit};
@@ -27,8 +27,8 @@ use crate::state::AppState;
 
 const ORGANIZATION_MISSING: &str = "Organization not found";
 const WORKSPACE_MISSING: &str = "Workspace not found";
-const ORGANIZATION_FORBIDDEN: &str = "Only people who can change the organization's agent policy can change the runner labels its work needs";
-const WORKSPACE_FORBIDDEN: &str = "Only people who can change this workspace's agent policy can change the runner labels its work needs";
+const ORGANIZATION_NEEDED: Permission = Permission::PoliciesUpdate;
+const WORKSPACE_NEEDED: Permission = Permission::WorkspacePoliciesUpdate;
 
 pub type OrganizationPath = Result<Path<Uuid>, PathRejection>;
 pub type WorkspacePath = Result<Path<(Uuid, Uuid)>, PathRejection>;
@@ -116,7 +116,7 @@ async fn write_organization(
     let license = state.stored_license().await;
     let mut transaction = state.db().begin().await?;
     let access = access::organization(&mut transaction, organization, user).await?;
-    access.write(ORGANIZATION_FORBIDDEN)?;
+    access.write(ORGANIZATION_NEEDED)?;
     let standing = Standing::of(&license?, Utc::now(), Feature::FleetPolicy);
     standing.require()?;
     let Json(request) = body.map_err(Refusal::Body)?;
@@ -190,7 +190,7 @@ async fn write_workspace(
     let license = state.stored_license().await;
     let mut transaction = state.db().begin().await?;
     let access = access::workspace(&mut transaction, organization, workspace, user).await?;
-    access.write(WORKSPACE_FORBIDDEN)?;
+    access.write(WORKSPACE_NEEDED)?;
     let standing = Standing::of(&license?, Utc::now(), Feature::FleetPolicy);
     standing.require()?;
     let Json(request) = body.map_err(Refusal::Body)?;

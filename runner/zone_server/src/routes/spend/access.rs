@@ -2,7 +2,6 @@ use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::refusal::Refusal;
-use crate::auth::permission::SPEND_REFUSED;
 use crate::auth::{Grant, Permission};
 use crate::db::organization_members;
 
@@ -39,7 +38,7 @@ fn allowed(grant: Option<Grant>, permission: Permission) -> Result<Grant, Refusa
     match grant {
         Some(grant) if grant.allows(permission) => Ok(grant),
         Some(grant) if grant.allows(Permission::OrganizationRead) => {
-            Err(Refusal::Forbidden(SPEND_REFUSED))
+            Err(Refusal::Forbidden(permission))
         }
         _ => Err(Refusal::Missing(ORGANIZATION_MISSING)),
     }

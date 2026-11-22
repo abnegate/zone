@@ -93,6 +93,9 @@ pub fn create_router(state: AppState) -> Router {
     let queue_frames = middleware::from_fn_with_state(state.clone(), models::queue_frame_extract);
     // Outermost on the queued routes so a refused caller never takes a permit.
     let installer = middleware::from_extractor_with_state::<ModelInstaller, _>(state.clone());
+    let authorizations_throttle =
+        middleware::from_fn_with_state(state.clone(), sso::throttle::authorizations);
+    let acs_throttle = middleware::from_fn_with_state(state.clone(), sso::throttle::acs);
 
     // Public routes (no auth required)
     // Note: WebSocket routes use in-message auth, not middleware
@@ -110,13 +113,15 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/auth/sso/providers", get(sso::sign_in::providers))
         .route(
             "/api/auth/sso/providers/{provider_id}/authorizations",
-            post(sso::sign_in::authorize),
+            post(sso::sign_in::authorize).layer(authorizations_throttle),
         )
         .route("/api/auth/sso/callbacks", post(sso::sign_in::callback))
         .route("/api/auth/sso/saml/metadata", get(sso::saml::metadata))
         .route(
             "/api/auth/sso/saml/acs",
-            post(sso::saml::acs).layer(DefaultBodyLimit::max(sso::saml::BODY_LIMIT)),
+            post(sso::saml::acs)
+                .layer(DefaultBodyLimit::max(sso::saml::BODY_LIMIT))
+                .layer(acs_throttle),
         )
         // Public invitation route (to view invitation details)
         .route("/api/invitations/{token}", get(invitations::get_invitation))

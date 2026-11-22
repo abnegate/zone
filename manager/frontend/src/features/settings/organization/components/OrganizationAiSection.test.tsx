@@ -1001,7 +1001,7 @@ describe('OrganizationAiSection', () => {
 
     it('shows the reason the server refused the reset', async () => {
       const message =
-        'Failed to reset org AI settings: Only organization admins can manage AI settings';
+        'Failed to reset org AI settings: This needs the ai_settings:update permission in this organization.';
       mockClient.resetOrgAiSettings.mockRejectedValueOnce(new ApiError(message, 403));
 
       render(<OrganizationAiSection editable />, { wrapper: Providers });
