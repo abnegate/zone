@@ -11,6 +11,8 @@
 //!   routes.
 //! - `spend`: spend reports and budgets held by `spend:read` and
 //!   `spend:update`, apart from the custom roles license.
+//! - `sso`: single sign-on administration, which only the server admin
+//!   reaches.
 
 mod assignments;
 mod locking;
@@ -18,6 +20,7 @@ mod members;
 mod oracle;
 mod routes;
 mod spend;
+mod sso;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
