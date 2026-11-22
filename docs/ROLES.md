@@ -71,7 +71,8 @@ organization admin doesn't make you a member of its workspaces, and a
 workspace role grants nothing in the organization. The organization reaches
 into its workspaces in four places only:
 
-- `policies:update` changes every workspace's agent policy too;
+- `policies:update` changes every workspace's agent policy and runner labels
+  too;
 - workspace AI and MCP settings also need organization membership;
 - `workspaces:create` creates a workspace, and its creator becomes the
   workspace's owner, with every workspace permission there, including its
@@ -98,7 +99,7 @@ because a budget's answer carries its target's spend, name and email.
 
 | Permission | What it allows | Built-in roles | In custom roles |
 |---|---|---|---|
-| `organization:read` | See the organization and its members, its GitHub connection and repositories, its MCP servers and its agent policy | member, admin, owner | Always, as the base |
+| `organization:read` | See the organization and its members, its GitHub connection and repositories, its MCP servers, its agent policy and its runner labels | member, admin, owner | Always, as the base |
 | `organization:update` | Change the organization's name and description | admin, owner | Yes |
 | `organization:delete` | Delete the organization | owner | No |
 | `members:create` | Add a member | admin, owner | Yes |
@@ -116,7 +117,7 @@ because a budget's answer carries its target's spend, name and email.
 | `ai_settings:read` | Read the organization's AI settings | admin, owner | Yes |
 | `ai_settings:update` | Change and clear the organization's AI settings | admin, owner | Yes |
 | `agent_logins:update` | Sign the organization's coding agents in and out | admin, owner | Yes |
-| `policies:update` | Change the organization's agent policy, and the agent policy of every workspace in it | admin, owner | Yes |
+| `policies:update` | Change the organization's agent policy and the [runner labels](FLEET.md#placement) its unattended work requires, and the same for every workspace in it | admin, owner | Yes |
 | `audit_logs:read` | Read and download the organization's audit log | admin, owner | Yes |
 | `audit:update` | Manage audit streaming destinations, exports and retention | admin, owner | Yes |
 | `spend:read` | See the organization's spend reports and budgets, and download spend as CSV (see [SPEND.md](SPEND.md)) | admin, owner | Yes |
@@ -127,7 +128,7 @@ because a budget's answer carries its target's spend, name and email.
 
 | Permission | What it allows | Built-in roles | In custom roles |
 |---|---|---|---|
-| `workspace:read` | See the workspace and its members, and read its chats, projects, tasks, sources, knowledge, pull requests, releases, analytics, theme, actions, AI settings, MCP servers and agent policy | viewer, member, admin, owner | Always, as the base |
+| `workspace:read` | See the workspace and its members, and read its chats, projects, tasks, sources, knowledge, pull requests, releases, analytics, theme, actions, AI settings, MCP servers, agent policy and runner labels | viewer, member, admin, owner | Always, as the base |
 | `workspace:write` | Chat, create and run tasks and projects, change sources, knowledge, documents, the theme and actions, and mount host folders | member, admin, owner | Yes |
 | `workspace:update` | Change the workspace's name and description | admin, owner | Yes |
 | `workspace:delete` | Delete the workspace | owner | No |
@@ -137,7 +138,7 @@ because a budget's answer carries its target's spend, name and email.
 | `workspace_administrators:update` | Seat, change and remove workspace admins and owners | owner | No |
 | `workspace_ai_settings:update` | Change the workspace's AI settings | admin, owner | Yes |
 | `workspace_mcp_servers:update` | Change the workspace's MCP server settings | admin, owner | Yes |
-| `workspace_policies:update` | Change the workspace's agent policy | admin, owner | Yes |
+| `workspace_policies:update` | Change the workspace's agent policy and the [runner labels](FLEET.md#placement) its unattended work requires | admin, owner | Yes |
 | `project_syncs:update` | Add and remove a project's sync, and rotate its webhook secret | admin, owner | Yes |
 | `pull_requests:override` | Merge a pull request from the Pull Requests page as a GitHub administrator, when the server allows it with [`ZONE_GITHUB_ADMIN_MERGE`](CONFIGURATION.md#zone_github_admin_merge) (off by default) | admin, owner | Yes |
 
@@ -146,9 +147,9 @@ because a budget's answer carries its target's spend, name and email.
 A few permissions belong to the server, not to an organization, and come from
 the server-wide roles `admin`, `user` and `viewer`: `models:create`,
 `models:delete`, `pull_requests:update` and `releases:create`. The server
-admin flag, which covers the license, single sign-on and server-wide audit
-settings, is separate again. None of these can go in a custom role, and an
-organization's roles never grant them. Merging a pull request needs
+admin flag, which covers the license, single sign-on, server-wide audit
+settings and the [runner fleet](FLEET.md), is separate again. None of these
+can go in a custom role, and an organization's roles never grant them. Merging a pull request needs
 `pull_requests:update` on the server and `workspace:write` in the workspace;
 creating a release needs `releases:create` and `workspace:write`.
 
