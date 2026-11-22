@@ -41,6 +41,7 @@ pub mod projects;
 pub mod recovery;
 pub mod refresh_tokens;
 pub mod reminders;
+pub mod scim;
 pub mod sealing;
 pub mod seats;
 pub mod sessions;

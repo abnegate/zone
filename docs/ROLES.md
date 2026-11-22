@@ -122,6 +122,7 @@ because a budget's answer carries its target's spend, name and email.
 | `spend:read` | See the organization's spend reports and budgets, and download spend as CSV (see [SPEND.md](SPEND.md)) | admin, owner | Yes |
 | `spend:update` | Create, change and delete the organization's budgets | admin, owner | Yes, with `spend:read` |
 | `roles:update` | Create, edit and delete custom roles | admin, owner | No |
+| `scim:update` | Set up SCIM provisioning: issue, rotate and revoke SCIM tokens, and map pushed groups to roles | owner | No |
 
 ### Workspace permissions
 

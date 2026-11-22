@@ -152,6 +152,22 @@ pub mod actions {
     pub const BUDGET_THRESHOLD_REACHED: &str = "budget.threshold_reached";
     pub const BUDGET_EXHAUSTED: &str = "budget.exhausted";
     pub const SPEND_EXPORT_DOWNLOADED: &str = "spend_export.downloaded";
+
+    pub const SCIM_TOKEN_CREATED: &str = "scim_token.created";
+    pub const SCIM_TOKEN_ROTATED: &str = "scim_token.rotated";
+    pub const SCIM_TOKEN_REVOKED: &str = "scim_token.revoked";
+
+    pub const SCIM_GROUP_MAPPED: &str = "scim_group.mapped";
+    pub const SCIM_GROUP_UNMAPPED: &str = "scim_group.unmapped";
+    pub const SCIM_GROUP_CREATED: &str = "scim_group.created";
+    pub const SCIM_GROUP_UPDATED: &str = "scim_group.updated";
+    pub const SCIM_GROUP_DELETED: &str = "scim_group.deleted";
+
+    pub const SCIM_USER_CREATED: &str = "scim_user.created";
+    pub const SCIM_USER_UPDATED: &str = "scim_user.updated";
+    pub const SCIM_USER_DEACTIVATED: &str = "scim_user.deactivated";
+    pub const SCIM_USER_REACTIVATED: &str = "scim_user.reactivated";
+    pub const SCIM_USER_DELETED: &str = "scim_user.deleted";
 }
 
 pub mod resources {
@@ -184,6 +200,8 @@ pub mod resources {
     pub const ROLE: &str = "role";
     pub const BUDGET: &str = "budget";
     pub const SPEND_EXPORT: &str = "spend_export";
+    pub const SCIM_TOKEN: &str = "scim_token";
+    pub const SCIM_GROUP: &str = "scim_group";
 }
 
 /// Log an action to the audit trail

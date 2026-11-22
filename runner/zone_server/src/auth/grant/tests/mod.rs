@@ -44,6 +44,7 @@ fn threshold(permission: Permission) -> Threshold {
         Permission::AuditUpdate => Organization(OrgRole::Admin),
         Permission::SpendRead | Permission::SpendUpdate => Organization(OrgRole::Admin),
         Permission::RolesUpdate => Organization(OrgRole::Admin),
+        Permission::ScimUpdate => Organization(OrgRole::Owner),
         Permission::WorkspaceRead => Workspace(WorkspaceRole::Viewer),
         Permission::WorkspaceWrite => Workspace(WorkspaceRole::Member),
         Permission::WorkspaceUpdate => Workspace(WorkspaceRole::Admin),
@@ -71,6 +72,7 @@ fn composable_by_specification(permission: Permission) -> bool {
             | Permission::OrganizationDelete
             | Permission::AdministratorsUpdate
             | Permission::RolesUpdate
+            | Permission::ScimUpdate
             | Permission::WorkspaceRead
             | Permission::WorkspaceDelete
             | Permission::WorkspaceAdministratorsUpdate
@@ -134,7 +136,7 @@ fn a_requirement_is_a_composable_permission_or_the_base_of_the_same_scope() {
 }
 
 #[test]
-fn the_catalogue_holds_four_server_twenty_four_organization_and_thirteen_workspace_permissions() {
+fn the_catalogue_holds_four_server_twenty_five_organization_and_thirteen_workspace_permissions() {
     let count = |scope| {
         Permission::ALL
             .into_iter()
@@ -142,7 +144,7 @@ fn the_catalogue_holds_four_server_twenty_four_organization_and_thirteen_workspa
             .count()
     };
     assert_eq!(count(Scope::Server), 4);
-    assert_eq!(count(Scope::Organization), 24);
+    assert_eq!(count(Scope::Organization), 25);
     assert_eq!(count(Scope::Workspace), 13);
 }
 
@@ -455,6 +457,7 @@ fn custom_grants_never_reach_owner_only_permissions() {
             Permission::OrganizationDelete,
             Permission::AdministratorsUpdate,
             Permission::RolesUpdate,
+            Permission::ScimUpdate,
             Permission::WorkspaceDelete,
             Permission::WorkspaceAdministratorsUpdate,
         ] {
