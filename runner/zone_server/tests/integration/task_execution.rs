@@ -1480,18 +1480,10 @@ impl Leased {
 async fn lease() -> Leased {
     let leased = admit().await;
     assert!(
-        tasks::claim_task_run(
-            &leased.pool,
-            leased.run,
-            leased.owner,
-            Claimant {
-                runner: None,
-                enforced: false
-            }
-        )
-        .await
-        .expect("the new run is claimable")
-        .claimed(),
+        tasks::claim_task_run(&leased.pool, leased.run, leased.owner, Claimant::UNENFORCED)
+            .await
+            .expect("the new run is claimable")
+            .claimed(),
         "a freshly admitted run takes a lease"
     );
     leased
@@ -1975,10 +1967,7 @@ async fn a_stop_cancels_a_run_no_worker_has_claimed_yet() {
             &admitted.pool,
             admitted.run,
             admitted.owner,
-            Claimant {
-                runner: None,
-                enforced: false
-            }
+            Claimant::UNENFORCED
         )
         .await
         .unwrap()

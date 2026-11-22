@@ -15,6 +15,9 @@ use crate::db::testing::Database;
 
 mod claim;
 
+/// The process every runner [`Fleet::runner`] registers is registered by, and claims as.
+const INSTANCE: Uuid = Uuid::from_u128(0x5eed);
+
 struct Fleet {
     database: Database,
 }
@@ -49,9 +52,7 @@ impl Fleet {
     }
 
     async fn runner(&self, name: &str, version: &str, carried: &str) -> Runner {
-        self.register(name, Uuid::new_v4(), version, carried)
-            .await
-            .runner
+        self.register(name, INSTANCE, version, carried).await.runner
     }
 
     async fn age(&self, runner: Uuid, seconds: f64) {
@@ -190,6 +191,35 @@ fn version(text: &str) -> Version {
 
 fn set(text: &str) -> Labels {
     Labels::parse_list(text).unwrap()
+}
+
+/// Revoking a runner finds its runs, leases and projects by the runner, and removing one sets
+/// each reference to null, so every column that names a runner leads a plain index.
+#[tokio::test]
+async fn every_reference_to_a_runner_leads_a_plain_index() {
+    let fleet = Fleet::new().await;
+    let references: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT c.conrelid::regclass::text || '.' || a.attname, \
+             EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.conrelid \
+                 AND i.indkey[0] = c.conkey[1] AND i.indpred IS NULL) \
+         FROM pg_constraint c \
+         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1] \
+         WHERE c.contype = 'f' AND c.confrelid = 'fleet_runners'::regclass \
+         ORDER BY 1",
+    )
+    .fetch_all(fleet.pool())
+    .await
+    .expect("the references to runners");
+    fleet.remove().await;
+
+    assert_eq!(
+        references,
+        [
+            ("chat_leases.runner_id".to_string(), true),
+            ("projects.auto_claim_runner_id".to_string(), true),
+            ("task_runs.runner_id".to_string(), true),
+        ]
+    );
 }
 
 #[tokio::test]

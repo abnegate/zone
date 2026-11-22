@@ -944,18 +944,10 @@ async fn claimed(pool: &sqlx::PgPool, task_id: uuid::Uuid) -> (uuid::Uuid, uuid:
         .id;
     let owner = uuid::Uuid::new_v4();
     assert!(
-        tasks::claim_task_run(
-            pool,
-            run,
-            owner,
-            Claimant {
-                runner: None,
-                enforced: false
-            }
-        )
-        .await
-        .expect("the run is claimable")
-        .claimed()
+        tasks::claim_task_run(pool, run, owner, Claimant::UNENFORCED)
+            .await
+            .expect("the run is claimable")
+            .claimed()
     );
     (run, owner)
 }

@@ -1,10 +1,11 @@
 use chrono::TimeDelta;
-use sqlx::{AssertSqlSafe, PgExecutor};
+use sqlx::{AssertSqlSafe, PgConnection, PgExecutor};
 use uuid::Uuid;
 use zone_enterprise::fleet::{Labels, Version};
 
 use crate::db::DbResult;
 use crate::db::fleet::candidate::Candidate;
+use crate::db::fleet::claimant::Claimant;
 use crate::db::fleet::minimum::Minimum;
 use crate::db::fleet::mode::Mode;
 use crate::db::fleet::runners::{CONNECTED, undecodable};
@@ -108,6 +109,31 @@ pub async fn shortfall(
         minimum.as_ref(),
         required.missing_from(&carried),
     ))
+}
+
+/// Holds `claimant`'s runner row `FOR SHARE` until the transaction ends, so a revoke or another
+/// process registering under the runner's name waits for the claim. Every claim takes it first,
+/// before any other lock, and only under fleet policy, where it is
+/// [`Unregistered`](Shortfall::Unregistered) without a runner row of this process's own: one
+/// that was removed, or that another live process sharing the name registered last, whose
+/// labels and version the row now carries.
+pub async fn hold(
+    connection: &mut PgConnection,
+    claimant: Claimant,
+) -> DbResult<Option<Shortfall>> {
+    if !claimant.enforced {
+        return Ok(None);
+    }
+    let Some(runner) = claimant.runner else {
+        return Ok(Some(Shortfall::Unregistered));
+    };
+    let own: Option<bool> =
+        sqlx::query_scalar("SELECT instance_id = $2 FROM fleet_runners WHERE id = $1 FOR SHARE")
+            .bind(runner)
+            .bind(claimant.instance)
+            .fetch_optional(connection)
+            .await?;
+    Ok((own != Some(true)).then_some(Shortfall::Unregistered))
 }
 
 /// Up to `limit` task runs `runner` may pick up, oldest first: admitted at least

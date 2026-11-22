@@ -391,18 +391,10 @@ async fn a_parked_run_keeps_its_lease_and_gives_it_back_once() {
     let run = tasks::create_task_run(&database.pool, task).await.unwrap();
     let owner = Uuid::new_v4();
     assert!(
-        tasks::claim_task_run(
-            &database.pool,
-            run.id,
-            owner,
-            Claimant {
-                runner: None,
-                enforced: false
-            }
-        )
-        .await
-        .unwrap()
-        .claimed()
+        tasks::claim_task_run(&database.pool, run.id, owner, Claimant::UNENFORCED)
+            .await
+            .unwrap()
+            .claimed()
     );
     let question = serde_json::json!({"tool_call_id": "call_1", "questions": []});
     assert!(
@@ -483,18 +475,10 @@ async fn the_sweeper_orphans_a_parked_run_whose_worker_died() {
     let run = tasks::create_task_run(&database.pool, task).await.unwrap();
     let owner = Uuid::new_v4();
     assert!(
-        tasks::claim_task_run(
-            &database.pool,
-            run.id,
-            owner,
-            Claimant {
-                runner: None,
-                enforced: false
-            }
-        )
-        .await
-        .unwrap()
-        .claimed()
+        tasks::claim_task_run(&database.pool, run.id, owner, Claimant::UNENFORCED)
+            .await
+            .unwrap()
+            .claimed()
     );
     assert!(
         tasks::park_task_run(

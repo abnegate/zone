@@ -1,7 +1,7 @@
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{Fleet, set, version};
+use super::{Fleet, INSTANCE, set, version};
 use crate::db::fleet::candidate::Candidate;
 use crate::db::fleet::claim::Claim;
 use crate::db::fleet::claimant::Claimant;
@@ -42,9 +42,18 @@ impl Fleet {
         runner: Option<Uuid>,
         enforced: bool,
     ) -> Claim {
-        tasks::claim_task_run(self.pool(), run, owner, Claimant { runner, enforced })
-            .await
-            .expect("the claim")
+        tasks::claim_task_run(
+            self.pool(),
+            run,
+            owner,
+            Claimant {
+                runner,
+                instance: INSTANCE,
+                enforced,
+            },
+        )
+        .await
+        .expect("the claim")
     }
 
     async fn claim(&self, run: Uuid, runner: Option<Uuid>, enforced: bool) -> Claim {
@@ -177,6 +186,38 @@ async fn an_enforced_claim_is_refused_with_what_the_runner_lacks() {
         Claim::Unavailable
     );
     fleet.remove().await;
+}
+
+#[tokio::test]
+async fn a_claim_is_judged_on_the_claiming_processs_own_registration() {
+    let fleet = Fleet::new().await;
+    let (_, workspace) = fleet.workspace().await;
+    fleet.require(None, Some(workspace), "gpu").await;
+    let runner = fleet.runner("shared", "1.4.0", "").await;
+    let other = fleet
+        .register("shared", Uuid::new_v4(), "1.4.0", "gpu")
+        .await
+        .runner;
+    let run = fleet.admit(workspace).await;
+
+    let taken_over = fleet.claim(run.id, Some(runner.id), true).await;
+    let untouched = fleet.held(run.id).await;
+    fleet.runner("shared", "1.4.0", "").await;
+    let registered_again = fleet.claim(run.id, Some(runner.id), true).await;
+    fleet.remove().await;
+
+    assert_eq!(other.id, runner.id, "both processes share the runner's row");
+    assert_eq!(
+        taken_over,
+        Claim::Refused(Shortfall::Unregistered),
+        "a process claimed on another process's labels"
+    );
+    assert_eq!(untouched.owner, None);
+    assert_eq!(
+        registered_again,
+        Claim::Refused(Shortfall::Missing { labels: set("gpu") }),
+        "a process registered again is judged on its own labels"
+    );
 }
 
 #[tokio::test]

@@ -4,6 +4,7 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::db::DbResult;
+use crate::db::fleet::runners::undecodable;
 use crate::db::fleet::state::State;
 use crate::db::tasks::{self, ACTIVE_RUN_STATUSES, TaskRunRow};
 use crate::services::chat::notice::Notice;
@@ -18,7 +19,7 @@ pub const RUN_REVOKED: &str = "The runner this task was running on was revoked f
 #[must_use]
 #[derive(Debug)]
 pub struct Revoked {
-    pub previous: String,
+    pub previous: State,
     pub notices: Vec<Notice>,
     pub runs: Vec<TaskRunRow>,
 }
@@ -38,17 +39,23 @@ impl Revoked {
     }
 }
 
-/// Revoke `runner` on `actor`'s behalf, and end the work it holds: each live
-/// task run is stopped as a user's stop would, keeping its task reserved
-/// while its owner drains, its chat leases expire, and its auto-project
-/// claims are cleared. `None` when there is no such runner.
+/// Revoke `runner` on `actor`'s behalf, and end the work it holds: its chat
+/// leases expire, its auto-project claims are cleared, and each live task run
+/// is stopped as a user's stop would, keeping its task reserved while its
+/// owner drains. A cleared project stays unclaimable for one claim lease from
+/// the revoke, so no other runner drives it while the revoked drive, whose
+/// fenced writes and renewal already fail, winds down. `None` when there is no
+/// such runner.
 ///
-/// Lock order is `fleet_policy` → `fleet_runners` → `tasks` → `task_runs` →
-/// `chat_leases` / `projects`. The caller must already hold `fleet_policy`
-/// `FOR UPDATE` and no task, run, lease or project lock. This locks the
-/// runner row, which waits for every claim holding it `FOR SHARE`, so a claim
-/// that committed first is seen and stopped here; then each live run's task
-/// before the run, in task id order.
+/// Lock order is `fleet_policy` → `fleet_runners` → `chat_leases` /
+/// `projects` → `tasks` → `task_runs` → `chats`, the order chat writes
+/// (`chat_leases`, then `chats`) and auto-project drives (`projects`, then
+/// `tasks`) take them in. The caller must already hold `fleet_policy`
+/// `FOR UPDATE` and no other lock. This locks the runner row, which waits for
+/// every claim holding it `FOR SHARE`, so a claim that committed first is seen
+/// and stopped here; then the runner's leases and projects; then each live
+/// run's task before the run, and the chat it announces the stop in, in task
+/// id order.
 pub async fn revoke(
     transaction: &mut PgConnection,
     runner: Uuid,
@@ -62,6 +69,8 @@ pub async fn revoke(
     let Some(previous) = previous else {
         return Ok(None);
     };
+    let previous = State::parse(&previous)
+        .ok_or_else(|| undecodable("state", format!("\"{previous}\" is not a runner state")))?;
     sqlx::query(
         "UPDATE fleet_runners SET state = $2, state_changed_by = $3, state_changed_at = NOW() \
          WHERE id = $1 AND state <> $2",
@@ -69,6 +78,21 @@ pub async fn revoke(
     .bind(runner)
     .bind(State::Revoked.as_str())
     .bind(actor)
+    .execute(&mut *transaction)
+    .await?;
+
+    sqlx::query(
+        "UPDATE chat_leases SET expires_at = clock_timestamp() \
+         WHERE runner_id = $1 AND expires_at > clock_timestamp()",
+    )
+    .bind(runner)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE projects SET auto_claim_id = NULL, auto_claimed_at = statement_timestamp() \
+         WHERE auto_claim_runner_id = $1 AND auto_claim_id IS NOT NULL",
+    )
+    .bind(runner)
     .execute(&mut *transaction)
     .await?;
 
@@ -92,21 +116,6 @@ pub async fn revoke(
         }
     }
 
-    sqlx::query(
-        "UPDATE chat_leases SET expires_at = clock_timestamp() \
-         WHERE runner_id = $1 AND expires_at > clock_timestamp()",
-    )
-    .bind(runner)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "UPDATE projects SET auto_claim_id = NULL, auto_claimed_at = NULL \
-         WHERE auto_claim_runner_id = $1 AND auto_claim_id IS NOT NULL",
-    )
-    .bind(runner)
-    .execute(&mut *transaction)
-    .await?;
-
     Ok(Some(Revoked {
         previous,
         notices,
@@ -128,19 +137,15 @@ mod tests {
     use crate::db::fleet::claimant::Claimant;
     use crate::db::recovery;
     use crate::db::tasks::{Mutation, RunMutation};
-    use crate::db::testing::Tenant;
+    use crate::db::testing::{Tenant, queued_behind};
 
     const LIFETIME: Duration = Duration::from_secs(30);
-
-    const UNENFORCED: Claimant = Claimant {
-        runner: None,
-        enforced: false,
-    };
 
     struct Work {
         task: Uuid,
         run: Uuid,
         owner: Uuid,
+        chat: Uuid,
         store: Store,
         lease: Lease,
         claim: Claim,
@@ -167,7 +172,8 @@ mod tests {
     }
 
     /// A claimed task run, a chat lease and an auto-project claim, each
-    /// recorded against `runner`.
+    /// recorded against `runner`. The run's task belongs to the leased chat,
+    /// so stopping the run announces it there.
     async fn work(tenant: &Tenant, writer: Uuid, runner: Uuid) -> Work {
         let pool = &tenant.pool;
         let task = tasks::create_task(
@@ -193,6 +199,7 @@ mod tests {
         let owner = Uuid::new_v4();
         let claimant = Claimant {
             runner: Some(runner),
+            instance: Uuid::nil(),
             enforced: false,
         };
         assert!(
@@ -211,7 +218,14 @@ mod tests {
         .fetch_one(pool)
         .await
         .expect("a chat");
-        let store = Store::new(pool.clone(), chat, Some(tenant.workspace)).claiming(UNENFORCED);
+        sqlx::query("UPDATE tasks SET chat_id = $2 WHERE id = $1")
+            .bind(task.id)
+            .bind(chat)
+            .execute(pool)
+            .await
+            .expect("the task's chat");
+        let store =
+            Store::new(pool.clone(), chat, Some(tenant.workspace)).claiming(Claimant::UNENFORCED);
         let lease = store
             .acquire(Uuid::new_v4(), LIFETIME)
             .await
@@ -240,6 +254,7 @@ mod tests {
             task: task.id,
             run: run.id,
             owner,
+            chat,
             store,
             lease,
             claim: Claim {
@@ -295,7 +310,7 @@ mod tests {
         let revoked = revoke_committed(pool, revoked_runner, Some(actor))
             .await
             .expect("the runner exists");
-        let previous = revoked.previous.clone();
+        let previous = revoked.previous;
         let stopped: Vec<Uuid> = revoked.publish().iter().map(|run| run.id).collect();
 
         let heartbeat = tasks::heartbeat_task_run(pool, revoked_work.run, revoked_work.owner).await;
@@ -304,7 +319,7 @@ mod tests {
             .store
             .renew(&revoked_work.lease, LIFETIME)
             .await;
-        let project = auto_projects::renew(pool, revoked_work.claim, UNENFORCED).await;
+        let project = auto_projects::renew(pool, revoked_work.claim, Claimant::UNENFORCED).await;
         let cleared: Option<Uuid> =
             sqlx::query_scalar("SELECT auto_claim_id FROM projects WHERE id = $1")
                 .bind(revoked_work.claim.project_id)
@@ -328,7 +343,7 @@ mod tests {
 
         let kept_heartbeat = tasks::heartbeat_task_run(pool, kept_work.run, kept_work.owner).await;
         let kept_renewed = kept_work.store.renew(&kept_work.lease, LIFETIME).await;
-        let kept_project = auto_projects::renew(pool, kept_work.claim, UNENFORCED).await;
+        let kept_project = auto_projects::renew(pool, kept_work.claim, Claimant::UNENFORCED).await;
         let kept_state: String =
             sqlx::query_scalar("SELECT state FROM fleet_runners WHERE id = $1")
                 .bind(kept_runner)
@@ -339,7 +354,7 @@ mod tests {
         remove(pool, &[revoked_runner, kept_runner]).await;
         tenant.cleanup().await;
 
-        assert_eq!(previous, "active");
+        assert_eq!(previous, State::Active);
         assert_eq!(stopped, vec![revoked_work.run]);
         assert!(
             !heartbeat.expect("the heartbeat"),
@@ -467,7 +482,7 @@ mod tests {
         let twice = revoke_committed(pool, revoked_runner, Some(second))
             .await
             .expect("the runner exists");
-        let previous = twice.previous.clone();
+        let previous = twice.previous;
         let _ = twice.publish();
         let changed_by: Option<Uuid> =
             sqlx::query_scalar("SELECT state_changed_by FROM fleet_runners WHERE id = $1")
@@ -481,8 +496,121 @@ mod tests {
         tenant.cleanup().await;
 
         assert!(once.is_empty(), "a runner with no work stopped runs");
-        assert_eq!(previous, State::Revoked.as_str());
+        assert_eq!(previous, State::Revoked);
         assert_eq!(changed_by, Some(first));
         assert!(unknown.is_none(), "an unknown runner was revoked");
+    }
+
+    fn revoking(pool: &PgPool, runner: Uuid) -> tokio::task::JoinHandle<Vec<Uuid>> {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            revoke_committed(&pool, runner, None)
+                .await
+                .expect("the runner exists")
+                .publish()
+                .iter()
+                .map(|run| run.id)
+                .collect()
+        })
+    }
+
+    /// A chat write locks the chat's lease and then the chat. A revoke queued
+    /// behind that lease, which belongs to the runner, holds no lock on the
+    /// chat its stopped run is announced in, so the write finishes and then
+    /// the revoke does.
+    #[tokio::test]
+    async fn a_revoke_waiting_on_a_chat_write_lets_the_write_finish() {
+        let tenant = Tenant::new().await;
+        let pool = &tenant.pool;
+        let writer = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;
+        let revoked_runner = runner(pool).await;
+        let work = work(&tenant, writer, revoked_runner).await;
+
+        let mut write = pool.begin().await.expect("a chat write");
+        let backend: i32 = sqlx::query_scalar(
+            "SELECT pg_backend_pid() FROM chat_leases WHERE chat_id = $1 FOR UPDATE",
+        )
+        .bind(work.chat)
+        .fetch_one(&mut *write)
+        .await
+        .expect("the chat's lease");
+        let revoke = revoking(pool, revoked_runner);
+        queued_behind(pool, backend).await;
+        let touched = sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
+            .bind(work.chat)
+            .execute(&mut *write)
+            .await
+            .map(|_| ());
+        let committed = write.commit().await;
+        let stopped = revoke.await;
+
+        remove(pool, &[revoked_runner]).await;
+        tenant.cleanup().await;
+
+        assert!(
+            touched.is_ok() && committed.is_ok(),
+            "the chat write failed behind the revoke: {touched:?} {committed:?}"
+        );
+        assert_eq!(
+            stopped.expect("the revoke completes"),
+            vec![work.run],
+            "the revoke stopped the runner's run"
+        );
+    }
+
+    /// An auto-project drive locks its project's row and then a task, as it
+    /// does to admit the task's next run. A revoke queued behind that project,
+    /// which the runner drives, holds no lock on the task whose live run it
+    /// stops, so the drive finishes and then the revoke does.
+    #[tokio::test]
+    async fn a_revoke_waiting_on_a_drive_lets_the_drive_finish() {
+        let tenant = Tenant::new().await;
+        let pool = &tenant.pool;
+        let writer = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;
+        let revoked_runner = runner(pool).await;
+        let work = work(&tenant, writer, revoked_runner).await;
+
+        let mut drive = pool.begin().await.expect("a drive's admission");
+        let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *drive)
+            .await
+            .expect("the drive's session");
+        let held = auto_projects::holds(&mut drive, work.claim)
+            .await
+            .expect("the project's claim");
+        let revoke = revoking(pool, revoked_runner);
+        queued_behind(pool, backend).await;
+        let task: Result<String, _> =
+            sqlx::query_scalar("SELECT status FROM tasks WHERE id = $1 FOR UPDATE")
+                .bind(work.task)
+                .fetch_one(&mut *drive)
+                .await;
+        let active: Result<bool, _> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT EXISTS(SELECT 1 FROM task_runs \
+             WHERE task_id = $1 AND status IN {ACTIVE_RUN_STATUSES})"
+        )))
+        .bind(work.task)
+        .fetch_one(&mut *drive)
+        .await;
+        let committed = drive.commit().await;
+        let stopped = revoke.await;
+
+        remove(pool, &[revoked_runner]).await;
+        tenant.cleanup().await;
+
+        assert!(held, "the drive held its project");
+        assert!(
+            task.is_ok() && committed.is_ok(),
+            "the drive failed behind the revoke: {task:?} {committed:?}"
+        );
+        assert!(
+            active.expect("the task's runs"),
+            "the drive saw the live run"
+        );
+        assert_eq!(
+            stopped.expect("the revoke completes"),
+            vec![work.run],
+            "the revoke stopped the runner's run"
+        );
     }
 }

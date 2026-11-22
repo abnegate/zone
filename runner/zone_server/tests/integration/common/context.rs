@@ -387,10 +387,8 @@ impl Harness {
     }
 
     pub fn store(&self) -> Store {
-        Store::new(self.pool.clone(), self.chat, Some(self.workspace)).claiming(Claimant {
-            runner: None,
-            enforced: false,
-        })
+        Store::new(self.pool.clone(), self.chat, Some(self.workspace))
+            .claiming(Claimant::UNENFORCED)
     }
 
     pub async fn requests(&self) -> Vec<Value> {

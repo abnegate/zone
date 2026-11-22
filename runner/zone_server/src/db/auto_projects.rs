@@ -20,7 +20,7 @@ use uuid::Uuid;
 use super::DbResult;
 use super::actions::invalid;
 use super::fleet::claimant::Claimant;
-use super::fleet::eligibility::UNATTENDED;
+use super::fleet::eligibility::{self, UNATTENDED};
 use super::fleet::state::State;
 use super::tasks::{self, Create, MutationError, Origin};
 
@@ -135,10 +135,11 @@ pub struct Claim {
 /// no one until that lease lapsed too.
 ///
 /// Each claim records `claimant`'s runner, so revoking that runner ends the
-/// drive. Under fleet policy only projects the runner may drive as unattended
-/// work are claimed, judged on the labels of the project's own workspace (a
-/// project without one is judged on the runner's state and version alone), and
-/// the runner is held `FOR SHARE` until the claims commit.
+/// drive. Under fleet policy only projects the claimant's own runner may drive
+/// as unattended work are claimed, judged on the labels of the project's own
+/// workspace (a project without one is judged on the runner's state and
+/// version alone), and the runner is [held](eligibility::hold) until the
+/// claims commit.
 pub async fn claim_due(
     pool: &PgPool,
     lease: Duration,
@@ -148,11 +149,11 @@ pub async fn claim_due(
 ) -> DbResult<Vec<Claim>> {
     let seconds = lease.as_secs_f64();
     let mut transaction = pool.begin().await?;
-    if let (true, Some(runner)) = (claimant.enforced, claimant.runner) {
-        sqlx::query("SELECT 1 FROM fleet_runners WHERE id = $1 FOR SHARE")
-            .bind(runner)
-            .execute(&mut *transaction)
-            .await?;
+    if eligibility::hold(&mut transaction, claimant)
+        .await?
+        .is_some()
+    {
+        return Ok(Vec::new());
     }
     let due: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT id FROM projects WHERE auto AND status = 'active' \

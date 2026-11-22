@@ -26,7 +26,8 @@ pub(crate) enum Handoff {
 
 /// Leave a run this runner may not take to another runner that may, or fail it naming what a
 /// runner would need. The fail is fenced on the run being unclaimed, so a runner that picked it
-/// up meanwhile keeps it.
+/// up meanwhile keeps it. An unregistered runner holds no row of its own, so the row it names, if
+/// any, is another process's and counts as another runner.
 pub(crate) async fn hand_off(
     state: &AppState,
     run: &TaskRunRow,
@@ -34,8 +35,12 @@ pub(crate) async fn hand_off(
     shortfall: Shortfall,
 ) -> Handoff {
     let pool = state.db();
+    let own = match shortfall {
+        Shortfall::Unregistered => None,
+        _ => claimant.runner,
+    };
     let code = refusal::of(shortfall).code();
-    match eligibility::exists(pool, run.id, claimant.runner).await {
+    match eligibility::exists(pool, run.id, own).await {
         Ok(true) => {
             tracing::info!(run = %run.id, code, "This runner may not take the task run, so it is left for another runner");
             return Handoff::Left;
