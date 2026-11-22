@@ -1,0 +1,30 @@
+version: 0.1
+log:
+  level: info
+  formatter: json
+  fields:
+    service: zone-registry-publish
+  accesslog:
+    disabled: true
+storage:
+  s3:
+    rootdirectory: /registry
+    encrypt: true
+    secure: true
+    v4auth: true
+    objectacl: bucket-owner-full-control
+  delete:
+    enabled: false
+  redirect:
+    disable: false
+  cache:
+    blobdescriptor: inmemory
+  maintenance:
+    uploadpurging:
+      enabled: false
+    readonly:
+      enabled: false
+http:
+  addr: 127.0.0.1:5000
+  headers:
+    X-Content-Type-Options: [nosniff]

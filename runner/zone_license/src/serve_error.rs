@@ -12,6 +12,8 @@ pub enum ServeError {
     Mail(#[from] MailError),
     #[error("the Polar API client could not be set up: {0}")]
     Polar(#[from] reqwest::Error),
+    #[error("the bundle storage client could not be set up: {0}")]
+    Storage(reqwest::Error),
     #[error("could not start the async runtime: {0}")]
     Runtime(io::Error),
     #[error("could not listen for shutdown signals: {0}")]

@@ -1,0 +1,9 @@
+licenses.bitecode.ltd {
+	@signer path /webhooks/polar /licenses/renew /health
+	handle @signer {
+		reverse_proxy zone-license:8080
+	}
+	handle {
+		respond 404
+	}
+}

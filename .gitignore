@@ -74,6 +74,9 @@ __pycache__/
 # Archives written by `make backup`
 backups/
 
+# Compose override written by the offline installer (docs/AIRGAP.md)
+/docker-compose.airgap.yml
+
 # Fastlane
 fastlane/README.md
 fastlane/report.xml

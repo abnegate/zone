@@ -11,6 +11,7 @@ import {
   unverifiedReason,
 } from '../status';
 import type { LicenseResponse } from '../types';
+import { LicenseId } from './LicenseId';
 import { LicenseRenewal } from './LicenseRenewal';
 import { ToneBadge } from './ToneBadge';
 
@@ -55,6 +56,7 @@ export function LicenseSummary({ response, changing, onRemove }: LicenseSummaryP
         </p>
       )}
       <dl className="license-details">
+        {license && <LicenseId id={license.id} status={status} />}
         {license && (
           <div className="license-detail">
             <dt>Customer</dt>

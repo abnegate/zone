@@ -18,6 +18,7 @@ Zone and want to install a license you bought, you only need
 - [What the customer receives](#what-the-customer-receives)
 - [Automatic renewal](#automatic-renewal)
 - [Hand-signing a license](#hand-signing-a-license)
+- [Checking a license ID](#checking-a-license-id)
 - [Rotating the signing key](#rotating-the-signing-key)
 - [Why the signer listens only to `order.paid`](#why-the-signer-listens-only-to-orderpaid)
 - [Failure modes](#failure-modes)
@@ -40,6 +41,9 @@ its plan's features while it's active and through its grace period. Both paid
 editions are billed per seat, monthly or yearly, through Polar, which is the
 merchant of record and handles VAT, GST and US sales tax. Zone never handles
 money; it only verifies a key.
+
+Each edition's support, and the license ID a support request quotes, are in
+[SUPPORT.md](SUPPORT.md).
 
 ### The Community member cap
 
@@ -394,6 +398,11 @@ redelivered webhook produces a byte-identical key (see
 One instance is enough; run two behind a load balancer only if it has to
 survive a host failure.
 
+The same signer can also hand Zone Enterprise customers registry tokens for
+the LTS images and download links for the air-gapped bundle. Both are off
+until you configure them; [DISTRIBUTION.md](DISTRIBUTION.md) covers the
+routes, the registry, the S3 bucket and how to deploy them.
+
 ### Building and running the image
 
 Build from the repository root:
@@ -475,7 +484,25 @@ Values are trimmed, and a blank value counts as unset, except
 | `SMTP_FROM` | Required | The address keys are sent from: a bare address, such as `licenses@example.com`, without a name. |
 | `SMTP_FROM_NAME` | `Zone` | The sender name, on one line. |
 | `POLAR_ACCESS_TOKEN` | None | An organization access token with `subscriptions:read`. See [The access token](#7-the-access-token). When it's unset, `POST /licenses/renew` answers `404` and Zone servers keep their key until one is pasted. |
+| `ZONE_LICENSE_REVOKED` | None | Comma-separated license IDs that `/token` and `/bundles` refuse. Each covers only that one key. See [Revocation](#revocation). |
+| `ZONE_LICENSE_REVOKED_SUBSCRIPTIONS` | None | Comma-separated Polar subscription IDs whose every key `/token` and `/bundles` refuse, renewed keys included. See [Revocation](#revocation). |
+| `ZONE_LICENSE_TRUSTED_PROXIES` | Required with `/token` or `/bundles` | Comma-separated CIDR ranges or addresses of the reverse proxy, or `none` when no proxy is in front of the signer. When a request comes from one, `/token` and `/bundles` take the client address from the rightmost `X-Forwarded-For` entry. Unset, the signer refuses to start while either route is on; see [DISTRIBUTION.md](DISTRIBUTION.md#rate-limits-and-client-addresses). |
+| `ZONE_LICENSE_ADDRESS_LIMIT` | `120` | Requests a minute per client address on each of `/token` and `/bundles`. |
+| `ZONE_LICENSE_KEY_LIMIT` | `240` | Requests a minute per license ID on each of `/token` and `/bundles`. |
+| `ZONE_REGISTRY_SERVICE` | None | The registry's name, such as `registry.bitecode.ltd`. When it's unset, `GET /token` answers `404`. |
+| `ZONE_REGISTRY_REPOSITORIES` | `zone/server,zone/manager,zone/litellm` | The repositories a registry token may grant `pull` on. |
+| `ZONE_REGISTRY_KEY_GENERATION` | `1` | The registry token key's generation. See [DISTRIBUTION.md](DISTRIBUTION.md#the-token-key). |
+| `ZONE_BUNDLE_BUCKET` | None | The S3 bucket holding air-gapped bundles. When it's unset, `GET /bundles/…` answers `404`; when it's set, the region and both keys below are required. |
+| `ZONE_BUNDLE_REGION` | Required with the bucket | The bucket's region. |
+| `ZONE_BUNDLE_ENDPOINT` | `https://s3.<region>.amazonaws.com` | The S3 endpoint, addressed path style. |
+| `ZONE_BUNDLE_PREFIX` | `bundles` | The key prefix the bundles live under. |
+| `ZONE_BUNDLE_ACCESS_KEY_ID` | Required with the bucket | The access key ID of an IAM user that can only read the bundles. |
+| `ZONE_BUNDLE_SECRET_ACCESS_KEY` | Required with the bucket | Its secret access key. |
 | `RUST_LOG` | `info` | The log filter. See [Logs](#logs). |
+
+The `ZONE_LICENSE_*` distribution settings, `ZONE_REGISTRY_*` and
+`ZONE_BUNDLE_*` are described in full in
+[DISTRIBUTION.md](DISTRIBUTION.md#environment).
 
 ### Routes
 
@@ -484,11 +511,14 @@ Values are trimmed, and a blank value counts as unset, except
 | `POST /webhooks/polar` | Polar's deliveries. See [Responses](#responses). |
 | `POST /licenses/renew` | Zone servers asking for their renewed key. See [The renewal route](#the-renewal-route). Bodies are capped at 16 KiB, far above any license key; a larger one gets `413`. |
 | `GET /health` | `200` with `{"status":"ok"}` while the process is serving. It doesn't check the mail relay or Polar. |
+| `GET /token` | Docker registry tokens for the LTS images, for Enterprise licenses only. `404` unless `ZONE_REGISTRY_SERVICE` is set; `POST` and `HEAD` answer `405`. See [The token route](DISTRIBUTION.md#the-token-route). |
+| `GET /bundles/{version}/{architecture}` | Download links for an air-gapped bundle, for Enterprise licenses only. `404` unless `ZONE_BUNDLE_BUCKET` is set; `POST` and `HEAD` answer `405`. See [The bundle route](DISTRIBUTION.md#the-bundle-route). |
 
 Point your platform's health check or uptime monitor at `/health`. Polar must
 reach `/webhooks/polar`, and customers' Zone servers must reach
-`/licenses/renew`, both from the internet. Webhook bodies are capped at 2 MB,
-far above any Polar event.
+`/licenses/renew`, both from the internet. Customers' Docker and Kubernetes
+hosts reach `/token`, and customers fetch bundles from `/bundles`. Webhook
+bodies are capped at 2 MB, far above any Polar event.
 
 The image has no Docker `HEALTHCHECK`: the slim runtime image carries no HTTP
 client to run one with. Have your orchestrator or load balancer probe
@@ -502,7 +532,8 @@ one line with an `outcome` of `sent`, `ignored`, `unsigned`, `malformed`,
 `unaddressed`, `misconfigured`, `unsignable`, `unsendable` or `undelivered`,
 matching the [responses](#responses). Once the signature checks out, the line
 carries the Polar `webhook` id and, once the order is read, its `order`,
-`subscription` and `license` ids, or the `product` id for `misconfigured`. A
+`subscription` and `license` ids, or the `product` id for `misconfigured`, and
+`sent` adds the key's `seats` and `plan`. A
 refused signature is logged at `info`, since anyone can post to the endpoint;
 an order a paying customer is left waiting on is logged as an error. An ignored
 delivery also logs the event type and the `reason`. A failed send logs what
@@ -542,13 +573,13 @@ Besides the `outcome`, each line carries these fields:
 | `ended` | `info` | `license`, `subscription`, `status` and `reason` |
 | `misconfigured` | `error` | `license`, `subscription`, `status` and the subscription's `product` id |
 | `unsignable` | `error` | `license`, `subscription`, `status`, `renewed` and `error`, the signing failure's code |
-| `renewed` | `info` | `license`, `subscription`, `status`, `renewed` and `seats` |
+| `renewed` | `info` | `license`, `subscription`, `status`, `renewed`, `seats` and `plan` |
 
 `license` is the posted key's id and `subscription` its subscription id.
 `status` is the subscription's Polar status; a subscription Polar has no
 record of (`404`) has none. `renewed` is the id of the key that was, or would
-have been, signed, and `seats` its seat count. `reason` says why an `ended`
-subscription is not renewing: `missing` (Polar has no such subscription),
+have been, signed, and `seats` and `plan` its seat count and plan. `reason`
+says why an `ended` subscription is not renewing: `missing` (Polar has no such subscription),
 `ended` (it has ended), `product` (its product isn't in `POLAR_PRODUCT_IDS`)
 or `status` (it isn't `active` or `trialing`, such as `past_due` after a failed
 charge). The errors are the outcomes every renewal keeps failing with until
@@ -556,6 +587,9 @@ you fix them. When Polar can't be reached or its answer can't be read, the
 Polar client also logs a `warn` line of its own before the outcome: the
 `cause` of a failed request, the `limit` for a body over 1 MiB, or where a body
 failed to parse (`category`, `line` and `column`).
+
+`/token` and `/bundles` requests each log one line too, described in
+[Logs and pull auditing](DISTRIBUTION.md#logs-and-pull-auditing).
 
 The logs never contain the license key, the webhook secret, the access token,
 the private key, the SMTP password, or the customer's name or email address.
@@ -580,9 +614,11 @@ terminate TLS in front of it:
   managed certificate.
 
 Polar's deliveries come from the internet, so the proxy must accept them
-without a challenge. If the name is behind Cloudflare, turn off Bot Fight Mode
-for it: Polar documents that it blocks webhook deliveries with `403`, and
-allow-listing Polar's addresses doesn't help.
+without a challenge. If the name's DNS is in Cloudflare, keep its record DNS
+only (not proxied). Cloudflare's proxy brings Bot Fight Mode, which Polar
+documents blocks webhook deliveries with `403` whatever addresses you
+allow-list, and once [distribution](DISTRIBUTION.md#deploying) is on, the
+proxy would also hide each customer's address from the signer's rate limits.
 
 The proxy must pass the request body through unchanged. The signature covers
 the exact bytes Polar sent, so anything that re-encodes the body makes every
@@ -591,14 +627,23 @@ delivery fail with `401`.
 Customers' Zone servers call `/licenses/renew` from their own networks, so a
 bot filter that challenges Polar challenges them too: a challenge page
 reaches Zone as a `4xx`, which it records as `refused`. If the proxy only
-lets through the paths it knows, allow these three and nothing else:
+lets through the paths it knows, allow these and nothing else:
 
-| Path | Called by |
-|---|---|
-| `/webhooks/polar` | Polar |
-| `/licenses/renew` | Customers' Zone servers |
-| `/health` | Your health check or uptime monitor |
+| Path | Methods | Called by |
+|---|---|---|
+| `/webhooks/polar` | Any | Polar |
+| `/licenses/renew` | Any | Customers' Zone servers |
+| `/health` | Any | Your health check or uptime monitor |
+| `/token` | `GET`, `POST` and `HEAD` | Customers' Docker, containerd and Kubernetes hosts. Pass `POST` through rather than refusing it: containerd posts first and falls back to `GET` on `405`, `404`, `401` or `400`, and the signer answers `405`. A proxy that refuses `POST` with another status, such as `403`, breaks containerd pulls. |
+| `/bundles/*` | `GET` and `HEAD` | Customers downloading an air-gapped bundle |
 
+The last two matter only once [distribution](DISTRIBUTION.md) is on. The
+reference Caddy configuration, for this host and the registry, is
+[`runner/zone_license/deploy/Caddyfile`](../runner/zone_license/deploy/Caddyfile);
+see [Caddy](DISTRIBUTION.md#caddy).
+
+`/token` and `/bundles` are rate limited per client address and per license;
+see [Rate limits and client addresses](DISTRIBUTION.md#rate-limits-and-client-addresses).
 `/licenses/renew` has no rate limit of its own. Anyone holding a valid key can
 make the signer read its subscription from Polar on every request, so add a
 rate limit in the proxy if that matters to you.
@@ -774,7 +819,10 @@ subscribe again. Once the old subscription has ended the signer answers its
 keys with `410`, so the leaked key runs only to its expiry and grace period.
 The new subscription has a new id, which the new keys carry and the leaked key
 can never reach. The customer pastes the key the new subscription's order
-emails them, and their server renews it from then on.
+emails them, and their server renews it from then on. Add the old
+subscription's ID to `ZONE_LICENSE_REVOKED_SUBSCRIPTIONS` as well, so the
+leaked key and every key renewed from it stop pulling LTS images and bundles
+within minutes instead of at expiry.
 
 ### What Zone sends
 
@@ -900,6 +948,12 @@ It prints the license string and nothing else, so it can be piped or copied as
 it is. The private key never goes on the command line, and `sign` refuses a
 key the release's keyring doesn't trust, exactly as `serve` does.
 
+On standard error, `sign` logs `signed a license` with the license's `id`,
+`key_id`, `seats`, `plan` and `expires_at`. Keep that line with the deal's
+record. A hand-signed ID is random, or whatever `--id` gave, so it appears in no signer log and can't
+be derived from Polar. That line is the only record of it, and support
+[checks the ID](#checking-a-license-id) against it.
+
 Send the key to the customer yourself, with the installation steps from
 [What the customer receives](#what-the-customer-receives).
 
@@ -910,6 +964,123 @@ A key given `--subscription` renews only while that subscription is `active`
 and its product is in `POLAR_PRODUCT_IDS`. Each renewed key keeps the customer
 name you signed it with, and carries the plan of the subscription's current
 product, whatever `--plan` you signed it with.
+
+## Checking a license ID
+
+[Support](SUPPORT.md#your-license-id) starts its response clock on a valid
+license ID. The ID isn't secret, so anyone can quote one, including a
+Community user who makes one up. Before treating a request as Team or
+Enterprise, confirm that the signer issued the ID, which plan it carries, and
+that it's active or in its grace period. The signer has no database, so its
+logs and Polar are the record.
+
+### 1. Find the ID in the signer's logs
+
+Every key the signer issues logs one line. The webhook logs `Sent a license`
+with the new key's ID in `license`. A renewal logs `Renewed a license` with the
+new key's ID in `renewed`; its `license` is the older key the server posted.
+Both lines carry `subscription`, `seats` and `plan`. `serve` writes one JSON
+object per line to standard error, with the event's fields under `fields`:
+
+```sh
+sudo docker logs zone-license 2>&1 | jq -cR --arg id '<license id>' '
+  fromjson?
+  | select((.fields.message == "Sent a license" and .fields.license == $id)
+        or (.fields.message == "Renewed a license" and .fields.renewed == $id))
+  | {timestamp, message: .fields.message, subscription: .fields.subscription,
+     plan: .fields.plan, seats: .fields.seats}'
+```
+
+A match prints a line such as:
+
+```json
+{"timestamp":"2026-11-18T12:00:03.123456Z","message":"Sent a license","subscription":"8c1d0c55-5a1c-4f0e-9a43-1b9b2f0c6e11","plan":"enterprise","seats":25}
+```
+
+Several matches for one ID are normal: a redelivered order or a server asking
+again logs the same ID. `fromjson?` skips anything that isn't a JSON line. A
+match proves the signer issued the ID and names its subscription and plan. It
+says nothing about whether the subscription is still paid, so go on to step 2.
+
+`/token` and `/bundles` lines also carry `license`, but only once the key
+verifies, and they don't name the subscription. No match means either the
+signer never issued the ID, or the line is gone: Docker keeps a container's
+logs only while that container exists, so a redeploy drops them (see
+[Logs and pull auditing](DISTRIBUTION.md#logs-and-pull-auditing)). In that
+case, use [When the logs are gone](#when-the-logs-are-gone).
+
+### 2. Look the subscription up in Polar
+
+Open the subscription in the Polar dashboard, or read it from the API with an
+organization access token that has `subscriptions:read`, such as the one in the
+signer's `POLAR_ACCESS_TOKEN`:
+
+```sh
+curl -fsS -H "Authorization: Bearer $POLAR_ACCESS_TOKEN" \
+  https://api.polar.sh/v1/subscriptions/<subscription id> \
+  | jq '{status, current_period_end, ended_at, seats, product: .product.name, email: .customer.email}'
+```
+
+Check that the product is one of the products in `POLAR_PRODUCT_IDS`, and
+that the plan `POLAR_PRODUCT_IDS` gives that product matches the log line's
+`plan`. `enterprise` gets the [severity targets](SUPPORT.md#enterprise-severity-levels);
+`team` gets best effort.
+
+### 3. Confirm it's active or in grace
+
+A license is active until its `expires_at`, then in its grace period for
+**30 days** (`GRACE_DAYS` in `runner/zone_enterprise/src/status.rs`), then
+lapsed. The grace period runs from the exact second of expiry. A key's
+`expires_at` is the `current_period_end` of the subscription period it was
+signed for, so:
+
+- **Active:** the subscription's `status` is `active` and `current_period_end`
+  is in the future.
+- **In grace:** the subscription is `canceled`, `past_due` or has ended, and
+  `current_period_end` was less than 30 days ago.
+- **Lapsed:** `current_period_end` was 30 days ago or more. The server runs
+  Community and gets Community support.
+
+The quoted ID can belong to an older period than Polar's current one, when the
+server hasn't installed its renewed key yet. The subscription being paid is
+what counts: help them, and point them at
+[Automatic renewal](#automatic-renewal) or the key in their latest email.
+
+### When the logs are gone
+
+A Polar license's ID is derived from its terms (see
+[The key's terms](#the-keys-terms)), so Polar alone can confirm one. Ask the
+customer for the billing email the license was bought with, or the Polar
+order reference from the receipt. [SUPPORT.md](SUPPORT.md#what-to-send) asks
+them to send one. Find the customer or order in Polar, open its subscription,
+and derive the ID of its current key from the subscription id, its
+`current_period_end`, its `seats` and its plan:
+
+```sh
+python3 - '<subscription id>' '<current_period_end>' '<seats>' '<team or enterprise>' <<'EOF'
+import sys, uuid
+from datetime import datetime
+subscription, period_end, seats, plan = sys.argv[1:]
+seconds = int(datetime.fromisoformat(period_end.replace('Z', '+00:00')).timestamp())
+name = f'{subscription}/{seconds}/{seats}' + ('/team' if plan == 'team' else '')
+print(uuid.uuid5(uuid.UUID('16eafa97-dd78-4dff-8550-01e045e0de9d'), name))
+EOF
+```
+
+This is the derivation in `runner/zone_license/src/license_id.rs`: a UUIDv5
+in that namespace over `<subscription>/<period end in Unix seconds>/<seats>`,
+with `/team` added for a Team key. If it prints the quoted ID, the ID is
+genuine. Then check steps 2 and 3. If it doesn't, the quoted ID may be from an
+earlier period or seat count. Ask for the **Expires** and **Seats** rows on the
+server's License page and derive again with those, or go by the subscription
+itself.
+
+A **hand-signed** key's ID can't be derived or found in the signer's logs. It
+was recorded when it was signed, in the `signed a license` line that
+[`zone-license sign`](#hand-signing-a-license) logs. Find that line in the
+deal's record and check its `plan` and `expires_at` there. A hand-signed key
+given `--subscription` gets derived IDs once it renews, so the steps above
+apply from its first renewal on.
 
 ## Rotating the signing key
 
@@ -955,6 +1126,21 @@ single license:
 - **Servers that don't upgrade** keep trusting a removed key for as long as
   they run the old release, so a leaked key can sign licenses for them
   indefinitely.
+
+`ZONE_LICENSE_REVOKED` and `ZONE_LICENSE_REVOKED_SUBSCRIPTIONS` don't change
+this. They make the signer refuse keys on `/token` and `/bundles`, so a leaked
+Enterprise key stops pulling LTS images and bundles within a few minutes, but
+Zone servers verify keys offline and keep accepting it, and `/licenses/renew`
+still renews it:
+
+- **Revoking a license ID** covers only that key. A renewal issues a key with a
+  new ID, so anyone holding the revoked key can renew it into one that pulls
+  again while the subscription is `active`.
+- **Revoking a subscription** covers every key on it, now and after any
+  renewal, so it is the one that holds for a leaked key. It also cuts off the
+  customer's own keys on that subscription: cancel or revoke the subscription
+  in Polar and move the customer to a new one, as in [A leaked key](#a-leaked-key).
+- **A key signed by hand** has no subscription, so only its ID revokes it.
 
 Guard the private key accordingly: leaking it is the one failure that can't be
 fully undone.
@@ -1108,7 +1294,7 @@ redeliver the order once it's fixed.
 | Deliveries get `422` with an `unsendable` log line | The relay refused the message for good, such as an unknown recipient or a refused sender, or the order's address can't be parsed | If the sender or the relay account is at fault, fix it and redeliver. If the recipient is, [hand-sign](#hand-signing-a-stuck-order) the key and send it to a corrected address. |
 | Deliveries get `422` | The order can't be issued, usually because it has no customer email (an `unaddressed` error in the log, naming the order) | [Hand-sign](#hand-signing-a-stuck-order) it and send the key yourself. |
 | A `misconfigured` error in the log | An order for a product in `POLAR_PRODUCT_IDS` had no subscription, or one without seats | Make the product seat-based, then [hand-sign](#hand-signing-a-stuck-order) the order the log names. |
-| Deliveries get `403` | Cloudflare Bot Fight Mode or another bot filter | Turn it off for the signer's name. |
+| Deliveries get `403` | Cloudflare's proxy with Bot Fight Mode, or another bot filter | Make the signer's name DNS only in Cloudflare, or turn the filter off for it. |
 | The endpoint is disabled | 10 consecutive events failed | Fix the cause, [re-enable it](#re-enabling-the-endpoint), then redeliver. |
 | A customer says no email arrived | Spam filtering, or a mistyped address | Check SPF and DKIM, redeliver the order, or hand-sign it to a corrected address. |
 

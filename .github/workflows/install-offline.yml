@@ -1,0 +1,45 @@
+name: Offline installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/install-offline.sh'
+      - 'scripts/test-install-offline.sh'
+      - 'scripts/env-file.sh'
+      - '.github/workflows/install-offline.yml'
+  pull_request:
+    paths:
+      - 'scripts/install-offline.sh'
+      - 'scripts/test-install-offline.sh'
+      - 'scripts/env-file.sh'
+      - '.github/workflows/install-offline.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Offline installer against faked Docker and crane
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint the installer and its test with the ShellCheck release used locally
+        run: |
+          docker run --rm -v "$PWD:/zone:ro" -w /zone \
+            koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d \
+            scripts/install-offline.sh scripts/test-install-offline.sh
+
+      - name: Run the installer test under dash
+        run: sh scripts/test-install-offline.sh
+
+      - name: Run the installer test under bash
+        run: bash scripts/test-install-offline.sh

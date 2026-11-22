@@ -1,4 +1,5 @@
 export { AdministersServerProvider } from './AdministersServer';
+export { LicenseId } from './LicenseId';
 export { LicenseKeyForm } from './LicenseKeyForm';
 export { LicenseRenewal } from './LicenseRenewal';
 export { LicenseSection } from './LicenseSection';
