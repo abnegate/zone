@@ -61,9 +61,11 @@ impl Failure {
     pub(super) fn exchange(error: Error) -> Self {
         let kind = match &error {
             Error::Unreadable(_) => Some(Kind::InvalidCode),
-            Error::Invalid(_) | Error::Forbidden(_) | Error::Refused(_) | Error::Unreachable(_) => {
-                Some(Kind::StartAgain)
-            }
+            Error::Invalid(_)
+            | Error::Forbidden(_)
+            | Error::Demoted(_)
+            | Error::Refused(_)
+            | Error::Unreachable(_) => Some(Kind::StartAgain),
             Error::Unavailable(_) | Error::Deleted | Error::Internal(_) | Error::Database(_) => {
                 None
             }
@@ -106,6 +108,7 @@ impl From<Error> for Failure {
                 Self::new(StatusCode::BAD_REQUEST, message)
             }
             Error::Forbidden(message) => Self::new(StatusCode::FORBIDDEN, message),
+            Error::Demoted(_) => Self::new(StatusCode::FORBIDDEN, error.to_string()),
             Error::Unavailable(_) => Self::new(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
             Error::Deleted => Self::new(StatusCode::NOT_FOUND, error.to_string()),
             Error::Refused(message) | Error::Unreachable(message) => {
@@ -135,11 +138,15 @@ mod tests {
 
     use super::*;
 
-    fn refusals() -> [Error; 8] {
+    const DEMOTED: &str = "This sign-in needs the agent_logins:update permission, and whoever \
+                           started it no longer holds it. Start again.";
+
+    fn refusals() -> [Error; 9] {
         [
             Error::Unreadable("bad paste"),
             Error::Invalid("no such sign-in"),
             Error::Forbidden("no longer an admin"),
+            Error::Demoted(Permission::AgentLoginsUpdate),
             Error::Unavailable(AgentKind::Codex),
             Error::Deleted,
             Error::Refused("device code request failed".to_string()),
@@ -163,6 +170,7 @@ mod tests {
             (StatusCode::BAD_REQUEST, "bad paste"),
             (StatusCode::BAD_REQUEST, "no such sign-in"),
             (StatusCode::FORBIDDEN, "no longer an admin"),
+            (StatusCode::FORBIDDEN, DEMOTED),
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "The codex CLI is not installed on this server",
@@ -194,6 +202,7 @@ mod tests {
         for (error, (status, kind)) in refusals().into_iter().zip([
             (StatusCode::BAD_REQUEST, Some(Kind::InvalidCode)),
             (StatusCode::BAD_REQUEST, Some(Kind::StartAgain)),
+            (StatusCode::FORBIDDEN, Some(Kind::StartAgain)),
             (StatusCode::FORBIDDEN, Some(Kind::StartAgain)),
             (StatusCode::SERVICE_UNAVAILABLE, None),
             (StatusCode::NOT_FOUND, None),
