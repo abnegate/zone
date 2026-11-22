@@ -10,8 +10,10 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use axum::Router;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -21,9 +23,11 @@ use zone_context::context::ContextService;
 use zone_server::cache::Cache;
 use zone_server::cluster::Bus;
 use zone_server::config::Config;
+use zone_server::config::Shutdown;
 use zone_server::db::reminders::Sweep;
 use zone_server::db::sealing::Options;
 use zone_server::db::sealing::Sealer;
+use zone_server::drain::Drain;
 use zone_server::routes;
 use zone_server::services::audit::transport::open::Transports;
 use zone_server::services::embedding::create_embedding_service;
@@ -36,6 +40,7 @@ use zone_server::services::mail::AccountMail;
 use zone_server::state::AppState;
 use zone_server::state::default_adapter_registry;
 use zone_server::workers::housekeeping::{Leadership, Timing};
+use zone_server::ws::chat;
 
 #[tokio::main]
 async fn main() {
@@ -270,6 +275,7 @@ async fn main() {
     // twice and under a different policy, and its wildcard header list could
     // not be combined with credentials at all.
     let background = state.background().clone();
+    let draining = state.drain().clone();
     let app = routes::create_router(state);
 
     // Start server
@@ -281,10 +287,7 @@ async fn main() {
 
     let listener = TcpListener::bind(addr).await.expect("Failed to bind");
 
-    let result = tokio::select! {
-        result = axum::serve(listener, app) => Some(result),
-        () = shutdown_requested() => None,
-    };
+    let result = serve(listener, app, &draining, config.shutdown).await;
     drain(&background, BACKGROUND_DRAIN).await;
     recovery.abort();
     let _ = recovery.await;
@@ -295,13 +298,64 @@ async fn main() {
         let _ = callback.await;
     }
     leadership.release().await;
-    if let Some(result) = result {
-        result.expect("Server error");
-    }
+    tracing::info!("Stopped");
+    result.expect("Server error");
 }
 
-/// Resolves on SIGTERM or ctrl-c. Open sockets are not waited for, since a
-/// long-lived one would hold a deploy until it was killed.
+/// Serves until SIGTERM or ctrl-c, then stops in order. Readiness fails first
+/// while everything keeps serving for the delay, so load balancers stop
+/// sending work here before the listener closes. Requests in flight then get
+/// the grace to finish. Chat turns are stopped only after that, since a coding
+/// agent's tools reach this server through the listener: each keeps its reply
+/// so far and releases its chat. Every WebSocket is then closed with 1012 so
+/// its client reconnects to another replica.
+async fn serve(
+    listener: TcpListener,
+    app: Router,
+    draining: &Drain,
+    shutdown: Shutdown,
+) -> std::io::Result<()> {
+    let listening = CancellationToken::new();
+    let mut server = tokio::spawn(
+        axum::serve(listener, app)
+            .with_graceful_shutdown(listening.clone().cancelled_owned())
+            .into_future(),
+    );
+    let ended = tokio::select! {
+        joined = &mut server => Some(joined),
+        () = shutdown_requested() => None,
+    };
+    draining.begin();
+    chat::hold_queues();
+    let joined = match ended {
+        Some(joined) => joined,
+        None => {
+            tracing::info!(delay = ?shutdown.delay, grace = ?shutdown.grace, "Draining");
+            tokio::time::sleep(shutdown.delay).await;
+            listening.cancel();
+            tokio::time::timeout(shutdown.grace, &mut server)
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::warn!("Requests were still running when the grace ran out");
+                    server.abort();
+                    Ok(Ok(()))
+                })
+        }
+    };
+    chat::stop_turns();
+    if tokio::time::timeout(TURNS_STOP, chat::settled())
+        .await
+        .is_err()
+    {
+        tracing::warn!("Chat turns were still stopping when the shutdown moved on");
+    }
+    if !draining.close_sockets(SOCKETS_CLOSE).await {
+        tracing::warn!("WebSockets were still closing when the shutdown moved on");
+    }
+    joined.unwrap_or_else(|error| Err(std::io::Error::other(error)))
+}
+
+/// Resolves on SIGTERM or ctrl-c.
 async fn shutdown_requested() {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("Could not listen for SIGTERM");
@@ -344,6 +398,8 @@ const UNKNOWN_ARGUMENTS: &str = "Unknown server arguments";
 const SEALING_CONNECTIONS: u32 = 2;
 const FAILURE: i32 = 1;
 const BACKGROUND_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
+const TURNS_STOP: std::time::Duration = std::time::Duration::from_secs(10);
+const SOCKETS_CLOSE: std::time::Duration = std::time::Duration::from_secs(2);
 const SUCCESS: i32 = 0;
 const DIMENSION_LEARNED_ON_FIRST_EMBED: &str = "learned on the first embed";
 

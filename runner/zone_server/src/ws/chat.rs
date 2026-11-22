@@ -32,6 +32,7 @@ use futures::{SinkExt, Stream, StreamExt};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -87,11 +88,17 @@ use confinement::Confinement;
 use ending::Ending;
 use frame::Frame;
 use handled::Handled;
-use queue::{Finished, Interrupted, Queued, Started};
+use queue::{Finished, Interrupted, Queue, Queued, Started};
 use relay::{Command, Floor, Reservation, Watch};
 
 /// WebSocket polling interval in milliseconds
 const WS_POLL_INTERVAL_MS: u64 = 50;
+
+/// How often a draining replica looks for turns still running.
+const SETTLE_POLL: Duration = Duration::from_millis(50);
+
+/// Told to a socket whose message would start a turn on a draining replica.
+const RESTARTING: &str = "This server is restarting, so it can't start a reply. Reconnecting you to another server; send your message again.";
 
 /// Authentication timeout in seconds
 const WS_AUTH_TIMEOUT_SECS: u64 = 30;
@@ -640,7 +647,9 @@ async fn control(
 }
 
 /// Applies a socket's command where the chat's turn runs, and writes what the
-/// command produced for this socket alone back to it.
+/// command produced for this socket alone back to it. Returns whether the
+/// socket stays open: a draining replica starts no turn, and closes the socket
+/// so its client reconnects to one that will.
 async fn dispatch(
     state: &AppState,
     stream: &Arc<ChatStream>,
@@ -649,11 +658,21 @@ async fn dispatch(
     user_id: Uuid,
     session_id: Uuid,
     command: Command,
-) {
+) -> bool {
+    let starts = matches!(command, Command::Send { .. } | Command::Interrupt { .. });
     let frames: Vec<Message> =
         match relay::route(state, stream.chat_id, user_id, session_id, &command).await {
+            relay::Route::Local if starts && state.drain().is_draining() => {
+                let refusal = ServerMessage::Error {
+                    message: RESTARTING.to_string(),
+                };
+                let mut sender = sender.lock().await;
+                let _ = sender.send(refusal.to_ws_message()).await;
+                let _ = sender.send(super::restarting()).await;
+                return false;
+            }
             relay::Route::Local => {
-                if matches!(command, Command::Send { .. } | Command::Interrupt { .. }) {
+                if starts {
                     relay::settle(stream).await;
                 }
                 control(state, stream, workspace_id, user_id, command)
@@ -677,9 +696,10 @@ async fn dispatch(
         };
     for frame in frames {
         if sender.lock().await.send(frame).await.is_err() {
-            return;
+            return false;
         }
     }
+    true
 }
 
 /// Sends one entry of the chat's fan-out to a connection. Relayed frames go
@@ -732,6 +752,37 @@ fn cancel_turns(chat_id: Uuid) {
         let _ = entry.value().send(());
     }
     crate::agent::ApprovalPolicy::deny_chat(chat_id);
+}
+
+/// Keeps every chat's queued messages from starting a turn here once the
+/// running one ends, since this replica is draining.
+pub fn hold_queues() {
+    for chat_id in queue::chats() {
+        queue::with(chat_id, Queue::hold);
+    }
+}
+
+/// Stops every turn this replica runs the way a person's Stop does: the reply
+/// so far is kept, and the chat's lease is released for another replica.
+pub fn stop_turns() {
+    let chats: HashSet<Uuid> = CHAT_CANCELLATIONS
+        .iter()
+        .map(|entry| entry.key().0)
+        .collect();
+    for chat_id in chats {
+        queue::with(chat_id, |queue| {
+            queue.stop(generating(chat_id));
+            cancel_turns(chat_id);
+        });
+    }
+}
+
+/// Resolves once no turn runs here. A turn leaves only after it has closed
+/// its session, so by then every lease it held is released.
+pub async fn settled() {
+    while !CHAT_CANCELLATIONS.is_empty() {
+        tokio::time::sleep(SETTLE_POLL).await;
+    }
 }
 
 /// Register the turn a message is starting under the queue's lock, so a Stop
@@ -1154,7 +1205,8 @@ pub async fn handle_chat_ws(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, chat_id))
+    let sockets = state.drain().sockets().clone();
+    ws.on_upgrade(move |socket| sockets.track_future(handle_socket(socket, state, chat_id)))
 }
 
 /// Guard that cleans up connection resources when dropped
@@ -1933,14 +1985,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                 }
 
                                 let command = Command::Send { id, content, metadata };
-                                dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await;
+                                if !dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await {
+                                    return;
+                                }
                             }
                             Ok(ClientMessage::Cancel) => {
-                                dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, Command::Cancel).await;
+                                if !dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, Command::Cancel).await {
+                                    return;
+                                }
                             }
                             Ok(ClientMessage::Interrupt { id }) => {
                                 let command = Command::Interrupt { id };
-                                dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await;
+                                if !dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await {
+                                    return;
+                                }
                             }
                             Ok(ClientMessage::EditQueued { id, content }) => {
                                 if content.len() > MAX_MESSAGE_LENGTH {
@@ -1951,18 +2009,24 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                     continue;
                                 }
                                 let command = Command::EditQueued { id, content };
-                                dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await;
+                                if !dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await {
+                                    return;
+                                }
                             }
                             Ok(ClientMessage::RemoveQueued { id }) => {
                                 let command = Command::RemoveQueued { id };
-                                dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await;
+                                if !dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await {
+                                    return;
+                                }
                             }
                             Ok(ClientMessage::ApproveTool {
                                 tool_call_id,
                                 approved,
                             }) => {
                                 let command = Command::ApproveTool { tool_call_id, approved };
-                                dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await;
+                                if !dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await {
+                                    return;
+                                }
                             }
                             Ok(ClientMessage::Auth { .. }) => {
                                 // Ignore duplicate auth messages
@@ -2035,6 +2099,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                 if sender.lock().await.send(Message::Ping(Bytes::new())).await.is_err() {
                     return;
                 }
+            }
+
+            () = state.drain().closing() => {
+                while let Ok(frame) = events.try_recv() {
+                    if !deliver(&sender, frame, floor).await {
+                        return;
+                    }
+                }
+                let _ = sender.lock().await.send(super::restarting()).await;
+                return;
             }
         }
     }

@@ -122,6 +122,12 @@ impl Queue {
         self.finish(true)
     }
 
+    /// Leaves whatever waits in the queue once the running turn ends, as a
+    /// Stop does, but without stopping that turn.
+    pub fn hold(&mut self) {
+        self.held = true;
+    }
+
     pub fn stop(&mut self, busy: bool) {
         if let Some(current) = self.current.as_mut() {
             current.cancelled = true;
@@ -221,6 +227,11 @@ pub fn with<T>(chat_id: Uuid, change: impl FnOnce(&mut Queue) -> T) -> T {
     drop(queue);
     QUEUES.remove_if(&chat_id, |_, queue| queue.is_idle());
     result
+}
+
+/// Every chat with a queue on this replica.
+pub fn chats() -> Vec<Uuid> {
+    QUEUES.iter().map(|queue| *queue.key()).collect()
 }
 
 /// A turn this queue started is running, or messages wait in it.
@@ -336,6 +347,30 @@ mod tests {
         assert_eq!(next(queue.finish(true)), "second");
         assert_eq!(next(queue.finish(true)), "third");
         assert_eq!(queue.finish(true), Finished::Idle);
+    }
+
+    #[test]
+    fn a_held_queue_lets_the_running_turn_finish_and_keeps_the_rest_waiting() {
+        let mut queue = Queue::default();
+        queue.submit(queued("first"), false);
+        queue.submit(queued("second"), false);
+
+        queue.hold();
+
+        assert_eq!(queue.finish(true), Finished::Held);
+        assert_eq!(contents(&queue), ["second"]);
+        assert!(queue.held());
+    }
+
+    #[test]
+    fn holding_an_idle_queue_leaves_it_idle() {
+        let mut queue = Queue::default();
+        queue.submit(queued("only"), false);
+
+        queue.hold();
+
+        assert_eq!(queue.finish(true), Finished::Idle);
+        assert!(queue.is_idle());
     }
 
     #[test]

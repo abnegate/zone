@@ -2576,6 +2576,31 @@ On by default. Once a day, the server looks at its license, and when the license
 
 ---
 
+## 🛑 Shutdown and readiness
+
+The server serves two probes. `GET /health` answers 200 `{"status":"healthy",...}` for as long as the process runs; use it for liveness and startup. `GET /health/ready` answers 200 `{"status":"ready"}` until the server receives SIGTERM (or ctrl-c), and 503 `{"status":"draining"}` from then on; use it for readiness. Readiness looks only at whether the server is draining, never at Postgres or Valkey: a database failover would otherwise mark every replica unready at once and leave the Service with nowhere to send anyone.
+
+On SIGTERM the server:
+
+1. marks itself draining, so readiness fails and chat sockets start no new reply. A message that would start one is refused with an error, and the socket is closed with code 1012 so the console reconnects, to another replica once this one has left the load balancer. Messages already queued behind a running reply stay queued and are dropped when the process exits.
+2. keeps serving for `ZONE_SHUTDOWN_DELAY_SECONDS`, while load balancers notice the failed readiness. Chat replies already running carry on.
+3. stops listening, and gives HTTP requests in flight up to `ZONE_SHUTDOWN_GRACE_SECONDS` to finish.
+4. stops every chat reply still running, the way Stop does: the reply so far is saved, and the chat is released at once for another replica instead of after its 30-second lease. Replies are not waited for past the listener, because a coding agent reaches Zone's tools through it.
+5. closes every WebSocket (chat, task run, context and model pull) with code 1012, Service Restart.
+6. finishes its background writes and releases housekeeping leadership, then exits.
+
+Both settings are read at startup. A blank value counts as unset, and a value that is not a whole number of seconds stops the server at startup. Leave both at 0 for a single server, which then stops at once, as it always did, apart from steps 4 to 6. On Kubernetes, keep `terminationGracePeriodSeconds` above delay + grace + about 20 seconds for steps 4 to 6; the HA profile (`helm/zone-apps/values-ha.yaml`) uses delay 10, grace 30 and a termination grace of 60.
+
+### `ZONE_SHUTDOWN_DELAY_SECONDS`
+- **Default**: `0`
+- **Description**: Seconds the server keeps serving after SIGTERM, with readiness failing, before it stops listening. Set it to at least the readiness probe's `periodSeconds × failureThreshold`, plus the time your ingress takes to drop an endpoint.
+
+### `ZONE_SHUTDOWN_GRACE_SECONDS`
+- **Default**: `0`
+- **Description**: Seconds HTTP requests in flight get to finish once the server stops listening. Chat replies still running after it are stopped and saved as they stand. At `0`, nothing in flight is waited for.
+
+---
+
 ## 🔒 VPN Configuration - Optional
 
 **VPN is completely optional!** Enable it to send all stack internet traffic through Gluetun, including private web search.
@@ -2730,6 +2755,7 @@ Regenerate secrets for production:
 | Task evaluation | No | ✅ Yes (off) |
 | Workspace digests | No | ✅ Yes (off) |
 | License renewal | No | ✅ Yes (on) |
+| Shutdown | No | ✅ Yes (stops at once) |
 
 *Security variables have insecure defaults. Change for production.
 
@@ -2795,6 +2821,7 @@ Need to find a specific config? Quick lookup:
 - **Task evaluation**: ZONE_TASK_EVALUATION, ZONE_TASK_EVALUATION_CATEGORIES, ZONE_TASK_EVALUATION_TOOL_TIMEOUT_SECONDS, ZONE_TASK_EVALUATION_BUDGET_SECONDS
 - **Workspace digests**: ZONE_REPORT_ENABLED, ZONE_REPORT_CADENCE, ZONE_REPORT_HOUR, ZONE_REPORT_WEEKDAY, ZONE_REPORT_DAY_OF_MONTH
 - **License renewal**: ZONE_LICENSE_RENEWAL, ZONE_LICENSE_RENEWAL_URL
+- **Shutdown**: ZONE_SHUTDOWN_DELAY_SECONDS, ZONE_SHUTDOWN_GRACE_SECONDS
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
 - **Timezone**: TZ
 - **VPN**: VPN_*, OPENVPN_*

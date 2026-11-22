@@ -1,7 +1,6 @@
 //! Housekeeping cluster sweeps run on one elected replica at a time, and the two sweeps that
 //! notify claim in Postgres before they send, so a leader change sends nothing twice.
 
-mod blackhole;
 mod entered;
 mod pass;
 mod recorder;
@@ -28,8 +27,8 @@ use zone_server::workers::housekeeping::{
 use zone_server::workers::regression::{self, RegressionChecker, RegressionSettings};
 use zone_server::workers::reports::{self, Cadence, ReportSettings};
 
+use crate::common::blackhole::Blackhole;
 use crate::common::{self, Database};
-use blackhole::Blackhole;
 use recorder::Recorder;
 use regressing::Regressing;
 use replica::Replica;

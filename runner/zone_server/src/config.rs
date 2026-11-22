@@ -24,12 +24,14 @@ use crate::services::login::claude::ROOT_PATH;
 use crate::workers::evaluation::EvaluationSettings;
 
 mod environment;
+mod shutdown;
 
 pub use abnegate_comfy::Config as ComfyUiConfig;
 pub use abnegate_llm::catalog::DEFAULT_GPT4ALL_MODELS_URL;
 pub use abnegate_llm::catalog::DEFAULT_HUGGINGFACE_MODELS_URL;
 pub use abnegate_search::WebSearchConfig;
 pub use environment::Environment;
+pub use shutdown::Shutdown;
 
 /// GitHub's own REST origin, which `GITHUB_API_URL` overrides for GitHub
 /// Enterprise. The origin answers only for repositories on the host it names,
@@ -153,6 +155,8 @@ pub struct Config {
     pub evaluation: EvaluationSettings,
     /// Automatic renewal of an Enterprise license (`ZONE_LICENSE_RENEWAL*`).
     pub license_renewal: renewal::Settings,
+    /// How a SIGTERM drains the server (`ZONE_SHUTDOWN_*`).
+    pub shutdown: Shutdown,
 }
 
 /// The instance-wide default backend.
@@ -1473,6 +1477,7 @@ impl Config {
             evaluation: EvaluationSettings::from_process_environment(),
             license_renewal: renewal::Settings::from_process_environment()
                 .map_err(|error| ConfigError::Invalid(error.message()))?,
+            shutdown: Shutdown::from_process_environment()?,
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
@@ -1528,6 +1533,7 @@ impl std::fmt::Debug for Config {
             .field("mcp_commands", &self.mcp_commands)
             .field("evaluation", &self.evaluation)
             .field("license_renewal", &self.license_renewal)
+            .field("shutdown", &self.shutdown)
             .finish()
     }
 }
@@ -1696,6 +1702,7 @@ mod tests {
             mcp_commands: false,
             evaluation: EvaluationSettings::default(),
             license_renewal: renewal::Settings::default(),
+            shutdown: Shutdown::default(),
         }
     }
 

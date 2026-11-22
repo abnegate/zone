@@ -75,7 +75,8 @@ pub async fn handle_pull_ws(
     socket: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    socket.on_upgrade(move |socket| handle(socket, state))
+    let sockets = state.drain().sockets().clone();
+    socket.on_upgrade(move |socket| sockets.track_future(handle(socket, state)))
 }
 
 async fn handle(socket: WebSocket, state: AppState) {
@@ -248,6 +249,10 @@ async fn subscribe(
                     // Detaching leaves the background job running.
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
                 }
+            }
+            () = state.drain().closing() => {
+                let _ = sender.send(super::restarting()).await;
+                return;
             }
         }
     }

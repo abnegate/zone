@@ -387,6 +387,11 @@ async fn answer(
             command,
         } => (user, session, command),
     };
+    if state.drain().is_draining()
+        && matches!(command, Command::Send { .. } | Command::Interrupt { .. })
+    {
+        return;
+    }
     let holder = super::owns(chat);
     let sent = match &command {
         Command::Send { id, .. } => Some(*id),

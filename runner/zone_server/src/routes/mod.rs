@@ -705,6 +705,7 @@ pub fn create_router(state: AppState) -> Router {
     // cannot 401 Prometheus and flip `up{job="manager"}` to 0.
     Router::new()
         .route("/health", get(health::health_check))
+        .route("/health/ready", get(health::readiness))
         .route(
             "/metrics",
             get(crate::metrics::scrape).head(crate::metrics::scrape),
