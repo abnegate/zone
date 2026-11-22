@@ -2,6 +2,7 @@
 //! organization. Every route needs a SCIM bearer token of that organization; past the license,
 //! only deprovisioning writes are accepted.
 
+pub mod console;
 pub mod discovery;
 pub mod document;
 pub mod groups;

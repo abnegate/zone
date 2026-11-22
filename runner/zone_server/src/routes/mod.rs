@@ -601,6 +601,26 @@ pub fn create_router(state: AppState) -> Router {
             patch(roles::update).delete(roles::delete),
         )
         .route(
+            "/api/organizations/{org_id}/scim",
+            get(scim::console::settings::get),
+        )
+        .route(
+            "/api/organizations/{org_id}/scim/tokens",
+            post(scim::console::tokens::create),
+        )
+        .route(
+            "/api/organizations/{org_id}/scim/tokens/{token_id}",
+            delete(scim::console::tokens::revoke),
+        )
+        .route(
+            "/api/organizations/{org_id}/scim/tokens/{token_id}/rotations",
+            post(scim::console::tokens::rotate),
+        )
+        .route(
+            "/api/organizations/{org_id}/scim/groups/{group_id}/mapping",
+            put(scim::console::mappings::put).delete(scim::console::mappings::delete),
+        )
+        .route(
             "/api/organizations/{org_id}/spend-reports",
             get(spend::reports::get),
         )

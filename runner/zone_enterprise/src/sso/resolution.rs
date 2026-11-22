@@ -25,6 +25,10 @@ pub fn resolve(
     }
     match by_email {
         [] => Ok(Resolution::Provision),
+        [account] if !linked && account.pristine && account.active => Ok(Resolution::Link {
+            user: account.id,
+            reclaim: false,
+        }),
         [account] => {
             if linked || !require_verified_email {
                 return Err(Error::EmailConflict);
@@ -51,6 +55,15 @@ mod tests {
             active: true,
             email_verified: true,
             admin: false,
+            pristine: false,
+        }
+    }
+
+    fn pristine(id: u128) -> Account {
+        Account {
+            email_verified: false,
+            pristine: true,
+            ..account(id)
         }
     }
 
@@ -196,6 +209,70 @@ mod tests {
         assert_eq!(
             resolve(None, &[inactive(2)], false, true),
             Err(Error::AccountDisabled)
+        );
+    }
+
+    #[test]
+    fn a_pristine_account_links_without_reclaim_whatever_the_verification_policy() {
+        for require_verified_email in [true, false] {
+            assert_eq!(
+                resolve(None, &[pristine(2)], false, require_verified_email),
+                Ok(Resolution::Link {
+                    user: Uuid::from_u128(2),
+                    reclaim: false
+                }),
+                "require_verified_email: {require_verified_email}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pristine_account_linked_through_any_provider_conflicts() {
+        for require_verified_email in [true, false] {
+            assert_eq!(
+                resolve(None, &[pristine(2)], true, require_verified_email),
+                Err(Error::EmailConflict),
+                "require_verified_email: {require_verified_email}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inactive_pristine_account_is_never_linked() {
+        let local = Account {
+            active: false,
+            ..pristine(2)
+        };
+        assert_eq!(
+            resolve(None, &[local], false, true),
+            Err(Error::AccountDisabled)
+        );
+        assert_eq!(
+            resolve(None, &[local], false, false),
+            Err(Error::EmailConflict)
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_email_conflicts_even_when_an_account_is_pristine() {
+        for require_verified_email in [true, false] {
+            assert_eq!(
+                resolve(
+                    None,
+                    &[pristine(2), pristine(3)],
+                    false,
+                    require_verified_email
+                ),
+                Err(Error::EmailConflict)
+            );
+        }
+    }
+
+    #[test]
+    fn a_known_subject_signs_in_whether_or_not_an_email_match_is_pristine() {
+        assert_eq!(
+            resolve(Some(account(1)), &[pristine(2)], false, false),
+            Ok(Resolution::SignIn(Uuid::from_u128(1)))
         );
     }
 }

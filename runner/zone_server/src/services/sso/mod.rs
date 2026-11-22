@@ -1,4 +1,5 @@
 pub mod callback;
+pub mod claim;
 pub mod configured;
 pub mod console;
 pub mod enforcement;
@@ -17,6 +18,7 @@ pub mod start;
 mod tests;
 
 pub use callback::Callback;
+pub use claim::Claim;
 pub use configured::Configured;
 pub use failure::Failure;
 pub use handoff::Handoff;

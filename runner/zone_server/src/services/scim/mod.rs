@@ -2,12 +2,16 @@
 //! and console routes share.
 
 pub mod client;
+pub mod console;
 pub mod entitlement;
 pub mod failure;
 pub mod groups;
+pub mod issued;
 pub mod limit;
 pub mod password;
 pub mod record;
+pub mod remapped;
+pub mod remapping;
 pub mod resource;
 pub mod secret;
 pub mod slot;
@@ -17,5 +21,8 @@ pub mod writer;
 pub use client::ScimClient;
 pub use entitlement::Entitlement;
 pub use failure::Failure;
+pub use issued::Issued;
+pub use remapped::Remapped;
+pub use remapping::Remapping;
 pub use slot::Slot;
 pub use writer::ScimWriter;
