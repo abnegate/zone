@@ -81,7 +81,7 @@ impl From<workspace_members::RoleChange> for Outcome {
 impl From<organization_members::Removal> for Outcome {
     fn from(removal: organization_members::Removal) -> Self {
         match removal {
-            organization_members::Removal::Removed => Self::Changed,
+            organization_members::Removal::Removed(_) => Self::Changed,
             organization_members::Removal::Revoked => Self::Revoked,
             organization_members::Removal::Forbidden => Self::Forbidden,
             organization_members::Removal::Uncovered => Self::Uncovered,

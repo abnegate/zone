@@ -1765,11 +1765,62 @@ pub async fn stop_task_run_authorized(
     {
         return Ok(Mutation::NotFound);
     }
+    stop_locked(transaction, run_id)
+        .await
+        .map(Mutation::Applied)
+}
+
+/// Cancel a live run and pause its task as [`stop_task_run_authorized`]
+/// does, on nobody's behalf: for a run whose actor no longer has the access
+/// that run needs.
+pub async fn stop_task_run(pool: &PgPool, run_id: Uuid) -> DbResult<Mutation<Stop>> {
+    let mut transaction = pool.begin().await?;
+    let task_id: Option<Uuid> = sqlx::query_scalar("SELECT task_id FROM task_runs WHERE id = $1")
+        .bind(run_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    let Some(task_id) = task_id else {
+        return Ok(Mutation::NotFound);
+    };
+    let locked: Option<Uuid> = sqlx::query_scalar("SELECT id FROM tasks WHERE id = $1 FOR UPDATE")
+        .bind(task_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    if locked.is_none() {
+        return Ok(Mutation::NotFound);
+    }
+    stop_locked(transaction, run_id)
+        .await
+        .map(Mutation::Applied)
+}
+
+/// The live runs `user_id` triggered in any of `workspaces`.
+pub async fn live_runs_triggered_by(
+    pool: &PgPool,
+    user_id: Uuid,
+    workspaces: &[Uuid],
+) -> DbResult<Vec<Uuid>> {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT r.id FROM task_runs r JOIN tasks t ON t.id = r.task_id \
+         WHERE r.triggered_by = $1 AND t.workspace_id = ANY($2) \
+           AND r.status IN {ACTIVE_RUN_STATUSES} \
+         ORDER BY r.id"
+    )))
+    .bind(user_id)
+    .bind(workspaces)
+    .fetch_all(pool)
+    .await
+}
+
+async fn stop_locked(
+    mut transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: Uuid,
+) -> DbResult<Stop> {
     let row: Option<TaskRunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = $2, completed_at = NOW(), error_message = $3, current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL, heartbeat_at = CASE WHEN owner IS NOT NULL AND heartbeat_at > NOW() - INTERVAL '60 seconds' THEN NOW() ELSE heartbeat_at END WHERE id = $1 AND status IN {ACTIVE_RUN_STATUSES} RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait, plan")))
         .bind(run_id).bind(CANCELLED).bind(STOPPED).fetch_optional(&mut *transaction).await?;
     let Some(run) = row else {
         transaction.commit().await?;
-        return Ok(Mutation::Applied(Stop::Finished));
+        return Ok(Stop::Finished);
     };
     let draining: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT EXISTS(SELECT 1 FROM task_runs r WHERE r.id = $1 AND {DRAINING})"
@@ -1785,7 +1836,7 @@ pub async fn stop_task_run_authorized(
         notice.publish();
     }
     task_progress::publish_terminal(run.id, CANCELLED, Some(STOPPED));
-    Ok(Mutation::Applied(Stop::Stopped(Box::new(run))))
+    Ok(Stop::Stopped(Box::new(run)))
 }
 
 /// Update task run progress

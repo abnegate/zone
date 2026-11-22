@@ -251,6 +251,23 @@ give a custom role afterwards. It needs `members:create` or
   `workspace_members:create` but not `workspace:write` can add viewers but
   not members.
 
+### Removing members
+
+Removing someone from an organization also takes them out of every workspace
+in it, and stops what they have running there: their chat turns (reminder and
+automation turns included), the task runs they started, and any invitation to
+the organization still waiting on their email. Their sessions aren't revoked,
+because they may belong to other organizations.
+
+- If they were a workspace's only owner, another member of the workspace is
+  made owner: whoever created the workspace, then an admin, a member or a
+  viewer, earliest to join first, and only someone who is still in the
+  organization. This is recorded as `workspace.owner_seated`. If nobody is
+  left, the workspace has no owner until an organization owner adds one.
+- Adding a removed member back, or their accepting a new invitation, starts
+  them afresh. Their old workspace memberships and roles don't come back; add
+  them to workspaces again.
+
 ### Invitations
 
 An invitation names an organization role (`org_role`), and optionally a
@@ -360,6 +377,7 @@ choosing **Manage budgets** chooses **See spend**.
 | `role.updated` | A custom role's name, description or permissions change; an edit that changes none of them isn't recorded | `role`, with the role's ID | The values before and after |
 | `role.deleted` | A custom role is deleted | `role`, with the role's ID | The values before |
 | `member.role_changed` | A member is given a built-in or custom role | The membership | `user_id`, `role` and `custom_role` |
+| `workspace.owner_seated` | A member is made a workspace's owner because its only owner left the organization | `workspace`, with the workspace's ID | The new owner's `user_id` |
 
 ## Codes
 

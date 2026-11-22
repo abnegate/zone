@@ -1,4 +1,8 @@
 mod admission_error;
+mod deprovision;
+mod deprovisioned;
+mod halt;
+mod halted;
 
 use chrono::Utc;
 use uuid::Uuid;
@@ -8,6 +12,10 @@ use crate::db::seats;
 use crate::state::AppState;
 
 pub use admission_error::AdmissionError;
+pub use deprovision::deprovision;
+pub use deprovisioned::Deprovisioned;
+pub use halt::halt;
+pub use halted::Halted;
 
 /// Admits `user`, or a person without an account when `None`, unless the
 /// server is capped and full. An existing member is always admitted, however
