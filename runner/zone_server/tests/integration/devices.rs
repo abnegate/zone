@@ -1,4 +1,7 @@
+use std::net::{IpAddr, SocketAddr};
+
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -21,6 +24,7 @@ struct Phone {
     name: &'static str,
     platform: &'static str,
     ip: &'static str,
+    peer: IpAddr,
 }
 
 impl Phone {
@@ -30,7 +34,12 @@ impl Phone {
             name,
             platform,
             ip: "192.168.4.31",
+            peer: IpAddr::from([127, 0, 0, 1]),
         }
+    }
+
+    fn connected_from(self, peer: IpAddr) -> Self {
+        Self { peer, ..self }
     }
 }
 
@@ -106,7 +115,8 @@ async fn post_auth(
         .header("x-zone-device-name", phone.name)
         .header("x-zone-device-platform", phone.platform)
         .header("x-forwarded-for", phone.ip)
-        .header("user-agent", "Zone/1");
+        .header("user-agent", "Zone/1")
+        .extension(ConnectInfo(SocketAddr::new(phone.peer, 50_000)));
     if let Some(token) = token {
         request = request.header("Authorization", format!("Bearer {token}"));
     }
@@ -162,6 +172,28 @@ async fn login_records_the_device_and_lists_it_connected() {
         .await;
     policy.assert_status(StatusCode::OK);
     assert_eq!(policy.json_value()["mode"], json!("open"));
+}
+
+#[tokio::test]
+async fn a_forwarded_address_from_an_untrusted_peer_records_the_peer() {
+    let client = TestClient::with_db().await;
+    let peer = IpAddr::from([203, 0, 113, 9]);
+    let phone = Phone::named("Spoofed", "android").connected_from(peer);
+    let account = register(&client, &phone).await;
+
+    let body = listed_devices(&client, &account).await;
+    assert_eq!(device_named(&body, "Spoofed")["last_ip"], json!("203.0.113.9"));
+
+    login(&client, &account, &phone)
+        .await
+        .assert_status(StatusCode::OK);
+    let sessions = client.get_auth("/api/auth/sessions", &account.token).await;
+    sessions.assert_status(StatusCode::OK);
+    let recorded = sessions.json_value().to_string();
+    assert!(
+        recorded.contains("203.0.113.9") && !recorded.contains(phone.ip),
+        "a session recorded the forwarded address: {recorded}"
+    );
 }
 
 #[tokio::test]

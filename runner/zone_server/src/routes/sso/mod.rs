@@ -8,6 +8,7 @@ pub mod refusal;
 pub mod saml;
 pub mod settings;
 pub mod sign_in;
+pub mod throttle;
 
 use axum::Json;
 use axum::extract::rejection::JsonRejection;

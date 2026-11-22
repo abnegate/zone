@@ -24,12 +24,14 @@ use crate::services::login::claude::ROOT_PATH;
 use crate::workers::evaluation::EvaluationSettings;
 
 mod environment;
+pub mod trusted_proxies;
 
 pub use abnegate_comfy::Config as ComfyUiConfig;
 pub use abnegate_llm::catalog::DEFAULT_GPT4ALL_MODELS_URL;
 pub use abnegate_llm::catalog::DEFAULT_HUGGINGFACE_MODELS_URL;
 pub use abnegate_search::WebSearchConfig;
 pub use environment::Environment;
+pub use trusted_proxies::TrustedProxies;
 
 /// GitHub's own REST origin, which `GITHUB_API_URL` overrides for GitHub
 /// Enterprise. The origin answers only for repositories on the host it names,
@@ -1613,6 +1615,8 @@ mod tests {
         evaluation::BUDGET_VARIABLE,
         renewal::ENABLED_VARIABLE,
         renewal::URL_VARIABLE,
+        SSO_REQUESTS_PER_MINUTE,
+        trusted_proxies::VARIABLE,
     ];
     const GITHUB_SETTINGS: [&str; 4] = [
         GITHUB_PULL_REQUEST_TTL,
@@ -2519,6 +2523,71 @@ mod tests {
             );
             assert!(!refused.to_string().contains(url), "{refused}");
         }
+    }
+
+    fn required(environment: &mut Variables) {
+        environment.set("JWT_SECRET", "12345678901234567890123456789012");
+        environment.set("ENCRYPTION_KEY", "abcdefghijklmnopqrstuvwxyz123456");
+        environment.set("DATABASE_URL", "postgres://database/zone");
+        environment.set("REDIS_URL", "redis://cache:6379");
+        environment.set("LITELLM_HOST", "http://models:4000");
+        environment.set("LITELLM_KEY", "models-key");
+    }
+
+    #[test]
+    fn single_sign_on_limits_default_and_refuse_zero() {
+        let mut environment = Variables::isolated(ENVIRONMENT);
+        required(&mut environment);
+
+        let config = Config::from_env().expect("required values are present");
+        assert_eq!(config.sso_requests_per_minute, DEFAULT_SSO_REQUESTS_PER_MINUTE);
+        assert_eq!(config.sso_requests_per_minute, 120);
+        assert_eq!(config.saml_permit_wait, PARSE_PERMIT_WAIT);
+        assert_eq!(config.trusted_proxies, TrustedProxies::default());
+
+        environment.set(SSO_REQUESTS_PER_MINUTE, " 30 ");
+        assert_eq!(
+            Config::from_env()
+                .expect("a positive limit")
+                .sso_requests_per_minute,
+            30
+        );
+
+        for refused in ["0", "-1", "many", "1.5"] {
+            environment.set(SSO_REQUESTS_PER_MINUTE, refused);
+            let error = Config::from_env().map(|_| ()).unwrap_err();
+            assert!(
+                matches!(error, ConfigError::Invalid(message) if message.contains(SSO_REQUESTS_PER_MINUTE)),
+                "{refused}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_proxies_are_read_and_an_invalid_entry_stops_startup() {
+        let mut environment = Variables::isolated(ENVIRONMENT);
+        required(&mut environment);
+        let edge: IpAddr = "172.31.0.7".parse().unwrap();
+
+        environment.set(trusted_proxies::VARIABLE, "172.31.0.0/24");
+        let trusted = Config::from_env()
+            .expect("a valid list")
+            .trusted_proxies;
+        assert!(trusted.trusts(edge));
+        assert!(!trusted.trusts(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+
+        environment.set(trusted_proxies::VARIABLE, "");
+        let trusted = Config::from_env()
+            .expect("an empty list")
+            .trusted_proxies;
+        assert!(!trusted.trusts(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+
+        environment.set(trusted_proxies::VARIABLE, "172.31.0.0/24,traefik");
+        let error = Config::from_env().map(|_| ()).unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::TrustedProxy(entry) if entry == "traefik"),
+            "{error}"
+        );
     }
 
     /// The environment picks the default every organization without an agent

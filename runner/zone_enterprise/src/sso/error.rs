@@ -211,6 +211,7 @@ mod tests {
         assert_eq!(DOMAIN_REQUIRED, "sso_domain_required");
         assert_eq!(VERIFIED_EMAIL_UNSUPPORTED, "sso_verified_email_unsupported");
         assert_eq!(PROTOCOL_MISMATCH, "sso_protocol_mismatch");
+        assert_eq!(RATE_LIMITED, "sso_rate_limited");
     }
 
     #[test]
