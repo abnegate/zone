@@ -17,6 +17,7 @@ export {
   CustomRoleReferenceSchema,
   CustomRoleSchema,
   ORGANIZATION_PERMISSIONS,
+  PERMISSION_REQUIREMENTS,
   PERMISSIONS,
   Permission,
   PermissionDefinitionSchema,

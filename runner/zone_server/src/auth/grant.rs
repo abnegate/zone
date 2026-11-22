@@ -56,12 +56,15 @@ impl Grant {
             }
             permissions.insert(permission);
         }
+        if let Some((permission, needs)) = unmet(&permissions) {
+            return Err(Composition::Requires { permission, needs });
+        }
         Ok(Self(permissions))
     }
 
     /// Rebuilds a custom role's grant from stored names, dropping any that are
-    /// unknown, of another scope, or not composable, so a stored row can never
-    /// grant more than a composed one.
+    /// unknown, of another scope, not composable, or without the permission
+    /// they require, so a stored row can never grant more than a composed one.
     pub fn stored<I, S>(scope: Scope, names: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -73,6 +76,9 @@ impl Grant {
             .filter(|permission| permission.scope() == scope && permission.composable())
             .collect();
         permissions.extend(scope.base());
+        while let Some((permission, _)) = unmet(&permissions) {
+            permissions.remove(&permission);
+        }
         Self(permissions)
     }
 
@@ -118,6 +124,15 @@ impl Serialize for Grant {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_seq(self.names())
     }
+}
+
+fn unmet(permissions: &BTreeSet<Permission>) -> Option<(Permission, Permission)> {
+    permissions.iter().find_map(|permission| {
+        permission
+            .requires()
+            .filter(|needs| !permissions.contains(needs))
+            .map(|needs| (*permission, needs))
+    })
 }
 
 const fn organization_threshold(permission: Permission) -> Option<OrgRole> {

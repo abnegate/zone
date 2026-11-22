@@ -1,5 +1,6 @@
 //! Every organization and workspace route, called by a custom-role holder
-//! with exactly the permission the route checks and by one without it.
+//! with exactly the permission the route checks, and any it requires, and by
+//! one without it.
 //!
 //! A holder with the permission is answered exactly what its probe earns
 //! past every guard, so a guard that turns it away with any status is caught.
@@ -717,7 +718,10 @@ async fn departures(fixture: &Fixture, scope: Scope, routes: &[Route]) -> Vec<St
         }
 
         if let Entry::Vacant(slot) = holders.entry(permission) {
-            slot.insert(holder(fixture, scope, &[permission]).await);
+            let needed: Vec<Permission> = std::iter::once(permission)
+                .chain(permission.requires())
+                .collect();
+            slot.insert(holder(fixture, scope, &needed).await);
         }
         let granted = &holders[&permission];
 

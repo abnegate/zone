@@ -328,6 +328,20 @@ describe('RolesSection', () => {
       }
     });
 
+    it('ticks seeing spend with managing budgets and clears managing budgets with seeing spend', async () => {
+      await loaded(ACTIVE);
+      fireEvent.click(screen.getByRole('button', { name: 'Create role' }));
+      fireEvent.click(within(dialog()).getByRole('radio', { name: /Organization/ }));
+
+      fireEvent.click(permission(Permission.SpendUpdate));
+      expect(permission(Permission.SpendUpdate)).toBeChecked();
+      expect(permission(Permission.SpendRead)).toBeChecked();
+
+      fireEvent.click(permission(Permission.SpendRead));
+      expect(permission(Permission.SpendRead)).not.toBeChecked();
+      expect(permission(Permission.SpendUpdate)).not.toBeChecked();
+    });
+
     it('explains how far an invitation reaches', async () => {
       await loaded(ACTIVE);
       fireEvent.click(screen.getByRole('button', { name: 'Create role' }));

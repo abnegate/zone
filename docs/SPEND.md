@@ -13,8 +13,8 @@ through Zone's LiteLLM is never given a number; the report lists it by reason
 instead.
 
 Holders of `spend:read`, which organization owners and admins have, find
-reports and budgets under **Settings → Organization → Spend**, and holders of
-`spend:update` change budgets there (see [Who can see and change](#who-can-see-and-change)).
+reports and budgets under **Settings → Organization → Spend**, and those who
+also hold `spend:update` change budgets there (see [Who can see and change](#who-can-see-and-change)).
 
 ## Licensing
 
@@ -66,17 +66,18 @@ unblocked.
 |---|---|
 | Reports and the CSV export | Holders of `spend:read` |
 | Budgets, to see | Holders of `spend:read` |
-| Budgets, to change | Holders of `spend:update`, with an entitled license |
+| Budgets, to change | Holders of `spend:read` and `spend:update`, with an entitled license |
 | Budget notices | Active organization owners and admins, and for a workspace budget, that workspace's owners and admins too |
 
 Organization owners and admins hold both permissions. With Zone Enterprise an
-organization can also give either one to a custom role (see
-[ROLES.md](ROLES.md)); the two are independent, so a role that only changes
-budgets doesn't see reports, and the reports and budgets answers say
-`editable: false` to a caller without `spend:update`. The spend license gate
-and the custom roles one are separate: a member who holds a custom role keeps
-its spend permissions on a Team license, and a Team license is all spend
-needs.
+organization can also give them to a custom role (see [ROLES.md](ROLES.md)):
+`spend:read` on its own, or `spend:update` together with `spend:read`, because
+a budget's answer carries its target's spend, name and email. A role that
+names `spend:update` without `spend:read` is refused with
+`permission_requires`. The reports and budgets answers say `editable: false`
+to a caller without `spend:update`. The spend license gate and the custom
+roles one are separate: a member who holds a custom role keeps its spend
+permissions on a Team license, and a Team license is all spend needs.
 
 Other members of the organization, workspace admins included, get `403` "Only
 organization owners and admins can see spend or change budgets". Someone who
@@ -386,12 +387,15 @@ Each budget gets one warning notice and one exhaustion notice a month. When
 spend passes both between two runs, only the exhaustion notice goes. A soft
 budget gets the same notices as a hard one.
 
+Notices go to built-in roles only: a custom role that holds `spend:read`
+sees the budgets but receives none of their notices.
+
 A notice goes:
 
-- by email, when SMTP is configured, to the organization's owners and
-  admins, and for a workspace budget to that workspace's owners and admins
-  too, once per address and never to a deactivated account, one at a time,
-  each waiting up to 60 seconds;
+- by email, when SMTP is configured, to the organization's built-in owners
+  and admins, and for a workspace budget to that workspace's built-in owners
+  and admins too, once per address and never to a deactivated account, one
+  at a time, each waiting up to 60 seconds;
 - to the server's notification channels:
   [`ZONE_NOTIFY_SLACK_WEBHOOK`](CONFIGURATION.md#zone_notify_slack_webhook),
   [`ZONE_NOTIFY_DISCORD_WEBHOOK`](CONFIGURATION.md#zone_notify_discord_webhook)

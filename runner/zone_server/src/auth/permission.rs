@@ -61,6 +61,10 @@ const WORKSPACE_ADMIN_REQUIRED: &str = "Workspace admin access required";
 pub const SPEND_REFUSED: &str =
     "Only organization owners and admins can see spend or change budgets";
 
+/// Each pair is a permission and the one a role must hold alongside it.
+const REQUIREMENTS: [(Permission, Permission); 1] =
+    [(Permission::SpendUpdate, Permission::SpendRead)];
+
 impl Permission {
     pub const ALL: [Self; 41] = [
         Self::ModelsCreate,
@@ -215,6 +219,14 @@ impl Permission {
                 | Self::WorkspaceDelete
                 | Self::WorkspaceAdministratorsUpdate
         )
+    }
+
+    /// The permission a custom role must also hold to carry this one.
+    pub fn requires(self) -> Option<Self> {
+        REQUIREMENTS
+            .into_iter()
+            .find(|(permission, _)| *permission == self)
+            .map(|(_, needs)| needs)
     }
 
     pub const fn index(self) -> u16 {

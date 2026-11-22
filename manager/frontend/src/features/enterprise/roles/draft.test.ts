@@ -79,6 +79,17 @@ describe('drafts', () => {
     expect(toggled(on, Permission.WorkspaceUpdate, true)).toEqual(on);
   });
 
+  it('ticks the permission a chosen one requires and unticks what requires a cleared one', () => {
+    const on = toggled([Permission.AuditLogsRead], Permission.SpendUpdate, true);
+    expect(on).toEqual([Permission.AuditLogsRead, Permission.SpendRead, Permission.SpendUpdate]);
+    expect(toggled(on, Permission.SpendRead, false)).toEqual([Permission.AuditLogsRead]);
+    expect(toggled(on, Permission.SpendUpdate, false)).toEqual([
+      Permission.AuditLogsRead,
+      Permission.SpendRead,
+    ]);
+    expect(toggled([], Permission.SpendRead, true)).toEqual([Permission.SpendRead]);
+  });
+
   it('drops the permissions another scope does not hold when the scope changes', () => {
     const draft = {
       ...emptyDraft(),

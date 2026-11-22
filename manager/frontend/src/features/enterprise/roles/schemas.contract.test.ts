@@ -19,6 +19,7 @@ import {
   CustomRoleReferenceSchema,
   CustomRoleSchema,
   ORGANIZATION_PERMISSIONS,
+  PERMISSION_REQUIREMENTS,
   PERMISSIONS,
   PermissionDefinitionSchema,
   ROLE_BASE,
@@ -55,6 +56,8 @@ const SCOPE_ARM = /((?:\|?\s*Self::[A-Za-z]+\s*)+)=>\s*Scope::([A-Za-z]+)/g;
 const VARIANT = /Self::([A-Za-z]+)/g;
 const BASE_ARM = /Self::([A-Za-z]+) => Some\((?:Permission::)?([A-Za-z]+)\)/g;
 const CODE_ARM = /=> "([a-z_]+)"/g;
+const REQUIREMENTS = /const REQUIREMENTS[^=]*=\s*\[([^;]*)\];/;
+const REQUIREMENT = /\(Permission::([A-Za-z]+), Permission::([A-Za-z]+)\)/g;
 const CODE = /pub const ([A-Z_]+): &str = "([^"]+)";/g;
 const STRUCT = /struct ([A-Z][A-Za-z]*)\s*\{/g;
 const PERMISSION_CHECK =
@@ -203,6 +206,17 @@ describe('the permission names match the catalogue the server declares', () => {
       ])
     );
     expect(bases).toEqual({ ...ROLE_BASE });
+  });
+
+  test('each permission requires the one the server requires alongside it', () => {
+    const table = REQUIREMENTS.exec(read(PERMISSION_RS))?.[1];
+    if (table === undefined) throw new Error('permission.rs declares no REQUIREMENTS table');
+    const nameOf = names();
+    const required = Object.fromEntries(
+      [...table.matchAll(REQUIREMENT)].map((pair) => [nameOf.get(pair[1]), nameOf.get(pair[2])])
+    );
+    expect(Object.keys(required).length).toBeGreaterThan(0);
+    expect(required).toEqual({ ...PERMISSION_REQUIREMENTS });
   });
 
   test('the fixture catalogue stores exactly the names the database accepts in a role', () => {

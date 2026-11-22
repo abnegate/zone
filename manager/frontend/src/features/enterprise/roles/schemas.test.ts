@@ -3,6 +3,7 @@ import { ACTIVE, AUDITOR } from './fixtures';
 import {
   CreateRoleRequestSchema,
   ORGANIZATION_PERMISSIONS,
+  PERMISSION_REQUIREMENTS,
   PERMISSIONS,
   Permission,
   ROLE_BASE,
@@ -39,6 +40,16 @@ describe('the permission catalogue', () => {
     });
     expect(ORGANIZATION_PERMISSIONS).toContain(ROLE_BASE[RoleScope.Organization]);
     expect(WORKSPACE_PERMISSIONS).toContain(ROLE_BASE[RoleScope.Workspace]);
+  });
+
+  it('requires only a composable permission of the same scope', () => {
+    const bases = new Set<string>(Object.values(ROLE_BASE));
+    const organization = new Set<string>(ORGANIZATION_PERMISSIONS);
+    for (const [permission, needs] of Object.entries(PERMISSION_REQUIREMENTS)) {
+      expect(bases.has(needs), permission).toBe(false);
+      expect(organization.has(needs), permission).toBe(organization.has(permission));
+    }
+    expect(PERMISSION_REQUIREMENTS).toEqual({ [Permission.SpendUpdate]: Permission.SpendRead });
   });
 
   it('models every role code once', () => {

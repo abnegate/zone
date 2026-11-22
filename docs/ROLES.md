@@ -90,6 +90,10 @@ A permission is either composable, which means a custom role may include it,
 or not. Everything that seats, changes or removes owners and admins is not
 composable, and neither is deleting the organization or a workspace.
 
+A composable permission can require another: a custom role that holds it
+must hold that one too. Only `spend:update` has a requirement, `spend:read`,
+because a budget's answer carries its target's spend, name and email.
+
 ### Organization permissions
 
 | Permission | What it allows | Built-in roles | In custom roles |
@@ -116,7 +120,7 @@ composable, and neither is deleting the organization or a workspace.
 | `audit_logs:read` | Read and download the organization's audit log | admin, owner | Yes |
 | `audit:update` | Manage audit streaming destinations, exports and retention | admin, owner | Yes |
 | `spend:read` | See the organization's spend reports and budgets, and download spend as CSV (see [SPEND.md](SPEND.md)) | admin, owner | Yes |
-| `spend:update` | Create, change and delete the organization's budgets | admin, owner | Yes |
+| `spend:update` | Create, change and delete the organization's budgets | admin, owner | Yes, with `spend:read` |
 | `roles:update` | Create, edit and delete custom roles | admin, owner | No |
 
 ### Workspace permissions
@@ -187,6 +191,8 @@ grant nothing:
 - a stored permission that isn't composable;
 - a stored permission of the other scope, such as `members:create` on a
   workspace role;
+- a stored permission without the one it requires, such as `spend:update`
+  without `spend:read`;
 - a membership that refers to a role of another organization or of the wrong
   scope. Such a membership doesn't even get the base permission, so its
   holder is treated as not being a member.
@@ -342,7 +348,9 @@ server checks every request either way.
 
 The **Roles** page appears to holders of `roles:update`. Any organization
 member can read the roles API, because whoever changes workspace roles needs
-the list to give them.
+the list to give them. In its editor, choosing a permission also chooses the
+one it requires, and clearing a permission clears those that require it, so
+choosing **Manage budgets** chooses **See spend**.
 
 ## Audit log
 
@@ -362,6 +370,7 @@ the list to give them.
 | `permission_unknown` | 400 | A permission name isn't in the catalogue. |
 | `permission_not_composable` | 400 | A permission can't go in a custom role. |
 | `permission_out_of_scope` | 400 | A permission belongs to the other scope. |
+| `permission_requires` | 400 | A permission needs another that the role doesn't hold, such as `spend:update` without `spend:read`. |
 | `name_invalid` | 400 | The name is empty. |
 | `name_reserved` | 400 | The name is a built-in role's. |
 | `role_name_taken` | 409 | Another role in the organization has this name, ignoring case. |

@@ -1,13 +1,13 @@
 //! Spend reports and budgets held by custom organization roles: `spend:read`
-//! sees them, `spend:update` changes budgets, and the spend license gate is
-//! independent of the custom roles one.
+//! sees them, `spend:update` alongside it changes budgets, and the spend
+//! license gate is independent of the custom roles one.
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
 use zone_server::auth::{Permission, Scope};
 
-use super::{Call, describe, licensed, organization_holder, role};
+use super::{Call, describe, holding_organization, licensed, organization_holder, role};
 use crate::common::TestResponse;
 use crate::common::policy::Fixture;
 use crate::common::spend::{budget_path, budgets_path, exports_path, reports_path};
@@ -16,6 +16,7 @@ use crate::common::sso::{self, Account};
 const FORBIDDEN: &str = "Only organization owners and admins can see spend or change budgets";
 const ORGANIZATION_MISSING: &str = "Organization not found";
 const LIMIT: i64 = 50_000_000;
+const STEWARD: [Permission; 2] = [Permission::SpendRead, Permission::SpendUpdate];
 
 fn organization_wide(limit: i64) -> Value {
     json!({ "scope": "organization", "limit_microdollars": limit })
@@ -112,9 +113,9 @@ async fn a_spend_reader_sees_reports_exports_and_budgets_and_changes_none() {
 }
 
 #[tokio::test]
-async fn a_budget_editor_creates_changes_and_deletes_budgets_but_reads_no_spend() {
+async fn a_budget_editor_who_sees_spend_creates_changes_and_deletes_budgets() {
     let fixture = licensed().await;
-    let editor = organization_holder(&fixture, &[Permission::SpendUpdate]).await;
+    let editor = organization_holder(&fixture, &STEWARD).await;
     let organization = fixture.organization;
 
     let creation = Call::post(budgets_path(organization), organization_wide(LIMIT));
@@ -146,7 +147,31 @@ async fn a_budget_editor_creates_changes_and_deletes_budgets_but_reads_no_spend(
         "{}",
         describe(&removal, &removed)
     );
-    for call in reads(&fixture) {
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_stored_budget_editor_without_spend_changes_and_reads_nothing() {
+    let fixture = licensed().await;
+    let budget = budget(&fixture).await;
+    let held = role(
+        fixture.pool(),
+        fixture.organization,
+        fixture.owner.id,
+        Scope::Organization,
+        &[],
+    )
+    .await;
+    sqlx::query("INSERT INTO custom_role_permissions (role_id, permission) VALUES ($1, $2)")
+        .bind(held)
+        .bind(Permission::SpendUpdate.name())
+        .execute(fixture.pool())
+        .await
+        .expect("a row from before spend:update needed spend:read");
+    let editor = holding_organization(&fixture, held).await;
+
+    for call in reads(&fixture).into_iter().chain(changes(&fixture, budget)) {
         let response = call.send(&fixture, &editor.token).await;
         refused(&call, &response, StatusCode::FORBIDDEN, FORBIDDEN);
     }
@@ -157,8 +182,7 @@ async fn a_budget_editor_creates_changes_and_deletes_budgets_but_reads_no_spend(
 #[tokio::test]
 async fn a_holder_of_both_reads_spend_as_editable() {
     let fixture = licensed().await;
-    let steward =
-        organization_holder(&fixture, &[Permission::SpendRead, Permission::SpendUpdate]).await;
+    let steward = organization_holder(&fixture, &STEWARD).await;
 
     assert_eq!(
         editable(&fixture, &steward).await,
@@ -192,7 +216,7 @@ async fn a_membership_whose_role_grants_nothing_is_told_the_organization_does_no
         elsewhere,
         fixture.owner.id,
         Scope::Organization,
-        &[Permission::SpendRead, Permission::SpendUpdate],
+        &STEWARD,
     )
     .await;
     let mis_scoped = role(
@@ -234,7 +258,7 @@ async fn a_membership_whose_role_grants_nothing_is_told_the_organization_does_no
 async fn a_spend_reader_keeps_spend_on_a_team_license_that_has_no_custom_roles() {
     let fixture = licensed().await;
     let reader = organization_holder(&fixture, &[Permission::SpendRead]).await;
-    let editor = organization_holder(&fixture, &[Permission::SpendUpdate]).await;
+    let editor = organization_holder(&fixture, &STEWARD).await;
     fixture.install(&sso::team()).await;
 
     for call in reads(&fixture) {

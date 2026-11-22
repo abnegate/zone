@@ -55,6 +55,7 @@ export const RoleCode = {
   PermissionUnknown: 'permission_unknown',
   PermissionNotComposable: 'permission_not_composable',
   PermissionOutOfScope: 'permission_out_of_scope',
+  PermissionRequires: 'permission_requires',
   NameInvalid: 'name_invalid',
   NameReserved: 'name_reserved',
   NameTaken: 'role_name_taken',
@@ -116,10 +117,15 @@ export const ROLE_BASE: Readonly<Record<RoleScope, PermissionName>> = {
   [RoleScope.Workspace]: Permission.WorkspaceRead,
 };
 
+export const PERMISSION_REQUIREMENTS: Readonly<Partial<Record<PermissionName, PermissionName>>> = {
+  [Permission.SpendUpdate]: Permission.SpendRead,
+};
+
 export const COMPOSITION_CODES = [
   RoleCode.PermissionUnknown,
   RoleCode.PermissionNotComposable,
   RoleCode.PermissionOutOfScope,
+  RoleCode.PermissionRequires,
 ] as const;
 
 export const ROLE_ROUTE_CODES = [

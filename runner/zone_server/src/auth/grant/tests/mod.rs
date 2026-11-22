@@ -77,6 +77,13 @@ fn composable_by_specification(permission: Permission) -> bool {
     )
 }
 
+fn required_by_specification(permission: Permission) -> Option<Permission> {
+    match permission {
+        Permission::SpendUpdate => Some(Permission::SpendRead),
+        _ => None,
+    }
+}
+
 const ORGANIZATION_ROLES: [OrgRole; 3] = [OrgRole::Member, OrgRole::Admin, OrgRole::Owner];
 const WORKSPACE_ROLES: [WorkspaceRole; 4] = [
     WorkspaceRole::Viewer,
@@ -99,6 +106,29 @@ fn the_threshold_table_agrees_with_the_catalogue_on_every_permission() {
             composable_by_specification(permission),
             "{}",
             permission.name()
+        );
+        assert_eq!(
+            permission.requires(),
+            required_by_specification(permission),
+            "{}",
+            permission.name()
+        );
+    }
+}
+
+#[test]
+fn a_requirement_is_a_composable_permission_or_the_base_of_the_same_scope() {
+    for permission in Permission::ALL {
+        let Some(needs) = permission.requires() else {
+            continue;
+        };
+        let scope = permission.scope();
+        assert!(permission.composable(), "{}", permission.name());
+        assert_eq!(needs.scope(), scope, "{}", permission.name());
+        assert!(
+            needs.composable() || Some(needs) == scope.base(),
+            "{}",
+            needs.name()
         );
     }
 }
@@ -310,6 +340,34 @@ fn compose_refuses_every_permission_of_another_scope() {
 }
 
 #[test]
+fn compose_refuses_changing_budgets_without_seeing_spend() {
+    let error = Grant::compose(
+        Scope::Organization,
+        &[Permission::SpendUpdate.name().to_string()],
+    )
+    .expect_err("spend:update alone is refused");
+    assert_eq!(
+        error,
+        Composition::Requires {
+            permission: Permission::SpendUpdate,
+            needs: Permission::SpendRead,
+        }
+    );
+    assert_eq!(error.code(), "permission_requires");
+    assert!(
+        error.message().contains("spend:update") && error.message().contains("spend:read"),
+        "{}",
+        error.message()
+    );
+
+    let both = [Permission::SpendUpdate, Permission::SpendRead]
+        .map(|permission| permission.name().to_string());
+    let grant = Grant::compose(Scope::Organization, &both).expect("the pair composes");
+    assert!(grant.allows(Permission::SpendRead));
+    assert!(grant.allows(Permission::SpendUpdate));
+}
+
+#[test]
 fn compose_accepts_every_composable_permission_of_its_scope() {
     for scope in [Scope::Organization, Scope::Workspace] {
         let composable: Vec<String> = Permission::ALL
@@ -353,22 +411,45 @@ fn stored_keeps_only_known_composable_names_of_its_scope_and_adds_the_base() {
 }
 
 #[test]
+fn stored_drops_a_permission_without_the_one_it_requires() {
+    let stored = Grant::stored(Scope::Organization, ["spend:update"]);
+    assert!(!stored.allows(Permission::SpendUpdate));
+    assert_eq!(stored.names(), vec!["organization:read"]);
+
+    let stored = Grant::stored(Scope::Organization, ["spend:update", "spend:read"]);
+    assert!(stored.allows(Permission::SpendUpdate));
+    assert!(stored.allows(Permission::SpendRead));
+}
+
+#[test]
 fn stored_never_grants_more_than_compose_would() {
     for scope in [Scope::Organization, Scope::Workspace] {
-        let every: Vec<&str> = Permission::ALL.iter().map(|p| p.name()).collect();
-        let stored = Grant::stored(scope, &every);
-        let composable: Vec<String> = stored.names().into_iter().map(str::to_string).collect();
-        assert_eq!(
-            Grant::compose(scope, &composable).expect("what is stored composes"),
-            stored
-        );
+        let every: Vec<&str> = Permission::ALL
+            .iter()
+            .map(|permission| permission.name())
+            .collect();
+        let alone = Permission::ALL
+            .iter()
+            .map(|permission| vec![permission.name()]);
+        for names in std::iter::once(every).chain(alone) {
+            let stored = Grant::stored(scope, &names);
+            let composable: Vec<String> = stored.names().into_iter().map(str::to_string).collect();
+            assert_eq!(
+                Grant::compose(scope, &composable),
+                Ok(stored),
+                "{scope:?} stored from {names:?}"
+            );
+        }
     }
 }
 
 #[test]
 fn custom_grants_never_reach_owner_only_permissions() {
     for scope in [Scope::Organization, Scope::Workspace] {
-        let every: Vec<&str> = Permission::ALL.iter().map(|p| p.name()).collect();
+        let every: Vec<&str> = Permission::ALL
+            .iter()
+            .map(|permission| permission.name())
+            .collect();
         let stored = Grant::stored(scope, every);
         for permission in [
             Permission::OrganizationDelete,

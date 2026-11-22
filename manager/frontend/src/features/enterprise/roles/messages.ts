@@ -20,6 +20,8 @@ const MESSAGES: Readonly<Record<Exclude<RoleCode, typeof RoleCode.InUse>, string
     "One of the chosen permissions is kept for built-in owners and admins, so it can't go in a custom role.",
   [RoleCode.PermissionOutOfScope]:
     "One of the chosen permissions doesn't apply to roles of this kind.",
+  [RoleCode.PermissionRequires]:
+    "One of the chosen permissions needs another that isn't chosen, as Manage budgets needs See spend. Choose both.",
   [RoleCode.NameInvalid]: NAME_REQUIRED,
   [RoleCode.NameReserved]:
     'Owner, admin, member and viewer are built-in roles. Choose another name.',
@@ -34,6 +36,7 @@ const FIELDS: Readonly<Partial<Record<RoleCode, RoleField>>> = {
   [RoleCode.PermissionUnknown]: RoleField.Permissions,
   [RoleCode.PermissionNotComposable]: RoleField.Permissions,
   [RoleCode.PermissionOutOfScope]: RoleField.Permissions,
+  [RoleCode.PermissionRequires]: RoleField.Permissions,
 };
 
 export function inUseMessage(members: number | undefined): string {

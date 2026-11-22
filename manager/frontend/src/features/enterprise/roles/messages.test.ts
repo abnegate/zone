@@ -30,6 +30,7 @@ describe('role refusals', () => {
       RoleCode.PermissionUnknown,
       RoleCode.PermissionNotComposable,
       RoleCode.PermissionOutOfScope,
+      RoleCode.PermissionRequires,
     ]) {
       expect(refusalField(code), code).toBe(RoleField.Permissions);
     }

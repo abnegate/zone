@@ -25,6 +25,7 @@ const IN_USE: &str = "role_in_use";
 const UNKNOWN: &str = "permission_unknown";
 const NOT_COMPOSABLE: &str = "permission_not_composable";
 const OUT_OF_SCOPE: &str = "permission_out_of_scope";
+const REQUIRES: &str = "permission_requires";
 const BODY_INVALID: &str = "body_invalid";
 const SCOPE_INVALID: &str = "scope_invalid";
 const ORGANIZATION_MISSING: &str = "Organization not found";
@@ -625,6 +626,7 @@ async fn every_invalid_role_is_refused_with_its_code() {
             organization_role("Writer", &["models:create"]),
             OUT_OF_SCOPE,
         ),
+        (organization_role("Treasurer", &["spend:update"]), REQUIRES),
     ];
     for (body, code) in cases {
         let response = create(&fixture, token, &body).await;

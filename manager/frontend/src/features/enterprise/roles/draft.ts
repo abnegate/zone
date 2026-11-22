@@ -1,4 +1,10 @@
-import { type PermissionName, ROLE_BASE, RoleScope } from './schemas';
+import {
+  PERMISSION_REQUIREMENTS,
+  PERMISSIONS,
+  type PermissionName,
+  ROLE_BASE,
+  RoleScope,
+} from './schemas';
 import type {
   CreateRoleRequest,
   CustomRole,
@@ -34,13 +40,30 @@ export function choices(
   return catalogue.filter((entry) => entry.scope === scope && entry.composable);
 }
 
+function requirements(permission: PermissionName): PermissionName[] {
+  const needed: PermissionName[] = [];
+  let next = PERMISSION_REQUIREMENTS[permission];
+  while (next !== undefined && !needed.includes(next)) {
+    needed.unshift(next);
+    next = PERMISSION_REQUIREMENTS[next];
+  }
+  return needed;
+}
+
+function requiring(permission: PermissionName): PermissionName[] {
+  return PERMISSIONS.filter((candidate) => requirements(candidate).includes(permission));
+}
+
 export function toggled(
   permissions: readonly PermissionName[],
   permission: PermissionName,
   on: boolean
 ): PermissionName[] {
-  const rest = permissions.filter((entry) => entry !== permission);
-  return on ? [...rest, permission] : rest;
+  const changing = on
+    ? [...requirements(permission), permission]
+    : [permission, ...requiring(permission)];
+  const rest = permissions.filter((entry) => !changing.includes(entry));
+  return on ? [...rest, ...changing] : rest;
 }
 
 export function rescoped(
