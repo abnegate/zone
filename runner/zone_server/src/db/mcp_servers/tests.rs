@@ -627,6 +627,11 @@ async fn only_administrators_create() {
         ),
         "{member:?}"
     );
+    assert_eq!(
+        member.expect_err("a member is refused").to_string(),
+        Permission::McpServersUpdate.refusal(),
+        "the refusal names the permission"
+    );
 
     let outsider = create_authorized(
         &fixture.pool,
@@ -1442,6 +1447,11 @@ async fn a_viewer_reads_overrides_and_cannot_write_them() {
     assert!(
         matches!(write, Err(McpServerError::Forbidden(WORKSPACE_FORBIDDEN))),
         "{write:?}"
+    );
+    assert_eq!(
+        write.expect_err("a viewer is refused").to_string(),
+        Permission::WorkspaceMcpServersUpdate.refusal(),
+        "the refusal names the permission"
     );
 
     let outsider = workspace_list_authorized(

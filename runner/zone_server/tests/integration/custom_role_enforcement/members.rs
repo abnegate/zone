@@ -6,7 +6,7 @@
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
-use zone_enterprise::LICENSE_REQUIRED;
+use zone_enterprise::{LICENSE_REQUIRED, MEMBER_CAP_REACHED};
 use zone_server::auth::{Permission, Scope};
 use zone_server::db::audit::actions;
 use zone_server::db::custom_roles::{AMBIGUOUS_ASSIGNMENT, EXCEEDS};
@@ -875,6 +875,71 @@ async fn an_inviter_never_invites_beyond_its_grant() {
         "an invitation within the inviter's grant is sent: {}",
         describe(&call, &response)
     );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_custom_holder_inviting_beyond_its_grant_to_a_full_community_server_reads_role_exceeds() {
+    let fixture = fixture().await;
+    let holder = organization_holder(
+        &fixture,
+        &[Permission::InvitationsCreate, Permission::MembersCreate],
+    )
+    .await;
+    fixture.member(OrgRole::Member, None).await;
+    fixture.state().cap_members();
+    let invitations = format!("/api/organizations/{}/invitations", fixture.organization);
+    let stranger = format!("{}@example.test", Uuid::new_v4());
+
+    let call = Call::post(
+        invitations.clone(),
+        json!({ "email": stranger, "org_role": OrgRole::Admin.as_str() }),
+    );
+    let response = call.send(&fixture, &holder.token).await;
+    assert!(
+        refused_with(&response, EXCEEDS),
+        "the role checks come before the cap: {}",
+        describe(&call, &response)
+    );
+
+    let call = Call::post(
+        invitations,
+        json!({ "email": stranger, "org_role": OrgRole::Member.as_str() }),
+    );
+    let response = call.send(&fixture, &holder.token).await;
+    assert!(
+        refused_with(&response, MEMBER_CAP_REACHED),
+        "{}",
+        describe(&call, &response)
+    );
+
+    let existing = user(fixture.pool()).await;
+    let call = Call::post(
+        organization_members_path(&fixture),
+        json!({ "user_id": existing, "role": OrgRole::Admin.as_str() }),
+    );
+    let response = call.send(&fixture, &holder.token).await;
+    assert_eq!(
+        response.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        describe(&call, &response)
+    );
+    assert_eq!(
+        response.json_value(),
+        json!({ "error": "Only owners can grant admin or owner role" }),
+        "an admin grant by a non-owner is refused before the cap: {}",
+        describe(&call, &response)
+    );
+
+    let invited: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM invitations WHERE organization_id = $1")
+            .bind(fixture.organization)
+            .fetch_one(fixture.pool())
+            .await
+            .expect("the invitations are counted");
+    assert_eq!(invited, 0, "a refused invitation is never stored");
 
     fixture.cleanup().await;
 }

@@ -1509,6 +1509,11 @@ mod tests {
                 matches!(refused, Err(AccessError::Forbidden(ORGANIZATION_FORBIDDEN))),
                 "{refused:?}"
             );
+            assert_eq!(
+                refused.expect_err("a member is refused").to_string(),
+                permission.refusal(),
+                "the refusal names the permission"
+            );
             let missing = organization_access(&tenant, outsider, permission).await;
             assert!(
                 matches!(missing, Err(AccessError::NotFound(ORGANIZATION_MISSING))),
@@ -1524,6 +1529,10 @@ mod tests {
         assert!(
             matches!(refused, Err(AccessError::Forbidden(ORGANIZATION_FORBIDDEN))),
             "{refused:?}"
+        );
+        assert_eq!(
+            refused.expect_err("a reader is refused").to_string(),
+            Permission::AiSettingsUpdate.refusal()
         );
         tenant.cleanup().await;
     }
@@ -1643,6 +1652,11 @@ mod tests {
             assert!(
                 matches!(refused, Err(AccessError::Forbidden(WORKSPACE_FORBIDDEN))),
                 "{refused:?}"
+            );
+            assert_eq!(
+                refused.expect_err("a writer is refused").to_string(),
+                Permission::WorkspaceAiSettingsUpdate.refusal(),
+                "the refusal names the permission"
             );
         }
         tenant.cleanup().await;
