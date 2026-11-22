@@ -227,6 +227,10 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Stop the publish registry
+        if: always()
+        run: docker rm --force zone-publish-registry > /dev/null 2>&1 || true
+
   manifest:
     name: Manifest, tags and signatures
     needs: [check, image]
@@ -413,6 +417,10 @@ jobs:
               echo "| \`$PUBLIC_REGISTRY/$repository\` | $tags | \`$digest\` |"
             done < "$RUNNER_TEMP/published"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop the registries
+        if: always()
+        run: docker rm --force zone-publish-registry zone-verify-registry > /dev/null 2>&1 || true
 
   bundle:
     name: Bundle
