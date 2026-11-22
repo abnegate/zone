@@ -62,8 +62,11 @@ confirmed>`**. A business day is one such day.
 - These are response targets only. There is no guarantee of a fix or a
   resolution time. A fix ships in a new release, or as an LTS backport when it
   meets [the backport criteria](LTS.md#what-gets-backported-draft-to-be-confirmed).
-- The clock starts when a request arrives with a valid license ID, so quote it
-  every time.
+- The clock starts when a request arrives with a valid license ID: one we can
+  [check](LICENSING.md#checking-a-license-id) is a Team or Enterprise license
+  that's active or in its grace period. Quote it every time, with the billing
+  email or Polar order reference from [What to send](#what-to-send), so we can
+  check it quickly.
 - Put the severity in the subject line, for example `Sev 1: server won't
   start after upgrading to 1.4.3-lts`.
 
@@ -109,7 +112,10 @@ also the user name you log in with for [LTS images](LTS.md#pulling) and
 
 ## What to send
 
-1. **The license ID**, as above.
+1. **The license ID**, as above, and **the billing email** the license was
+   bought with or **the Polar order reference** from its receipt. We use them
+   to find the subscription behind the ID. For a license issued by hand,
+   outside Polar, give the customer name shown on the License page.
 2. **The version.** On Compose, `docker compose images manager console` shows
    the image tags, such as `1.4.3-lts`. The server reports its own version at
    `/health`:
