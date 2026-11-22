@@ -116,6 +116,17 @@ describe('BudgetEditor', () => {
     getOrgMembers.mockResolvedValue({ members: MEMBERS });
   });
 
+  it('says who gets the threshold notice', async () => {
+    renderEditor();
+    await sourcesLoaded();
+
+    expect(
+      screen.getByText(
+        'Holders of spend:read in the organization, custom roles included, get a notice once spend reaches this share. For a workspace budget, so do its owners and admins.'
+      )
+    ).toBeInTheDocument();
+  });
+
   describe('pickers', () => {
     it('offers the workspaces of the organization, sorted by name', async () => {
       renderEditor();
