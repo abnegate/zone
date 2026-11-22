@@ -514,7 +514,7 @@ describe('visibleSections', () => {
     expect(ORGANIZATION_ROLES).toBe('/settings/organization/roles');
   });
 
-  it('shows Spend only to organization owners and admins, right after the organization Audit export', () => {
+  it('shows Spend only to built-in roles that hold spend:read, right after the organization Audit export', () => {
     for (const [organizationRole, shown] of [
       ['owner', true],
       ['admin', true],

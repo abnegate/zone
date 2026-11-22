@@ -273,7 +273,7 @@ describe('SettingsPage', () => {
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
     });
 
-    it('shows an organization owner and workspace admin all eighteen sections', () => {
+    it('shows an organization owner and workspace admin all nineteen sections', () => {
       signInAs('owner', 'admin');
 
       renderAt('/settings/workspace/general');
