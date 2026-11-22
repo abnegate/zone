@@ -296,7 +296,7 @@ pub struct TaskRow {
 /// The statuses a run holds while it still owns its lease and its task's
 /// admission slot. A run parked on a question is idle, not finished: it keeps
 /// heartbeating, keeps blocking a second admission, and stays sweepable.
-const ACTIVE_RUN_STATUSES: &str = "('running','waiting')";
+pub(crate) const ACTIVE_RUN_STATUSES: &str = "('running','waiting')";
 
 /// A stopped run whose owner is still alive to tear it down, over
 /// `task_runs` aliased `r`. Its task stays reserved for it until the owner
@@ -1765,11 +1765,35 @@ pub async fn stop_task_run_authorized(
     {
         return Ok(Mutation::NotFound);
     }
-    let row: Option<TaskRunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = $2, completed_at = NOW(), error_message = $3, current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL, heartbeat_at = CASE WHEN owner IS NOT NULL AND heartbeat_at > NOW() - INTERVAL '60 seconds' THEN NOW() ELSE heartbeat_at END WHERE id = $1 AND status IN {ACTIVE_RUN_STATUSES} RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait, plan")))
-        .bind(run_id).bind(CANCELLED).bind(STOPPED).fetch_optional(&mut *transaction).await?;
-    let Some(run) = row else {
+    let Some((run, notice)) = cancel_run(&mut transaction, run_id, STOPPED).await? else {
         transaction.commit().await?;
         return Ok(Mutation::Applied(Stop::Finished));
+    };
+    transaction.commit().await?;
+    if let Some(notice) = notice {
+        notice.publish();
+    }
+    task_progress::publish_terminal(run.id, CANCELLED, Some(STOPPED));
+    Ok(Mutation::Applied(Stop::Stopped(Box::new(run))))
+}
+
+/// Cancel a live run with `message` and pause its task, giving the run and
+/// the notice to publish once the caller commits; `None` when the run had
+/// already ended.
+///
+/// The caller must already hold the run's task `FOR UPDATE`, so the task is
+/// locked before the run. A run whose owner is alive keeps its task reserved
+/// under [`DRAINING`], with its lease renewed for the teardown, until that
+/// owner releases it or recovery does once the lease lapses.
+pub(crate) async fn cancel_run(
+    transaction: &mut PgConnection,
+    run_id: Uuid,
+    message: &str,
+) -> DbResult<Option<(TaskRunRow, Option<notice::Notice>)>> {
+    let row: Option<TaskRunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = $2, completed_at = NOW(), error_message = $3, current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL, heartbeat_at = CASE WHEN owner IS NOT NULL AND heartbeat_at > NOW() - INTERVAL '60 seconds' THEN NOW() ELSE heartbeat_at END WHERE id = $1 AND status IN {ACTIVE_RUN_STATUSES} RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait, plan")))
+        .bind(run_id).bind(CANCELLED).bind(message).fetch_optional(&mut *transaction).await?;
+    let Some(run) = row else {
+        return Ok(None);
     };
     let draining: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT EXISTS(SELECT 1 FROM task_runs r WHERE r.id = $1 AND {DRAINING})"
@@ -1779,13 +1803,8 @@ pub async fn stop_task_run_authorized(
     .await?;
     sqlx::query("UPDATE tasks SET status = $3, updated_at = NOW(), active_run_id = CASE WHEN $4 THEN active_run_id END WHERE id = $1 AND active_run_id = $2")
         .bind(run.task_id).bind(run.id).bind(PAUSED).bind(draining).execute(&mut *transaction).await?;
-    let notice = notice::announce_run(&mut transaction, run.id, CANCELLED, Some(STOPPED)).await?;
-    transaction.commit().await?;
-    if let Some(notice) = notice {
-        notice.publish();
-    }
-    task_progress::publish_terminal(run.id, CANCELLED, Some(STOPPED));
-    Ok(Mutation::Applied(Stop::Stopped(Box::new(run))))
+    let notice = notice::announce_run(transaction, run.id, CANCELLED, Some(message)).await?;
+    Ok(Some((run, notice)))
 }
 
 /// Update task run progress
