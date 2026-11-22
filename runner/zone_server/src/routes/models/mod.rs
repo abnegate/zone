@@ -216,7 +216,7 @@ async fn list_workspace_models(
     if let Err(error) = check_workspace_read_access(&state, auth, workspace).await {
         return error.into_response();
     }
-    let route = Route::for_workspace(&state, workspace).await;
+    let route = Route::preview_workspace(&state, workspace).await;
     let origin = match route.origin() {
         Ok(origin) => origin,
         Err(unusable) => return ServerError::Conflict(unusable.to_string()).into_response(),

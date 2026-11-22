@@ -19,6 +19,7 @@ mod production;
 mod seats;
 #[cfg(any(test, feature = "signing"))]
 mod signing;
+pub mod spend;
 #[cfg(feature = "sso")]
 pub mod sso;
 mod status;

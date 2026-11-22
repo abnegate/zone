@@ -44,11 +44,14 @@ pub mod sealing;
 pub mod seats;
 pub mod sessions;
 pub mod sources;
+pub mod spend;
 pub mod sso;
 pub mod sync_config;
 pub mod task_access;
 pub mod task_tool_calls;
 pub mod tasks;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod users;
 pub mod workspace_host_directories;
 pub mod workspace_members;

@@ -1310,6 +1310,69 @@ CREATE INDEX chat_token_usage_chat_idx ON chat_token_usage (chat_id, recorded_at
 CREATE INDEX chat_token_usage_workspace_idx ON chat_token_usage (workspace_id, recorded_at DESC);
 CREATE INDEX chat_token_usage_message_idx ON chat_token_usage (message_id);
 
+CREATE TABLE budgets (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    workspace_id uuid REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id uuid REFERENCES users(id) ON DELETE CASCADE,
+    limit_microdollars bigint NOT NULL,
+    threshold_percent integer DEFAULT 80 NOT NULL,
+    hard boolean DEFAULT false NOT NULL,
+    exhausted_month date,
+    warning_sent_month date,
+    exhaustion_sent_month date,
+    created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    updated_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT budgets_limit_check CHECK (limit_microdollars > 0),
+    CONSTRAINT budgets_threshold_check CHECK (threshold_percent BETWEEN 1 AND 100),
+    CONSTRAINT budgets_scope_check CHECK (workspace_id IS NULL OR user_id IS NULL),
+    CONSTRAINT budgets_target_key UNIQUE NULLS NOT DISTINCT (organization_id, workspace_id, user_id)
+);
+CREATE INDEX idx_budgets_workspace ON budgets (workspace_id) WHERE workspace_id IS NOT NULL;
+CREATE INDEX idx_budgets_user ON budgets (user_id) WHERE user_id IS NOT NULL;
+
+CREATE TABLE spend_cursor (
+    id boolean DEFAULT true NOT NULL PRIMARY KEY,
+    through timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT spend_cursor_singleton_check CHECK (id)
+);
+
+CREATE TABLE spend_keys (
+    token text NOT NULL PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    workspace_id uuid REFERENCES workspaces(id) ON DELETE SET NULL,
+    user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+    automated boolean NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    revoked_at timestamp with time zone,
+    CONSTRAINT spend_keys_automated_check CHECK (NOT automated OR user_id IS NULL)
+);
+
+CREATE TABLE spend_records (
+    request_id text NOT NULL PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    workspace_id uuid REFERENCES workspaces(id) ON DELETE SET NULL,
+    user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+    automated boolean NOT NULL,
+    token text NOT NULL,
+    model text NOT NULL,
+    provider text NOT NULL,
+    spend_microdollars bigint NOT NULL,
+    prompt_tokens bigint DEFAULT 0 NOT NULL,
+    completion_tokens bigint DEFAULT 0 NOT NULL,
+    failed boolean DEFAULT false NOT NULL,
+    occurred_at timestamp with time zone NOT NULL,
+    CONSTRAINT spend_records_spend_check CHECK (spend_microdollars >= 0),
+    CONSTRAINT spend_records_tokens_check CHECK (prompt_tokens >= 0 AND completion_tokens >= 0),
+    CONSTRAINT spend_records_automated_check CHECK (NOT automated OR user_id IS NULL)
+);
+CREATE INDEX idx_spend_records_organization ON spend_records (organization_id, occurred_at);
+CREATE INDEX idx_spend_records_workspace ON spend_records (workspace_id, occurred_at);
+CREATE INDEX idx_spend_records_user ON spend_records (user_id, occurred_at);
+
 CREATE TABLE sync_deliveries (
     sync_config_id uuid NOT NULL REFERENCES sync_configs(id) ON DELETE CASCADE,
     delivery_id text NOT NULL,

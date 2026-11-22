@@ -1,4 +1,5 @@
-//! The messages an account flow sends: sign-up verification and password reset.
+//! The messages an account flow sends, sign-up verification and password reset, and the notices
+//! budgets send to an organization's admins.
 //!
 //! Zone owns the wording; delivery is `abnegate_notify`'s [`Mailer`] through
 //! the relay the `SMTP_*` variables describe, or any other
@@ -15,6 +16,7 @@ mod template;
 mod variable;
 
 pub use account::AccountMail;
+pub use account::SEND_TIMEOUT;
 pub use config::Config;
 pub use config::DEFAULT_PORT;
 pub use error::Error;

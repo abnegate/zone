@@ -61,6 +61,7 @@ export {
   UNVERIFIED_CODES,
   UnverifiedSchema,
 } from './schemas';
+export { SpendPage } from './spend';
 export { SsoSection } from './sso';
 export type {
   LicenseDetails,
