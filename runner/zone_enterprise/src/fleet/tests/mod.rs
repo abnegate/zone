@@ -234,6 +234,7 @@ fn constants_are_the_wire_contract() {
     assert_eq!(LABEL_INVALID, "fleet_label_invalid");
     assert_eq!(STATE_INVALID, "fleet_state_invalid");
     assert_eq!(RUNNER_ONLINE, "fleet_runner_online");
+    assert_eq!(RUNNER_BUSY, "fleet_runner_busy");
     assert_eq!(NO_RUNNER_LEFT, "fleet_no_runner_left");
 }
 

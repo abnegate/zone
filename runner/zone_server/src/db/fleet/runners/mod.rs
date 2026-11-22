@@ -1,6 +1,7 @@
 mod change;
 mod listed;
 mod registered;
+mod remaining;
 mod removal;
 mod runner;
 mod updated;
@@ -8,6 +9,7 @@ mod updated;
 pub use change::Change;
 pub use listed::Listed;
 pub use registered::Registered;
+pub use remaining::Remaining;
 pub use removal::Removal;
 pub use runner::Runner;
 pub(crate) use runner::{COLUMNS, undecodable};
@@ -21,12 +23,28 @@ use zone_enterprise::fleet::{Labels, Version};
 use crate::db::DbResult;
 use crate::db::fleet::state::State;
 use crate::db::fleet::transition::Transition;
+use crate::db::tasks::ACTIVE_RUN_STATUSES;
 
 /// How recently a runner must have been seen to count as connected.
 pub const CONNECTED: TimeDelta = TimeDelta::seconds(60);
 
 const RUNS: &str = "(SELECT COUNT(*) FROM task_runs run \
      WHERE run.runner_id = runner.id AND run.status IN ('running', 'waiting')) AS runs";
+
+/// Whether the runner aliased `runner` holds no live work: no running or waiting task run and no
+/// unexpired chat lease.
+fn idle() -> String {
+    format!(
+        "NOT EXISTS ( \
+             SELECT 1 FROM task_runs run \
+             WHERE run.runner_id = runner.id AND run.status IN {ACTIVE_RUN_STATUSES} \
+         ) \
+         AND NOT EXISTS ( \
+             SELECT 1 FROM chat_leases lease \
+             WHERE lease.runner_id = runner.id AND lease.expires_at > now() \
+         )"
+    )
+}
 
 /// Registers the process `instance` under `name`, or refreshes the row that already holds the
 /// name, keeping its state. `started_at` restarts only when another process takes the name over.
@@ -135,21 +153,25 @@ pub async fn set_state(
     }))
 }
 
-/// Removes an offline runner. A connected one is refused, since its next heartbeat would only
-/// register it again.
+/// Removes an offline runner that holds no live work. A connected one is refused, since its next
+/// heartbeat would only register it again, and so is one whose task runs or chat leases are still
+/// live, as [`forget`] spares it.
 pub async fn remove(pool: &PgPool, id: Uuid) -> DbResult<Removal> {
     let mut transaction = pool.begin().await?;
-    let connected: Option<bool> = sqlx::query_scalar(
-        "SELECT last_seen_at > now() - $2 FROM fleet_runners WHERE id = $1 FOR UPDATE",
-    )
+    let found: Option<(bool, bool)> = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT runner.last_seen_at > now() - $2, {} \
+         FROM fleet_runners runner WHERE runner.id = $1 FOR UPDATE",
+        idle()
+    )))
     .bind(id)
     .bind(CONNECTED)
     .fetch_optional(&mut *transaction)
     .await?;
-    let removal = match connected {
+    let removal = match found {
         None => Removal::Missing,
-        Some(true) => Removal::Online,
-        Some(false) => Removal::Removed(
+        Some((true, _)) => Removal::Online,
+        Some((false, false)) => Removal::Busy,
+        Some((false, true)) => Removal::Removed(
             sqlx::query_as(AssertSqlSafe(format!(
                 "DELETE FROM fleet_runners runner WHERE runner.id = $1 RETURNING {COLUMNS}"
             )))
@@ -169,15 +191,9 @@ pub async fn forget(executor: impl PgExecutor<'_>, offline: TimeDelta) -> DbResu
         "DELETE FROM fleet_runners runner \
          WHERE runner.state <> $2 \
            AND runner.last_seen_at <= now() - $1 \
-           AND NOT EXISTS ( \
-               SELECT 1 FROM task_runs run \
-               WHERE run.runner_id = runner.id AND run.status IN ('running', 'waiting') \
-           ) \
-           AND NOT EXISTS ( \
-               SELECT 1 FROM chat_leases lease \
-               WHERE lease.runner_id = runner.id AND lease.expires_at > now() \
-           ) \
-         RETURNING {COLUMNS}"
+           AND {} \
+         RETURNING {COLUMNS}",
+        idle()
     )))
     .bind(offline)
     .bind(State::Revoked.as_str())
@@ -185,12 +201,13 @@ pub async fn forget(executor: impl PgExecutor<'_>, offline: TimeDelta) -> DbResu
     .await
 }
 
-/// Counts the connected runners that would be active and current after `change`. The caller
-/// holds `fleet_policy` locked, so concurrent changes can't each leave the other's runner last.
+/// Counts the connected runners that are active and current now, and that would be after
+/// `change`. The caller holds `fleet_policy` locked, so concurrent changes can't each leave the
+/// other's runner last.
 pub async fn remaining(
     transaction: &mut Transaction<'_, Postgres>,
     change: Change,
-) -> DbResult<i64> {
+) -> DbResult<Remaining> {
     let (excluded, replaced, minimum) = match change {
         Change::Cordon(runner) | Change::Revoke(runner) => (Some(runner), false, None),
         Change::Minimum(minimum) => (
@@ -199,16 +216,22 @@ pub async fn remaining(
             minimum.map(|minimum| minimum.version().key().to_vec()),
         ),
     };
-    sqlx::query_scalar(
+    sqlx::query_as(
         "WITH minimum AS ( \
-             SELECT CASE WHEN $3 THEN $4::integer[] ELSE minimum_version_key END AS key \
+             SELECT minimum_version_key AS current, \
+                 CASE WHEN $3 THEN $4::integer[] ELSE minimum_version_key END AS next \
              FROM fleet_policy \
          ) \
-         SELECT COUNT(*) FROM fleet_runners runner CROSS JOIN minimum \
-         WHERE runner.state = $5 \
-           AND runner.last_seen_at > now() - $1 \
-           AND runner.id IS DISTINCT FROM $2 \
-           AND (minimum.key IS NULL OR runner.version_key >= minimum.key)",
+         SELECT \
+             COUNT(*) FILTER ( \
+                 WHERE minimum.current IS NULL OR runner.version_key >= minimum.current \
+             ) AS before, \
+             COUNT(*) FILTER ( \
+                 WHERE runner.id IS DISTINCT FROM $2 \
+                   AND (minimum.next IS NULL OR runner.version_key >= minimum.next) \
+             ) AS after \
+         FROM fleet_runners runner CROSS JOIN minimum \
+         WHERE runner.state = $5 AND runner.last_seen_at > now() - $1",
     )
     .bind(CONNECTED)
     .bind(excluded)

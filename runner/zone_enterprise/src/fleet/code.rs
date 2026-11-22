@@ -10,4 +10,5 @@ pub const VERSION_INVALID: &str = "fleet_version_invalid";
 pub const LABEL_INVALID: &str = "fleet_label_invalid";
 pub const STATE_INVALID: &str = "fleet_state_invalid";
 pub const RUNNER_ONLINE: &str = "fleet_runner_online";
+pub const RUNNER_BUSY: &str = "fleet_runner_busy";
 pub const NO_RUNNER_LEFT: &str = "fleet_no_runner_left";

@@ -7,7 +7,7 @@ use crate::db::fleet::labels;
 use crate::db::fleet::minimum::Minimum;
 use crate::db::fleet::mode::Mode;
 use crate::db::fleet::policy;
-use crate::db::fleet::runners::{self, Change, Registered, Removal, Runner};
+use crate::db::fleet::runners::{self, Change, Registered, Remaining, Removal, Runner};
 use crate::db::fleet::shortfall::Shortfall;
 use crate::db::fleet::state::State;
 use crate::db::fleet::transition::Transition;
@@ -169,7 +169,7 @@ impl Fleet {
         .expect("a live lease");
     }
 
-    async fn remaining(&self, change: Change) -> i64 {
+    async fn remaining(&self, change: Change) -> Remaining {
         let mut transaction = self.pool().begin().await.unwrap();
         policy::lock(&mut transaction).await.unwrap();
         let remaining = runners::remaining(&mut transaction, change)
@@ -315,6 +315,41 @@ async fn only_an_offline_runner_can_be_removed() {
 }
 
 #[tokio::test]
+async fn an_offline_runner_holding_live_work_is_kept() {
+    let fleet = Fleet::new().await;
+    let (_, workspace) = fleet.workspace().await;
+    let running = fleet.runner("running", "1.4.0", "").await;
+    let chatting = fleet.runner("chatting", "1.4.0", "").await;
+    fleet.live_run(workspace, running.id).await;
+    fleet.live_lease(workspace, chatting.id).await;
+    for runner in [running.id, chatting.id] {
+        fleet.age(runner, 61.0).await;
+        assert_eq!(
+            runners::remove(fleet.pool(), runner).await.unwrap(),
+            Removal::Busy
+        );
+    }
+    let kept: Vec<String> = runners::list(fleet.pool())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|listed| listed.runner.name)
+        .collect();
+    assert_eq!(kept, ["chatting", "running"]);
+
+    sqlx::query("UPDATE task_runs SET status = 'completed' WHERE runner_id = $1")
+        .bind(running.id)
+        .execute(fleet.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        runners::remove(fleet.pool(), running.id).await.unwrap(),
+        Removal::Removed(_)
+    ));
+    fleet.remove().await;
+}
+
+#[tokio::test]
 async fn a_state_change_writes_only_when_it_changes_something() {
     let fleet = Fleet::new().await;
     let runner = fleet.runner("eu-1", "1.4.0", "").await;
@@ -372,20 +407,57 @@ async fn remaining_counts_only_connected_active_current_runners() {
     fleet.set(revoked.id, State::Revoked).await;
     fleet.age(offline.id, 61.0).await;
 
-    assert_eq!(fleet.remaining(Change::Minimum(None)).await, 2);
-    assert_eq!(fleet.remaining(Change::Cordon(current.id)).await, 1);
-    assert_eq!(fleet.remaining(Change::Revoke(older.id)).await, 1);
-    assert_eq!(fleet.remaining(Change::Cordon(cordoned.id)).await, 2);
+    let counted = |before, after| Remaining { before, after };
+    assert_eq!(fleet.remaining(Change::Minimum(None)).await, counted(2, 2));
+    assert_eq!(
+        fleet.remaining(Change::Cordon(current.id)).await,
+        counted(2, 1)
+    );
+    assert_eq!(
+        fleet.remaining(Change::Revoke(older.id)).await,
+        counted(2, 1)
+    );
+    assert_eq!(
+        fleet.remaining(Change::Cordon(cordoned.id)).await,
+        counted(2, 2)
+    );
+    assert_eq!(
+        fleet.remaining(Change::Revoke(offline.id)).await,
+        counted(2, 2)
+    );
     let raised = Minimum::parse("1.5.0").unwrap();
-    assert_eq!(fleet.remaining(Change::Minimum(Some(raised))).await, 1);
+    assert_eq!(
+        fleet.remaining(Change::Minimum(Some(raised))).await,
+        counted(2, 1)
+    );
     let above = Minimum::parse("2.0.0").unwrap();
-    assert_eq!(fleet.remaining(Change::Minimum(Some(above))).await, 0);
+    assert_eq!(
+        fleet.remaining(Change::Minimum(Some(above))).await,
+        counted(2, 0)
+    );
 
     fleet.minimum(Some("1.5.0")).await;
-    assert_eq!(fleet.remaining(Change::Cordon(older.id)).await, 1);
-    assert_eq!(fleet.remaining(Change::Revoke(current.id)).await, 0);
-    assert_eq!(fleet.remaining(Change::Minimum(None)).await, 2);
+    assert_eq!(
+        fleet.remaining(Change::Cordon(older.id)).await,
+        counted(1, 1)
+    );
+    assert_eq!(
+        fleet.remaining(Change::Revoke(current.id)).await,
+        counted(1, 0)
+    );
+    assert_eq!(fleet.remaining(Change::Minimum(None)).await, counted(1, 2));
     fleet.remove().await;
+}
+
+#[test]
+fn only_taking_the_count_from_some_runners_to_none_strands_the_fleet() {
+    let counted = |before, after| Remaining { before, after };
+    assert!(counted(1, 0).strands());
+    assert!(counted(3, 0).strands());
+    assert!(!counted(0, 0).strands());
+    assert!(!counted(2, 1).strands());
+    assert!(!counted(1, 1).strands());
+    assert!(!counted(0, 1).strands());
 }
 
 #[tokio::test]

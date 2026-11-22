@@ -16,7 +16,7 @@ use crate::auth::ServerAdmin;
 use crate::db::audit::{actions, resources};
 use crate::db::fleet::policy;
 use crate::db::fleet::revocation::{self, Revoked};
-use crate::db::fleet::runners::{self, Change, Removal};
+use crate::db::fleet::runners::{self, Change, Removal, undecodable};
 use crate::db::fleet::state::State as RunnerState;
 use crate::db::fleet::transition::Transition;
 use crate::db::users::UserRow;
@@ -91,13 +91,13 @@ pub(super) async fn write(
     let runner = runners::get(&mut *transaction, id)
         .await?
         .ok_or(Refusal::Missing(MISSING))?;
-    let previous = runner.state;
+    let mut previous = runner.state;
     let mut revoked = None;
-    if previous != requested {
-        if let Some(change) = reduction(id, previous, requested) {
+    if runner.state != requested {
+        if let Some(change) = reduction(id, runner.state, requested) {
             guard(&mut transaction, change, request.confirm).await?;
         }
-        revoked = apply(&mut transaction, id, requested, admin.id).await?;
+        (previous, revoked) = apply(&mut transaction, id, requested, admin.id).await?;
     }
     let listed = runners::listed(&mut *transaction, id)
         .await?
@@ -148,26 +148,34 @@ pub(super) fn reduction(id: Uuid, previous: RunnerState, next: RunnerState) -> O
     }
 }
 
+/// Moves runner `id` to `requested`, answering the state it held under the row lock the change
+/// took, and what a revoke stopped.
 async fn apply(
     transaction: &mut Transaction<'_, Postgres>,
     id: Uuid,
     requested: RunnerState,
     actor: Uuid,
-) -> Result<Option<Revoked>, Refusal> {
+) -> Result<(RunnerState, Option<Revoked>), Refusal> {
     let transition = match requested {
         RunnerState::Active => Transition::Activate,
         RunnerState::Cordoned => Transition::Cordon,
         RunnerState::Revoked => {
-            return revocation::revoke(transaction, id, Some(actor))
+            let revoked = revocation::revoke(transaction, id, Some(actor))
                 .await?
-                .map(Some)
-                .ok_or(Refusal::Missing(MISSING));
+                .ok_or(Refusal::Missing(MISSING))?;
+            let previous = RunnerState::parse(&revoked.previous).ok_or_else(|| {
+                undecodable(
+                    "state",
+                    format!("\"{}\" is not a runner state", revoked.previous),
+                )
+            })?;
+            return Ok((previous, Some(revoked)));
         }
     };
-    runners::set_state(transaction, id, transition, actor)
+    let updated = runners::set_state(transaction, id, transition, actor)
         .await?
-        .map(|_| None)
-        .ok_or(Refusal::Missing(MISSING))
+        .ok_or(Refusal::Missing(MISSING))?;
+    Ok((updated.previous, None))
 }
 
 /// Signals the owners of a revoked runner's stopped runs, as a user's stop does. Only after the
@@ -191,6 +199,7 @@ pub(super) async fn removal(
     let runner = match runners::remove(state.db(), id).await? {
         Removal::Removed(runner) => runner,
         Removal::Online => return Err(Refusal::Online),
+        Removal::Busy => return Err(Refusal::Busy),
         Removal::Missing => return Err(Refusal::Missing(MISSING)),
     };
     audit(

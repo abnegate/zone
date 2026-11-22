@@ -35,9 +35,10 @@ async fn standing(state: &AppState) -> Result<Standing, Refusal> {
     ))
 }
 
-/// Refuses `change` when it would leave no connected runner able to take work, unless the admin
-/// confirmed it. The caller holds `fleet_policy` locked, so two admins can't each leave the
-/// other's runner as the last one.
+/// Refuses `change` when it would take the connected runners able to take work from some to
+/// none, unless the admin confirmed it. A fleet already left with none, or a change to a runner
+/// that isn't counted, needs no confirmation. The caller holds `fleet_policy` locked, so two
+/// admins can't each leave the other's runner as the last one.
 async fn guard(
     transaction: &mut Transaction<'_, Postgres>,
     change: Change,
@@ -46,8 +47,11 @@ async fn guard(
     if confirm {
         return Ok(());
     }
-    match fleet_runners::remaining(transaction, change).await? {
-        remaining if remaining > 0 => Ok(()),
-        remaining => Err(Refusal::NoRunnerLeft { remaining }),
+    let remaining = fleet_runners::remaining(transaction, change).await?;
+    if remaining.strands() {
+        return Err(Refusal::NoRunnerLeft {
+            remaining: remaining.after,
+        });
     }
+    Ok(())
 }

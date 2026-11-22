@@ -39,6 +39,9 @@ const EXPORTED_RANGE: &str = "start_date=2020-01-01&end_date=2020-12-31";
 
 const BUDGET_LIMIT: i64 = 50_000_000;
 
+/// A runner label the label routes save, so each admitted call writes a requirement.
+const PLACED: &str = "region=eu";
+
 /// What a guard tells someone it turns away as outside the tenant.
 const TURNED_AWAY: [&str; 3] = [
     "Organization not found",
@@ -505,7 +508,7 @@ impl Route {
             ),
             Self::UpdateOrganizationRunnerLabels => Call::patch(
                 format!("{organization}/runner-labels"),
-                json!({ "labels": [] }),
+                json!({ "labels": [PLACED] }),
             ),
             Self::ListAuditLogs => Call::get(format!("{organization}/audit-logs")),
             Self::ExportAuditLogs => {
@@ -616,9 +619,10 @@ impl Route {
             Self::UpdateWorkspacePolicy => {
                 Call::patch(format!("{nested}/agent-policy"), json!({ "agents": [] }))
             }
-            Self::UpdateWorkspaceRunnerLabels => {
-                Call::patch(format!("{nested}/runner-labels"), json!({ "labels": [] }))
-            }
+            Self::UpdateWorkspaceRunnerLabels => Call::patch(
+                format!("{nested}/runner-labels"),
+                json!({ "labels": [PLACED] }),
+            ),
             Self::DeleteProjectSync => {
                 Call::delete(format!("/api/projects/{project}/sync/{absent}"))
             }

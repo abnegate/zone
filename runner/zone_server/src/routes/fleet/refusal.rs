@@ -2,7 +2,7 @@ use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use zone_enterprise::fleet::{self, BODY_INVALID, RUNNER_ONLINE, STATE_INVALID};
+use zone_enterprise::fleet::{self, BODY_INVALID, RUNNER_BUSY, RUNNER_ONLINE, STATE_INVALID};
 
 use super::responses::NoRunnerLeftResponse;
 use crate::auth::entitlement::Unentitled;
@@ -11,9 +11,10 @@ use crate::error::ServerError;
 use crate::routes::common::ErrorResponse;
 use crate::routes::policy::refusal::Refusal as AccessRefusal;
 
-const FAILED: &str = "Could not load or save the fleet policy";
+const FAILED: &str = "Could not reach the runner fleet";
 const UNAUTHENTICATED: &str = "Invalid user ID in token";
 const ONLINE: &str = "This runner is connected, so its next heartbeat would only register it again. Stop its server first, or cordon or revoke it instead.";
+const BUSY: &str = "This runner still holds live work: a running or waiting task run, or an open chat. Remove it once that work ends, or revoke the runner to end it now.";
 
 #[derive(Debug)]
 pub enum Refusal {
@@ -26,6 +27,7 @@ pub enum Refusal {
     Invalid(fleet::Error),
     State(String),
     Online,
+    Busy,
     NoRunnerLeft {
         remaining: i64,
     },
@@ -78,6 +80,11 @@ impl IntoResponse for Refusal {
                 Json(ErrorResponse::with_code(ONLINE, RUNNER_ONLINE)),
             )
                 .into_response(),
+            Self::Busy => (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::with_code(BUSY, RUNNER_BUSY)),
+            )
+                .into_response(),
             Self::NoRunnerLeft { remaining } => {
                 let refusal = fleet::Refusal::NoRunnerLeft { remaining };
                 (
@@ -91,7 +98,7 @@ impl IntoResponse for Refusal {
                     .into_response()
             }
             Self::Database(error) => {
-                tracing::error!(%error, "Failed to reach the fleet policy");
+                tracing::error!(%error, "Failed to reach the runner fleet");
                 ServerError::Internal(FAILED.to_owned()).into_response()
             }
         }

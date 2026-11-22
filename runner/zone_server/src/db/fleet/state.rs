@@ -1,4 +1,7 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+use serde::Serialize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum State {
     Active,
     Cordoned,
@@ -39,5 +42,15 @@ mod tests {
         }
         assert_eq!(State::parse("draining"), None);
         assert_eq!(State::parse("Active"), None);
+    }
+
+    #[test]
+    fn a_state_serialises_as_its_stored_name() {
+        for state in State::ALL {
+            assert_eq!(
+                serde_json::to_value(state).unwrap(),
+                serde_json::Value::from(state.as_str())
+            );
+        }
     }
 }
