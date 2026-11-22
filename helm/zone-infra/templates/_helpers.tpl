@@ -55,6 +55,10 @@ Namespace
 {{- .Values.global.namespace | default .Release.Namespace }}
 {{- end }}
 
+{{- define "zone-infra.barmanCloudPlugin" -}}
+barman-cloud.cloudnative-pg.io
+{{- end }}
+
 {{/*
 Secrets name
 */}}

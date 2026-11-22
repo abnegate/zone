@@ -243,11 +243,132 @@ check_apps_default() {
         '[.. | select(tag == "!!map" and .name == "REDIS_URL" and has("value"))] | length'
 }
 
+infra_cluster='select(.kind == "Cluster" and .metadata.name == "zone-postgres")'
+infra_backup='select(.kind == "ScheduledBackup" and .metadata.name == "zone-postgres")'
+infra_valkey='[select(.metadata.name == "valkey" or .metadata.name == "valkey-pvc") | .kind] | join(",")'
+barman_cloud_plugin=barman-cloud.cloudnative-pg.io
+
+ai_litellm='select(.kind == "Deployment" and .metadata.name == "litellm")'
+ai_ollama='select(.kind == "Deployment" and .metadata.name == "ollama")'
+ai_pdb='select(.kind == "PodDisruptionBudget" and .metadata.name == "litellm")'
+
+expect_at_most() {
+    message=$1
+    limit=$2
+    value=$3
+    case "$limit$value" in
+        *[!0-9]* | '')
+            fail "$message" " not numbers: limit \"$limit\", value \"$value\""
+            return
+            ;;
+    esac
+    if [ "$value" -gt "$limit" ]; then
+        fail "$message" " $value exceeds $limit"
+    fi
+}
+
+check_infra_default() {
+    rendered=$(rendered_or_fail 'the zone-infra defaults render' render zone-infra) || return 0
+    expect 'the default cluster runs one instance' 1 "$rendered" "$infra_cluster | .spec.instances"
+    expect 'the default cluster sets no postgresql block' false "$rendered" "$infra_cluster | .spec | has(\"postgresql\")"
+    expect 'the default cluster leaves affinity to CNPG' false "$rendered" "$infra_cluster | .spec | has(\"affinity\")"
+    expect 'the default cluster loads no plugins' false "$rendered" "$infra_cluster | .spec | has(\"plugins\")"
+    expect 'the default render schedules no backup' 0 "$rendered" "[$infra_backup] | length"
+    expect 'the default render deploys the in-cluster valkey' PersistentVolumeClaim,Service,Deployment "$rendered" "$infra_valkey"
+}
+
+check_infra_ha() {
+    rendered=$(rendered_or_fail 'the zone-infra HA profile renders' render_ha zone-infra) || return 0
+    expect 'the HA cluster runs three instances' 3 "$rendered" "$infra_cluster | .spec.instances"
+    expect 'a commit waits for any one standby, and blocks without one' 'any 1 required' "$rendered" \
+        "$infra_cluster | .spec.postgresql.synchronous | .method + \" \" + (.number | tostring) + \" \" + .dataDurability"
+    expect 'every instance requires a node of its own' 'true required kubernetes.io/hostname' "$rendered" \
+        "$infra_cluster | .spec.affinity | (.enablePodAntiAffinity | tostring) + \" \" + .podAntiAffinityType + \" \" + .topologyKey"
+    expect 'the HA cluster loads no plugins without an object store' false "$rendered" "$infra_cluster | .spec | has(\"plugins\")"
+    expect 'the HA render schedules no backup without an object store' 0 "$rendered" "[$infra_backup] | length"
+    expect 'the HA render deploys no in-cluster valkey' '' "$rendered" "$infra_valkey"
+    expect 'the HA render has no Valkey Deployment' 0 "$rendered" \
+        '[select(.kind == "Deployment" and .spec.template.metadata.labels["app.kubernetes.io/name"] == "valkey")] | length'
+
+    max_connections=$(query "$rendered" "$infra_cluster | .spec.postgresql.parameters.max_connections")
+    apps=$(rendered_or_fail 'the zone-apps HA profile renders for sizing' render_apps_ha_vouched) || return 0
+    ai=$(rendered_or_fail 'the zone-ai HA profile renders for sizing' render_ha zone-ai) || return 0
+    server_replicas=$(query "$apps" 'select(.kind == "HorizontalPodAutoscaler" and .metadata.name == "zone-apps-server") | .spec.maxReplicas')
+    litellm_replicas=$(query "$ai" "$ai_litellm | .spec.replicas")
+    litellm_workers=$(query "$ai" "$ai_litellm | .spec.template.spec.containers[0].args as \$arguments | \$arguments | to_entries | .[] | select(.value == \"--num_workers\") | \$arguments[.key + 1]")
+    case "$server_replicas$litellm_replicas$litellm_workers" in
+        *[!0-9]* | '')
+            fail 'the connection sizing inputs are numbers' " server $server_replicas, litellm $litellm_replicas x $litellm_workers"
+            return
+            ;;
+    esac
+    needed=$(((server_replicas + 1) * (20 + 1) + (litellm_replicas + 1) * litellm_workers * 10))
+    expect_at_most 'max_connections covers every server and LiteLLM pool at the HPA maximum plus a surge pod' \
+        "$max_connections" "$needed"
+}
+
+check_infra_ha_parameters() {
+    rendered=$(rendered_or_fail 'the zone-infra HA profile with a numeric parameter renders' \
+        render_ha zone-infra --set postgres.parameters.max_connections=500) || return 0
+    expect 'a postgresql parameter set as a number renders as a string, as CNPG requires' '!!str 500' "$rendered" \
+        "$infra_cluster | .spec.postgresql.parameters.max_connections | tag + \" \" + ."
+}
+
+check_infra_ha_backup() {
+    rendered=$(rendered_or_fail 'the zone-infra HA profile with an object store renders' \
+        render_ha zone-infra --set postgres.backup.objectStore=zone-backups) || return 0
+    expect 'the cluster archives WAL through the Barman Cloud plugin' "$barman_cloud_plugin true zone-backups" "$rendered" \
+        "$infra_cluster | .spec.plugins[] | .name + \" \" + (.isWALArchiver | tostring) + \" \" + .parameters.barmanObjectName"
+    expect 'the scheduled backup targets the cluster through the plugin' "zone-postgres plugin $barman_cloud_plugin" "$rendered" \
+        "$infra_backup | .spec | .cluster.name + \" \" + .method + \" \" + .pluginConfiguration.name"
+    expect 'the scheduled backup prefers a standby' prefer-standby "$rendered" "$infra_backup | .spec.target"
+    expect 'the scheduled backup has a six-field schedule' 6 "$rendered" \
+        "$infra_backup | .spec.schedule | split(\" \") | length"
+}
+
+check_infra_ha_refusals() {
+    expect_refused 'synchronous replication with too few standbys is refused' 'must be below postgres.instances' \
+        render_ha zone-infra --set postgres.instances=1
+}
+
+check_ai_default() {
+    rendered=$(rendered_or_fail 'the zone-ai defaults render' render zone-ai) || return 0
+    expect 'the default LiteLLM runs one replica' 1 "$rendered" "$ai_litellm | .spec.replicas"
+    expect 'the default LiteLLM sets no affinity' null "$rendered" "$ai_litellm | .spec.template.spec.affinity"
+    expect 'the default render has no LiteLLM PDB' 0 "$rendered" "[$ai_pdb] | length"
+}
+
+check_ai_ha() {
+    rendered=$(rendered_or_fail 'the zone-ai HA profile renders' render_ha zone-ai) || return 0
+    expect 'LiteLLM runs two replicas' 2 "$rendered" "$ai_litellm | .spec.replicas"
+    expect 'LiteLLM prefers spreading across hostnames' 'kubernetes.io/hostname litellm' "$rendered" \
+        "$ai_litellm | .spec.template.spec.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].podAffinityTerm | .topologyKey + \" \" + .labelSelector.matchLabels[\"app.kubernetes.io/name\"]"
+    expect 'LiteLLM requires no anti-affinity' 0 "$rendered" \
+        "[$ai_litellm | .spec.template.spec.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[]?] | length"
+    expect 'the LiteLLM PDB allows one disruption and sets no minAvailable' '1 false' "$rendered" \
+        "$ai_pdb | (.spec.maxUnavailable | tostring) + \" \" + (.spec | has(\"minAvailable\") | tostring)"
+    expect 'the LiteLLM PDB selects the LiteLLM pods' litellm "$rendered" \
+        "$ai_pdb | .spec.selector.matchLabels[\"app.kubernetes.io/name\"]"
+
+    default_ollama=$(query "$(render zone-ai)" "$ai_ollama")
+    ha_ollama=$(query "$rendered" "$ai_ollama")
+    if [ "$default_ollama" != "$ha_ollama" ]; then
+        fail 'the HA profile leaves Ollama unchanged'
+    fi
+}
+
 check_apps_default
 check_apps_ha
 check_apps_ha_secret
 check_apps_ha_refusals
 check_apps_ha_network_policy
+check_infra_default
+check_infra_ha
+check_infra_ha_parameters
+check_infra_ha_backup
+check_infra_ha_refusals
+check_ai_default
+check_ai_ha
 
 if [ "$failures" -gt 0 ]; then
     printf '%s Helm HA check(s) failed\n' "$failures" >&2

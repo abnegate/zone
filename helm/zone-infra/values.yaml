@@ -23,6 +23,25 @@ postgres:
 
   sharedPreloadLibraries: []
 
+  # postgresql.conf settings; CNPG takes every value as a string.
+  parameters: {}
+
+  # CNPG spec.postgresql.synchronous, e.g. {method: any, number: 1,
+  # dataDurability: required}. number must be below instances.
+  synchronous: {}
+
+  # CNPG spec.affinity, e.g. {podAntiAffinityType: required}.
+  affinity: {}
+
+  # Barman Cloud plugin backups. Set objectStore to the name of a
+  # barmancloud.cnpg.io ObjectStore in this namespace to archive WAL there and
+  # take scheduled base backups; empty leaves backups off. schedule has a
+  # leading seconds field.
+  backup:
+    objectStore: ""
+    schedule: "0 0 0 * * *"
+    target: ""
+
   postInitTemplateSQL:
     - CREATE EXTENSION IF NOT EXISTS vector
     - CREATE EXTENSION IF NOT EXISTS pg_trgm
