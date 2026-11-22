@@ -66,6 +66,8 @@ helm upgrade --install zone-apps ./helm/zone-apps --namespace zone \
 
 `JWT_SECRET` and `ENCRYPTION_KEY` must each be exactly 32 characters. zone-server runs sqlx migrations on startup; do not enable `migration.enabled`.
 
+For the supported high-availability topology, install each chart with its `values-ha.yaml` as [docs/HA.md](../docs/HA.md) describes.
+
 ## Access
 
 With Kind + HAProxy, add `127.0.0.1 zone.local` to `/etc/hosts` and open http://zone.local (ingress class `haproxy`). If host port 80 is already taken (for example by `make up`), Kind maps ingress to http://127.0.0.1:8080 instead.
