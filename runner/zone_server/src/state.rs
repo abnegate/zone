@@ -44,6 +44,7 @@ use crate::services::mcp_servers::hubs::Hubs;
 use crate::services::mcp_servers::status::Policy;
 use crate::services::network_denial::NetworkDenial;
 use crate::services::scim::limit;
+use crate::services::sso::throttle::Throttle;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
 use crate::train_jobs::TrainRegistry;
@@ -125,6 +126,7 @@ struct AppStateInner {
     pub mail: Option<Arc<AccountMail>>,
     pub rate_limiter: Arc<RateLimiter<Uuid>>,
     pub scim_limiter: Arc<RwLock<Arc<RateLimiter<Uuid>>>>,
+    pub sso_throttle: Arc<Throttle>,
     pub sync_registry: SyncRegistry,
     pub pull_registry: PullRegistry,
     /// The one LoRA training run. Survives the HTTP request that started it.
@@ -248,14 +250,17 @@ impl AppState {
 
         let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::default()));
         let scim_limiter = Arc::new(RwLock::new(Arc::new(limit::limiter())));
+        let sso_throttle = Arc::new(Throttle::new(config.sso_requests_per_minute));
         let cleaned = Arc::clone(&rate_limiter);
         let scim_cleaned = Arc::clone(&scim_limiter);
+        let swept = Arc::clone(&sso_throttle);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(RATE_LIMITER_CLEANUP_INTERVAL);
             loop {
                 interval.tick().await;
                 cleaned.cleanup();
                 read(&scim_cleaned).cleanup();
+                swept.cleanup();
                 tracing::debug!("Rate limiter cleanup completed");
             }
         });
@@ -281,6 +286,7 @@ impl AppState {
                 mail,
                 rate_limiter,
                 scim_limiter,
+                sso_throttle,
                 sync_registry: SyncRegistry::new(Arc::clone(&master_key)),
                 pull_registry: PullRegistry::new(),
                 train_jobs: TrainRegistry::new(),
@@ -382,6 +388,11 @@ impl AppState {
             .unwrap_or_else(PoisonError::into_inner) = limiter;
     }
 
+    /// The per-address limit on single sign-on starts and SAML posts.
+    pub fn sso_throttle(&self) -> &Throttle {
+        &self.inner.sso_throttle
+    }
+
     /// Get the index semaphore for limiting concurrent indexing operations
     pub fn index_semaphore(&self) -> &Arc<Semaphore> {
         &self.inner.index_semaphore
@@ -397,7 +408,8 @@ impl AppState {
         &self.inner.frame_semaphore
     }
 
-    /// Permits for checking SAML responses. A post that finds none is refused, not queued.
+    /// Permits for checking SAML responses. A post waits `saml_permit_wait` for one, then is
+    /// refused.
     pub fn saml_semaphore(&self) -> &Arc<Semaphore> {
         &self.inner.saml_semaphore
     }
@@ -633,6 +645,12 @@ impl AppState {
 const LAZY_DATABASE: &str = "postgres://localhost/test";
 
 #[cfg(test)]
+const TEST_SAML_PERMIT_WAIT: Duration = Duration::from_millis(50);
+
+#[cfg(test)]
+const TEST_ADMISSION_WAIT: Duration = Duration::from_millis(100);
+
+#[cfg(test)]
 const UNREACHABLE_DATABASE: &str = "postgres://127.0.0.1:1/unreachable";
 
 #[cfg(test)]
@@ -723,6 +741,10 @@ pub(crate) fn test_config() -> Config {
         connect_urls: Vec::new(),
         mcp_enabled: true,
         mcp_commands: false,
+        trusted_proxies: Default::default(),
+        sso_requests_per_minute: crate::config::DEFAULT_SSO_REQUESTS_PER_MINUTE,
+        saml_permit_wait: TEST_SAML_PERMIT_WAIT,
+        admission_wait: TEST_ADMISSION_WAIT,
     }
 }
 
@@ -977,6 +999,10 @@ mod tests {
             connect_urls: Vec::new(),
             mcp_enabled: true,
             mcp_commands: false,
+            trusted_proxies: Default::default(),
+            sso_requests_per_minute: crate::config::DEFAULT_SSO_REQUESTS_PER_MINUTE,
+            saml_permit_wait: TEST_SAML_PERMIT_WAIT,
+            admission_wait: TEST_ADMISSION_WAIT,
         }
     }
 

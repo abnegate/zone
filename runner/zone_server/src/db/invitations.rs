@@ -4,13 +4,13 @@
 //! Tokens are hashed before storage for security.
 
 use chrono::{DateTime, Duration, Utc};
-use sqlx::{Executor, PgPool, Postgres};
+use sqlx::{Connection, Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use super::DbResult;
 use crate::utils::crypto::{generate_token, hash_token};
 
-const TOKEN_EXPIRY_DAYS: i64 = 7; // Invitations expire in 7 days
+const TOKEN_EXPIRY_DAYS: i64 = 7;
 
 /// Invitation row from database
 #[derive(Debug, Clone)]
@@ -125,22 +125,18 @@ pub async fn get_invitation_by_token(pool: &PgPool, token: &str) -> DbResult<Opt
     }))
 }
 
-/// Accept an invitation
+/// Marks the invitation accepted and seats `user_id` in its organization and workspaces as one
+/// unit: a transaction of its own, or a savepoint when `connection` is already in one.
 ///
-/// This function atomically:
-/// 1. Verifies the token is valid, not expired, and not already accepted
-/// 2. Marks the invitation as accepted
-/// 3. Adds the user to the organization with the specified role
-/// 4. Adds the user to all specified workspaces with the specified role
-///
-/// Returns an error if the token is invalid, expired, or already accepted
-pub async fn accept_invitation(pool: &PgPool, token: &str, user_id: Uuid) -> DbResult<()> {
+/// Fails with [`sqlx::Error::RowNotFound`] if the token is unknown, expired or already accepted.
+pub async fn accept_invitation(
+    connection: &mut PgConnection,
+    token: &str,
+    user_id: Uuid,
+) -> DbResult<()> {
+    let mut transaction = connection.begin().await?;
     let token_hash = hash_token(token);
 
-    // Start a transaction
-    let mut tx = pool.begin().await?;
-
-    // Get and mark invitation as accepted atomically
     let row = sqlx::query!(
         r#"
         UPDATE invitations
@@ -152,22 +148,20 @@ pub async fn accept_invitation(pool: &PgPool, token: &str, user_id: Uuid) -> DbR
         "#,
         token_hash
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *transaction)
     .await?;
 
     let invitation = row.ok_or(sqlx::Error::RowNotFound)?;
 
-    // Add user to organization
     let org_role = invitation
         .org_role
         .parse()
         .unwrap_or(super::organization_members::OrgRole::Member);
 
-    super::suspensions::forget(&mut *tx, invitation.organization_id, user_id).await?;
+    super::suspensions::forget(&mut *transaction, invitation.organization_id, user_id).await?;
 
-    // Use reactivate_member to handle cases where user was previously a member
     super::organization_members::reactivate_member(
-        &mut *tx,
+        &mut *transaction,
         invitation.organization_id,
         user_id,
         org_role,
@@ -175,16 +169,14 @@ pub async fn accept_invitation(pool: &PgPool, token: &str, user_id: Uuid) -> DbR
     )
     .await?;
 
-    // Add user to workspaces
     let workspace_role = invitation
         .workspace_role
         .parse()
         .unwrap_or(super::workspace_members::WorkspaceRole::Member);
 
     for workspace_id in invitation.workspace_ids.unwrap_or_default() {
-        // Use reactivate_member to handle cases where user was previously a member
         super::workspace_members::reactivate_member(
-            &mut *tx,
+            &mut *transaction,
             workspace_id,
             user_id,
             workspace_role,
@@ -193,7 +185,7 @@ pub async fn accept_invitation(pool: &PgPool, token: &str, user_id: Uuid) -> DbR
         .await?;
     }
 
-    tx.commit().await?;
+    transaction.commit().await?;
 
     Ok(())
 }

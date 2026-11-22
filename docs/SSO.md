@@ -62,7 +62,10 @@ License section, and lists any providers that already exist as read-only.
 On Community, the [member cap](LICENSING.md#the-community-member-cap) also
 applies to single sign-on, OIDC and SAML alike: once the server has 3 active
 members, a first sign-in that would create an account is refused with
-`member_cap_reached`. People who already have an account keep signing in,
+`member_cap_reached`. The count and the new account are one step, so with
+one place left exactly one of several simultaneous first sign-ins gets in; one
+that waits more than about 5 seconds for its turn answers
+`member_admission_busy`. People who already have an account keep signing in,
 including, for OIDC, one linked by email.
 
 An SSO user who signs in counts toward licensed seats in the same way as a
@@ -860,8 +863,9 @@ there and refresh the metadata in Zone again. See
    The server checks at most one response per CPU core at a time, across
    every provider, because parsing holds many times the response's size in
    memory before its signature is known. A post that arrives while every
-   check is running isn't queued: its attempt is discarded and the browser
-   gets `sso_sign_in_failed`, and the person starts again.
+   check is running waits up to 2 seconds for one to finish. If none does,
+   its attempt is discarded, the browser gets `sso_sign_in_failed`, and the
+   person starts again.
 5. On success, the server redirects the browser with `303 See Other` to
    `{APP_BASE_URL}/sso/callback?state=…&code=…`, with a one-time handoff
    code that expires after 2 minutes. On failure, it redirects to
@@ -876,6 +880,54 @@ there and refresh the metadata in Zone again. See
 The handoff through the console keeps the same protection against login
 cross-site request forgery that OIDC has: the sign-in only completes in the
 browser that started it.
+
+### Rate limits and client addresses
+
+Starting a sign-in and posting a SAML response need no account, so Zone
+limits both per client address: `ZONE_SSO_REQUESTS_PER_MINUTE` (120 by
+default) starts and posts together, per address, in each one-minute window.
+The count is kept in each server process's memory, so the limit applies per
+replica: behind a load balancer spreading requests over three replicas, one
+address can make up to three times as many.
+Without the limit, one client could start sign-ins in a loop and post large
+responses until every SAML response check was taken, and everyone else's
+sign-ins would fail with `sso_sign_in_failed`. The limit applies to
+`POST /api/auth/sso/providers/{provider_id}/authorizations` and
+`POST /api/auth/sso/saml/acs`. It's checked before the request's body is
+read or its provider looked up. The OIDC callback,
+`POST /api/auth/sso/callbacks`, isn't limited: it needs a code the identity
+provider issued.
+
+- A start over the limit gets `429 Too Many Requests` with a `Retry-After`
+  header, the seconds until the window resets, and the code
+  `sso_rate_limited`.
+- A SAML post over the limit is sent back to
+  `{APP_BASE_URL}/sso/callback?error=sso_rate_limited`, with no `state`,
+  because its `RelayState` is never read. The console explains this code
+  without a `state` only to a browser that has a sign-in in progress.
+- The server logs the first refusal of an address in each window as a
+  warning, naming the address, and the rest at debug, so a flood leaves one
+  line per address per minute.
+
+The client address is the TCP peer, unless that peer is a trusted proxy
+listed in `ZONE_TRUSTED_PROXIES`. Then Zone reads `X-Forwarded-For` from the
+right, skips every trusted hop, and takes the first hop that isn't trusted.
+If every hop is trusted, the leftmost one is the client. An entry may carry a
+port, as Azure Application Gateway and IIS ARR send it (`198.51.100.7:4711`
+or `[2001:db8::1]:443`), and Zone drops it. Any other entry that isn't an IP
+address, such as `unknown` or an obfuscated `_hidden`, stops the walk at the
+last trusted hop. Zone never reads `X-Real-IP`. A request with no peer address
+counts against one shared bucket. IPv6 clients are counted by their /64
+network, because one subscriber is usually given a whole /64.
+
+Only loopback is trusted by default, so without a trusted proxy every client
+behind one reverse proxy shares that proxy's limit. List your proxy in
+`ZONE_TRUSTED_PROXIES` to give each client its own; see
+[CONFIGURATION.md](CONFIGURATION.md#zone_trusted_proxies). List only your
+proxies, never a range your clients use: a client whose own address is
+trusted is skipped as a proxy, so it can name any address it likes to the
+left of its own. The same address is what Zone records for a session and a
+device.
 
 ### Claims from userinfo
 
@@ -1156,7 +1208,8 @@ each one.
 | `sso_metadata_invalid` | Zone couldn't fetch or use the SAML metadata. The message names the problem. | The metadata URL uses `https` and doesn't redirect. The document is a single `EntityDescriptor` with an `IDPSSODescriptor`, an HTTP-Redirect `SingleSignOnService` and an RSA signing certificate of at least 2048 bits. See [Metadata](#metadata). Send either a metadata URL or metadata XML, not both. |
 | `sso_assertion_invalid` | The SAML response failed a check: its signature, audience, recipient, destination, issuer, time limits, subject, or it was replayed or encrypted. The person sees a general message and the server log has the reason. | See [What Zone checks](#what-zone-checks). The identity provider uses Zone's exact entity ID and ACS URL, signs with SHA-256 and doesn't encrypt. The metadata in Zone is current after a certificate change. The Zone server's clock is correct. |
 | `sso_sign_in_refused` | The identity provider answered with a status other than Success. The server log has the status. | The person is assigned to the app at the identity provider. |
-| `sso_sign_in_failed` | Zone couldn't finish a SAML sign-in for a reason on the server's side, such as its database being unavailable, a stored provider setting it can't read, or every SAML response check (one per CPU core) already running. | The server log. Try again. |
+| `sso_sign_in_failed` | Zone couldn't finish a SAML sign-in for a reason on the server's side, such as its database being unavailable, a stored provider setting it can't read, or every SAML response check (one per CPU core) still running after the post waited 2 seconds for one. | The server log. Try again. |
+| `sso_rate_limited` | The client's address started sign-ins or posted SAML responses more than `ZONE_SSO_REQUESTS_PER_MINUTE` times in a minute. A start gets 429 with `Retry-After`; a SAML post is redirected to the console with no `state`. See [Rate limits and client addresses](#rate-limits-and-client-addresses). | Wait a minute. If everyone behind a reverse proxy is limited together, list the proxy in `ZONE_TRUSTED_PROXIES`. |
 | `sso_domain_required` | A SAML provider was saved without allowed domains. | Add at least one allowed domain. |
 | `sso_verified_email_unsupported` | A SAML provider was saved with `require_verified_email: true`. | Leave it out or set it to `false`. See [Allowed domains and verified email for SAML](#allowed-domains-and-verified-email-for-saml). |
 | `sso_protocol_mismatch` | A request set a field that belongs to the other protocol, such as a client secret on a SAML provider or a metadata URL on an OIDC provider. | Send only the fields for the provider's protocol. See [API](#api). |
@@ -1170,6 +1223,7 @@ each one.
 | `account_disabled` | The Zone account is disabled. | Disabled accounts can't sign in by any method. |
 | `license_required` | A change was refused because there's no Zone Enterprise license that is active or in its grace period. | **Settings → This server → License**. |
 | `member_cap_reached` | A first sign-in would create an account, but the server runs Community and already has 3 active members. See [the member cap](LICENSING.md#the-community-member-cap). | A Zone Team or Enterprise license under **Settings → This server → License**. |
+| `member_admission_busy` | A first sign-in on a Community server couldn't be counted against the member cap because too many people were joining at once. The answer is `503 Service Unavailable` with the message "Too many people are joining this server at once. Try again in a moment." | Try again in a moment. |
 
 Zone accepts ID tokens signed with RS256, RS384, RS512, PS256, PS384,
 PS512, ES256, ES384 or EdDSA. When the discovery document lists
@@ -1228,7 +1282,7 @@ browser reach them without a Zone session:
 | Method and path | Purpose |
 |---|---|
 | `GET /api/auth/sso/saml/metadata` | Zone's SP metadata, as `application/samlmetadata+xml`. Its URL is also Zone's entity ID. |
-| `POST /api/auth/sso/saml/acs` | The ACS. Takes a form of at most 1 MiB with `SAMLResponse` and a `RelayState` of at most 80 bytes, and answers `303` to `{APP_BASE_URL}/sso/callback` with the outcome. |
+| `POST /api/auth/sso/saml/acs` | The ACS. Takes a form of at most 1 MiB with `SAMLResponse` and a `RelayState` of at most 80 bytes, and answers `303` to `{APP_BASE_URL}/sso/callback` with the outcome. It's limited per client address; see [Rate limits and client addresses](#rate-limits-and-client-addresses). |
 
 ### Settings
 

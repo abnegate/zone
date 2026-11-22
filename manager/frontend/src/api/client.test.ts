@@ -3745,6 +3745,8 @@ describe('Client', () => {
         ],
         ['acceptInvitation', () => client.acceptInvitation(token)],
         ['addOrgMember', () => client.addOrgMember(orgId, { email: 'a@b.co', role: 'member' })],
+        ['createOrganization', () => client.createOrganization({ name: 'Org', slug: 'org' })],
+        ['updateOrganization', () => client.updateOrganization(orgId, { is_active: true })],
       ] as const) {
         it(`keeps the refusal code from a ${name} failure`, async () => {
           mockFetch.mockResolvedValueOnce(capRefusal());

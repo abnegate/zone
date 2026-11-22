@@ -506,9 +506,6 @@ fn refusals_keep_the_legacy_guard_texts() {
             | Permission::DevicesUpdate
             | Permission::GitHubUpdate => "Organization admin access required".to_string(),
             Permission::OrganizationDelete => "Organization owner access required".to_string(),
-            Permission::SpendRead | Permission::SpendUpdate => {
-                "Only organization owners and admins can see spend or change budgets".to_string()
-            }
             Permission::WorkspaceRead => "Not a member of this workspace".to_string(),
             Permission::WorkspaceWrite => "Workspace write access required".to_string(),
             Permission::WorkspaceUpdate

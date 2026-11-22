@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use axum::http::HeaderMap;
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -12,10 +10,12 @@ use super::claim::Claim;
 use super::configured::Configured;
 use super::console::{redirect_uri, service_provider};
 use super::handoff::{self, Handoff};
+use super::parse_permit;
 use super::posted::Posted;
 use super::settlement::Settlement;
 use super::sign_in_failure::SignInFailure;
 use super::start::Start;
+use crate::auth::client_address::ClientAddress;
 use crate::auth::hash_password;
 use crate::auth::password::PasswordError;
 use crate::db::audit::{actions, resources};
@@ -102,9 +102,8 @@ async fn hand_off(
     let request_id = attempt.request_id.clone().ok_or(Error::StateInvalid)?;
     let service = service_provider(&state.config().app_base_url);
     let response = response.to_owned();
-    let permit = Arc::clone(state.saml_semaphore())
-        .try_acquire_owned()
-        .map_err(|_| SignInFailure::Overloaded)?;
+    let permit =
+        parse_permit::acquire(state.saml_semaphore(), state.config().saml_permit_wait).await?;
     let consumed = tokio::task::spawn_blocking(move || {
         let consumed = saml::consume(&provider, &service, &request_id, &response, Utc::now());
         drop(permit);
@@ -143,6 +142,7 @@ pub async fn complete(
     state: &AppState,
     callback: &Callback<'_>,
     headers: &HeaderMap,
+    address: ClientAddress,
 ) -> Result<AuthResponse, SignInFailure> {
     let attempt = attempts::consume(state.db(), callback.state)
         .await?
@@ -168,13 +168,16 @@ pub async fn complete(
         )
         .await;
     }
-    if let Err(error) = users::update_last_login(state.db(), settlement.user).await {
+    if !settlement.provisioned
+        && let Err(error) = users::update_last_login(state.db(), settlement.user).await
+    {
         tracing::warn!(user_id = %settlement.user, %error, "Failed to update last login");
     }
     let response = session::issue(
         state,
         settlement.user,
         headers,
+        address,
         Credential::Provider(attempt.provider_id),
     )
     .await?;
@@ -332,9 +335,11 @@ async fn create(
     identity: &Identity,
     email_verified: bool,
 ) -> Result<Uuid, SignInFailure> {
-    members::admit(state, None).await?;
+    let cap = members::cap(state).await?;
+    members::check(state, cap, None).await?;
     let password_hash = unusable().await?;
     let mut transaction = state.db().begin().await?;
+    members::admit(&mut transaction, cap, None).await?;
     let user = provision::insert(
         &mut transaction,
         &identity.email,
@@ -352,8 +357,9 @@ async fn create(
         &identity.email,
     )
     .await?;
+    provision::furnish(&mut transaction, &user).await?;
+    users::update_last_login(&mut *transaction, user.id).await?;
     transaction.commit().await?;
-    provision::furnish(state.db(), &user).await;
     record(
         state,
         user.id,

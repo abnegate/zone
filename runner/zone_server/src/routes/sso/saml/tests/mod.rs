@@ -227,6 +227,7 @@ async fn a_refusal_names_its_code_and_every_other_failure_is_a_failed_sign_in() 
         (SignInFailure::Overloaded, SIGN_IN_FAILED),
         (SignInFailure::Interrupted(interrupted), SIGN_IN_FAILED),
         (SignInFailure::Full { cap: 3 }, SIGN_IN_FAILED),
+        (SignInFailure::AdmissionBusy, SIGN_IN_FAILED),
         (
             SignInFailure::Session(account::Refusal::Missing),
             SIGN_IN_FAILED,

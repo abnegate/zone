@@ -86,6 +86,7 @@ The following table lists the configurable parameters and their default values.
 | `server.env.ZONE_REPORT_DAY_OF_MONTH` | Day of the month, `1` to `31`, a monthly digest is owed; moved to the last day in shorter months | unset (`1`) |
 | `server.env.ZONE_LICENSE_RENEWAL` | Renew a paid license that carries a Polar subscription by posting only its key to the license server once a day from 14 days before expiry, and install the key it returns: `true`, `1`, `yes` or `on` turns it on, `false`, `0`, `no` or `off` off, in any case, and any other value logs a warning and keeps it on. Turn it off for an air-gapped install; see [docs/LICENSING.md](../../docs/LICENSING.md#automatic-renewal) | unset (`true`) |
 | `server.env.ZONE_LICENSE_RENEWAL_URL` | Where the license key is posted for renewal: an `http` or `https` URL with no user name or password that doesn't name a link-local or cloud metadata address. Plain `http` is accepted only for a loopback or private network host; see [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md#zone_license_renewal_url) for the list. A URL that breaks a rule stops zone-server at startup | unset (`https://licenses.bitecode.ltd/licenses/renew`) |
+| `server.trustedProxies` | Comma-separated CIDRs of the peers whose `X-Forwarded-For` zone-server believes, passed as `ZONE_TRUSTED_PROXIES`. Set it to your ingress controller's pod CIDR, never a range your clients use; see [Client Addresses](#client-addresses). `server.env.ZONE_TRUSTED_PROXIES` does the same and wins | `""` (unset: loopback only, so every client shares one single sign-on limit) |
 
 ### Manager Configuration
 
@@ -269,6 +270,19 @@ server:
 ```
 
 GitHub keeps the addresses an App was registered with, so settle the origin before connecting GitHub. After changing it, correct the addresses in the App's settings on GitHub, or delete the App and connect again.
+
+## Client Addresses
+
+zone-server decides which address a request came from for its single sign-on throttle and for the address it records on sessions and devices. It believes `X-Forwarded-For` only from the peers `server.trustedProxies` lists. The chart leaves the list empty, so zone-server trusts loopback only: every request through the ingress arrives from the ingress controller's pod, every client shares that pod's single sign-on limit (per zone-server replica), and the devices list shows the controller's address. That fails closed, and the install notes warn about it.
+
+Set it to your ingress controller's pod CIDR, never a range your clients use:
+
+```yaml
+server:
+  trustedProxies: 10.244.0.0/16
+```
+
+zone-server skips every hop in a trusted range as if it were a proxy, so a client whose own address is in one (a corporate install where users have private addresses, with `10.0.0.0/8` trusted) can put any address to the left of its own in `X-Forwarded-For` and be counted under that address instead. Every pod in the CIDR can do the same, so where pods other than the ingress controller share it, list the controller's pods more narrowly or keep them off zone-server with a network policy. See [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md#zone_trusted_proxies).
 
 ## Upgrading
 

@@ -2040,9 +2040,9 @@ async fn an_insert_commits_the_user_role_and_the_verified_flag_together() {
 #[tokio::test]
 async fn furnishing_gives_the_user_an_organization_and_workspace_they_own() {
     let fixture = Fixture::new().await;
-    let mut connection = fixture.pool().acquire().await.unwrap();
+    let mut transaction = fixture.pool().begin().await.unwrap();
     let user = provision::insert(
-        &mut connection,
+        &mut transaction,
         "ada@acme.com",
         "hash",
         Some("Ada"),
@@ -2051,9 +2051,9 @@ async fn furnishing_gives_the_user_an_organization_and_workspace_they_own() {
     )
     .await
     .unwrap();
-    drop(connection);
 
-    provision::furnish(fixture.pool(), &user).await;
+    provision::furnish(&mut transaction, &user).await.unwrap();
+    transaction.commit().await.unwrap();
 
     let owned: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT o.name, w.name, wm.role::text FROM organizations o \
@@ -2072,6 +2072,48 @@ async fn furnishing_gives_the_user_an_organization_and_workspace_they_own() {
             "Default Workspace".to_owned(),
             "owner".to_owned()
         )]
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_failed_furnishing_rolls_back_alone_and_the_account_still_commits() {
+    let fixture = Fixture::new().await;
+    let mut transaction = fixture.pool().begin().await.unwrap();
+    let user = provision::insert(
+        &mut transaction,
+        "ada@acme.com",
+        "hash",
+        Some("Ada"),
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO organizations (name, slug) VALUES ('Taken', $1)")
+        .bind(provision::organization_slug(
+            &provision::organization_name(user.display_name.as_deref()),
+            user.id,
+        ))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+
+    provision::furnish(&mut transaction, &user).await.unwrap();
+    transaction.commit().await.unwrap();
+
+    let memberships: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM organization_members WHERE user_id = $1")
+            .bind(user.id)
+            .fetch_one(fixture.pool())
+            .await
+            .unwrap();
+    assert_eq!(memberships, 0);
+    assert!(
+        users::get_user_by_id(fixture.pool(), user.id)
+            .await
+            .unwrap()
+            .is_some()
     );
     fixture.cleanup().await;
 }

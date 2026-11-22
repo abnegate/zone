@@ -13,7 +13,9 @@ use uuid::Uuid;
 use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 use zone_enterprise::spend::{Budget, Microdollars, Month, Scope, State, Target};
+use zone_server::auth::{self, Permission};
 use zone_server::db::audit::lock::Lock;
+use zone_server::db::custom_roles::testing::{assign_organization, composed};
 use zone_server::db::migrations;
 use zone_server::db::organization_members::OrgRole;
 use zone_server::db::spend::budgets::{self, Announcement, BudgetRow, CreateError, Crossing};
@@ -1246,6 +1248,126 @@ async fn a_budget_notice_goes_to_active_accounts_only() {
     ];
     expected.sort();
     assert_eq!(mailed, expected, "deactivated accounts get no notice");
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_budget_notice_reaches_custom_roles_that_hold_spend_read() {
+    let fixture = Fixture::new("spend_notice_custom").await;
+    let pool = fixture.pool();
+    let organization = fixture.policy.organization;
+    let admin = fixture.policy.member(OrgRole::Admin, None).await;
+    let reader = fixture.policy.member(OrgRole::Member, None).await;
+    let auditor = fixture.policy.member(OrgRole::Member, None).await;
+    let foreigner = fixture.policy.member(OrgRole::Member, None).await;
+    let misscoped = fixture.policy.member(OrgRole::Member, None).await;
+    let departed = fixture.policy.stranger().await;
+    fixture.policy.member(OrgRole::Member, None).await;
+    let (elsewhere, _) = fixture
+        .policy
+        .another_organization(&fixture.policy.owner)
+        .await;
+    let reading = composed(
+        pool,
+        organization,
+        auth::Scope::Organization,
+        &[Permission::SpendRead],
+    )
+    .await;
+    let auditing = composed(
+        pool,
+        organization,
+        auth::Scope::Organization,
+        &[Permission::AuditLogsRead],
+    )
+    .await;
+    let foreign = composed(
+        pool,
+        elsewhere,
+        auth::Scope::Organization,
+        &[Permission::SpendRead],
+    )
+    .await;
+    let workspace_role = composed(pool, organization, auth::Scope::Workspace, &[]).await;
+    sqlx::query("INSERT INTO custom_role_permissions (role_id, permission) VALUES ($1, $2)")
+        .bind(workspace_role)
+        .bind(Permission::SpendRead.name())
+        .execute(pool)
+        .await
+        .unwrap();
+    assign_organization(pool, organization, reader.id, reading).await;
+    assign_organization(pool, organization, auditor.id, auditing).await;
+    assign_organization(pool, organization, foreigner.id, foreign).await;
+    assign_organization(pool, organization, misscoped.id, workspace_role).await;
+    sqlx::query(
+        "INSERT INTO organization_members (organization_id, user_id, role, custom_role_id, is_active) \
+         VALUES ($1, $2, $3, $4, false)",
+    )
+    .bind(organization)
+    .bind(departed.id)
+    .bind(OrgRole::Member.as_str())
+    .bind(reading)
+    .execute(pool)
+    .await
+    .unwrap();
+    let held: Option<Uuid> = sqlx::query_scalar(
+        "SELECT custom_role_id FROM organization_members WHERE organization_id = $1 AND user_id = $2",
+    )
+    .bind(organization)
+    .bind(departed.id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        held,
+        Some(reading),
+        "the inactive member still holds spend:read"
+    );
+    fixture
+        .record(Spend {
+            occurred_at: inside(),
+            ..fixture.spend()
+        })
+        .await;
+    let mut connection = fixture.pool().acquire().await.unwrap();
+    let created = budgets::create(
+        &mut connection,
+        fixture.policy.organization,
+        &organization_wide(),
+        &budget(1, false),
+        fixture.policy.owner.id,
+        month(),
+    )
+    .await
+    .unwrap();
+    drop(connection);
+
+    let crossings = budgets::settle(fixture.pool(), month()).await.unwrap();
+    let crossing = crossings
+        .iter()
+        .find(|crossing| crossing.row.id == created.id)
+        .expect("the budget is used up");
+    assert!(
+        notice::announce(fixture.state(), &Fanout::new(), crossing, month())
+            .await
+            .unwrap()
+    );
+
+    let mut mailed = fixture.mailed();
+    mailed.sort();
+    let mut expected = vec![
+        fixture.policy.owner.email.clone(),
+        admin.email,
+        reader.email,
+    ];
+    expected.sort();
+    assert_eq!(
+        mailed, expected,
+        "active spend:read holders get the notice, built-in or by a custom role of this \
+         organization's scope, and nobody else: not another organization's role, a workspace \
+         role naming it, nor an inactive member"
+    );
 
     fixture.cleanup().await;
 }

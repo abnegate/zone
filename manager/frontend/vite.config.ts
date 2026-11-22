@@ -1,8 +1,9 @@
+import type { ClientRequest, IncomingMessage } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import tailwind from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
-import { createServer, defineConfig, type Plugin } from 'vite';
+import { createServer, defineConfig, type Plugin, type ProxyOptions } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
 import {
@@ -29,6 +30,23 @@ const STYLESHEETS = [SIGNED_OUT_STYLESHEET, FEATURE_STYLESHEET, SHARED_STYLESHEE
 const SHELL_MARKER = '<!--signed-out-shell-->';
 const APP_CHUNK = 'app';
 const RENDERER_CHUNK = 'renderer';
+const FORWARDED_FOR = 'x-forwarded-for';
+
+function forwardPeer(request: ClientRequest, incoming: IncomingMessage) {
+  const peer = incoming.socket.remoteAddress;
+  if (peer) {
+    request.setHeader(FORWARDED_FOR, peer);
+  } else {
+    request.removeHeader(FORWARDED_FOR);
+  }
+}
+
+// The manager trusts this proxy's X-Forwarded-For, so it names only the peer
+// rather than appending to whatever the browser sent, as `xfwd` would.
+const forwardClientAddress: NonNullable<ProxyOptions['configure']> = (proxy) => {
+  proxy.on('proxyReq', forwardPeer);
+  proxy.on('proxyReqWs', forwardPeer);
+};
 
 function deferFeatureStylesheet(): Plugin {
   return {
@@ -173,11 +191,13 @@ export default defineConfig(({ command }) => {
         '/api': {
           target: process.env.VITE_PROXY_TARGET || 'http://localhost:8000',
           changeOrigin: true,
+          configure: forwardClientAddress,
         },
         '/ws': {
           target: process.env.VITE_PROXY_TARGET || 'http://localhost:8000',
           changeOrigin: true,
           ws: true,
+          configure: forwardClientAddress,
         },
       },
     },

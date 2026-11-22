@@ -59,8 +59,6 @@ pub enum Permission {
 
 const ORGANIZATION_ADMIN_REQUIRED: &str = "Organization admin access required";
 const WORKSPACE_ADMIN_REQUIRED: &str = "Workspace admin access required";
-pub const SPEND_REFUSED: &str =
-    "Only organization owners and admins can see spend or change budgets";
 
 /// Each pair is a permission and the one a role must hold alongside it.
 const REQUIREMENTS: [(Permission, Permission); 1] =
@@ -271,7 +269,6 @@ impl Permission {
             | Self::DevicesUpdate
             | Self::GitHubUpdate => ORGANIZATION_ADMIN_REQUIRED.to_string(),
             Self::OrganizationDelete => "Organization owner access required".to_string(),
-            Self::SpendRead | Self::SpendUpdate => SPEND_REFUSED.to_string(),
             Self::WorkspaceRead => "Not a member of this workspace".to_string(),
             Self::WorkspaceWrite => "Workspace write access required".to_string(),
             Self::WorkspaceUpdate
@@ -287,6 +284,8 @@ impl Permission {
             | Self::PoliciesUpdate
             | Self::AuditLogsRead
             | Self::AuditUpdate
+            | Self::SpendRead
+            | Self::SpendUpdate
             | Self::RolesUpdate
             | Self::ScimUpdate => format!(
                 "This needs the {} permission in this organization.",

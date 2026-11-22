@@ -23,8 +23,8 @@ pub enum OrgRole {
 impl std::str::FromStr for OrgRole {
     type Err = ();
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
             "member" => Ok(Self::Member),
             "admin" => Ok(Self::Admin),
             "owner" => Ok(Self::Owner),
@@ -34,7 +34,8 @@ impl std::str::FromStr for OrgRole {
 }
 
 impl OrgRole {
-    /// Convert role to string
+    pub const ALL: [Self; 3] = [Self::Member, Self::Admin, Self::Owner];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Member => "member",
@@ -64,7 +65,7 @@ pub struct OrganizationMemberRow {
 /// CRITICAL-7: This function now fails if the member already exists (active or inactive).
 /// Use `reactivate_member` to explicitly reactivate an inactive member.
 pub async fn add_member(
-    pool: &PgPool,
+    executor: impl Executor<'_, Database = Postgres>,
     organization_id: Uuid,
     user_id: Uuid,
     role: OrgRole,
@@ -84,7 +85,7 @@ pub async fn add_member(
         invited_by,
         now
     )
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     Ok(OrganizationMemberRow {
@@ -348,7 +349,7 @@ pub async fn remove_guarded(
 
 /// Get a member by organization and user ID
 pub async fn get_member(
-    pool: &PgPool,
+    executor: impl Executor<'_, Database = Postgres>,
     organization_id: Uuid,
     user_id: Uuid,
 ) -> DbResult<Option<OrganizationMemberRow>> {
@@ -362,7 +363,7 @@ pub async fn get_member(
         organization_id,
         user_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(row.map(|r| {

@@ -280,9 +280,9 @@ describe('agentsApi', () => {
   it("surfaces the server's own reason when a sign-in fails", async () => {
     respond({ error: refusal }, 502);
     await expect(agentsApi.start(organization, 'codex')).rejects.toThrow(refusal);
-    respond({ error: 'Only organization admins can sign in to coding agents' }, 403);
+    respond({ error: 'This needs the agent_logins:update permission in this organization.' }, 403);
     await expect(agentsApi.start(organization, 'claude')).rejects.toThrow(
-      'Only organization admins can sign in to coding agents'
+      'This needs the agent_logins:update permission in this organization.'
     );
   });
 
@@ -311,7 +311,7 @@ describe('agentsApi', () => {
     expect(failure).toMatchObject({ message: 'Something new went wrong.', status: 400 });
     expect(failure.kind).toBeUndefined();
 
-    respond({ error: 'Only organization admins can sign in to coding agents' }, 403);
+    respond({ error: 'This needs the agent_logins:update permission in this organization.' }, 403);
     const denied = await agentsApi.start(organization, 'claude').catch((reason) => reason);
     expect(denied).toMatchObject({ status: 403 });
     expect(denied.kind).toBeUndefined();

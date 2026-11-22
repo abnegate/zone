@@ -28,7 +28,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_server::auth::{Grant, Permission, Scope};
-use zone_server::db::custom_roles::{self, Assignment, Creation, Definition};
+use zone_server::db::custom_roles::{self, Assignment};
 use zone_server::db::organization_members::{self, OrgRole};
 use zone_server::db::workspace_members::{self, WorkspaceRole};
 
@@ -110,28 +110,8 @@ async fn seat_workspace(pool: &PgPool, workspace: Uuid, member: Uuid, role: Work
 }
 
 /// A custom role of `scope` in `organization` holding `permissions` and its base.
-async fn role(
-    pool: &PgPool,
-    organization: Uuid,
-    creator: Uuid,
-    scope: Scope,
-    permissions: &[Permission],
-) -> Uuid {
-    let grant = composed(scope, permissions);
-    let name = format!("Role {}", Uuid::new_v4());
-    let definition = Definition {
-        name: &name,
-        description: None,
-        scope,
-        grant: &grant,
-    };
-    match custom_roles::create(pool, organization, &definition, creator)
-        .await
-        .expect("the role is created")
-    {
-        Creation::Created(role) => role.id,
-        Creation::NameTaken => panic!("a fresh name is never taken"),
-    }
+async fn role(pool: &PgPool, organization: Uuid, scope: Scope, permissions: &[Permission]) -> Uuid {
+    custom_roles::testing::composed(pool, organization, scope, permissions).await
 }
 
 /// Gives an organization member a custom role, as the owner `assigner` would.
@@ -181,7 +161,6 @@ async fn organization_holder(fixture: &Fixture, permissions: &[Permission]) -> A
     let role = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Organization,
         permissions,
     )
@@ -209,7 +188,6 @@ async fn workspace_holder(fixture: &Fixture, permissions: &[Permission]) -> Acco
     let role = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Workspace,
         permissions,
     )

@@ -347,7 +347,7 @@ async fn admin(state: &AppState, claims: &Claims, organization: Uuid) -> Result<
     if viewer.manages {
         Ok(viewer.user)
     } else {
-        Err(Failure::admins_only())
+        Err(Failure::forbidden(Permission::AgentLoginsUpdate))
     }
 }
 

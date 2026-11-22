@@ -13,10 +13,10 @@ use serde::Serialize;
 use zone_enterprise::policy::Denial;
 
 use super::kind::Kind;
+use crate::auth::Permission;
 use crate::db::ai_settings::AccessError;
 use crate::services::login::error::Error;
 
-const ADMINS_ONLY: &str = "Only organization admins can sign in to coding agents";
 const INTERNAL: &str = "Internal server error";
 
 #[derive(Debug)]
@@ -46,8 +46,8 @@ impl Failure {
         }
     }
 
-    pub(super) fn admins_only() -> Self {
-        Self::new(StatusCode::FORBIDDEN, ADMINS_ONLY)
+    pub(super) fn forbidden(permission: Permission) -> Self {
+        Self::new(StatusCode::FORBIDDEN, permission.refusal())
     }
 
     pub(super) fn denied(denial: Denial) -> Self {
@@ -61,9 +61,11 @@ impl Failure {
     pub(super) fn exchange(error: Error) -> Self {
         let kind = match &error {
             Error::Unreadable(_) => Some(Kind::InvalidCode),
-            Error::Invalid(_) | Error::Forbidden(_) | Error::Refused(_) | Error::Unreachable(_) => {
-                Some(Kind::StartAgain)
-            }
+            Error::Invalid(_)
+            | Error::Forbidden(_)
+            | Error::Demoted(_)
+            | Error::Refused(_)
+            | Error::Unreachable(_) => Some(Kind::StartAgain),
             Error::Unavailable(_) | Error::Deleted | Error::Internal(_) | Error::Database(_) => {
                 None
             }
@@ -91,7 +93,7 @@ impl Failure {
 impl From<AccessError> for Failure {
     fn from(error: AccessError) -> Self {
         match error {
-            AccessError::Forbidden(_) => Self::admins_only(),
+            AccessError::Forbidden(permission) => Self::forbidden(permission),
             AccessError::NotFound(message) => Self::new(StatusCode::NOT_FOUND, message),
             AccessError::Invalid(message) => Self::new(StatusCode::BAD_REQUEST, message),
             AccessError::Database(error) => Self::database(error),
@@ -106,6 +108,7 @@ impl From<Error> for Failure {
                 Self::new(StatusCode::BAD_REQUEST, message)
             }
             Error::Forbidden(message) => Self::new(StatusCode::FORBIDDEN, message),
+            Error::Demoted(_) => Self::new(StatusCode::FORBIDDEN, error.to_string()),
             Error::Unavailable(_) => Self::new(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
             Error::Deleted => Self::new(StatusCode::NOT_FOUND, error.to_string()),
             Error::Refused(message) | Error::Unreachable(message) => {
@@ -135,11 +138,15 @@ mod tests {
 
     use super::*;
 
-    fn refusals() -> [Error; 8] {
+    const DEMOTED: &str = "This sign-in needs the agent_logins:update permission, and whoever \
+                           started it no longer holds it. Start again.";
+
+    fn refusals() -> [Error; 9] {
         [
             Error::Unreadable("bad paste"),
             Error::Invalid("no such sign-in"),
             Error::Forbidden("no longer an admin"),
+            Error::Demoted(Permission::AgentLoginsUpdate),
             Error::Unavailable(AgentKind::Codex),
             Error::Deleted,
             Error::Refused("device code request failed".to_string()),
@@ -163,6 +170,7 @@ mod tests {
             (StatusCode::BAD_REQUEST, "bad paste"),
             (StatusCode::BAD_REQUEST, "no such sign-in"),
             (StatusCode::FORBIDDEN, "no longer an admin"),
+            (StatusCode::FORBIDDEN, DEMOTED),
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "The codex CLI is not installed on this server",
@@ -179,12 +187,13 @@ mod tests {
                 (status, message, None)
             );
         }
-        let forbidden = Failure::from(AccessError::Forbidden(
-            "Only organization admins can manage AI settings",
-        ));
+        let forbidden = Failure::from(AccessError::Forbidden(Permission::AgentLoginsUpdate));
         assert_eq!(
             (forbidden.status, forbidden.message.as_ref()),
-            (StatusCode::FORBIDDEN, ADMINS_ONLY)
+            (
+                StatusCode::FORBIDDEN,
+                Permission::AgentLoginsUpdate.refusal().as_str()
+            )
         );
     }
 
@@ -193,6 +202,7 @@ mod tests {
         for (error, (status, kind)) in refusals().into_iter().zip([
             (StatusCode::BAD_REQUEST, Some(Kind::InvalidCode)),
             (StatusCode::BAD_REQUEST, Some(Kind::StartAgain)),
+            (StatusCode::FORBIDDEN, Some(Kind::StartAgain)),
             (StatusCode::FORBIDDEN, Some(Kind::StartAgain)),
             (StatusCode::SERVICE_UNAVAILABLE, None),
             (StatusCode::NOT_FOUND, None),
@@ -216,8 +226,11 @@ mod tests {
             )
         );
         assert_eq!(
-            sent(Failure::admins_only()).await,
-            (StatusCode::FORBIDDEN, json!({ "error": ADMINS_ONLY }))
+            sent(Failure::forbidden(Permission::AgentLoginsUpdate)).await,
+            (
+                StatusCode::FORBIDDEN,
+                json!({ "error": Permission::AgentLoginsUpdate.refusal() })
+            )
         );
     }
 

@@ -74,6 +74,7 @@ const SIGN_IN_CODES = [
   'ASSERTION_INVALID',
   'SIGN_IN_REFUSED',
   'SIGN_IN_FAILED',
+  'RATE_LIMITED',
 ];
 
 /** The connection fields a provider of the other protocol sends as null. */
