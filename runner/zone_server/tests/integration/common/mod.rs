@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod audit;
+pub mod blackhole;
 pub mod chat_socket;
 pub mod comfy;
 pub mod context;
@@ -117,6 +118,7 @@ pub fn test_config() -> Config {
         source_index: Default::default(),
         evaluation: Default::default(),
         license_renewal: Default::default(),
+        shutdown: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
         train_upload_limit_mb: 512,
@@ -587,6 +589,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         source_index: Default::default(),
         evaluation: Default::default(),
         license_renewal: Default::default(),
+        shutdown: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
         train_upload_limit_mb: 512,

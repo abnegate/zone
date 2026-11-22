@@ -34,6 +34,7 @@ use crate::cluster::Bus;
 use crate::config::AgentConfig;
 use crate::config::{Config, ModelBackend};
 use crate::db::DbResult;
+use crate::drain::Drain;
 use crate::pull::PullRegistry;
 use crate::services::chat::pull_request::StatusCache;
 use crate::services::github::snapshots::Snapshots;
@@ -161,6 +162,7 @@ struct AppStateInner {
     /// Relays live state to the other replicas. A process starts on its own
     /// loopback, which reaches nobody, until [`AppState::with_bus`] gives it Valkey.
     pub bus: Bus,
+    pub drain: Drain,
     /// Whether the Community member cap applies, which a test build leaves off
     /// until a test opts in with [`AppState::cap_members`].
     #[cfg(any(test, feature = "testing"))]
@@ -299,6 +301,7 @@ impl AppState {
                 github_snapshots,
                 background: TaskTracker::new(),
                 bus,
+                drain: Drain::default(),
                 #[cfg(any(test, feature = "testing"))]
                 capped: AtomicBool::new(false),
             }),
@@ -319,6 +322,11 @@ impl AppState {
     /// The bus to the other replicas.
     pub fn bus(&self) -> &Bus {
         &self.inner.bus
+    }
+
+    /// Whether the process is stopping, and its WebSockets with it.
+    pub fn drain(&self) -> &Drain {
+        &self.inner.drain
     }
 
     /// Writes that finish off work already delivered, which the server waits
@@ -712,6 +720,7 @@ pub(crate) fn test_config() -> Config {
         source_index: Default::default(),
         evaluation: Default::default(),
         license_renewal: Default::default(),
+        shutdown: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
         train_upload_limit_mb: 512,
@@ -979,6 +988,7 @@ mod tests {
             source_index: Default::default(),
             evaluation: Default::default(),
             license_renewal: Default::default(),
+            shutdown: Default::default(),
             monitoring: Default::default(),
             chat: Default::default(),
             train_upload_limit_mb: 512,

@@ -108,7 +108,8 @@ pub async fn handle_context_ws(
     State(state): State<AppState>,
     Path(gathering_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, gathering_id))
+    let sockets = state.drain().sockets().clone();
+    ws.on_upgrade(move |socket| sockets.track_future(handle_socket(socket, state, gathering_id)))
 }
 
 /// Handle the WebSocket connection
@@ -523,12 +524,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, gathering_id: Uuid) {
                         last_client_activity = Instant::now();
                     }
                     Some(Ok(Message::Pong(_))) => {
-                        // MAJOR-4: Update activity timestamp on pong
                         last_client_activity = Instant::now();
                     }
                     Some(Ok(Message::Close(_))) | None => return,
                     _ => {}
                 }
+            }
+
+            () = state.drain().closing() => {
+                let _ = sender.send(super::restarting()).await;
+                return;
             }
         }
     }
