@@ -253,6 +253,13 @@ never contacts the registry again. The registry name is part of each image's
 name, so leave `ZONE_AIRGAP_REGISTRY` as `compose` wrote it. Later runs
 reuse the port it names, and refuse a `--port` that disagrees with it.
 
+`compose` leaves `ZONE_TRUSTED_PROXIES` out of `.env`. `docker-compose.yml`
+pins Traefik to `172.31.0.250` on `zone_edge` and trusts that address by
+default, and the override changes only images, so the manager reads each
+client's address from Traefik with no setting. A value you put in `.env`
+replaces the default; see
+[`ZONE_TRUSTED_PROXIES`](CONFIGURATION.md#zone_trusted_proxies).
+
 Start Zone from the directory:
 
 ```sh
@@ -342,6 +349,18 @@ with a slash: `registry.internal:5443/mirror/`, not
 anyway. Leave `global.imageRegistry` empty when you use them; a value left
 over from pulling LTS images straight from Zone's registry would be added in
 front of the full repositories a second time.
+
+The values set images only. `helm-values` can't know your ingress
+controller's addresses, so it leaves `server.trustedProxies` unset, and
+zone-server then trusts loopback only: every client arrives from the ingress
+controller and shares one single sign-on rate limit. Set it in your own
+`zone-apps` values to the ingress controller's addresses, such as its pod
+CIDR; see [`ZONE_TRUSTED_PROXIES`](CONFIGURATION.md#zone_trusted_proxies).
+
+```yaml
+server:
+  trustedProxies: "10.244.0.0/16"
+```
 
 ### 3. Install the charts
 

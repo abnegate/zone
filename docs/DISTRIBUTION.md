@@ -272,6 +272,16 @@ around the limit. Caddy's `reverse_proxy` replaces any `X-Forwarded-For` a
 client sends with the address it saw, so the rightmost entry is always the
 real client.
 
+Zone itself has the same setting under another name,
+[`ZONE_TRUSTED_PROXIES`](CONFIGURATION.md#zone_trusted_proxies), for the
+Traefik or ingress controller in front of zone-server. The two differ because
+their proxies do. The signer runs on EC2 behind one Caddy, so it reads only
+the rightmost entry. Zone may sit behind a chain of proxies, so it walks
+`X-Forwarded-For` from the right past every trusted hop. With one Caddy that
+replaces the header, both arrive at the same address. Unset, Zone trusts
+loopback only, while the signer refuses to start. Zone has no `none`: an
+empty value already trusts nothing.
+
 Set it to the `signer` network's subnet:
 
 ```sh

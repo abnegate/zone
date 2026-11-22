@@ -242,6 +242,14 @@ manager:
 `manager.image` is the console (`zone/manager`). `zone-infra` and `zone-ai`
 run only third-party images, so they need no changes for LTS.
 
+`server.trustedProxies` is unset by default, as on any other release, so
+zone-server trusts loopback only and counts every client behind the ingress
+controller as one. Set it to your ingress controller's addresses, such as its
+pod CIDR; see
+[`ZONE_TRUSTED_PROXIES`](CONFIGURATION.md#zone_trusted_proxies). With
+Compose, `docker-compose.lts.yml` changes only the images, so the stack keeps
+trusting Traefik's pinned address.
+
 ## Running the runner
 
 The runner ships inside `zone/server`, at `/app/zone-runner`:
