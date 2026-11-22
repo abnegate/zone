@@ -47,6 +47,16 @@ jobs:
           sh scripts/test-bundle.sh
           bash scripts/test-bundle.sh
 
+      - name: Verify the bundle layout with bsdtar, as macOS archives it
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libarchive-tools
+          mkdir -p "$RUNNER_TEMP/bsdtar"
+          ln -s "$(command -v bsdtar)" "$RUNNER_TEMP/bsdtar/tar"
+          PATH=$RUNNER_TEMP/bsdtar:$PATH tar --version
+          PATH=$RUNNER_TEMP/bsdtar:$PATH sh scripts/test-bundle.sh
+
       - name: Verify the bundle upload never overwrites, under dash and bash
         run: |
           sh scripts/test-bundle-upload.sh
