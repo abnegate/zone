@@ -26,8 +26,8 @@ under **Settings → This server → License**.
 |---|---|---|
 | Enterprise, active or in grace | Everything | Editable |
 | Enterprise, lapsed (past grace) | Reads and deprovisioning only | Read-only, with a renewal notice; tokens can still be revoked |
-| Team, in any state | Reads and deprovisioning only | Read-only, with an upgrade notice; tokens can still be revoked |
-| Removed, never installed (Community), or a stored key that doesn't verify | Reads and deprovisioning only | Read-only, with an upgrade notice; tokens can still be revoked |
+| Team, in any state | Reads and deprovisioning only | An upgrade notice; tokens, groups and sync history already there are shown read-only, and tokens can still be revoked |
+| Removed, never installed (Community), or a stored key that doesn't verify | Reads and deprovisioning only | An upgrade notice; tokens, groups and sync history already there are shown read-only, and tokens can still be revoked |
 
 Without the license, an identity provider that already has a token keeps
 reaching Zone, but Zone accepts only the requests that take access away:
