@@ -29,7 +29,7 @@ form_urlencoded = "=1.2.3"
 getrandom = { workspace = true, features = ["std"] }
 hkdf = "=0.13.0"
 hmac = "=0.13.0"
-ipnet = "=2.12.1"
+ipnet = { workspace = true }
 lettre = { version = "=0.11.24", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1-native-tls"] }
 reqwest = { workspace = true }
 rusty-s3 = { version = "=0.11.0", default-features = false, features = ["rustcrypto"] }
