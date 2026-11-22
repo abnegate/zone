@@ -185,8 +185,13 @@ async fn access_refusals_answer_as_the_agent_policy_does() {
     let (status, body) = answered(AccessRefusal::Missing("Organization not found").into()).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body, json!({ "error": "Organization not found" }));
-    let (status, _) = answered(AccessRefusal::Forbidden(Permission::PoliciesUpdate).into()).await;
+    let (status, body) =
+        answered(AccessRefusal::Forbidden(Permission::WorkspacePoliciesUpdate).into()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body,
+        json!({ "error": "This needs the workspace_policies:update permission in this workspace." })
+    );
 }
 
 #[test]

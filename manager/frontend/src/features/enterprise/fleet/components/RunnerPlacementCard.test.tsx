@@ -192,6 +192,17 @@ describe('RunnerPlacementCard', () => {
       expect(screen.queryByRole('button', { name: 'Remove region=eu' })).not.toBeInTheDocument();
     });
 
+    it('names the permission a member needs to change the labels', async () => {
+      await loaded(ORGANIZATION, fromOrganization({ ...ORGANIZATION_LABELS, editable: false }));
+
+      expect(
+        screen.getByText(
+          'Changing the runner labels needs the policies:update permission in this organization.'
+        )
+      ).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: SAVE_LABELS })).not.toBeInTheDocument();
+    });
+
     it('stays out of the way on Community', async () => {
       labels.mockResolvedValue(fromOrganization(COMMUNITY_ORGANIZATION_LABELS));
       renderCard(ORGANIZATION);
@@ -217,6 +228,17 @@ describe('RunnerPlacementCard', () => {
         `${EFFECTIVE_LABEL}gpu, region=eu`
       );
       expect(labels).toHaveBeenCalledWith(WORKSPACE);
+    });
+
+    it('names the permission a member needs to change the workspace labels', async () => {
+      await loaded(WORKSPACE, fromWorkspace({ ...WORKSPACE_LABELS, editable: false }));
+
+      expect(
+        screen.getByText(
+          "Changing this workspace's runner labels needs the workspace_policies:update permission in this workspace."
+        )
+      ).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: SAVE_LABELS })).not.toBeInTheDocument();
     });
 
     it('does not offer a label the organization already requires', async () => {

@@ -14,6 +14,7 @@ use zone_enterprise::fleet::{
     BODY_INVALID, LABEL_INVALID, Labels, NO_RUNNER_LEFT, RUNNER_CORDONED, RUNNER_ONLINE,
     RUNNER_OUTDATED, RUNNER_REVOKED, STATE_INVALID, VERSION_INVALID, Version,
 };
+use zone_server::auth::admin_guard::REQUIRED;
 use zone_server::auth::{Grant, Permission, Scope};
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::custom_roles::{self, Assignment, Creation, Definition};
@@ -398,6 +399,16 @@ fn uncoded(response: &TestResponse, status: StatusCode) {
     );
 }
 
+fn forbidden(response: &TestResponse, error: &str) {
+    uncoded(response, StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.json_value()["error"],
+        error,
+        "unexpected refusal: {}",
+        response.text()
+    );
+}
+
 fn locked_out(response: &TestResponse) {
     refused(response, StatusCode::CONFLICT, NO_RUNNER_LEFT);
     assert_eq!(response.json_value()["remaining"], 0, "{}", response.text());
@@ -466,7 +477,7 @@ async fn only_a_server_admin_reaches_the_fleet() {
                 .await,
             fleet.delete(&runner_path(fleet.runner), token).await,
         ] {
-            uncoded(&response, StatusCode::FORBIDDEN);
+            forbidden(&response, REQUIRED);
         }
     }
 
@@ -1009,11 +1020,11 @@ async fn members_read_the_organization_labels_and_only_the_policy_permission_cha
     assert_eq!(read["editable"], false);
     assert_eq!(read["labels"], json!([]));
     assert_eq!(read["updated_at"], Value::Null);
-    uncoded(
+    forbidden(
         &fleet
             .patch(&fleet.organization_labels(), &member.token, &change)
             .await,
-        StatusCode::FORBIDDEN,
+        "This needs the policies:update permission in this organization.",
     );
     uncoded(
         &fleet
@@ -1266,11 +1277,11 @@ async fn the_workspace_policy_permission_changes_the_workspace_labels() {
 
     let read = answered(&fleet.get(&fleet.workspace_labels(), &viewer.token).await);
     assert_eq!(read["editable"], false);
-    uncoded(
+    forbidden(
         &fleet
             .patch(&fleet.workspace_labels(), &viewer.token, &change)
             .await,
-        StatusCode::FORBIDDEN,
+        "This needs the workspace_policies:update permission in this workspace.",
     );
     uncoded(
         &fleet.get(&fleet.workspace_labels(), &outsider.token).await,
@@ -1294,11 +1305,11 @@ async fn the_workspace_policy_permission_changes_the_workspace_labels() {
     assert_eq!(saved["editable"], true);
     assert_eq!(saved["workspace"], json!(["region=eu"]));
     assert!(saved["updated_at"].is_string(), "{saved}");
-    uncoded(
+    forbidden(
         &fleet
             .patch(&fleet.organization_labels(), &holder.token, &change)
             .await,
-        StatusCode::FORBIDDEN,
+        "This needs the policies:update permission in this organization.",
     );
 
     let entries = fleet.entries(actions::RUNNER_LABELS_UPDATED).await;

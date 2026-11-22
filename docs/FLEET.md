@@ -445,7 +445,11 @@ Refusals of a change:
 | `PATCH /api/organizations/{org_id}/workspaces/{ws_id}/runner-labels` | [See above](#who-can-see-and-change-what) | Replace the workspace's own labels. |
 
 Reading works on every edition; every change needs the license. A request
-from someone who isn't a server admin to a server route gets 403. A request
+from someone who isn't a server admin to a server route gets 403 with "This
+needs a server admin." A label change from someone without the permission
+gets 403 naming it, such as "This needs the policies:update permission in
+this organization." or "This needs the workspace_policies:update permission
+in this workspace." A request
 is checked in this order: membership (404), the caller's role or server admin
 (403), the license (403 `license_required`), the body (400
 `fleet_body_invalid`), each field (400 `fleet_version_invalid`,

@@ -1,3 +1,4 @@
+import { Permission } from '../roles/schemas';
 import { Tone } from '../status';
 import type { FleetRefusal } from './FleetRefusal';
 import { FleetCode, RunnerState } from './schemas';
@@ -223,11 +224,9 @@ export const PLACEMENT_LAPSED =
 export const PLACEMENT_NOT_ENFORCED =
   'Label requirements are saved but not enforced without a Zone Enterprise license.';
 
-export const ORGANIZATION_PLACEMENT_READ_ONLY =
-  'Only people who can change the agent policy can change the runner labels.';
+export const ORGANIZATION_PLACEMENT_READ_ONLY = `Changing the runner labels needs the ${Permission.PoliciesUpdate} permission in this organization.`;
 
-export const WORKSPACE_PLACEMENT_READ_ONLY =
-  "Only people who can change this workspace's agent policy can change its runner labels.";
+export const WORKSPACE_PLACEMENT_READ_ONLY = `Changing this workspace's runner labels needs the ${Permission.WorkspacePoliciesUpdate} permission in this workspace.`;
 
 export const REQUIRED_LABEL = 'Required labels';
 
