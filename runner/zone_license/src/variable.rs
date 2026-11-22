@@ -20,11 +20,17 @@ pub enum Variable {
     RegistryService,
     RegistryRepositories,
     RegistryKeyGeneration,
+    BundleBucket,
+    BundleRegion,
+    BundleEndpoint,
+    BundlePrefix,
+    BundleAccessKeyId,
+    BundleSecretAccessKey,
 }
 
 impl Variable {
     #[cfg(test)]
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 26] = [
         Self::PrivateKeyFile,
         Self::PrivateKey,
         Self::KeyId,
@@ -45,6 +51,12 @@ impl Variable {
         Self::RegistryService,
         Self::RegistryRepositories,
         Self::RegistryKeyGeneration,
+        Self::BundleBucket,
+        Self::BundleRegion,
+        Self::BundleEndpoint,
+        Self::BundlePrefix,
+        Self::BundleAccessKeyId,
+        Self::BundleSecretAccessKey,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -69,6 +81,12 @@ impl Variable {
             Self::RegistryService => "ZONE_REGISTRY_SERVICE",
             Self::RegistryRepositories => "ZONE_REGISTRY_REPOSITORIES",
             Self::RegistryKeyGeneration => "ZONE_REGISTRY_KEY_GENERATION",
+            Self::BundleBucket => "ZONE_BUNDLE_BUCKET",
+            Self::BundleRegion => "ZONE_BUNDLE_REGION",
+            Self::BundleEndpoint => "ZONE_BUNDLE_ENDPOINT",
+            Self::BundlePrefix => "ZONE_BUNDLE_PREFIX",
+            Self::BundleAccessKeyId => "ZONE_BUNDLE_ACCESS_KEY_ID",
+            Self::BundleSecretAccessKey => "ZONE_BUNDLE_SECRET_ACCESS_KEY",
         }
     }
 
@@ -113,6 +131,12 @@ mod tests {
                 "ZONE_REGISTRY_SERVICE",
                 "ZONE_REGISTRY_REPOSITORIES",
                 "ZONE_REGISTRY_KEY_GENERATION",
+                "ZONE_BUNDLE_BUCKET",
+                "ZONE_BUNDLE_REGION",
+                "ZONE_BUNDLE_ENDPOINT",
+                "ZONE_BUNDLE_PREFIX",
+                "ZONE_BUNDLE_ACCESS_KEY_ID",
+                "ZONE_BUNDLE_SECRET_ACCESS_KEY",
             ]
         );
     }
