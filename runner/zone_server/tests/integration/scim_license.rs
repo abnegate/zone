@@ -5,24 +5,35 @@
 //! revoked, and nobody loses a membership, a role or their access to the lapse itself. The
 //! Community member cap is checked here too.
 
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
+use axum::response::IntoResponse;
+use futures::future::join_all;
+use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use sqlx::Postgres;
+use sqlx::pool::PoolConnection;
 use uuid::Uuid;
+use zone_enterprise::scim::{UserChanges, UserDocument};
 use zone_server::auth::Permission;
 use zone_server::auth::entitlement::ENTERPRISE_MESSAGE;
 use zone_server::db::audit::actions;
 use zone_server::db::organization_members::OrgRole;
 use zone_server::db::workspace_members::{self, WorkspaceRole};
+use zone_server::services::members::{AdmissionError, SEATS_LOCK};
+use zone_server::services::scim::{Entitlement, Failure, ScimClient, users};
 
 use crate::common::TestResponse;
 use crate::common::scim::{
-    Fixture, GROUP_SCHEMA, IssuedToken, PATCH_SCHEMA, Placeholders, USER_SCHEMA, assert_refused,
-    assert_scim, replay, resource_id,
+    CONTENT_TYPE, ERROR_SCHEMA, Fixture, GROUP_SCHEMA, IssuedToken, PATCH_SCHEMA, Placeholders,
+    USER_SCHEMA, assert_refused, assert_scim, replay, resource_id,
 };
 use crate::common::sso::{self, Account};
 use crate::common::test_email;
 
 const PREFIX: &str = "scim_license";
+const HOLD_SEATS: &str = "SELECT pg_advisory_lock($1)";
+const RELEASE_SEATS: &str = "SELECT pg_advisory_unlock($1)";
+const ATTEMPTS: usize = 3;
 
 struct Provisioned {
     token: IssuedToken,
@@ -489,6 +500,200 @@ async fn enterprise_provisions_past_the_community_cap_and_community_provisions_n
         .scim_delete(&format!("/Users/{fifth}"), &token.secret)
         .await
         .assert_status(StatusCode::NO_CONTENT);
+
+    fixture.cleanup().await;
+}
+
+/// The writer a request authenticated while the license was still Enterprise: its license then
+/// lapses before the request is admitted, so the Community cap applies to the admission.
+fn lapsing(fixture: &Fixture, token: &IssuedToken) -> ScimClient {
+    ScimClient {
+        organization_id: fixture.organization,
+        token_id: token.id,
+        token_name: "Okta".to_owned(),
+        entitlement: Entitlement::Full,
+    }
+}
+
+fn document(user_name: &str) -> UserDocument {
+    serde_json::from_value(user(user_name)).unwrap()
+}
+
+/// Holds the seat lock on a session of its own until [`release_seats`].
+async fn hold_seats(fixture: &Fixture) -> PoolConnection<Postgres> {
+    let mut holder = fixture.pool().acquire().await.unwrap();
+    sqlx::query(HOLD_SEATS)
+        .bind(SEATS_LOCK)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder
+}
+
+async fn release_seats(mut holder: PoolConnection<Postgres>) {
+    sqlx::query(RELEASE_SEATS)
+        .bind(SEATS_LOCK)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+}
+
+async fn accounts(fixture: &Fixture, email: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE lower(email) = $1")
+        .bind(email.to_lowercase())
+        .fetch_one(fixture.pool())
+        .await
+        .unwrap()
+}
+
+/// A failure as the SCIM routes answer it.
+async fn answered(failure: Failure) -> (StatusCode, Option<String>, Value) {
+    let response = failure.into_response();
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        content_type,
+        serde_json::from_slice(&bytes).unwrap(),
+    )
+}
+
+async fn assert_busy(failure: Failure) {
+    assert!(matches!(failure, Failure::Busy(_)), "{failure:?}");
+    assert_eq!(
+        answered(failure).await,
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(CONTENT_TYPE.to_owned()),
+            json!({
+                "schemas": [ERROR_SCHEMA],
+                "status": "503",
+                "detail": AdmissionError::Busy.to_string(),
+            })
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_provisioning_counts_the_cap_under_the_seat_lock_and_answers_busy_in_scim_format() {
+    let fixture = Fixture::capped(PREFIX).await;
+    let token = fixture.token().await;
+    fixture.inner.remove_license(&fixture.owner).await;
+    let client = lapsing(&fixture, &token);
+    let email = test_email();
+    let holder = hold_seats(&fixture).await;
+
+    let refused = users::create(fixture.state(), &client, &document(&email)).await;
+
+    release_seats(holder).await;
+    assert_busy(refused.expect_err("a held seat lock admits nobody")).await;
+    assert_eq!(
+        accounts(&fixture, &email).await,
+        0,
+        "the refusal created an account"
+    );
+
+    let admitted = users::create(fixture.state(), &client, &document(&email))
+        .await
+        .expect("the released seat lock admits the newcomer");
+    assert_eq!(
+        fixture.holding(admitted.id).await,
+        held(OrgRole::Member, None)
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_reactivation_counts_the_cap_under_the_seat_lock_and_answers_busy_in_scim_format() {
+    let fixture = Fixture::capped(PREFIX).await;
+    let token = fixture.token().await;
+    let user = fixture.provision(&token.secret, &test_email()).await;
+    fixture
+        .scim_patch(
+            &format!("/Users/{user}"),
+            &token.secret,
+            &patch(json!([{ "op": "replace", "value": { "active": false } }])),
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    fixture.inner.remove_license(&fixture.owner).await;
+    let client = lapsing(&fixture, &token);
+    let reactivation = UserChanges {
+        active: Some(true),
+        ..UserChanges::default()
+    };
+    let holder = hold_seats(&fixture).await;
+
+    let refused = users::update(fixture.state(), &client, user, reactivation.clone()).await;
+
+    release_seats(holder).await;
+    assert_busy(refused.expect_err("a held seat lock reactivates nobody")).await;
+    assert_eq!(
+        fixture.holding(user).await,
+        Some((OrgRole::Member.as_str().to_owned(), None, false))
+    );
+
+    users::update(fixture.state(), &client, user, reactivation)
+        .await
+        .expect("the released seat lock reactivates the member");
+    assert_eq!(fixture.holding(user).await, held(OrgRole::Member, None));
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_provisionings_one_below_the_cap_admit_exactly_one() {
+    let fixture = Fixture::capped(PREFIX).await;
+    let token = fixture.token().await;
+    fixture.member(OrgRole::Member).await;
+    let mut stranded = Vec::with_capacity(ATTEMPTS);
+    for _ in 0..ATTEMPTS {
+        let account = fixture.stranger().await;
+        sqlx::query("UPDATE organization_members SET is_active = false WHERE user_id = $1")
+            .bind(account.id)
+            .execute(fixture.pool())
+            .await
+            .unwrap();
+        stranded.push(account);
+    }
+    fixture.inner.remove_license(&fixture.owner).await;
+    let client = lapsing(&fixture, &token);
+    let documents: Vec<UserDocument> = stranded
+        .iter()
+        .map(|account| document(&account.email))
+        .collect();
+
+    let settled = join_all(
+        documents
+            .iter()
+            .map(|document| users::create(fixture.state(), &client, document)),
+    )
+    .await;
+
+    let admitted = settled.iter().filter(|settled| settled.is_ok()).count();
+    assert_eq!(
+        admitted, 1,
+        "exactly one provisioning is admitted: {settled:?}"
+    );
+    for refused in settled.into_iter().filter_map(Result::err) {
+        assert!(
+            matches!(refused, Failure::Forbidden(_) | Failure::Busy(_)),
+            "{refused:?}"
+        );
+    }
+    let mut seated = 0;
+    for account in &stranded {
+        if fixture.holding(account.id).await.is_some() {
+            seated += 1;
+        }
+    }
+    assert_eq!(seated, 1, "only the admitted provisioning seated anyone");
 
     fixture.cleanup().await;
 }

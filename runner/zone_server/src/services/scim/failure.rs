@@ -15,6 +15,7 @@ const FORBIDDEN: u16 = 403;
 const PAYLOAD_TOO_LARGE: u16 = 413;
 const TOO_MANY_REQUESTS: u16 = 429;
 const INTERNAL_SERVER_ERROR: u16 = 500;
+const SERVICE_UNAVAILABLE: u16 = 503;
 const EMAIL_KEYS: [&str; 2] = ["users_email_key", "users_email_lower_key"];
 const EMAIL_TAKEN: &str = "Another account already has that email address.";
 const USER_NAME_TAKEN: &str = "Another user in the organization already has that userName.";
@@ -40,6 +41,8 @@ pub enum Failure {
     TooLarge,
     #[error("Too many SCIM requests for this organization. Try again in {retry_after} seconds.")]
     Throttled { retry_after: u64 },
+    #[error("{0}")]
+    Busy(String),
     #[error(transparent)]
     Storage(#[from] sqlx::Error),
     #[error("{0}")]
@@ -75,6 +78,7 @@ impl Failure {
             Self::LastOwner => scim::CONFLICT,
             Self::TooLarge => PAYLOAD_TOO_LARGE,
             Self::Throttled { .. } => TOO_MANY_REQUESTS,
+            Self::Busy(_) => SERVICE_UNAVAILABLE,
             Self::Storage(_) | Self::Internal(_) => INTERNAL_SERVER_ERROR,
         }
     }
@@ -88,6 +92,7 @@ impl Failure {
             | Self::Forbidden(_)
             | Self::LastOwner
             | Self::TooLarge
+            | Self::Busy(_)
             | Self::Storage(_)
             | Self::Internal(_) => None,
         }
@@ -109,6 +114,7 @@ impl From<AdmissionError> for Failure {
     fn from(error: AdmissionError) -> Self {
         match error {
             AdmissionError::Full { .. } => Self::Forbidden(error.to_string()),
+            AdmissionError::Busy => Self::Busy(error.to_string()),
             AdmissionError::Database(error) => Self::Storage(error),
         }
     }
@@ -142,6 +148,7 @@ mod tests {
                 429,
                 Some(ScimType::TooMany),
             ),
+            (Failure::Busy("busy".into()), 503, None),
             (Failure::Storage(sqlx::Error::PoolTimedOut), 500, None),
             (Failure::Internal("hashing"), 500, None),
         ];
@@ -171,6 +178,14 @@ mod tests {
             failure.detail(),
             AdmissionError::Full { cap: 3 }.to_string()
         );
+    }
+
+    #[test]
+    fn a_held_seat_lock_is_unavailable_with_the_admission_message() {
+        let failure = Failure::from(AdmissionError::Busy);
+        assert_eq!(failure.status(), 503);
+        assert_eq!(failure.scim_type(), None);
+        assert_eq!(failure.detail(), AdmissionError::Busy.to_string());
     }
 
     #[test]

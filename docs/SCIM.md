@@ -660,6 +660,7 @@ Errors use the SCIM error format:
 | 409 | | The request would deactivate or delete the organization's last active owner. |
 | 413 | | The request body is larger than Zone accepts. |
 | 429 | `tooMany` | The [rate limit](#rate-limit) is used up. |
+| 503 | | A user create or reactivation that the [member cap](LICENSING.md#the-community-member-cap) applies to waited more than about 5 seconds for its turn. Nothing changed; the provider retries. |
 
 ## Troubleshooting
 

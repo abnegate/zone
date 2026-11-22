@@ -104,13 +104,15 @@ pub async fn create(
     {
         return Err(conflict(ALREADY_MEMBER));
     }
-    members::admit(state, account).await?;
+    let cap = members::cap(state).await?;
+    members::check(state, cap, account).await?;
     let provisioned = match account {
         Some(_) => None,
         None => Some(password::unusable().await?),
     };
 
     let mut transaction = state.db().begin().await?;
+    members::admit(&mut transaction, cap, account).await?;
     organization_members::lock_owners(&mut transaction, organization_id).await?;
     let user_id = match account {
         Some(user_id) => user_id,
@@ -201,11 +203,16 @@ pub async fn update(
     };
     let deactivating = changes.deactivates() && member.active;
     let reactivating = changes.active == Some(true) && !member.active;
-    if reactivating {
-        members::admit(state, Some(user_id)).await?;
-    }
+    let cap = if reactivating {
+        Some(members::cap(state).await?)
+    } else {
+        None
+    };
 
     let mut transaction = state.db().begin().await?;
+    if let Some(cap) = cap {
+        members::admit(&mut transaction, cap, Some(user_id)).await?;
+    }
     organization_members::lock_owners(&mut transaction, organization_id).await?;
     if !attributes.is_empty() {
         let mut link = member
