@@ -383,6 +383,11 @@ redelivered webhook produces a byte-identical key (see
 One instance is enough; run two behind a load balancer only if it has to
 survive a host failure.
 
+The same signer can also hand Zone Enterprise customers registry tokens for
+the LTS images and download links for the air-gapped bundle. Both are off
+until you configure them; [DISTRIBUTION.md](DISTRIBUTION.md) covers the
+routes, the registry, the S3 bucket and how to deploy them.
+
 ### Building and running the image
 
 Build from the repository root:
@@ -464,7 +469,24 @@ Values are trimmed, and a blank value counts as unset, except
 | `SMTP_FROM` | Required | The address keys are sent from: a bare address, such as `licenses@example.com`, without a name. |
 | `SMTP_FROM_NAME` | `Zone` | The sender name, on one line. |
 | `POLAR_ACCESS_TOKEN` | None | An organization access token with `subscriptions:read`. See [The access token](#7-the-access-token). When it's unset, `POST /licenses/renew` answers `404` and Zone servers keep their key until one is pasted. |
+| `ZONE_LICENSE_REVOKED` | None | Comma-separated license IDs that `/token` and `/bundles` refuse. See [Revocation](#revocation). |
+| `ZONE_LICENSE_TRUSTED_PROXIES` | None | Comma-separated CIDR ranges or addresses of the reverse proxy. When a request comes from one, `/token` and `/bundles` take the client address from the rightmost `X-Forwarded-For` entry. Set it whenever either route is on; see [DISTRIBUTION.md](DISTRIBUTION.md#rate-limits-and-client-addresses). |
+| `ZONE_LICENSE_ADDRESS_LIMIT` | `120` | Requests a minute per client address on each of `/token` and `/bundles`. |
+| `ZONE_LICENSE_KEY_LIMIT` | `240` | Requests a minute per license ID on each of `/token` and `/bundles`. |
+| `ZONE_REGISTRY_SERVICE` | None | The registry's name, such as `registry.bitecode.ltd`. When it's unset, `GET /token` answers `404`. |
+| `ZONE_REGISTRY_REPOSITORIES` | `zone/server,zone/manager,zone/litellm` | The repositories a registry token may grant `pull` on. |
+| `ZONE_REGISTRY_KEY_GENERATION` | `1` | The registry token key's generation. See [DISTRIBUTION.md](DISTRIBUTION.md#the-token-key). |
+| `ZONE_BUNDLE_BUCKET` | None | The S3 bucket holding air-gapped bundles. When it's unset, `GET /bundles/…` answers `404`; when it's set, the region and both keys below are required. |
+| `ZONE_BUNDLE_REGION` | Required with the bucket | The bucket's region. |
+| `ZONE_BUNDLE_ENDPOINT` | `https://s3.<region>.amazonaws.com` | The S3 endpoint, addressed path style. |
+| `ZONE_BUNDLE_PREFIX` | `bundles` | The key prefix the bundles live under. |
+| `ZONE_BUNDLE_ACCESS_KEY_ID` | Required with the bucket | The access key ID of an IAM user that can only read the bundles. |
+| `ZONE_BUNDLE_SECRET_ACCESS_KEY` | Required with the bucket | Its secret access key. |
 | `RUST_LOG` | `info` | The log filter. See [Logs](#logs). |
+
+The `ZONE_LICENSE_*` distribution settings, `ZONE_REGISTRY_*` and
+`ZONE_BUNDLE_*` are described in full in
+[DISTRIBUTION.md](DISTRIBUTION.md#environment).
 
 ### Routes
 
@@ -473,11 +495,14 @@ Values are trimmed, and a blank value counts as unset, except
 | `POST /webhooks/polar` | Polar's deliveries. See [Responses](#responses). |
 | `POST /licenses/renew` | Zone servers asking for their renewed key. See [The renewal route](#the-renewal-route). Bodies are capped at 16 KiB, far above any license key; a larger one gets `413`. |
 | `GET /health` | `200` with `{"status":"ok"}` while the process is serving. It doesn't check the mail relay or Polar. |
+| `GET /token` | Docker registry tokens for the LTS images, for Enterprise licenses only. `404` unless `ZONE_REGISTRY_SERVICE` is set; `POST` and `HEAD` answer `405`. See [The token route](DISTRIBUTION.md#the-token-route). |
+| `GET /bundles/{version}/{architecture}` | Download links for an air-gapped bundle, for Enterprise licenses only. `404` unless `ZONE_BUNDLE_BUCKET` is set; `POST` and `HEAD` answer `405`. See [The bundle route](DISTRIBUTION.md#the-bundle-route). |
 
 Point your platform's health check or uptime monitor at `/health`. Polar must
 reach `/webhooks/polar`, and customers' Zone servers must reach
-`/licenses/renew`, both from the internet. Webhook bodies are capped at 2 MB,
-far above any Polar event.
+`/licenses/renew`, both from the internet. Customers' Docker and Kubernetes
+hosts reach `/token`, and customers fetch bundles from `/bundles`. Webhook
+bodies are capped at 2 MB, far above any Polar event.
 
 The image has no Docker `HEALTHCHECK`: the slim runtime image carries no HTTP
 client to run one with. Have your orchestrator or load balancer probe
@@ -546,6 +571,9 @@ Polar client also logs a `warn` line of its own before the outcome: the
 `cause` of a failed request, the `limit` for a body over 1 MiB, or where a body
 failed to parse (`category`, `line` and `column`).
 
+`/token` and `/bundles` requests each log one line too, described in
+[Logs and pull auditing](DISTRIBUTION.md#logs-and-pull-auditing).
+
 The logs never contain the license key, the webhook secret, the access token,
 the private key, the SMTP password, or the customer's name or email address.
 Set `RUST_LOG`, such as `RUST_LOG=debug`, to change what's logged.
@@ -580,14 +608,23 @@ delivery fail with `401`.
 Customers' Zone servers call `/licenses/renew` from their own networks, so a
 bot filter that challenges Polar challenges them too: a challenge page
 reaches Zone as a `4xx`, which it records as `refused`. If the proxy only
-lets through the paths it knows, allow these three and nothing else:
+lets through the paths it knows, allow these and nothing else:
 
-| Path | Called by |
-|---|---|
-| `/webhooks/polar` | Polar |
-| `/licenses/renew` | Customers' Zone servers |
-| `/health` | Your health check or uptime monitor |
+| Path | Methods | Called by |
+|---|---|---|
+| `/webhooks/polar` | Any | Polar |
+| `/licenses/renew` | Any | Customers' Zone servers |
+| `/health` | Any | Your health check or uptime monitor |
+| `/token` | `GET`, `POST` and `HEAD` | Customers' Docker, containerd and Kubernetes hosts. Pass `POST` through rather than refusing it: containerd posts first and falls back to `GET` only on the signer's `405`. |
+| `/bundles/*` | `GET` and `HEAD` | Customers downloading an air-gapped bundle |
 
+The last two matter only once [distribution](DISTRIBUTION.md) is on. The
+reference Caddy configuration, for this host and the registry, is
+[`runner/zone_license/deploy/Caddyfile`](../runner/zone_license/deploy/Caddyfile);
+see [Caddy](DISTRIBUTION.md#caddy).
+
+`/token` and `/bundles` are rate limited per client address and per license;
+see [Rate limits and client addresses](DISTRIBUTION.md#rate-limits-and-client-addresses).
 `/licenses/renew` has no rate limit of its own. Anyone holding a valid key can
 make the signer read its subscription from Polar on every request, so add a
 rate limit in the proxy if that matters to you.
@@ -944,6 +981,11 @@ single license:
 - **Servers that don't upgrade** keep trusting a removed key for as long as
   they run the old release, so a leaked key can sign licenses for them
   indefinitely.
+
+`ZONE_LICENSE_REVOKED` doesn't change this. It makes the signer refuse a
+license on `/token` and `/bundles`, so a leaked Enterprise key stops pulling
+LTS images and bundles within a few minutes, but Zone servers verify keys
+offline and keep accepting it, and `/licenses/renew` still renews it.
 
 Guard the private key accordingly: leaking it is the one failure that can't be
 fully undone.
