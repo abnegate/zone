@@ -88,13 +88,13 @@ async fn organization(savepoint: &mut Transaction<'_, Postgres>, user: &UserRow)
     Ok(())
 }
 
-fn organization_name(display_name: Option<&str>) -> String {
+pub fn organization_name(display_name: Option<&str>) -> String {
     display_name
         .map(|name| format!("{name}'s Organization"))
         .unwrap_or_else(|| UNNAMED_ORGANIZATION.to_owned())
 }
 
-fn organization_slug(name: &str, user_id: Uuid) -> String {
+pub fn organization_slug(name: &str, user_id: Uuid) -> String {
     let base: String = name
         .to_lowercase()
         .replace(' ', "-")

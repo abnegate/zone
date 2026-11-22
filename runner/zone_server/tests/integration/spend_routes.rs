@@ -29,14 +29,6 @@ const LIMIT: i64 = 50_000_000;
 const OCTOBER: &str = "from=2026-10-01&to=2026-10-03";
 const CSV_HEADER: &str = "date,workspace_id,workspace,user_id,user_email,automated,model,provider,requests,prompt_tokens,completion_tokens,spend_usd\r\n";
 const CSV_TYPE: &str = "text/csv; charset=utf-8";
-const NEEDED: [Permission; 6] = [
-    Permission::SpendRead,
-    Permission::SpendRead,
-    Permission::SpendRead,
-    Permission::SpendUpdate,
-    Permission::SpendUpdate,
-    Permission::SpendUpdate,
-];
 
 fn at(text: &str) -> DateTime<Utc> {
     text.parse().unwrap()
@@ -127,30 +119,52 @@ async fn total(fixture: &Fixture, query: &str) -> Value {
     reported(fixture, query).await["report"]["total"].clone()
 }
 
-/// Every spend route for `budget`, as `token`.
-async fn every_route(fixture: &Fixture, budget: Uuid, token: &str) -> Vec<TestResponse> {
+/// Every spend route for `budget`, as `token`, with the permission a refusal of it names.
+async fn every_route(
+    fixture: &Fixture,
+    budget: Uuid,
+    token: &str,
+) -> Vec<(TestResponse, Permission)> {
     let organization = fixture.policy.organization;
     vec![
-        fixture.get(&reports_path(organization), token).await,
-        fixture.get(&exports_path(organization), token).await,
-        fixture.get(&budgets_path(organization), token).await,
-        fixture
-            .post(
-                &budgets_path(organization),
-                token,
-                &organization_wide(LIMIT),
-            )
-            .await,
-        fixture
-            .patch(
-                &budget_path(organization, budget),
-                token,
-                &json!({ "hard": true }),
-            )
-            .await,
-        fixture
-            .delete(&budget_path(organization, budget), token)
-            .await,
+        (
+            fixture.get(&reports_path(organization), token).await,
+            Permission::SpendRead,
+        ),
+        (
+            fixture.get(&exports_path(organization), token).await,
+            Permission::SpendRead,
+        ),
+        (
+            fixture.get(&budgets_path(organization), token).await,
+            Permission::SpendRead,
+        ),
+        (
+            fixture
+                .post(
+                    &budgets_path(organization),
+                    token,
+                    &organization_wide(LIMIT),
+                )
+                .await,
+            Permission::SpendUpdate,
+        ),
+        (
+            fixture
+                .patch(
+                    &budget_path(organization, budget),
+                    token,
+                    &json!({ "hard": true }),
+                )
+                .await,
+            Permission::SpendUpdate,
+        ),
+        (
+            fixture
+                .delete(&budget_path(organization, budget), token)
+                .await,
+            Permission::SpendUpdate,
+        ),
     ]
 }
 
@@ -180,11 +194,7 @@ async fn only_owners_and_admins_reach_spend_and_strangers_are_told_it_does_not_e
     let admin = fixture.policy.member(OrgRole::Admin, None).await;
     let stranger = fixture.policy.stranger().await;
 
-    for (response, needed) in every_route(&fixture, budget, &member.token)
-        .await
-        .into_iter()
-        .zip(NEEDED)
-    {
+    for (response, needed) in every_route(&fixture, budget, &member.token).await {
         assert_eq!(
             response.status,
             StatusCode::FORBIDDEN,
@@ -198,7 +208,7 @@ async fn only_owners_and_admins_reach_spend_and_strangers_are_told_it_does_not_e
             response.text()
         );
     }
-    for response in every_route(&fixture, budget, &stranger.token).await {
+    for (response, _) in every_route(&fixture, budget, &stranger.token).await {
         assert_eq!(
             response.status,
             StatusCode::NOT_FOUND,

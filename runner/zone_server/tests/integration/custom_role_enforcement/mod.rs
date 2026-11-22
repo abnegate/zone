@@ -28,7 +28,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_server::auth::{Grant, Permission, Scope};
-use zone_server::db::custom_roles::{self, Assignment, Creation, Definition};
+use zone_server::db::custom_roles::{self, Assignment};
 use zone_server::db::organization_members::{self, OrgRole};
 use zone_server::db::workspace_members::{self, WorkspaceRole};
 
@@ -109,34 +109,9 @@ async fn seat_workspace(pool: &PgPool, workspace: Uuid, member: Uuid, role: Work
         .expect("a workspace member is seated");
 }
 
-/// A custom role of `scope` in `organization` holding `permissions` and its base. An owner seated
-/// only to create it leaves again, so the organization keeps the members and owners the test gave
-/// it.
+/// A custom role of `scope` in `organization` holding `permissions` and its base.
 async fn role(pool: &PgPool, organization: Uuid, scope: Scope, permissions: &[Permission]) -> Uuid {
-    let grant = composed(scope, permissions);
-    let name = format!("Role {}", Uuid::new_v4());
-    let definition = Definition {
-        name: &name,
-        description: None,
-        scope,
-        grant: &grant,
-    };
-    let creator = user(pool).await;
-    seat_organization(pool, organization, creator, OrgRole::Owner).await;
-    let created = match custom_roles::create(pool, organization, &definition, creator)
-        .await
-        .expect("the role is created")
-    {
-        Creation::Created(role) => role.id,
-        Creation::Forbidden => panic!("an owner holds roles:update"),
-        Creation::NameTaken => panic!("a fresh name is never taken"),
-    };
-    sqlx::query("DELETE FROM users WHERE id = $1")
-        .bind(creator)
-        .execute(pool)
-        .await
-        .expect("the owner seated to create the role leaves");
-    created
+    custom_roles::testing::composed(pool, organization, scope, permissions).await
 }
 
 /// Gives an organization member a custom role, as the owner `assigner` would.

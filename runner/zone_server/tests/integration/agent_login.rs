@@ -104,8 +104,8 @@ const ON_HOLD: &str = "Your Claude account is on hold, so it cannot sign in to C
                        why, or appeal, at claude.ai/restricted.";
 const UNAVAILABLE: &str =
     "claude.com could not finish the sign-in just now. Try again in a few minutes.";
-const DEMOTED: &str = "Only organization admins can sign in to coding agents, and whoever \
-                       started this sign-in no longer is one. Start again.";
+const DEMOTED: &str = "This sign-in needs the agent_logins:update permission, and whoever \
+                       started it no longer holds it. Start again.";
 const CLOSE_AND_RETURN: &str = "You can close this tab and return to Zone.";
 /// The console every loopback sign-in here starts from, as its `Origin` names it and the server
 /// lists it: compose's.

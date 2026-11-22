@@ -373,9 +373,9 @@ pub async fn recipients(
 }
 
 /// The built-in organization roles that hold `spend:read`. A custom role holds it when its stored
-/// permissions name it, as [`Grant::stored`] reads them: `spend:read` requires no other permission.
+/// permissions name it.
 fn readers() -> Vec<&'static str> {
-    [OrgRole::Owner, OrgRole::Admin, OrgRole::Member]
+    OrgRole::ALL
         .into_iter()
         .filter(|role| Grant::organization(*role).allows(Permission::SpendRead))
         .map(|role| role.as_str())
@@ -390,5 +390,26 @@ fn classify(error: sqlx::Error) -> CreateError {
             CreateError::Exists
         }
         _ => CreateError::Database(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn organization_owners_and_admins_read_spend() {
+        assert_eq!(
+            readers(),
+            [OrgRole::Admin.as_str(), OrgRole::Owner.as_str()]
+        );
+    }
+
+    #[test]
+    fn an_organization_role_naming_spend_read_holds_it_and_a_workspace_role_does_not() {
+        assert_eq!(Permission::SpendRead.requires(), None);
+        let stored = [Permission::SpendRead.name()];
+        assert!(Grant::stored(auth::Scope::Organization, stored).allows(Permission::SpendRead));
+        assert!(!Grant::stored(auth::Scope::Workspace, stored).allows(Permission::SpendRead));
     }
 }

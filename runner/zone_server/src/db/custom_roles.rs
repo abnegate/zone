@@ -562,8 +562,8 @@ pub(crate) async fn held(
     )
 }
 
-#[cfg(test)]
-pub(crate) mod testing {
+#[cfg(any(test, feature = "testing"))]
+pub mod testing {
     use sqlx::PgPool;
     use uuid::Uuid;
 
@@ -601,6 +601,24 @@ pub(crate) mod testing {
             Creation::Forbidden => panic!("the creator does not hold roles:update"),
             Creation::NameTaken => panic!("a fresh role name was taken"),
         }
+    }
+
+    /// [`role`] created by an owner seated only to create it, who leaves again, so the
+    /// organization keeps the members and owners the test gave it.
+    pub async fn composed(
+        pool: &PgPool,
+        organization: Uuid,
+        scope: Scope,
+        granted: &[Permission],
+    ) -> Uuid {
+        let creator = owner(pool, organization).await;
+        let role = role(pool, organization, creator, scope, granted).await;
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(creator)
+            .execute(pool)
+            .await
+            .expect("the owner seated to create the role leaves");
+        role
     }
 
     /// A fresh account seated as an owner of `organization`.
@@ -657,8 +675,6 @@ pub(crate) mod testing {
     }
 
     /// Moves a workspace member onto a fresh workspace custom role holding `granted` and the base.
-    /// An owner seated only to create the role is removed again, so the organization keeps the
-    /// members the test gave it.
     pub async fn hold(
         pool: &PgPool,
         organization: Uuid,
@@ -666,13 +682,7 @@ pub(crate) mod testing {
         user: Uuid,
         granted: &[Permission],
     ) {
-        let creator = owner(pool, organization).await;
-        let role = role(pool, organization, creator, Scope::Workspace, granted).await;
-        sqlx::query("DELETE FROM users WHERE id = $1")
-            .bind(creator)
-            .execute(pool)
-            .await
-            .expect("the creator is removed");
+        let role = composed(pool, organization, Scope::Workspace, granted).await;
         assign_workspace(pool, workspace, user, role).await;
     }
 }

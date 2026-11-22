@@ -22,8 +22,8 @@ pub enum OrgRole {
 impl std::str::FromStr for OrgRole {
     type Err = ();
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
             "member" => Ok(Self::Member),
             "admin" => Ok(Self::Admin),
             "owner" => Ok(Self::Owner),
@@ -33,7 +33,8 @@ impl std::str::FromStr for OrgRole {
 }
 
 impl OrgRole {
-    /// Convert role to string
+    pub const ALL: [Self; 3] = [Self::Member, Self::Admin, Self::Owner];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Member => "member",

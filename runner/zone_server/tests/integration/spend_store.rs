@@ -13,9 +13,9 @@ use uuid::Uuid;
 use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 use zone_enterprise::spend::{Budget, Microdollars, Month, Scope, State, Target};
-use zone_server::auth::{self, Grant, Permission};
+use zone_server::auth::{self, Permission};
 use zone_server::db::audit::lock::Lock;
-use zone_server::db::custom_roles::{self, Creation, Definition};
+use zone_server::db::custom_roles::testing::{assign_organization, composed};
 use zone_server::db::migrations;
 use zone_server::db::organization_members::OrgRole;
 use zone_server::db::spend::budgets::{self, Announcement, BudgetRow, CreateError, Crossing};
@@ -1252,57 +1252,78 @@ async fn a_budget_notice_goes_to_active_accounts_only() {
     fixture.cleanup().await;
 }
 
-async fn custom_organization_role(fixture: &Fixture, granted: &[Permission]) -> Uuid {
-    let names: Vec<String> = granted
-        .iter()
-        .map(|permission| permission.name().to_owned())
-        .collect();
-    let grant = Grant::compose(auth::Scope::Organization, &names).unwrap();
-    let name = format!("Spend {}", Uuid::new_v4());
-    let definition = Definition {
-        name: &name,
-        description: None,
-        scope: auth::Scope::Organization,
-        grant: &grant,
-    };
-    match custom_roles::create(
-        fixture.pool(),
-        fixture.policy.organization,
-        &definition,
-        fixture.policy.owner.id,
-    )
-    .await
-    .unwrap()
-    {
-        Creation::Created(role) => role.id,
-        other => panic!("the owner creates the role: {other:?}"),
-    }
-}
-
-async fn hold_organization_role(fixture: &Fixture, user: Uuid, role: Uuid) {
-    sqlx::query(
-        "UPDATE organization_members SET role = 'member', custom_role_id = $1 \
-         WHERE organization_id = $2 AND user_id = $3",
-    )
-    .bind(role)
-    .bind(fixture.policy.organization)
-    .bind(user)
-    .execute(fixture.pool())
-    .await
-    .unwrap();
-}
-
 #[tokio::test]
 async fn a_budget_notice_reaches_custom_roles_that_hold_spend_read() {
     let fixture = Fixture::new("spend_notice_custom").await;
+    let pool = fixture.pool();
+    let organization = fixture.policy.organization;
     let admin = fixture.policy.member(OrgRole::Admin, None).await;
     let reader = fixture.policy.member(OrgRole::Member, None).await;
     let auditor = fixture.policy.member(OrgRole::Member, None).await;
+    let foreigner = fixture.policy.member(OrgRole::Member, None).await;
+    let misscoped = fixture.policy.member(OrgRole::Member, None).await;
+    let departed = fixture.policy.stranger().await;
     fixture.policy.member(OrgRole::Member, None).await;
-    let reading = custom_organization_role(&fixture, &[Permission::SpendRead]).await;
-    let auditing = custom_organization_role(&fixture, &[Permission::AuditLogsRead]).await;
-    hold_organization_role(&fixture, reader.id, reading).await;
-    hold_organization_role(&fixture, auditor.id, auditing).await;
+    let (elsewhere, _) = fixture
+        .policy
+        .another_organization(&fixture.policy.owner)
+        .await;
+    let reading = composed(
+        pool,
+        organization,
+        auth::Scope::Organization,
+        &[Permission::SpendRead],
+    )
+    .await;
+    let auditing = composed(
+        pool,
+        organization,
+        auth::Scope::Organization,
+        &[Permission::AuditLogsRead],
+    )
+    .await;
+    let foreign = composed(
+        pool,
+        elsewhere,
+        auth::Scope::Organization,
+        &[Permission::SpendRead],
+    )
+    .await;
+    let workspace_role = composed(pool, organization, auth::Scope::Workspace, &[]).await;
+    sqlx::query("INSERT INTO custom_role_permissions (role_id, permission) VALUES ($1, $2)")
+        .bind(workspace_role)
+        .bind(Permission::SpendRead.name())
+        .execute(pool)
+        .await
+        .unwrap();
+    assign_organization(pool, organization, reader.id, reading).await;
+    assign_organization(pool, organization, auditor.id, auditing).await;
+    assign_organization(pool, organization, foreigner.id, foreign).await;
+    assign_organization(pool, organization, misscoped.id, workspace_role).await;
+    sqlx::query(
+        "INSERT INTO organization_members (organization_id, user_id, role, custom_role_id, is_active) \
+         VALUES ($1, $2, $3, $4, false)",
+    )
+    .bind(organization)
+    .bind(departed.id)
+    .bind(OrgRole::Member.as_str())
+    .bind(reading)
+    .execute(pool)
+    .await
+    .unwrap();
+    let held: Option<Uuid> = sqlx::query_scalar(
+        "SELECT custom_role_id FROM organization_members WHERE organization_id = $1 AND user_id = $2",
+    )
+    .bind(organization)
+    .bind(departed.id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        held,
+        Some(reading),
+        "the inactive member still holds spend:read"
+    );
     fixture
         .record(Spend {
             occurred_at: inside(),
@@ -1343,7 +1364,9 @@ async fn a_budget_notice_reaches_custom_roles_that_hold_spend_read() {
     expected.sort();
     assert_eq!(
         mailed, expected,
-        "spend:read holders get the notice, built-in or custom, and nobody else"
+        "active spend:read holders get the notice, built-in or by a custom role of this \
+         organization's scope, and nobody else: not another organization's role, a workspace \
+         role naming it, nor an inactive member"
     );
 
     fixture.cleanup().await;

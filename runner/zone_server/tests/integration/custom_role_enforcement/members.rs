@@ -673,10 +673,13 @@ async fn a_custom_assignment_answers_and_audits_the_role_it_assigned() {
             role.to_string(),
             "{recorded}"
         );
-        assert!(
-            recorded["custom_role"]["name"]
-                .as_str()
-                .is_some_and(|name| name.starts_with("Role ")),
+        let name: String = sqlx::query_scalar("SELECT name FROM custom_roles WHERE id = $1")
+            .bind(role)
+            .fetch_one(fixture.pool())
+            .await
+            .expect("the role is stored");
+        assert_eq!(
+            recorded["custom_role"]["name"], name,
             "the audit names the role: {recorded}"
         );
         assert_eq!(recorded["role"], *rank, "{recorded}");

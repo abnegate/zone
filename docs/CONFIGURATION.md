@@ -944,9 +944,13 @@ is signed in, the panel lists each account with its plan, its state, and
 meters for its five-hour and weekly windows saying when each resets, and
 offers **Add another Claude account** or **Add another ChatGPT account** to
 sign in one more. While the panel is open and no sign-in is in progress, it
-reads the accounts' usage again every minute. Only organization admins and
-owners can sign in or out. Other members see the status, with "Ask an
-organization admin to sign in" while the agent is not signed in.
+reads the accounts' usage again every minute. Signing in or out needs the
+`agent_logins:update` permission, which organization owners and admins hold
+and a custom role can carry. A sign-in started by someone who loses it before
+the sign-in finishes is refused with "This sign-in needs the
+agent_logins:update permission, and whoever started it no longer holds it.
+Start again." Other members see the status, with "Ask an organization admin
+to sign in" while the agent is not signed in.
 
 **How sign-ins are told apart.** Each sign-in is one row, keyed by the account
 it signed in to, and signing in to an account the organization already holds

@@ -12,14 +12,14 @@ use super::access::{self, Access};
 use super::refusal::Refusal;
 use super::standing::Standing;
 use super::{caller, rules, serialized};
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, Permission};
 use crate::db::audit::{actions, resources};
 use crate::db::policies::{self, Stored};
 use crate::routes::common::{AuditEvent, audit};
 use crate::state::AppState;
 
 const MISSING: &str = "Workspace not found";
-const FORBIDDEN: &str = "Only workspace admins, or organization owners and admins, can change this workspace's agent policy";
+const NEEDED: Permission = Permission::WorkspacePoliciesUpdate;
 
 type WorkspacePath = Result<Path<(Uuid, Uuid)>, PathRejection>;
 
@@ -118,7 +118,7 @@ async fn write(
     let license = state.stored_license().await;
     let mut transaction = state.db().begin().await?;
     let access = access::workspace(&mut transaction, organization, workspace, user).await?;
-    access.write(FORBIDDEN)?;
+    access.write(NEEDED)?;
     let standing = Standing::of(&license?, Utc::now());
     standing.require()?;
     let Json(patch) = body.map_err(Refusal::Body)?;
