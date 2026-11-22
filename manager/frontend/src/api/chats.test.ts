@@ -46,6 +46,42 @@ describe('chatsApi.searchChatMessages', () => {
   });
 });
 
+describe('a chat write the server fleet refuses', () => {
+  const revoked =
+    "This Zone server was revoked from its fleet, so it can't run chats. Reload the page to reach another server.";
+
+  const refusedWith = (code: string) =>
+    mock(async () =>
+      Response.json({ error: revoked, code }, { status: 503 })
+    ) as unknown as typeof globalThis.fetch;
+
+  it('names the refusal in the server words and keeps its code when sending', async () => {
+    globalThis.fetch = refusedWith('fleet_runner_revoked');
+
+    const failure = await chatsApi
+      .sendMessage('chat-1', { content: 'Hello' })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(503);
+    expect((failure as ApiError).code).toBe('fleet_runner_revoked');
+    expect((failure as ApiError).message).toBe(revoked);
+  });
+
+  it('names the refusal in the server words and keeps its code when deleting', async () => {
+    globalThis.fetch = refusedWith('fleet_runner_outdated');
+
+    const failure = await chatsApi
+      .deleteMessage('chat-1', 'message-1')
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(503);
+    expect((failure as ApiError).code).toBe('fleet_runner_outdated');
+    expect((failure as ApiError).message).toBe(revoked);
+  });
+});
+
 describe('chatsApi.createChat', () => {
   const request = { workspace_id: 'ws-1', title: 'New chat', model_name: 'auto' };
 
