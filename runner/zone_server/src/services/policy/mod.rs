@@ -219,13 +219,8 @@ async fn organization_of(state: &AppState, workspace: Uuid) -> Option<Uuid> {
     }
 }
 
-/// A stored key that no longer verifies, such as after a keyring change, keeps the saved
-/// policies enforced: only removing the license stops enforcement.
 pub fn enforces(stored: &Stored) -> bool {
-    match stored {
-        Stored::Unverified(_) => true,
-        Stored::Empty | Stored::Verified(_) => Feature::Policy.enforced(stored.license()),
-    }
+    stored.enforces(Feature::Policy)
 }
 
 async fn enforced(state: &AppState) -> Result<bool, Denial> {

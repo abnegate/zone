@@ -39,6 +39,7 @@ pub mod runner;
 pub mod schedule;
 pub mod scratch;
 pub mod search;
+pub mod spend;
 pub mod sso;
 pub mod stages;
 pub mod task_progress;
