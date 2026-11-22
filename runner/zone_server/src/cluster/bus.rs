@@ -5,6 +5,7 @@ use abnegate_secret::MasterKey;
 use bytes::Bytes;
 use dashmap::DashMap;
 use metrics::Gauge;
+use redis::aio::ConnectionManager;
 use serde::Serialize;
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -121,6 +122,17 @@ impl Bus {
 
     pub fn connection(&self) -> watch::Receiver<bool> {
         self.shared.status.watch()
+    }
+
+    /// The namespace every key and channel of this cluster lives in.
+    pub fn namespace(&self) -> &Namespace {
+        &self.shared.namespace
+    }
+
+    /// The Valkey connection the bus publishes on, for state the replicas
+    /// share outside pub/sub. None on the loopback.
+    pub fn valkey(&self) -> Option<ConnectionManager> {
+        self.shared.transport.valkey().cloned()
     }
 
     pub fn publish(&self, topic: Topic, value: &impl Serialize) {

@@ -142,6 +142,7 @@ mod role_grants;
 mod seal_secrets;
 mod seats;
 mod sessions;
+mod shared_limiter;
 mod skills_store;
 mod spend_enforcement;
 mod spend_routes;

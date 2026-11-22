@@ -32,6 +32,7 @@ pub const LOG_INTERVAL: Duration = Duration::from_secs(60);
 /// keeps subscribed, reconnecting and resubscribing whenever it drops.
 #[derive(Debug)]
 pub struct Valkey {
+    manager: ConnectionManager,
     publisher: mpsc::Sender<Packet>,
     commands: mpsc::UnboundedSender<Command>,
     dropped: Throttle,
@@ -66,9 +67,10 @@ impl Valkey {
     ) -> Self {
         let (publisher, packets) = mpsc::channel(BACKLOG);
         let (commands, receiver) = mpsc::unbounded_channel();
-        tokio::spawn(publish(manager, packets));
+        tokio::spawn(publish(manager.clone(), packets));
         tokio::spawn(subscribe(client, shared, receiver, status, stop));
         Self {
+            manager,
             publisher,
             commands,
             dropped: Throttle::new(LOG_INTERVAL),
@@ -87,6 +89,12 @@ impl Valkey {
 
     pub fn command(&self, command: Command) {
         let _ = self.commands.send(command);
+    }
+
+    /// The multiplexed connection the bus publishes on, for commands that
+    /// are not pub/sub.
+    pub fn manager(&self) -> &ConnectionManager {
+        &self.manager
     }
 }
 

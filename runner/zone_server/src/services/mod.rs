@@ -23,6 +23,7 @@ pub mod hosts;
 pub mod image_intent;
 pub mod knowledge;
 pub mod license;
+pub mod limit;
 pub mod login;
 pub mod mail;
 pub mod mcp_servers;
