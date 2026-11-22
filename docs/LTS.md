@@ -60,7 +60,7 @@ ruleset.
 | Branch | `release/X.Y-lts` | `release/1.4-lts` | Cut from `vX.Y.0`. |
 | Git tag | `vX.Y.Z-lts` | `v1.4.3-lts` | Must point at a commit on `release/X.Y-lts`. No leading zeros. |
 | Image tag, immutable | `X.Y.Z-lts` | `1.4.3-lts` | Published once and never moved or overwritten. |
-| Image tag, moving | `X.Y-lts` | `1.4-lts` | Always the newest release of the line. |
+| Image tag, moving | `X.Y-lts` | `1.4-lts` | Always the highest patch released on the line. |
 | Cargo version | `X.Y.Z` | `1.4.3` | What `zone-server --version` reports. |
 
 **A note on semver.** `1.4.3-lts` is a semver *prerelease* string, so tools
@@ -275,8 +275,16 @@ Pushing the tag starts the **LTS** workflow:
    digest to the registry's storage.
 3. **Manifest, tags and signatures** joins the two platforms into one index
    per image, refuses an `X.Y.Z-lts` tag that already holds other builds, tags
-   `X.Y.Z-lts` and `X.Y-lts`, signs each index, verifies each signature, and
-   lists the digests in the job summary.
+   `X.Y.Z-lts`, moves `X.Y-lts` with `scripts/lts-tag.sh`, signs each index,
+   verifies each signature, and lists the digests in the job summary.
+   `X.Y-lts` only moves forward: the script reads the
+   `org.opencontainers.image.version` label of the build it points at and
+   moves it only to a higher patch. Rerunning a release leaves it in place, and
+   a release older than the one it points at is published without moving it,
+   with a notice in the job summary. Manifest jobs of one line run one at a
+   time, so two patch releases approved together can't race on the tag.
+   GitHub keeps only one job waiting per group, so a third release queued
+   behind them cancels the waiting one; rerun it once the line is free.
 4. **Bundle** builds the [air-gapped bundle](AIRGAP.md) for the release.
 
 [DISTRIBUTION.md](DISTRIBUTION.md) covers the registry, its storage and the

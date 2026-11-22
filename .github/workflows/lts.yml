@@ -225,13 +225,20 @@ jobs:
           name: digest-${{ matrix.image.name }}-${{ matrix.architecture }}
           path: ${{ runner.temp }}/digest/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
+
+      - name: Stop the publish registry
+        if: always()
+        run: docker rm --force zone-publish-registry > /dev/null 2>&1 || true
 
   manifest:
     name: Manifest, tags and signatures
     needs: [check, image]
     runs-on: ubuntu-24.04
     environment: distribution
+    concurrency:
+      group: lts-manifest-${{ needs.check.outputs.line }}
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
@@ -342,21 +349,21 @@ jobs:
               read -r -a digests <<< "${platforms[$name]}"
               docker buildx imagetools create --tag "$target:$VERSION" "${digests[@]/#/$target@}"
             fi
-            docker buildx imagetools create --tag "$target:$LINE-lts" "$target:$VERSION"
+            sh scripts/lts-tag.sh "$target" "$VERSION"
             digest=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$target:$VERSION" | jq -r .digest)
-            moved=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$target:$LINE-lts" | jq -r .digest)
-            if [ "$moved" != "$digest" ]; then
-              echo "::error::$repository:$LINE-lts points at $moved, not $digest"
-              exit 1
+            held=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$target:$LINE-lts" | jq -r .digest)
+            tags="\`$VERSION\`"
+            if [ "$held" = "$digest" ]; then
+              tags="$tags, \`$LINE-lts\`"
             fi
-            printf '%s\t%s\n' "$repository" "$digest" >> "$RUNNER_TEMP/published"
+            printf '%s\t%s\t%s\n' "$repository" "$digest" "$tags" >> "$RUNNER_TEMP/published"
           done
           cat "$RUNNER_TEMP/published"
 
       - name: Sign the indexes
         run: |
           set -euo pipefail
-          while IFS=$'\t' read -r repository digest; do
+          while IFS=$'\t' read -r repository digest _; do
             cosign sign --yes "$PUBLISH_REGISTRY/$repository@$digest"
           done < "$RUNNER_TEMP/published"
 
@@ -387,15 +394,16 @@ jobs:
           exit 1
 
       - name: Verify the signatures through the second registry name
+        env:
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/lts.yml@${{ github.ref }}
         run: |
           set -euo pipefail
-          identity="https://github.com/bitecodehq/zone/.github/workflows/lts.yml@refs/tags/$GITHUB_REF_NAME"
-          while IFS=$'\t' read -r repository digest; do
+          while IFS=$'\t' read -r repository digest _; do
             cosign verify \
-              --certificate-identity "$identity" \
+              --certificate-identity "$IDENTITY" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               "$VERIFY_REGISTRY/$repository@$digest" > /dev/null
-            echo "verified $repository@$digest as $identity"
+            echo "verified $repository@$digest as $IDENTITY"
           done < "$RUNNER_TEMP/published"
 
       - name: Write the digests to the job summary
@@ -406,10 +414,14 @@ jobs:
             echo
             echo '| Image | Tags | Index digest |'
             echo '|---|---|---|'
-            while IFS=$'\t' read -r repository digest; do
-              echo "| \`$PUBLIC_REGISTRY/$repository\` | \`$VERSION\`, \`$LINE-lts\` | \`$digest\` |"
+            while IFS=$'\t' read -r repository digest tags; do
+              echo "| \`$PUBLIC_REGISTRY/$repository\` | $tags | \`$digest\` |"
             done < "$RUNNER_TEMP/published"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop the registries
+        if: always()
+        run: docker rm --force zone-publish-registry zone-verify-registry > /dev/null 2>&1 || true
 
   bundle:
     name: Bundle

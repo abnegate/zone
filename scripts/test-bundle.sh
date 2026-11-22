@@ -293,6 +293,13 @@ cmp -s "$directory/expected-members" "$directory/actual-members" \
 if tar -tf "$archive" | grep -v "^$top/" > /dev/null; then
     fail "Expected every member under $top/"
 fi
+case $(tar --version 2> /dev/null || true) in
+    *'GNU tar'*) owners=$(tar -tvf "$archive" | awk '{ print $2 }') ;;
+    *) owners=$(tar -tvf "$archive" | awk '{ print $3 "/" $4 }') ;;
+esac
+foreign=$(printf '%s\n' "$owners" | grep -vx '0/0' || true)
+[ -z "$foreign" ] \
+    || fail "Expected every member owned by uid 0 and gid 0 with no names, found: $(printf '%s\n' "$foreign" | sort -u | tr '\n' ' ')"
 
 [ ! -s "$directory/siblings.log" ] \
     || fail "Expected each layout to be appended and deleted before the next pull: $(cat "$directory/siblings.log")"

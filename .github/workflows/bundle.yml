@@ -69,9 +69,10 @@ jobs:
       REGION: ${{ vars.ZONE_DISTRIBUTION_REGION }}
       CRANE_VERSION: v0.22.1
       HELM_VERSION: v4.3.1
-      MINIMUM_AWS_CLI: 2.17.34
+      MINIMUM_AWS_CLI: 2.33.0
       REGISTRY_IMAGE: registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0
       REGISTRY_CONTAINER: zone-publish-registry
+      IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/bundle.yml@${{ github.ref }}
 
     steps:
       - name: Checkout repository
@@ -96,7 +97,7 @@ jobs:
           cli=$(aws --version 2>&1 | sed -n 's|^aws-cli/\([0-9][0-9.]*\).*|\1|p')
           lowest=$(printf '%s\n%s\n' "$MINIMUM_AWS_CLI" "$cli" | sort -V | head -n 1)
           if [ -z "$cli" ] || [ "$lowest" != "$MINIMUM_AWS_CLI" ]; then
-            echo "::error::AWS CLI $MINIMUM_AWS_CLI or later is needed for put-object --if-none-match; found '${cli:-none}'"
+            echo "::error::AWS CLI $MINIMUM_AWS_CLI or later is needed for s3 cp --no-overwrite; found '${cli:-none}'"
             exit 1
           fi
           echo "AWS CLI $cli on $actual"
@@ -129,44 +130,6 @@ jobs:
           printf 'WORK=%s\n' "$work" >> "$GITHUB_ENV"
           printf 'ARCHIVE=%s\n' "$work/zone-bundle-$VERSION-$ARCHITECTURE.tar" >> "$GITHUB_ENV"
           df -h
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.ZONE_DISTRIBUTION_ROLE }}
-          aws-region: ${{ vars.ZONE_DISTRIBUTION_REGION }}
-          role-session-name: zone-bundle-${{ matrix.architecture }}
-
-      - name: Start the publish registry
-        env:
-          REGISTRY_STORAGE_S3_BUCKET: ${{ vars.ZONE_DISTRIBUTION_BUCKET }}
-          REGISTRY_STORAGE_S3_REGION: ${{ vars.ZONE_DISTRIBUTION_REGION }}
-        run: |
-          set -eu
-          config=$GITHUB_WORKSPACE/runner/zone_license/deploy/registry/publish.yml
-          if [ ! -f "$config" ]; then
-            echo '::error::runner/zone_license/deploy/registry/publish.yml is missing'
-            exit 1
-          fi
-          docker run --detach --name "$REGISTRY_CONTAINER" --network host \
-            --volume "$config:/etc/distribution/config.yml:ro" \
-            --env AWS_ACCESS_KEY_ID \
-            --env AWS_SECRET_ACCESS_KEY \
-            --env AWS_SESSION_TOKEN \
-            --env AWS_REGION \
-            --env REGISTRY_STORAGE_S3_BUCKET \
-            --env REGISTRY_STORAGE_S3_REGION \
-            "$REGISTRY_IMAGE" > /dev/null
-          for _ in $(seq 1 30); do
-            if curl -fsS -o /dev/null http://127.0.0.1:5000/v2/; then
-              echo 'The publish registry is listening on 127.0.0.1:5000'
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs --tail 50 "$REGISTRY_CONTAINER" >&2
-          echo '::error::The publish registry did not answer on 127.0.0.1:5000'
-          exit 1
 
       - name: Install crane
         env:
@@ -206,6 +169,45 @@ jobs:
             fi
           done
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.ZONE_DISTRIBUTION_ROLE }}
+          aws-region: ${{ vars.ZONE_DISTRIBUTION_REGION }}
+          role-session-name: zone-bundle-${{ matrix.architecture }}
+          role-duration-seconds: 7200
+
+      - name: Start the publish registry
+        env:
+          REGISTRY_STORAGE_S3_BUCKET: ${{ vars.ZONE_DISTRIBUTION_BUCKET }}
+          REGISTRY_STORAGE_S3_REGION: ${{ vars.ZONE_DISTRIBUTION_REGION }}
+        run: |
+          set -eu
+          config=$GITHUB_WORKSPACE/runner/zone_license/deploy/registry/publish.yml
+          if [ ! -f "$config" ]; then
+            echo '::error::runner/zone_license/deploy/registry/publish.yml is missing'
+            exit 1
+          fi
+          docker run --detach --name "$REGISTRY_CONTAINER" --network host \
+            --volume "$config:/etc/distribution/config.yml:ro" \
+            --env AWS_ACCESS_KEY_ID \
+            --env AWS_SECRET_ACCESS_KEY \
+            --env AWS_SESSION_TOKEN \
+            --env AWS_REGION \
+            --env REGISTRY_STORAGE_S3_BUCKET \
+            --env REGISTRY_STORAGE_S3_REGION \
+            "$REGISTRY_IMAGE" > /dev/null
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:5000/v2/; then
+              echo 'The publish registry is listening on 127.0.0.1:5000'
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs --tail 50 "$REGISTRY_CONTAINER" >&2
+          echo '::error::The publish registry did not answer on 127.0.0.1:5000'
+          exit 1
+
       - name: Assemble the bundle
         run: |
           set -eu
@@ -219,6 +221,10 @@ jobs:
           cat "$ARCHIVE.sha256"
           df -h
 
+      - name: Stop the publish registry
+        if: always()
+        run: docker rm --force "$REGISTRY_CONTAINER" > /dev/null 2>&1 || true
+
       - name: Install cosign
         uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
@@ -228,14 +234,41 @@ jobs:
         run: cosign sign-blob --yes --bundle "$ARCHIVE.sha256.sigstore.json" "$ARCHIVE.sha256"
 
       - name: Verify the signature
-        env:
-          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/bundle.yml@${{ github.ref }}
         run: |
           cosign verify-blob \
             --bundle "$ARCHIVE.sha256.sigstore.json" \
             --certificate-identity "$IDENTITY" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "$ARCHIVE.sha256"
+
+      - name: Verify the signature and checksum offline, as docs/AIRGAP.md does
+        run: |
+          set -eu
+          name=$(basename -- "$ARCHIVE")
+          offline=$WORK/offline
+          rm -rf -- "$offline"
+          mkdir -- "$offline"
+          ln -- "$ARCHIVE" "$offline/$name"
+          cp -- "$ARCHIVE.sha256" "$ARCHIVE.sha256.sigstore.json" "$offline/"
+          cd "$offline"
+          cosign initialize
+          cp ~/.sigstore/root/tuf-repo-cdn.sigstore.dev/targets/trusted_root.json .
+          isolated() {
+            sudo unshare --net -- "$@"
+          }
+          if isolated curl --silent --max-time 10 --output /dev/null https://tuf-repo-cdn.sigstore.dev; then
+            echo '::error::The isolated network namespace still reaches the internet, so it proves nothing'
+            exit 1
+          fi
+          isolated "$(command -v cosign)" verify-blob \
+            --bundle "$name.sha256.sigstore.json" \
+            --trusted-root trusted_root.json \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$name.sha256"
+          isolated sha256sum -c "$name.sha256"
+          cd "$WORK"
+          rm -rf -- "$offline"
 
       - name: Refresh AWS credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
@@ -248,51 +281,5 @@ jobs:
         run: |
           set -eu
           df -h
-          name=$(basename -- "$ARCHIVE")
-          prefix=bundles/$VERSION
-          checksum=$prefix/$name.sha256
-          marker=$checksum.sigstore.json
-
-          absent() {
-            if probe=$(aws s3api head-object --bucket "$BUCKET" --key "$1" 2>&1); then
-              return 1
-            fi
-            case $probe in
-              *'(404)'* | *'Not Found'*) return 0 ;;
-            esac
-            printf '%s\n' "$probe" >&2
-            echo "::error::Could not check whether s3://$BUCKET/$1 exists"
-            exit 1
-          }
-
-          put() {
-            if ! aws s3api put-object \
-              --bucket "$BUCKET" \
-              --key "$1" \
-              --body "$2" \
-              --content-type "$3" \
-              --if-none-match '*' \
-              --server-side-encryption AES256 > /dev/null; then
-              echo "::error::Could not create s3://$BUCKET/$1; it may already exist"
-              exit 1
-            fi
-          }
-
-          if ! absent "$marker"; then
-            echo "::error::Bundle $VERSION for $ARCHITECTURE is already published: s3://$BUCKET/$marker exists"
-            exit 1
-          fi
-          if ! absent "$checksum"; then
-            echo "::error::s3://$BUCKET/$checksum is left from an upload that never committed; nothing was published, so delete it and rerun"
-            exit 1
-          fi
-
-          aws s3 cp --only-show-errors --sse AES256 "$ARCHIVE" "s3://$BUCKET/$prefix/$name"
-          put "$checksum" "$ARCHIVE.sha256" text/plain
-          put "$marker" "$ARCHIVE.sha256.sigstore.json" application/json
-          echo "Published s3://$BUCKET/$prefix/$name"
+          sh scripts/bundle-upload.sh "$BUCKET" "$VERSION" "$ARCHIVE"
           df -h
-
-      - name: Stop the publish registry
-        if: always()
-        run: docker rm --force "$REGISTRY_CONTAINER" > /dev/null 2>&1 || true

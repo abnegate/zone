@@ -185,7 +185,12 @@ sha256sum -c zone-bundle-1.4.3-lts-amd64.tar.sha256
 ```
 
 On macOS, use `shasum -a 256 -c` for the second command. Both must pass.
-Nothing in the verification contacts the network.
+Nothing in the verification contacts the network: with `--trusted-root`,
+cosign reads the trust root from the file and never asks TUF. Before it
+uploads a bundle, the bundle workflow fetches `trusted_root.json` the same way
+and runs both commands in a network namespace with no interfaces. Leave out
+cosign's `--offline` flag: v3 deprecates it, because `--bundle` with
+`--trusted-root` already verifies offline.
 
 ### 3. The extracted files
 

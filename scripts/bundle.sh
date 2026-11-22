@@ -123,6 +123,22 @@ choose_checksum() {
     fi
 }
 
+choose_tar() {
+    case $(tar --version 2> /dev/null || true) in
+        *'GNU tar'*)
+            pack() {
+                tar --owner=0 --group=0 --numeric-owner "$@"
+            }
+            ;;
+        *bsdtar*)
+            pack() {
+                tar --uid 0 --gid 0 --numeric-owner "$@"
+            }
+            ;;
+        *) fail 'tar is neither GNU tar nor bsdtar, so the bundle cannot be archived as root' ;;
+    esac
+}
+
 prepare_output() {
     top=zone-bundle-$version-$architecture
     mkdir -p -- "$output"
@@ -292,9 +308,9 @@ append() {
         done
     ) >> "$checksums"
     if [ -f "$tarball" ]; then
-        tar -rf "$tarball" -C "$work" "$top/$1"
+        pack -rf "$tarball" -C "$work" "$top/$1"
     else
-        tar -cf "$tarball" -C "$work" "$top/$1"
+        pack -cf "$tarball" -C "$work" "$top/$1"
     fi
     rm -rf -- "${staging:?}/$1"
 }
@@ -363,7 +379,7 @@ assemble() {
     append images.txt
 
     cp -- "$checksums" "$staging/SHA256SUMS"
-    tar -rf "$tarball" -C "$work" "$top/SHA256SUMS"
+    pack -rf "$tarball" -C "$work" "$top/SHA256SUMS"
 }
 
 publish() {
@@ -379,6 +395,7 @@ trap 'exit 1' HUP INT TERM
 parse_arguments "$@"
 validate
 choose_checksum
+choose_tar
 prepare_output
 read_manifest
 resolve_digests

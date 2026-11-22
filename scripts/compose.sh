@@ -8,10 +8,6 @@
 #   ./scripts/compose.sh --profile dev --profile vpn --profile monitoring up
 #   make up PROFILES=dev,vpn,monitoring
 #
-# Release overlays follow the profile overlays, before docker-compose.override.yml:
-#   docker-compose.lts.yml     when ZONE_LTS_VERSION is set (docs/LTS.md)
-#   docker-compose.airgap.yml  when the offline installer has written it
-#
 # Profiles:
 #   dev                     docker-compose.dev.yml (hot reload)
 #   vpn                     docker-compose.vpn.yml (full tunnel)

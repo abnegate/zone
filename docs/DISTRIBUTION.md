@@ -545,7 +545,8 @@ dots, so S3's virtual-hosted URLs match its TLS certificate.
 ### The bucket
 
 One bucket in ap-southeast-2, with public access blocked, SSE-S3, ACLs disabled
-(the default), and a lifecycle rule that aborts incomplete multipart uploads
+(the default), versioning on, and lifecycle rules that abort incomplete
+multipart uploads after 7 days and expire the registry's replaced versions
 after 7 days:
 
 ```sh
@@ -555,9 +556,67 @@ aws s3api put-public-access-block --bucket <bucket> --public-access-block-config
   BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 aws s3api put-bucket-encryption --bucket <bucket> --server-side-encryption-configuration \
   '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+aws s3api put-bucket-versioning --bucket <bucket> --versioning-configuration Status=Enabled
 aws s3api put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-configuration \
-  '{"Rules":[{"ID":"abort-incomplete-uploads","Status":"Enabled","Filter":{},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":7}}]}'
+  '{"Rules":[{"ID":"abort-incomplete-uploads","Status":"Enabled","Filter":{},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":7}},{"ID":"expire-replaced-registry-versions","Status":"Enabled","Filter":{"Prefix":"registry/"},"NoncurrentVersionExpiration":{"NoncurrentDays":7},"Expiration":{"ExpiredObjectDeleteMarker":true}}]}'
+aws s3api put-bucket-policy --bucket <bucket> --policy file://bundle-policy.json
 ```
+
+`bundle-policy.json` refuses every write to `bundles/` that could replace an
+object:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyBundleOverwrites",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::<bucket>/bundles/*",
+      "Condition": {
+        "Null": {"s3:if-none-match": "true"},
+        "Bool": {"s3:ObjectCreationOperation": "true"}
+      }
+    }
+  ]
+}
+```
+
+`s3:if-none-match` is the condition key S3 sets from a write's `If-None-Match`
+header, and `Null` matches a `PutObject` or `CompleteMultipartUpload` that
+doesn't send one. `CreateMultipartUpload`, `UploadPart` and `UploadPartCopy`
+can't carry the header, so `s3:ObjectCreationOperation` exempts them; the
+part uploads create nothing until `CompleteMultipartUpload`, which the policy
+does check. S3 then answers a write to an existing key with
+`412 Precondition Failed`, whoever holds the credentials. The bundle workflow
+sends `If-None-Match: *` on all three files: `put-object --if-none-match '*'`
+for the checksum and its signature, and `s3 cp --no-overwrite` for the tar,
+which AWS CLI 2.33.0 and later put on the `PutObject` or the
+`CompleteMultipartUpload` of a multipart upload. A copy into `bundles/`
+without the header is refused too. See
+[Enforce conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes-enforce.html).
+
+`s3 cp --no-overwrite` treats `412` as a skipped file and exits `0`, so
+`scripts/bundle-upload.sh` refuses to start when the tar's key already exists, uploads it with
+its SHA-256 in the `sha256` metadata, and stops unless the object it then
+reads back carries that hash.
+
+Versioning covers what the policy can't: a delete, or a write by the bucket
+owner after removing the policy, leaves the previous version recoverable. The
+registry commits every upload by copying it into place and deleting the
+original, so its prefix piles up replaced versions; the second lifecycle rule
+expires them. Restore a bundle by copying its previous version back:
+
+```sh
+aws s3api list-object-versions --bucket <bucket> --prefix bundles/1.4.3-lts/
+aws s3api copy-object --bucket <bucket> --key <key> \
+  --copy-source '<bucket>/<key>?versionId=<version id>'
+```
+
+The policy refuses that copy, so an operator removes it for the restore and
+puts it back after.
 
 The prefixes `registry/` and `bundles/` appear with the first publish. Nothing
 purges the registry's own `_uploads` state from a failed publish; it is a few
@@ -707,6 +766,17 @@ deleting the original; bundles are only ever added:
 
 `s3:PutObjectAcl` covers the `bucket-owner-full-control` header the registry
 sends on every write.
+
+The bundle job starts its registry with a two-hour session, because assembling
+about 11 GB through it can outlast the default hour. STS refuses a session
+longer than the role's maximum, which is one hour unless you raise it:
+
+```sh
+aws iam update-role --role-name zone-distribution-publisher --max-session-duration 7200
+```
+
+The registry runs only while the bundle is assembled, and the upload takes a
+fresh one-hour session.
 
 ## Network access
 
