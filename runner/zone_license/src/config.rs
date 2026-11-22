@@ -4,8 +4,10 @@ use std::path::Path;
 
 use abnegate_notify::{Sender, SmtpConfig};
 use lettre::Address;
+use rusty_s3::{Bucket, Credentials, UrlStyle};
 use zone_enterprise::Keyring;
 
+use crate::bundle::{BundleSettings, DEFAULT_PREFIX};
 use crate::config_error::ConfigError;
 use crate::polar::{AccessToken, WebhookSecret};
 use crate::private_key::PrivateKey;
@@ -23,6 +25,12 @@ const LISTEN_REASON: &str = "it must be an IP address and port, such as 0.0.0.0:
 const PORT_REASON: &str = "it must be a port number from 1 to 65535";
 const FROM_REASON: &str = "it must be a bare email address, such as licenses@example.com";
 const FROM_NAME_REASON: &str = "it must be a single line";
+const REGION_REASON: &str =
+    "it must be a region name of lowercase letters, digits and dashes, such as ap-southeast-2";
+const ENDPOINT_REASON: &str =
+    "it must be an http or https URL with a host, such as https://s3.ap-southeast-2.amazonaws.com";
+const PREFIX_REASON: &str =
+    "it must be one or more path segments of letters, digits, '.', '_' or '-', such as bundles";
 
 pub struct Config {
     pub signer: Signer,
@@ -32,6 +40,7 @@ pub struct Config {
     pub keyring: Keyring,
     pub listen: SocketAddr,
     pub smtp: SmtpConfig,
+    pub bundles: Option<BundleSettings>,
 }
 
 impl Config {
@@ -111,6 +120,7 @@ impl Config {
             &mut problems,
             |name| !name.contains(['\r', '\n']),
         );
+        let bundles = bundles(&value, &mut problems);
 
         let assembled = (|| {
             Some(Self {
@@ -127,6 +137,7 @@ impl Config {
                     password?,
                     Sender::new(from?).with_name(name?),
                 ),
+                bundles,
             })
         })();
         match assembled {
@@ -150,6 +161,7 @@ impl fmt::Debug for Config {
             .field("smtp_user", &self.smtp.user)
             .field("smtp_from", &self.smtp.sender.address)
             .field("smtp_from_name", &self.smtp.sender.name)
+            .field("bundles", &self.bundles)
             .finish_non_exhaustive()
     }
 }
@@ -173,6 +185,66 @@ fn signer(
         .map_err(|error| problems.push(error.into()))
         .ok()?;
     Some(signer)
+}
+
+fn bundles(
+    value: &impl Fn(Variable) -> Option<String>,
+    problems: &mut Vec<Problem>,
+) -> Option<BundleSettings> {
+    let bucket = value(Variable::BundleBucket)?;
+    let region = required(
+        value(Variable::BundleRegion),
+        Variable::BundleRegion,
+        problems,
+    )
+    .and_then(|region| {
+        checked(
+            region,
+            Variable::BundleRegion,
+            REGION_REASON,
+            problems,
+            BundleSettings::is_region,
+        )
+    });
+    let endpoint = match value(Variable::BundleEndpoint) {
+        Some(endpoint) => checked(
+            endpoint,
+            Variable::BundleEndpoint,
+            ENDPOINT_REASON,
+            problems,
+            BundleSettings::is_endpoint,
+        ),
+        None => region.as_deref().map(BundleSettings::default_endpoint),
+    };
+    let prefix = parsed(
+        value(Variable::BundlePrefix),
+        Variable::BundlePrefix,
+        DEFAULT_PREFIX.to_owned(),
+        PREFIX_REASON,
+        problems,
+        BundleSettings::parse_prefix,
+    );
+    let key = required(
+        value(Variable::BundleAccessKeyId),
+        Variable::BundleAccessKeyId,
+        problems,
+    );
+    let secret = required(
+        value(Variable::BundleSecretAccessKey),
+        Variable::BundleSecretAccessKey,
+        problems,
+    );
+    let bucket = match (endpoint.and_then(|endpoint| endpoint.parse().ok()), region) {
+        (Some(endpoint), Some(region)) => Bucket::new(endpoint, UrlStyle::Path, bucket, region)
+            .map_err(|_| problems.push(invalid(Variable::BundleEndpoint, ENDPOINT_REASON)))
+            .ok(),
+        _ => None,
+    };
+    Some(BundleSettings {
+        bucket: bucket?,
+        prefix: prefix?,
+        credentials: Credentials::new(key?, secret?),
+    })
 }
 
 fn required(
@@ -243,6 +315,10 @@ mod tests {
     const PASSWORD: &str = "hunter2-not-a-real-password";
     const PRODUCT: &str = "prod_a";
     const ACCESS_TOKEN: &str = "polar_oat_config-test-token";
+    const BUCKET: &str = "zone-distribution";
+    const REGION: &str = "ap-southeast-2";
+    const ACCESS_KEY_ID: &str = "AKIACONFIGBUNDLETEST";
+    const SECRET_ACCESS_KEY: &str = "config-bundle-secret/hidden+key";
     const REQUIRED: [Variable; 7] = [
         Variable::WebhookSecret,
         Variable::Products,
@@ -585,6 +661,177 @@ mod tests {
         assert!(!shown.contains("config-test-token"), "{shown}");
         assert!(shown.contains("access_token"), "{shown}");
         assert!(shown.contains("[redacted]"), "{shown}");
+    }
+
+    fn bundled(changes: &[(Variable, &str)]) -> HashMap<Variable, String> {
+        let mut variables = with(&[
+            (Variable::BundleBucket, BUCKET),
+            (Variable::BundleRegion, REGION),
+            (Variable::BundleAccessKeyId, ACCESS_KEY_ID),
+            (Variable::BundleSecretAccessKey, SECRET_ACCESS_KEY),
+        ]);
+        for (variable, value) in changes {
+            variables.insert(*variable, (*value).to_owned());
+        }
+        variables
+    }
+
+    fn bundles(variables: &HashMap<Variable, String>) -> BundleSettings {
+        load(variables).unwrap().bundles.expect("bundles on")
+    }
+
+    #[test]
+    fn bundles_are_off_without_a_bucket() {
+        assert!(load(&complete()).unwrap().bundles.is_none());
+        let mut variables = bundled(&[(Variable::BundleBucket, "  ")]);
+        assert!(load(&variables).unwrap().bundles.is_none());
+        variables.remove(&Variable::BundleBucket);
+        assert!(load(&variables).unwrap().bundles.is_none());
+    }
+
+    #[test]
+    fn a_bucket_with_its_region_and_keys_turns_bundles_on() {
+        let settings = bundles(&bundled(&[]));
+        assert_eq!(settings.bucket.name(), BUCKET);
+        assert_eq!(settings.bucket.region(), REGION);
+        assert_eq!(
+            settings.bucket.base_url().as_str(),
+            "https://s3.ap-southeast-2.amazonaws.com/zone-distribution/"
+        );
+        assert_eq!(settings.prefix, "bundles");
+        assert_eq!(settings.credentials.key(), ACCESS_KEY_ID);
+        assert_eq!(settings.credentials.secret(), SECRET_ACCESS_KEY);
+    }
+
+    #[test]
+    fn the_endpoint_default_follows_the_region() {
+        let settings = bundles(&bundled(&[(Variable::BundleRegion, "eu-central-1")]));
+        assert_eq!(
+            settings.bucket.base_url().as_str(),
+            "https://s3.eu-central-1.amazonaws.com/zone-distribution/"
+        );
+        assert_eq!(settings.bucket.region(), "eu-central-1");
+    }
+
+    #[test]
+    fn the_endpoint_and_prefix_are_honoured_path_style() {
+        let settings = bundles(&bundled(&[
+            (Variable::BundleEndpoint, " http://127.0.0.1:9000/s3 "),
+            (Variable::BundlePrefix, "/zone/bundles/"),
+        ]));
+        assert_eq!(
+            settings.bucket.base_url().as_str(),
+            "http://127.0.0.1:9000/s3/zone-distribution/"
+        );
+        assert_eq!(settings.bucket.region(), REGION);
+        assert_eq!(settings.prefix, "zone/bundles");
+    }
+
+    #[test]
+    fn a_bucket_alone_names_each_missing_bundle_variable() {
+        let problems = problems(&with(&[(Variable::BundleBucket, BUCKET)]));
+        let missing: Vec<Variable> = problems
+            .iter()
+            .filter_map(|problem| match problem {
+                Problem::Missing(variable) => Some(*variable),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            missing,
+            [
+                Variable::BundleRegion,
+                Variable::BundleAccessKeyId,
+                Variable::BundleSecretAccessKey,
+            ],
+            "{problems:?}"
+        );
+        assert_eq!(problems.len(), 3, "{problems:?}");
+    }
+
+    #[test]
+    fn each_missing_bundle_variable_is_named_alone() {
+        for missing in [
+            Variable::BundleRegion,
+            Variable::BundleAccessKeyId,
+            Variable::BundleSecretAccessKey,
+        ] {
+            let mut variables = bundled(&[]);
+            variables.remove(&missing);
+            let problems = problems(&variables);
+            assert!(
+                matches!(problems.as_slice(), [Problem::Missing(variable)] if *variable == missing),
+                "{missing:?}: {problems:?}"
+            );
+            let message = load(&variables).expect_err("refused").to_string();
+            assert!(message.contains(missing.name()), "{message}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_bad_bundle_region() {
+        for region in ["AP-SOUTHEAST-2", "ap southeast 2", "evil.example/", "a:1"] {
+            let problems = problems(&bundled(&[(Variable::BundleRegion, region)]));
+            assert_eq!(invalid(&problems), [Variable::BundleRegion], "{region}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_bad_bundle_endpoint() {
+        for endpoint in [
+            "s3.amazonaws.com",
+            "ftp://s3.amazonaws.com",
+            "https://",
+            "not a url",
+        ] {
+            let problems = problems(&bundled(&[(Variable::BundleEndpoint, endpoint)]));
+            assert_eq!(invalid(&problems), [Variable::BundleEndpoint], "{endpoint}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_bad_bundle_prefix() {
+        for prefix in ["/", "a/../b", "a//b", "a b"] {
+            let problems = problems(&bundled(&[(Variable::BundlePrefix, prefix)]));
+            assert_eq!(invalid(&problems), [Variable::BundlePrefix], "{prefix}");
+        }
+    }
+
+    #[test]
+    fn a_partial_bundle_config_reports_every_problem_at_once() {
+        let mut variables = with(&[
+            (Variable::BundleBucket, BUCKET),
+            (Variable::BundleEndpoint, "ftp://nowhere"),
+            (Variable::BundlePrefix, ".."),
+            (Variable::BundleAccessKeyId, ACCESS_KEY_ID),
+        ]);
+        variables.remove(&Variable::SmtpHost);
+        let problems = problems(&variables);
+        assert_eq!(
+            invalid(&problems),
+            [Variable::BundleEndpoint, Variable::BundlePrefix]
+        );
+        let shown = ConfigError::new(problems).to_string();
+        for variable in [
+            Variable::SmtpHost,
+            Variable::BundleRegion,
+            Variable::BundleSecretAccessKey,
+            Variable::BundleEndpoint,
+            Variable::BundlePrefix,
+        ] {
+            assert!(shown.contains(variable.name()), "{shown}");
+        }
+    }
+
+    #[test]
+    fn debug_hides_the_bundle_secret() {
+        let config = load(&bundled(&[])).unwrap();
+        let shown = format!("{config:?} {config:#?}");
+        assert!(!shown.contains(SECRET_ACCESS_KEY), "{shown}");
+        assert!(!shown.contains("hidden+key"), "{shown}");
+        assert!(shown.contains(ACCESS_KEY_ID), "{shown}");
+        assert!(shown.contains(BUCKET), "{shown}");
+        assert!(shown.contains("secret_access_key"), "{shown}");
     }
 
     #[test]

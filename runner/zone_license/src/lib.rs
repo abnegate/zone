@@ -1,3 +1,4 @@
+pub mod bundle;
 mod cli;
 mod command;
 pub mod config;

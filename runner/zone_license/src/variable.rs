@@ -13,11 +13,17 @@ pub enum Variable {
     SmtpPassword,
     SmtpFrom,
     SmtpFromName,
+    BundleBucket,
+    BundleRegion,
+    BundleEndpoint,
+    BundlePrefix,
+    BundleAccessKeyId,
+    BundleSecretAccessKey,
 }
 
 impl Variable {
     #[cfg(test)]
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 19] = [
         Self::PrivateKeyFile,
         Self::PrivateKey,
         Self::KeyId,
@@ -31,6 +37,12 @@ impl Variable {
         Self::SmtpPassword,
         Self::SmtpFrom,
         Self::SmtpFromName,
+        Self::BundleBucket,
+        Self::BundleRegion,
+        Self::BundleEndpoint,
+        Self::BundlePrefix,
+        Self::BundleAccessKeyId,
+        Self::BundleSecretAccessKey,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -48,6 +60,12 @@ impl Variable {
             Self::SmtpPassword => "SMTP_PASSWORD",
             Self::SmtpFrom => "SMTP_FROM",
             Self::SmtpFromName => "SMTP_FROM_NAME",
+            Self::BundleBucket => "ZONE_BUNDLE_BUCKET",
+            Self::BundleRegion => "ZONE_BUNDLE_REGION",
+            Self::BundleEndpoint => "ZONE_BUNDLE_ENDPOINT",
+            Self::BundlePrefix => "ZONE_BUNDLE_PREFIX",
+            Self::BundleAccessKeyId => "ZONE_BUNDLE_ACCESS_KEY_ID",
+            Self::BundleSecretAccessKey => "ZONE_BUNDLE_SECRET_ACCESS_KEY",
         }
     }
 
@@ -85,6 +103,12 @@ mod tests {
                 "SMTP_PASSWORD",
                 "SMTP_FROM",
                 "SMTP_FROM_NAME",
+                "ZONE_BUNDLE_BUCKET",
+                "ZONE_BUNDLE_REGION",
+                "ZONE_BUNDLE_ENDPOINT",
+                "ZONE_BUNDLE_PREFIX",
+                "ZONE_BUNDLE_ACCESS_KEY_ID",
+                "ZONE_BUNDLE_SECRET_ACCESS_KEY",
             ]
         );
     }
