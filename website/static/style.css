@@ -357,27 +357,6 @@ strong {
   padding-block: clamp(3rem, 6vw, 5rem) clamp(2.5rem, 5vw, 4rem);
 }
 
-.eyebrow {
-  display: inline-block;
-  margin-bottom: 1rem;
-  color: var(--text-secondary);
-  font-size: 0.875rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.eyebrow::before {
-  content: '';
-  display: inline-block;
-  width: 0.6em;
-  height: 0.6em;
-  margin-right: 0.5em;
-  border-radius: 2px;
-  background: var(--brand);
-  vertical-align: 0.05em;
-}
-
 .lead {
   max-width: 62ch;
   margin-top: 1.25rem;
