@@ -55,7 +55,7 @@ pub async fn check(state: &AppState, cap: Cap, user: Option<Uuid>) -> Result<(),
 /// Admits `user`, or a person without an account when `None`, unless the server is capped and
 /// full. An existing member is always admitted, however far over the cap the server is.
 ///
-/// `transaction` must be the one that then inserts the membership: a newcomer's count holds
+/// `transaction` must be the one that then inserts the membership: the count holds
 /// [`SEATS_LOCK`] until it commits. Holding that lock, the transaction must take no other pool
 /// connection, and must take no row lock before calling this.
 pub async fn admit(
@@ -67,9 +67,6 @@ pub async fn admit(
         return Ok(());
     };
     let connection = &mut **transaction;
-    if counted(connection, user).await? {
-        return Ok(());
-    }
     lock(connection, cap.wait).await?;
     room(connection, limit, user).await
 }
@@ -111,22 +108,14 @@ fn lock_timeout(wait: Duration) -> String {
     format!("{}ms", wait.as_millis().max(SHORTEST_WAIT_MILLISECONDS))
 }
 
-async fn counted(
-    connection: &mut PgConnection,
-    user: Option<Uuid>,
-) -> Result<bool, AdmissionError> {
-    match user {
-        Some(user) => Ok(seats::member(&mut *connection, user).await?),
-        None => Ok(false),
-    }
-}
-
 async fn room(
     connection: &mut PgConnection,
     limit: u32,
     user: Option<Uuid>,
 ) -> Result<(), AdmissionError> {
-    if counted(connection, user).await? {
+    if let Some(user) = user
+        && seats::member(&mut *connection, user).await?
+    {
         return Ok(());
     }
     make_room(connection, limit, 1).await

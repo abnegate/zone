@@ -1016,7 +1016,7 @@ async fn a_seat_lock_held_past_the_timeout_answers_busy() {
 }
 
 #[tokio::test]
-async fn an_existing_member_joins_another_organization_without_waiting_for_the_seat_lock() {
+async fn an_existing_member_joining_another_organization_waits_for_the_seat_lock() {
     let server = Server::capped().await;
     let member = server.join().await;
     let holder = server.hold_seats().await;
@@ -1024,7 +1024,12 @@ async fn an_existing_member_joins_another_organization_without_waiting_for_the_s
     let response = server.create_organization(&member).await;
 
     Server::release_seats(holder).await;
-    response.assert_status(StatusCode::CREATED);
+    response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.json_value()["code"], json!(MEMBER_ADMISSION_BUSY));
+    server
+        .create_organization(&member)
+        .await
+        .assert_status(StatusCode::CREATED);
     server.cleanup().await;
 }
 
