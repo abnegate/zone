@@ -8,6 +8,7 @@ use abnegate_secret::MasterKey;
 use chrono::Utc;
 use dashmap::DashMap;
 use sqlx::PgPool;
+use std::num::NonZeroUsize;
 #[cfg(any(test, feature = "testing"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -24,7 +25,7 @@ use zone_context::embeddings::EmbeddingService;
 use zone_core::llm::{LlmBackend, cli};
 #[cfg(any(test, feature = "testing"))]
 use zone_enterprise::Keyring;
-use zone_enterprise::sso::Oidc;
+use zone_enterprise::sso::{Oidc, saml};
 use zone_enterprise::{Edition, License, status};
 
 use crate::cache::Cache;
@@ -56,6 +57,10 @@ const MAX_CONCURRENT_TRAIN: usize = 1;
 const MAX_CONCURRENT_FRAME_EXTRACT: usize = 4;
 /// Without a sweep, every client the rate limiter has ever seen stays in it.
 const RATE_LIMITER_CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
+
+fn max_concurrent_saml() -> usize {
+    std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
+}
 
 /// The adapters a source can be verified and fetched with.
 ///
@@ -130,6 +135,9 @@ struct AppStateInner {
     /// Clip extracts queue here instead of 429ing, so a dump of hundreds of
     /// videos can run a few ffmpeg jobs at a time.
     pub frame_semaphore: Arc<Semaphore>,
+    /// SAML responses are parsed on the blocking pool, holding many times their size in memory
+    /// before any signature is checked, so one permit per core bounds that peak.
+    pub saml_semaphore: Arc<Semaphore>,
     /// The process's MCP hubs: the instance layer, connected once, and one
     /// per organization, each shared across chat turns.
     pub mcp: Hubs,
@@ -138,6 +146,7 @@ struct AppStateInner {
     pub licenses: Licenses,
     pub renewal: OnceLock<Option<renewal::Client>>,
     pub oidc: Oidc,
+    pub saml: saml::Client,
     /// Terminal frames for task runs, for sockets and waits to subscribe to.
     /// The process's one instance, which the writers that finish a run also
     /// publish to, so a state built per test observes the same runs.
@@ -269,12 +278,14 @@ impl AppState {
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
+                saml_semaphore: Arc::new(Semaphore::new(max_concurrent_saml())),
                 mcp,
                 github: OnceLock::new(),
                 network_denial: OnceCell::new(),
                 licenses: Licenses::new(),
                 renewal: OnceLock::new(),
                 oidc: Oidc::new(),
+                saml: saml::Client::new(),
                 task_progress: task_progress::progress(),
                 device_connections: DashMap::new(),
                 pull_request_statuses: StatusCache::default(),
@@ -360,6 +371,11 @@ impl AppState {
     /// Permits for clip extracts. Waiters queue rather than 429.
     pub fn frame_semaphore(&self) -> &Arc<Semaphore> {
         &self.inner.frame_semaphore
+    }
+
+    /// Permits for checking SAML responses. A post that finds none is refused, not queued.
+    pub fn saml_semaphore(&self) -> &Arc<Semaphore> {
+        &self.inner.saml_semaphore
     }
 
     /// Get the sync registry
@@ -503,6 +519,10 @@ impl AppState {
 
     pub fn oidc(&self) -> &Oidc {
         &self.inner.oidc
+    }
+
+    pub fn saml(&self) -> &saml::Client {
+        &self.inner.saml
     }
 
     pub async fn license(&self) -> Option<License> {
@@ -745,6 +765,13 @@ mod tests {
         let state = AppState::for_tests();
         let clone = state.clone();
         assert!(std::ptr::eq(state.oidc(), clone.oidc()));
+    }
+
+    #[tokio::test]
+    async fn every_clone_shares_one_saml_client() {
+        let state = AppState::for_tests();
+        let clone = state.clone();
+        assert!(std::ptr::eq(state.saml(), clone.saml()));
     }
 
     #[tokio::test]
@@ -1066,6 +1093,10 @@ mod tests {
         assert_eq!(
             state.frame_semaphore().available_permits(),
             MAX_CONCURRENT_FRAME_EXTRACT
+        );
+        assert_eq!(
+            state.saml_semaphore().available_permits(),
+            max_concurrent_saml()
         );
         assert_eq!(
             state

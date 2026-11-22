@@ -1,0 +1,8 @@
+<root a="x&#13;y&#10;z&#9;w" b="crlf
+line" c="&amp;&lt;&gt;&quot;&apos;">
+  <text>one
+twothree&#13;four &amp; &lt; &gt; &quot; &apos;</text>
+  <data><![CDATA[<raw> & "quoted" ]]]]><![CDATA[> 
+ end]]></data>
+  <mixed>a<![CDATA[b]]>&#x63;d</mixed>
+</root>

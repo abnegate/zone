@@ -1,4 +1,6 @@
 import { Badge, Button } from '@zone/ui';
+import { protocolBadge } from '../messages';
+import { Protocol } from '../schemas';
 import type { ProviderResponse } from '../types';
 
 interface SsoProviderListProps {
@@ -13,8 +15,11 @@ function domainsText(domains: readonly string[]): string {
   return domains.length === 0 ? 'Any email domain' : `Domains: ${domains.join(', ')}`;
 }
 
-function verificationText(required: boolean): string {
-  return required ? 'Verified email required' : 'Provider emails trusted';
+function verificationText(provider: ProviderResponse): string {
+  if (provider.protocol === Protocol.Saml) {
+    return 'Never joins accounts by email';
+  }
+  return provider.require_verified_email ? 'Verified email required' : 'Provider emails trusted';
 }
 
 export function SsoProviderList({
@@ -47,14 +52,14 @@ export function SsoProviderList({
               <div className="sso-provider-identity">
                 <div className="sso-provider-heading">
                   <span className="sso-provider-name">{provider.display_name}</span>
+                  <Badge variant="outline">{protocolBadge(provider.protocol)}</Badge>
                   <Badge variant={provider.enabled ? 'success' : 'neutral'}>
                     {provider.enabled ? 'Enabled' : 'Disabled'}
                   </Badge>
                 </div>
                 <span className="sso-provider-issuer">{provider.issuer}</span>
                 <span className="sso-provider-meta">
-                  {domainsText(provider.allowed_domains)} ·{' '}
-                  {verificationText(provider.require_verified_email)}
+                  {domainsText(provider.allowed_domains)} · {verificationText(provider)}
                 </span>
               </div>
               {editable && (

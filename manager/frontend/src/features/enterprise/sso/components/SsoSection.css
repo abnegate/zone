@@ -48,6 +48,7 @@
 }
 
 .sso-redirect,
+.sso-service-provider,
 .sso-providers {
   display: flex;
   flex-direction: column;
@@ -55,14 +56,28 @@
   min-width: 0;
 }
 
-.sso-redirect-row {
+.sso-copy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  min-width: 0;
+}
+
+.sso-copy-label {
+  font-size: var(--ui-text-xs);
+  font-weight: 500;
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-secondary);
+}
+
+.sso-copy-row {
   display: flex;
   align-items: center;
   gap: var(--ui-space-3);
   min-width: 0;
 }
 
-.sso-redirect-uri {
+.sso-copy-value {
   flex: 1;
   min-width: 0;
   font-family: var(--ui-font-mono);
@@ -156,6 +171,96 @@
   border: 0;
 }
 
+.sso-choice {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.sso-choice-legend {
+  padding: 0;
+  margin-bottom: var(--ui-label-gap);
+}
+
+.sso-choice-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ui-space-2) var(--ui-space-4);
+  min-width: 0;
+}
+
+.sso-choice-option {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  min-width: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+  cursor: pointer;
+}
+
+.sso-choice-option input[type='radio'] {
+  flex-shrink: 0;
+  margin: 0;
+  accent-color: var(--ui-accent);
+  cursor: pointer;
+}
+
+.sso-choice-option:has(input:disabled),
+.sso-choice-option:has(input:disabled) input[type='radio'] {
+  cursor: not-allowed;
+}
+
+.sso-facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-2);
+  min-width: 0;
+  margin: 0;
+}
+
+.sso-fact {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-0-5);
+  min-width: 0;
+}
+
+.sso-fact dt {
+  font-size: var(--ui-text-xs);
+  font-weight: 500;
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-secondary);
+}
+
+.sso-fact dd {
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+}
+
+.sso-fact-value,
+.sso-metadata-xml {
+  font-family: var(--ui-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.sso-fact-value {
+  font-size: var(--ui-text-xs);
+}
+
+.sso-fact-value + .sso-fact-value {
+  margin-top: var(--ui-space-1);
+}
+
+.sso-metadata-xml {
+  min-width: 0;
+  font-size: var(--ui-text-xs);
+}
+
 .sso-provider-form .sso-notice {
   margin-top: var(--ui-space-4);
 }
@@ -170,7 +275,7 @@
 
 @media (max-width: 768px) {
   .sso-card-header,
-  .sso-redirect-row {
+  .sso-copy-row {
     flex-wrap: wrap;
   }
 

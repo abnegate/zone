@@ -134,6 +134,11 @@ async fn community_can_read_but_not_change_anything() {
             "status": "community",
             "required": false,
             "redirect_uri": "http://localhost:3000/sso/callback",
+            "service_provider": {
+                "entity_id": "http://localhost:3000/api/auth/sso/saml/metadata",
+                "acs_url": "http://localhost:3000/api/auth/sso/saml/acs",
+                "metadata_url": "http://localhost:3000/api/auth/sso/saml/metadata",
+            },
             "providers": [],
         })
     );
@@ -283,6 +288,9 @@ async fn an_admin_adds_a_provider_through_a_loopback_identity_provider() {
         "display_name": "Okta",
         "issuer": identity_provider.issuer(),
         "client_id": CLIENT_ID,
+        "sso_url": null,
+        "metadata_url": null,
+        "certificate_fingerprints": [],
         "allowed_domains": ["acme.com", "acme.io"],
         "require_verified_email": false,
         "enabled": false,

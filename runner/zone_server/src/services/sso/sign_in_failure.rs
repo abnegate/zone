@@ -1,3 +1,4 @@
+use uuid::Uuid;
 use zone_enterprise::sso::Error;
 
 use crate::auth::password::PasswordError;
@@ -15,12 +16,18 @@ pub enum SignInFailure {
     Storage(#[from] sqlx::Error),
     #[error(transparent)]
     Provider(ProviderError),
+    #[error("The stored settings of SSO provider {0} no longer parse: {1}")]
+    Unreadable(Uuid, Error),
     #[error(transparent)]
     Password(#[from] PasswordError),
     #[error("The account changed while the sign-in was linking it")]
     Stale,
     #[error("Too many sign-ins are waiting for the identity provider")]
     Busy,
+    #[error("Too many SAML responses are being checked at once")]
+    Overloaded,
+    #[error("The SAML response check stopped before it finished: {0}")]
+    Interrupted(tokio::task::JoinError),
     #[error("The server is at its cap of {cap} active members")]
     Full { cap: u32 },
 }

@@ -21,8 +21,12 @@ describe('single sign-on section surfaces', () => {
     expect(css).not.toMatch(/:\s*(?:white|black)\b/i);
   });
 
-  it('sets the redirect URI and issuers in the mono face and breaks them anywhere', () => {
-    for (const selector of ['.sso-redirect-uri', '.sso-provider-issuer']) {
+  it('sets copied values, issuers, SAML facts and metadata in the mono face and breaks them anywhere', () => {
+    for (const selector of [
+      '.sso-copy-value',
+      '.sso-provider-issuer',
+      '.sso-fact-value, .sso-metadata-xml',
+    ]) {
       expect(rule(css, selector), selector).toContain('font-family: var(--ui-font-mono)');
       expect(rule(css, selector), selector).toContain('overflow-wrap: anywhere');
     }
@@ -32,9 +36,16 @@ describe('single sign-on section surfaces', () => {
     for (const selector of [
       '.sso-section',
       '.sso-card-header',
-      '.sso-redirect, .sso-providers',
-      '.sso-redirect-row',
-      '.sso-redirect-uri',
+      '.sso-redirect, .sso-service-provider, .sso-providers',
+      '.sso-copy',
+      '.sso-copy-row',
+      '.sso-copy-value',
+      '.sso-choice',
+      '.sso-choice-options',
+      '.sso-choice-option',
+      '.sso-facts',
+      '.sso-fact',
+      '.sso-metadata-xml',
       '.sso-provider',
       '.sso-provider-identity',
       '.sso-provider-heading',
@@ -48,6 +59,10 @@ describe('single sign-on section surfaces', () => {
   it('stacks provider actions under each provider and wraps headers on a phone', () => {
     const phone = media(css, PHONE);
     expect(rule(phone, '.sso-provider')).toContain('grid-template-columns: minmax(0, 1fr)');
-    expect(rule(phone, '.sso-card-header, .sso-redirect-row')).toContain('flex-wrap: wrap');
+    expect(rule(phone, '.sso-card-header, .sso-copy-row')).toContain('flex-wrap: wrap');
+  });
+
+  it('wraps the protocol and metadata choices instead of overflowing', () => {
+    expect(rule(css, '.sso-choice-options')).toContain('flex-wrap: wrap');
   });
 });

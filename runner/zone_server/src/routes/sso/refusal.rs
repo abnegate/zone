@@ -21,14 +21,19 @@ pub fn status(error: &Error, stage: Stage) -> StatusCode {
         | Error::ClientIdInvalid
         | Error::ClientSecretInvalid
         | Error::DomainInvalid(_)
-        | Error::StateInvalid => StatusCode::BAD_REQUEST,
+        | Error::StateInvalid
+        | Error::MetadataInvalid(_)
+        | Error::DomainRequired
+        | Error::VerifiedEmailUnsupported
+        | Error::ProtocolMismatch => StatusCode::BAD_REQUEST,
         Error::Discovery(_) => match stage {
             Stage::Configuration => StatusCode::BAD_REQUEST,
             Stage::SignIn => StatusCode::BAD_GATEWAY,
         },
         Error::TokenExchange(_) => StatusCode::BAD_GATEWAY,
-        Error::IdTokenInvalid(_) => StatusCode::UNAUTHORIZED,
+        Error::IdTokenInvalid(_) | Error::AssertionInvalid(_) => StatusCode::UNAUTHORIZED,
         Error::Required
+        | Error::SignInRefused(_)
         | Error::EmailMissing
         | Error::EmailUnverified
         | Error::DomainNotAllowed
@@ -66,6 +71,7 @@ mod tests {
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
     use zone_enterprise::sso::Rejection;
+    use zone_enterprise::sso::saml::Refusal;
 
     use super::*;
 
@@ -95,6 +101,21 @@ mod tests {
             (Error::DomainNotAllowed, StatusCode::FORBIDDEN),
             (Error::EmailConflict, StatusCode::CONFLICT),
             (Error::AccountDisabled, StatusCode::FORBIDDEN),
+            (
+                Error::MetadataInvalid("no signing certificate".into()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Error::AssertionInvalid(Refusal::Signature),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Error::SignInRefused("urn:oasis:names:tc:SAML:2.0:status:Responder".into()),
+                StatusCode::FORBIDDEN,
+            ),
+            (Error::DomainRequired, StatusCode::BAD_REQUEST),
+            (Error::VerifiedEmailUnsupported, StatusCode::BAD_REQUEST),
+            (Error::ProtocolMismatch, StatusCode::BAD_REQUEST),
         ];
         for (error, expected) in cases {
             for stage in [Stage::Configuration, Stage::SignIn] {

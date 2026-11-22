@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<saml2p:Response xmlns:saml2p="urn:oasis:names:tc:SAML:2.0:protocol" Version="2.0" ID="id-response" IssueInstant="2026-11-21T10:00:00.443Z" Destination="https://zone.example.com/api/auth/sso/saml/acs" InResponseTo="_request">
+	<saml2:Issuer xmlns:saml2="urn:oasis:names:tc:SAML:2.0:assertion">http://www.okta.com/exk1</saml2:Issuer>
+  <saml2p:Status>
+      <saml2p:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/>
+  </saml2p:Status>
+	<saml2:Assertion xmlns:saml2="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" Version="2.0" IssueInstant="2026-11-21T10:00:00.443Z" ID="id-assertion">
+		<saml2:Issuer Format="urn:oasis:names:tc:SAML:2.0:nameid-format:entity">http://www.okta.com/exk1</saml2:Issuer>
+    <saml2:Subject>
+	    <saml2:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">jane@acme.com</saml2:NameID>
+      <saml2:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"><saml2:SubjectConfirmationData Recipient="https://zone.example.com/api/auth/sso/saml/acs" NotOnOrAfter="2026-11-21T10:05:00.443Z" InResponseTo="_request" /></saml2:SubjectConfirmation>
+    </saml2:Subject>
+    <saml2:Conditions NotOnOrAfter="2026-11-21T10:05:00.443Z" NotBefore="2026-11-21T09:55:00.443Z"><saml2:AudienceRestriction><saml2:Audience>https://zone.example.com/api/auth/sso/saml/metadata</saml2:Audience></saml2:AudienceRestriction></saml2:Conditions>
+    <saml2:AuthnStatement SessionIndex="id-session" AuthnInstant="2026-11-21T10:00:00.443Z"><saml2:AuthnContext><saml2:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml2:AuthnContextClassRef></saml2:AuthnContext></saml2:AuthnStatement>
+    <saml2:AttributeStatement>
+      <saml2:Attribute NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" Name="email"><saml2:AttributeValue xsi:nil="false" xml:lang="en" Extra="1"/></saml2:Attribute>
+      <z:Order xmlns:z="urn:z" xmlns:a="urn:a" z:b="1" a:c="2" d="3" a:a="4" xml:space="preserve" c="5"><?zone-marker  keep this?></z:Order>
+    </saml2:AttributeStatement>
+	</saml2:Assertion>
+</saml2p:Response>
