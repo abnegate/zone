@@ -1,0 +1,23 @@
+zone-server             zone:server                                                                                                                 zone/server                            compose:manager,helm-split:zone-apps:server.image,helm-split:zone-apps:migration.image
+zone-manager            zone:manager                                                                                                                zone/manager                           compose:console,helm-split:zone-apps:manager.image
+zone-litellm            zone:litellm                                                                                                                zone/litellm                           compose:litellm
+traefik                 traefik:v3.7.12@sha256:9c2a54d87f76f5c2f5f2682c68394af92fb12c0a2686798d6462a3f84bd78eaf                                     library/traefik                        compose:traefik
+pgvector                pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b                              pgvector/pgvector                      compose:postgres
+valkey                  valkey/valkey:8.1.10-alpine@sha256:b21fd94099dcd4bc6b2b9230daef69b6558b887ad4a2a1afe56ff6e745a88cdb                         valkey/valkey                          compose:valkey,helm-split:zone-infra:valkey.image
+ollama                  ollama/ollama:0.33.2@sha256:020e4134285e2ef4d8fd801234176de3b4faadc992a3eb06c8e66a2f9d4c4ba2                                ollama/ollama                          compose:ollama,compose:ollama-init,helm-split:zone-ai:ollama.image
+gluetun                 ghcr.io/thecfu/gluetun-exporter:0.1.1-bundled@sha256:bc0d59e2307c8aa1e16d6d0e5173ebd7fb568caceacff8ed29ea87931b61515e       thecfu/gluetun-exporter                compose:gluetun
+searxng                 searxng/searxng:2026.9.3-a1144dda3@sha256:3602e6ddbeba037f5d800d1ed9d296a8b93c9f5b3cf9d05fa179d0e766dd59a1                  searxng/searxng                        compose:searxng
+prometheus              prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0                             prom/prometheus                        compose:prometheus
+grafana                 grafana/grafana:13.2.1@sha256:f772d434e8fab0049deb2b1b30abd43342bcfca1537614aa8d36080232cf4283                              grafana/grafana                        compose:grafana
+postgres-exporter       prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e       prometheuscommunity/postgres-exporter  compose:postgres-exporter
+redis-exporter          oliver006/redis_exporter:v1.90.0@sha256:a129504e65b87c54f79bc92f1afc403475e8ff646a3d7512de469904ceddf986                    oliver006/redis_exporter               compose:valkey-exporter
+ollama-metrics          ghcr.io/norskhelsenett/ollama-metrics:latest@sha256:3dd32882666cf0e77272086446b5639c636fb090ac9ea629c11874200c629164        norskhelsenett/ollama-metrics          compose:ollama-metrics
+cadvisor                gcr.io/cadvisor/cadvisor:v0.52.1@sha256:f40e65878e25c2e78ea037f73a449527a0fb994e303dc3e34cb6b187b4b91435                    cadvisor/cadvisor                      compose:cadvisor
+blackbox-exporter       prom/blackbox-exporter:v0.27.0@sha256:a50c4c0eda297baa1678cd4dc4712a67fdea713b832d43ce7fcc5f9bea05094d                      prom/blackbox-exporter                 compose:blackbox
+cloudnative-postgresql  ghcr.io/cloudnative-pg/postgresql:16.15@sha256:34cd4159d07b3410a1b29da35072e2e927a0905e717a61afa3814624a2e8859a             cloudnative-pg/postgresql              helm-string:zone-infra:postgres.image
+curl                    curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777                              curlimages/curl                        helm-split:zone-ai:ollama.init.image
+litellm                 ghcr.io/berriai/litellm:v1.99.1@sha256:a53a7d3ffebede1925bd3ee8a21e4a7b9b63e2e68ec883af136edcccb6eeb82c                     berriai/litellm                        helm-split:zone-ai:litellm.image
+postgres                postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b                                  library/postgres                       helm-string:zone-apps:initContainers.postgres.image
+
+#excluded comfyui builds a CUDA image from source for NVIDIA GPUs, and its models are not bundled
+#excluded comfyui-model-setup downloads models from the internet, which an air-gapped host cannot reach
