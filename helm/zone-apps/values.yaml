@@ -118,6 +118,11 @@ server:
   # zone-server's own defaults: ZONE_MCP_COMMANDS stays off, so organization
   # admins can add only HTTP servers, and an empty ZONE_MCP_SERVERS and
   # ZONE_MCP_CONFIG configure no instance server.
+  # ZONE_TRUSTED_PROXIES lists the peers whose X-Forwarded-For zone-server
+  # believes, as comma-separated CIDRs. The service is ClusterIP, so every
+  # peer is in the cluster: the private ranges below cover the ingress
+  # controller on most clusters. Narrow it to your ingress controller's pod
+  # CIDR where other pods could reach zone-server directly.
   env:
     PORT: "8000"
     HOST: "0.0.0.0"
@@ -130,6 +135,7 @@ server:
     ZONE_MCP_COMMANDS: "false"
     ZONE_MCP_CONFIG: ""
     ZONE_MCP_SERVERS: ""
+    ZONE_TRUSTED_PROXIES: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
 
   # Origin a browser reaches Zone at, scheme://host[:port] with no path,
   # passed to zone-server as APP_BASE_URL. Empty derives it from the first

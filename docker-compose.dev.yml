@@ -60,6 +60,9 @@ services:
       - APP_BASE_URL=${APP_BASE_URL:-http://localhost:3001}
       # Traefik's consoles, plus the Vite server published on localhost:3001.
       - ZONE_CONSOLE_ORIGINS=${ZONE_CONSOLE_ORIGINS-http://localhost:3001,http://manager.localhost,https://manager.localhost,http://manager.${DOMAIN_HOST_WEBUI},https://manager.${DOMAIN_HOST_WEBUI}}
+      # The Vite server proxies from zone_edge or zone_internal, whichever its
+      # lookup of manager answers with, as well as Traefik on zone_edge.
+      - ZONE_TRUSTED_PROXIES=${ZONE_TRUSTED_PROXIES-172.31.0.0/24,172.30.0.0/24}
       - SQLX_OFFLINE=true
       - RUST_LOG=zone_server=debug,zone_core=debug,abnegate_agent=debug,zone_context=debug
       - RUST_BACKTRACE=1
