@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{Acquire, PgExecutor, Postgres, QueryBuilder};
+use sqlx::{Acquire, PgConnection, PgExecutor, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use super::criterion::Criterion;
@@ -155,6 +155,23 @@ pub async fn get(
     .bind(organization_id)
     .bind(id)
     .fetch_optional(executor)
+    .await?;
+    row.map(Row::record).transpose()
+}
+
+/// The group, locked `FOR UPDATE` until the caller's transaction ends.
+pub async fn lock(
+    connection: &mut PgConnection,
+    organization_id: Uuid,
+    id: Uuid,
+) -> DbResult<Option<GroupRecord>> {
+    let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "{} WHERE g.organization_id = $1 AND g.id = $2 FOR UPDATE OF g",
+        select("scim_groups")
+    )))
+    .bind(organization_id)
+    .bind(id)
+    .fetch_optional(connection)
     .await?;
     row.map(Row::record).transpose()
 }
