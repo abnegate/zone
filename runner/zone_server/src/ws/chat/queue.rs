@@ -223,6 +223,11 @@ pub fn with<T>(chat_id: Uuid, change: impl FnOnce(&mut Queue) -> T) -> T {
     result
 }
 
+/// A turn this queue started is running, or messages wait in it.
+pub fn active(chat_id: Uuid) -> bool {
+    QUEUES.get(&chat_id).is_some_and(|queue| !queue.is_idle())
+}
+
 pub fn snapshot(chat_id: Uuid) -> Option<(Vec<Queued>, bool)> {
     QUEUES
         .get(&chat_id)

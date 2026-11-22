@@ -56,7 +56,8 @@ impl From<Error> for ChatError {
 
 const PAGE_CHARS: u64 = 8_000;
 pub(crate) const RUNNING: &str = "running";
-const INTERRUPTED: &str = "interrupted";
+pub(crate) const COMPLETED: &str = "completed";
+pub(crate) const INTERRUPTED: &str = "interrupted";
 
 #[derive(Clone)]
 pub struct Store {

@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod audit;
+pub mod chat_socket;
 pub mod comfy;
 pub mod context;
 pub mod database;
@@ -16,9 +17,11 @@ pub mod logs;
 pub mod mail;
 pub mod mcp;
 pub mod policy;
+pub mod replica;
 pub mod spend;
 pub mod sso;
 pub mod stand_in;
+pub mod stub_litellm;
 pub mod transcript;
 
 pub use database::Database;
