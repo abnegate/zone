@@ -41,6 +41,9 @@ editions are billed per seat, monthly or yearly, through Polar, which is the
 merchant of record and handles VAT, GST and US sales tax. Zone never handles
 money; it only verifies a key.
 
+Each edition's support, and the license ID a support request quotes, are in
+[SUPPORT.md](SUPPORT.md).
+
 ### The Community member cap
 
 An active member is a person who is an active member of an active

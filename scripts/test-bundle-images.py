@@ -401,6 +401,21 @@ def unused_entries(listing: Listing, used: set[str]) -> list[str]:
     ]
 
 
+def idle_consumers(listing: Listing, renders: list[HelmRender]) -> list[str]:
+    controlling = set()
+    for render in renders:
+        for _, sentinel in render.pairs:
+            controlled = SENTINEL.search(sentinel)
+            if controlled:
+                controlling.add(render.consumers[int(controlled.group('index'))][1])
+    return [
+        f'entry {entry.name} lists {consumer}, but setting it changes no image helm/{consumer.chart} renders'
+        for entry in listing.entries
+        for consumer in entry.consumers
+        if consumer.kind is not Kind.COMPOSE and consumer not in controlling
+    ]
+
+
 def images(node: object) -> Iterator[str]:
     if isinstance(node, dict):
         for key, value in node.items():
@@ -739,6 +754,21 @@ class HelmComparisonTests(unittest.TestCase):
             ['entry postgres on line 2 is used by no rendered image'],
         )
 
+    def test_consumer_that_sets_no_rendered_image_is_reported(self) -> None:
+        render = HelmRender('zone-apps', 'test', True, (('zone/server:latest', self.sentinel(0)), (self.POSTGRES, self.POSTGRES)), self.CONSUMERS)
+        self.assertEqual(
+            idle_consumers(self.LISTING, [render]),
+            ['entry postgres lists helm-string:zone-apps:initContainers.postgres.image, '
+             'but setting it changes no image helm/zone-apps renders'],
+        )
+
+    def test_consumer_set_in_any_render_is_not_idle(self) -> None:
+        renders = [
+            HelmRender('zone-apps', 'test', True, (('zone/server:latest', self.sentinel(0)),), self.CONSUMERS),
+            HelmRender('zone-apps', 'example', False, ((self.POSTGRES, self.sentinel(1)),), self.CONSUMERS),
+        ]
+        self.assertEqual(idle_consumers(self.LISTING, renders), [])
+
     def test_missing_consumer_path_is_reported(self) -> None:
         defaults = {'zone-apps': {'server': {'image': {'repository': 'zone/server', 'tag': 'latest'}}}}
         self.assertEqual(
@@ -806,6 +836,9 @@ class HelmRenderTests(unittest.TestCase):
             with self.subTest(chart=render.chart, values=render.label):
                 self.assertTrue(render.pairs, f'{render.chart} ({render.label}) renders no images')
                 self.assertEqual(compare_helm(listing(), render).problems, [])
+
+    def test_every_helm_consumer_sets_a_rendered_image(self) -> None:
+        self.assertEqual(idle_consumers(listing(), every_helm_render()), [])
 
 
 class CoverageTests(unittest.TestCase):
