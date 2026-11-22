@@ -2,10 +2,53 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use super::deactivation::Deactivation;
+use super::joining::Joining;
 use super::removal::Removal;
 use crate::db::DbResult;
-use crate::db::organization_members;
+use crate::db::organization_members::{self, OrgRole};
 use crate::db::suspensions::{self, Resumed};
+
+pub async fn join(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    user_id: Uuid,
+    active: bool,
+) -> DbResult<Joining> {
+    organization_members::lock_owners(transaction, organization_id).await?;
+    let current: Option<bool> = sqlx::query_scalar(
+        "SELECT is_active FROM organization_members \
+         WHERE organization_id = $1 AND user_id = $2 FOR UPDATE",
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if current == Some(true) {
+        return Ok(Joining::AlreadyMember);
+    }
+
+    suspensions::forget(&mut **transaction, organization_id, user_id).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO organization_members (organization_id, user_id, role, is_active, invited_at)
+        VALUES ($1, $2, $3, $4, NOW())
+        ON CONFLICT (organization_id, user_id) DO UPDATE
+        SET role = EXCLUDED.role,
+            custom_role_id = NULL,
+            is_active = EXCLUDED.is_active,
+            invited_by = NULL,
+            invited_at = EXCLUDED.invited_at,
+            updated_at = NOW()
+        "#,
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .bind(OrgRole::Member.as_str())
+    .bind(active)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(Joining::Joined)
+}
 
 pub async fn deactivate(
     transaction: &mut Transaction<'_, Postgres>,

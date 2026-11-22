@@ -8173,7 +8173,7 @@ cat 'DIR/reply.jsonl'
     }
 
     #[tokio::test]
-    async fn deprovisioning_a_member_cancels_the_turns_they_registered() {
+    async fn halting_a_member_cancels_the_turns_they_registered() {
         let tenant = crate::db::testing::Tenant::new().await;
         let member = tenant
             .organization_member(crate::db::organization_members::OrgRole::Member)
@@ -8185,12 +8185,11 @@ cat 'DIR/reply.jsonl'
         state.disable_mcp();
         let mut turn = Generation::new(Uuid::new_v4(), member, tenant.workspace);
 
-        let deprovisioned =
-            crate::services::members::deprovision(&state, tenant.organization, member)
-                .await
-                .expect("the member is deprovisioned");
+        let halted = crate::services::members::halt(&state, tenant.organization, member)
+            .await
+            .expect("the member is halted");
 
-        assert_eq!(deprovisioned.halted.turns, 1);
+        assert_eq!(halted.turns, 1);
         assert!(turn.is_cancelled(), "the member's turn kept running");
         drop(turn);
         tenant.cleanup().await;

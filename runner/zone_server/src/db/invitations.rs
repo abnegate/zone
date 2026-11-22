@@ -7,8 +7,12 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::{Connection, Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
+mod revoked;
+
 use super::DbResult;
 use crate::utils::crypto::{generate_token, hash_token};
+
+pub use revoked::Revoked;
 
 const TOKEN_EXPIRY_DAYS: i64 = 7;
 
@@ -246,26 +250,32 @@ pub async fn revoke_invitation(pool: &PgPool, invitation_id: Uuid) -> DbResult<(
     Ok(())
 }
 
-/// Deletes every invitation to an organization still waiting on `email`,
-/// expired or not, whatever case the email was invited in.
-pub async fn revoke_pending<'a, E>(executor: E, organization_id: Uuid, email: &str) -> DbResult<u64>
+pub async fn revoke_pending<'a, E>(
+    executor: E,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Vec<Revoked>>
 where
     E: Executor<'a, Database = Postgres>,
 {
-    let result = sqlx::query(
+    sqlx::query_as(
         r#"
         DELETE FROM invitations
         WHERE organization_id = $1
-          AND lower(email) = lower($2)
           AND accepted_at IS NULL
+          AND lower(email) IN (
+              SELECT lower(email) FROM users WHERE id = $2
+              UNION
+              SELECT lower(email) FROM scim_users
+              WHERE organization_id = $1 AND user_id = $2 AND email IS NOT NULL
+          )
+        RETURNING id, email
         "#,
     )
     .bind(organization_id)
-    .bind(email)
-    .execute(executor)
-    .await?;
-
-    Ok(result.rows_affected())
+    .bind(user_id)
+    .fetch_all(executor)
+    .await
 }
 
 /// Get a pending invitation for a specific email in an organization

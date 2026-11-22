@@ -4,6 +4,7 @@ use zone_enterprise::scim;
 
 use super::client::ScimClient;
 use crate::db::audit::{AuditContext, actions, log_action, resources};
+use crate::db::invitations::Revoked;
 use crate::db::scim::{NewError, errors};
 use crate::db::suspensions::Successor;
 use crate::state::AppState;
@@ -42,6 +43,23 @@ pub async fn successors(state: &AppState, client: &ScimClient, successors: &[Suc
             actions::WORKSPACE_OWNER_SEATED,
             resources::WORKSPACE,
             successor.workspace_id,
+            attributes,
+        )
+        .await;
+    }
+}
+
+pub async fn invitations(state: &AppState, client: &ScimClient, revoked: &[Revoked]) {
+    for invitation in revoked {
+        let mut attributes = Map::new();
+        attributes.insert("email".to_owned(), json!(invitation.email));
+        log(
+            state,
+            client,
+            None,
+            actions::INVITATION_REVOKED,
+            resources::INVITATION,
+            invitation.id,
             attributes,
         )
         .await;

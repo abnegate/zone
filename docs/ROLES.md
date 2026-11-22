@@ -285,7 +285,9 @@ because they may belong to other organizations.
   them to workspaces again.
 
 Deactivating a member through SCIM differs: it also revokes their sessions,
-and reactivating them restores their workspace memberships and roles. See
+unless another organization with other active members still shares the
+account, and reactivating them restores their workspace memberships and
+roles. See
 [SCIM.md](SCIM.md#deactivation).
 
 ### Invitations

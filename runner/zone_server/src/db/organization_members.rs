@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use super::DbResult;
 use super::custom_roles::{self, Assignment, Membership, Reference, Summary};
+use super::invitations;
 use super::suspensions::{self, Suspension};
 use crate::auth::{Grant, Permission, Scope};
 
@@ -297,7 +298,10 @@ pub async fn lock_owners(
 /// Outcome of a removal that must leave an owner seated.
 #[derive(Debug)]
 pub enum Removal {
-    Removed(Suspension),
+    Removed {
+        suspension: Suspension,
+        invitations: Vec<invitations::Revoked>,
+    },
     Revoked,
     Forbidden,
     Uncovered,
@@ -343,8 +347,43 @@ pub async fn remove_guarded(
     }
 
     let suspension = suspensions::suspend(&mut transaction, organization_id, user_id).await?;
+    let invitations =
+        invitations::revoke_pending(&mut *transaction, organization_id, user_id).await?;
     transaction.commit().await?;
-    Ok(Removal::Removed(suspension))
+    Ok(Removal::Removed {
+        suspension,
+        invitations,
+    })
+}
+
+pub async fn shared_elsewhere(
+    executor: impl Executor<'_, Database = Postgres>,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<bool> {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM organization_members mine
+            INNER JOIN organizations o ON o.id = mine.organization_id
+            WHERE mine.user_id = $2
+              AND mine.organization_id <> $1
+              AND mine.is_active
+              AND o.is_active IS NOT FALSE
+              AND EXISTS (
+                  SELECT 1 FROM organization_members other
+                  WHERE other.organization_id = mine.organization_id
+                    AND other.user_id <> $2
+                    AND other.is_active
+              )
+        )
+        "#,
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .fetch_one(executor)
+    .await
 }
 
 /// Get a member by organization and user ID

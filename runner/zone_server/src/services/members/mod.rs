@@ -4,6 +4,7 @@ mod deprovision;
 mod deprovisioned;
 mod halt;
 mod halted;
+mod sign_out;
 
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ pub use deprovision::deprovision;
 pub use deprovisioned::Deprovisioned;
 pub use halt::halt;
 pub use halted::Halted;
+pub use sign_out::SignOut;
 
 /// The transaction-scoped advisory lock ("zoneSEAT") every capped admission holds from its count
 /// until its membership commits.

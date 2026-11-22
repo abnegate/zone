@@ -1,8 +1,8 @@
-use super::Halted;
+use super::SignOut;
+use crate::db::invitations::Revoked;
 
-/// What deprovisioning a member revoked and stopped.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deprovisioned {
-    pub sessions: i64,
-    pub halted: Halted,
+    pub sign_out: SignOut,
+    pub invitations: Vec<Revoked>,
 }

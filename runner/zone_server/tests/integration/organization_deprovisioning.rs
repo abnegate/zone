@@ -359,6 +359,92 @@ async fn removing_a_member_revokes_the_invitations_waiting_on_their_email() {
 }
 
 #[tokio::test]
+async fn a_console_removal_revokes_invitations_in_its_transaction() {
+    let client = TestClient::with_db().await;
+    let pool = create_test_pool().await;
+    let owner = account(&client).await;
+    let leaving = account(&client).await;
+    let tenant = tenant(&client, &owner).await;
+    join(&client, &owner, tenant.organization, &leaving).await;
+    let (invitation, _) = invitations::create_invitation(
+        &pool,
+        &leaving.email,
+        tenant.organization,
+        vec![],
+        "member",
+        "member",
+        owner.user,
+    )
+    .await
+    .expect("an invitation to the leaving member");
+    let refusal = format!("refuse_{}", tenant.organization.simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION {refusal}() RETURNS trigger LANGUAGE plpgsql AS \
+         $$ BEGIN RAISE EXCEPTION 'invitation revocation refused'; END $$"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TRIGGER {refusal} BEFORE DELETE ON invitations FOR EACH ROW \
+         WHEN (OLD.organization_id = '{}') EXECUTE FUNCTION {refusal}()",
+        tenant.organization
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let failed = client
+        .delete_auth(
+            &format!(
+                "/api/organizations/{}/members/{}",
+                tenant.organization, leaving.user
+            ),
+            &owner.token,
+        )
+        .await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP TRIGGER {refusal} ON invitations"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP FUNCTION {refusal}()")))
+        .execute(&pool)
+        .await
+        .unwrap();
+    failed.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        held_in_organization(&pool, tenant.organization, leaving.user)
+            .await
+            .expect("the membership row is kept")
+            .is_active,
+        "a removal whose invitations could not be revoked still committed"
+    );
+
+    remove(&client, &owner, tenant.organization, &leaving).await;
+    assert!(
+        invitations::get_invitation_by_id(&pool, invitation.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the leaving member's invitation survived"
+    );
+    let audited: Vec<(Option<Uuid>, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT actor_id, old_values FROM audit_logs WHERE action = $1 AND resource_id = $2",
+    )
+    .bind(actions::INVITATION_REVOKED)
+    .bind(invitation.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        audited,
+        vec![(Some(owner.user), Some(json!({ "email": leaving.email })))]
+    );
+}
+
+#[tokio::test]
 async fn removing_a_member_stops_the_task_runs_they_triggered() {
     let client = TestClient::with_db().await;
     let pool = create_test_pool().await;
@@ -672,11 +758,16 @@ async fn deprovisioning_answers_the_members_token_with_unauthorized() {
         .await
         .assert_status(StatusCode::OK);
 
-    let deprovisioned = members::deprovision(client.state(), tenant.organization, member.user)
+    let mut transaction = client.state().db().begin().await.unwrap();
+    let deprovisioned = members::deprovision(&mut transaction, tenant.organization, member.user)
         .await
         .expect("the member is deprovisioned");
+    transaction.commit().await.unwrap();
 
-    assert!(deprovisioned.sessions >= 1, "no session was revoked");
+    assert!(
+        matches!(deprovisioned.sign_out, members::SignOut::Revoked { sessions } if sessions >= 1),
+        "no session was revoked: {deprovisioned:?}"
+    );
     client
         .get_auth("/api/organizations", &member.token)
         .await
