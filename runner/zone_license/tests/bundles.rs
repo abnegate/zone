@@ -440,10 +440,14 @@ async fn a_bad_version_or_architecture_is_unknown_without_calling_storage() {
 #[tokio::test]
 async fn a_bundle_storage_says_is_missing_is_unknown_with_its_code() {
     let keys = Keys::new();
-    for (response, code) in [
-        (s3_error(404, "NoSuchKey"), Some("NoSuchKey")),
-        (s3_error(403, "AccessDenied"), Some("AccessDenied")),
-        (ResponseTemplate::new(404), None),
+    for (response, code, level) in [
+        (s3_error(404, "NoSuchKey"), Some("NoSuchKey"), " INFO "),
+        (
+            s3_error(403, "AccessDenied"),
+            Some("AccessDenied"),
+            " WARN ",
+        ),
+        (ResponseTemplate::new(404), None, " INFO "),
     ] {
         let storage = storage(response).await;
         let service = Service::start(config(&keys, Some(&storage), &[])).await;
@@ -457,7 +461,7 @@ async fn a_bundle_storage_says_is_missing_is_unknown_with_its_code() {
         .await;
 
         let line = line(&logged, "unknown");
-        assert!(line.contains(" INFO "), "{line}");
+        assert!(line.contains(level), "{line}");
         assert!(line.contains("version=1.4.3-lts"), "{line}");
         assert!(line.contains("architecture=amd64"), "{line}");
         match code {

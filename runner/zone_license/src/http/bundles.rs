@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 use tracing::field;
 use uuid::Uuid;
 
-use crate::bundle::{Architecture, BundleVersion, Object, Presence, StorageError};
+use crate::bundle::{ACCESS_DENIED, Architecture, BundleVersion, Object, Presence, StorageError};
 use crate::gate::{Denial, Limited};
 use crate::http::bundle_outcome::BundleOutcome;
 use crate::http::bundle_response::BundleResponse;
@@ -94,6 +94,19 @@ async fn distribute(
                 "Issued bundle download links"
             );
             (outcome.status(), Json(body)).into_response()
+        }
+        Ok(Presence::Absent { code }) if code.as_deref() == Some(ACCESS_DENIED) => {
+            let outcome = BundleOutcome::Unknown;
+            tracing::warn!(
+                %outcome,
+                %license,
+                %address,
+                %version,
+                %architecture,
+                code = ACCESS_DENIED,
+                "Refused a bundle the storage denied; if it is published, check the presigner's policy"
+            );
+            outcome.status().into_response()
         }
         Ok(Presence::Absent { code }) => {
             let outcome = BundleOutcome::Unknown;

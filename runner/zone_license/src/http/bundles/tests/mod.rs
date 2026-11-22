@@ -322,6 +322,33 @@ async fn no_answer_from_an_enabled_bundle_route_is_cached() {
     }
 }
 
+fn s3_error(status: u16, code: &str) -> ResponseTemplate {
+    ResponseTemplate::new(status).set_body_string(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>{code}</Code></Error>"
+    ))
+}
+
+#[tokio::test]
+async fn access_denied_is_unknown_but_warns_while_no_such_key_stays_info() {
+    for (response, level, quiet) in [
+        (s3_error(403, "AccessDenied"), " WARN ", " INFO "),
+        (s3_error(404, "NoSuchKey"), " INFO ", " WARN "),
+    ] {
+        let storage = storage(response).await;
+        let app = peered(distributed(&storage, Duration::from_secs(10)));
+
+        let logged = logging::capture(tracing::Level::INFO, async {
+            let response = app.oneshot(request(Method::GET, BUNDLE)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        })
+        .await;
+
+        let line = line(&logged, "unknown");
+        assert!(line.contains(level), "{line}");
+        assert!(!line.contains(quiet), "{line}");
+    }
+}
+
 #[tokio::test]
 async fn storage_that_times_out_is_unavailable_and_logged_as_a_warning() {
     let storage = storage(ResponseTemplate::new(206).set_delay(DELAY)).await;

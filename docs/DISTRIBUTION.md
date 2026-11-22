@@ -229,7 +229,10 @@ only once that commit marker exists, and that's the object the signer probes.
 It probes with a presigned ranged `GET` (`Range: bytes=0-0`), not a `HEAD`,
 because S3 `HEAD` responses carry no error code. `AccessDenied` counts as
 absent because S3 answers it, instead of `404`, for a missing key when the
-caller can't list the bucket, which the presigner user can't.
+caller can't list the bucket, which the presigner user can't. It still logs at
+`warn`, while `NoSuchKey` and a bare `404` log at `info`, because a presigner
+policy that has lost `s3:GetObject` answers the same way: `AccessDenied` for a
+bundle you know is published means the policy is broken.
 
 `SignatureDoesNotMatch`, `InvalidAccessKeyId` and `ExpiredToken` mean the
 presigner's key is wrong or gone. They answer `503`, and like every other S3
@@ -641,7 +644,7 @@ leaked license allows anyway:
 ```
 
 It has no `s3:ListBucket`, so S3 answers a missing bundle with `AccessDenied`,
-which the signer reports as `unknown`.
+which the signer reports as `unknown` and logs at `warn`.
 
 ### The publisher role
 
