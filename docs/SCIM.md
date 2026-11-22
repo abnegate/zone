@@ -348,9 +348,11 @@ replaces them: an attribute it leaves out is cleared, except `active`, which
 changes nothing when it's left out.
 
 The account's own email and display name, which the member sees everywhere
-in Zone, change only when SCIM created the account and the account has
-never been a member of any other organization. Otherwise one organization's
-identity provider could rename an account that other organizations share.
+in Zone, change only when SCIM created the account and the account has no
+membership in any other organization, active or not. A member removed in
+another organization's console still counts; one that organization's
+identity provider deleted doesn't. Otherwise one organization's identity
+provider could rename an account that other organizations share.
 An email that another account already has answers 409 `uniqueness`.
 
 `active: false` [deactivates](#deactivation) the member, and `active: true`
@@ -401,6 +403,9 @@ Some consequences:
 
 - **Unmapping the last mapping** drops its members to Member. So does
   deleting the last mapped group.
+- **A deactivated member** is worked out too, whenever a group they're in
+  changes: they come back with the role their groups give them when they're
+  reactivated, not one a mapping stopped granting while they were away.
 - **Editing a mapped custom role's permissions** applies at once, to
   everyone who holds the role. Which group's role wins is settled again on
   each member's next SCIM change.

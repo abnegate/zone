@@ -46,10 +46,7 @@ pub async fn apply(
         return Ok(Applied::Skipped);
     };
     let role = parse(&seat.role)?;
-    if !seat.is_active
-        || role == OrgRole::Owner
-        || !linked(connection, organization_id, user_id).await?
-    {
+    if role == OrgRole::Owner || !linked(connection, organization_id, user_id).await? {
         return Ok(Applied::Skipped);
     }
 
@@ -114,6 +111,10 @@ pub async fn apply(
 
     let to = target.membership();
     let assigned = to.custom_role.as_ref().map(|summary| summary.id);
+    if !seat.is_active {
+        suspend_as(connection, organization_id, user_id, to.role, assigned).await?;
+        return Ok(Applied::Skipped);
+    }
     if role == to.role && seat.custom_role_id == assigned {
         return Ok(Applied::Unchanged);
     }
@@ -205,6 +206,28 @@ async fn linked(
     .bind(user_id)
     .fetch_one(connection)
     .await
+}
+
+/// Makes the role a suspended member would come back with the one SCIM now gives them, so
+/// reactivation never restores a role a mapping stopped granting while they were away.
+async fn suspend_as(
+    connection: &mut PgConnection,
+    organization_id: Uuid,
+    user_id: Uuid,
+    role: OrgRole,
+    custom_role_id: Option<Uuid>,
+) -> DbResult<()> {
+    sqlx::query(
+        "UPDATE organization_suspensions SET role = $3, custom_role_id = $4 \
+         WHERE organization_id = $1 AND user_id = $2",
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .bind(role.as_str())
+    .bind(custom_role_id)
+    .execute(connection)
+    .await?;
+    Ok(())
 }
 
 async fn governed(
