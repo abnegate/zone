@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../../../api/ApiError';
 import { chooseSelect, selectOptionValues } from '../../../../test/select';
@@ -334,6 +334,45 @@ describe('ScimSection', () => {
       expect(rotateToken).toHaveBeenCalledWith(ORGANIZATION_ID, OKTA.id);
       expect(within(card).getByText(SECRET)).toBeInTheDocument();
       expect(screen.queryByRole('dialog')).toBeNull();
+    });
+
+    it('still shows a rotated secret when the section left while the rotation was pending', async () => {
+      let finish: (issued: typeof ROTATED) => void = () => {};
+      rotateToken.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          })
+      );
+      settings.mockResolvedValue(ACTIVE);
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
+      });
+      const page = (shown: boolean) => (
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <AdministersServerProvider value>
+              {shown && <ScimSection organizationId={ORGANIZATION_ID} />}
+            </AdministersServerProvider>
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+      const view = render(page(true));
+      fireEvent.click(await screen.findByRole('button', { name: `Rotate ${OKTA.name}` }));
+      fireEvent.click(within(dialog()).getByRole('button', { name: ROTATE_CONFIRM }));
+      await waitFor(() => expect(rotateToken).toHaveBeenCalled());
+
+      view.rerender(page(false));
+      await act(async () => {
+        finish(ROTATED);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+      view.rerender(page(true));
+
+      const card = await screen.findByRole('region', { name: secretTitle(OKTA.name) });
+      expect(within(card).getByText(SECRET)).toBeInTheDocument();
+      fireEvent.click(within(card).getByRole('button', { name: 'Dismiss' }));
+      expect(screen.queryByRole('region', { name: secretTitle(OKTA.name) })).toBeNull();
     });
 
     it('cancels a rotation without rotating', async () => {

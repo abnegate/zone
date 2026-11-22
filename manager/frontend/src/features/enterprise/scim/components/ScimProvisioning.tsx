@@ -3,9 +3,10 @@ import { LapsedNotice } from '../../components/LapsedNotice';
 import { UpgradeNotice } from '../../components/UpgradeNotice';
 import { community, lapsed } from '../../policy/license';
 import { useRoles } from '../../roles/hooks';
+import { useIssuedScimSecret } from '../hooks';
 import { LAPSED_NOTICE, UPGRADE_NOTICE } from '../labels';
 import { organizationRoles } from '../mapping';
-import type { IssuedResponse, ScimSettings, TokenResponse } from '../types';
+import type { ScimSettings, TokenResponse } from '../types';
 import { CreateScimTokenDialog } from './CreateScimTokenDialog';
 import { RevokeScimTokenDialog } from './RevokeScimTokenDialog';
 import { RotateScimTokenDialog } from './RotateScimTokenDialog';
@@ -30,14 +31,13 @@ export function ScimProvisioning({ organizationId, settings }: ScimProvisioningP
   const [creating, setCreating] = useState(false);
   const [rotating, setRotating] = useState<TokenResponse | null>(null);
   const [revoking, setRevoking] = useState<TokenResponse | null>(null);
-  const [issued, setIssued] = useState<IssuedResponse | null>(null);
+  const { issued, dismiss } = useIssuedScimSecret(organizationId);
   const editable = settings.entitled;
   const { response: roles } = useRoles(editable ? organizationId : null);
   const upgrade = community(settings);
   const shown = !upgrade || configured(settings);
 
-  const show = (next: IssuedResponse) => {
-    setIssued(next);
+  const show = () => {
     setCreating(false);
     setRotating(null);
   };
@@ -45,7 +45,7 @@ export function ScimProvisioning({ organizationId, settings }: ScimProvisioningP
   const revoked = (token: TokenResponse) => {
     setRevoking(null);
     if (issued?.token.id === token.id) {
-      setIssued(null);
+      dismiss();
     }
   };
 
@@ -56,7 +56,7 @@ export function ScimProvisioning({ organizationId, settings }: ScimProvisioningP
       {shown && (
         <>
           <ScimBaseUrl url={settings.base_url} />
-          {issued && <ScimTokenSecret issued={issued} onDismiss={() => setIssued(null)} />}
+          {issued && <ScimTokenSecret issued={issued} onDismiss={dismiss} />}
           <ScimTokenList
             tokens={settings.tokens}
             editable={editable}

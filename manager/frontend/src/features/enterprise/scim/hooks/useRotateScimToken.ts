@@ -3,6 +3,7 @@ import { scimApi } from '../api';
 import { ScimRefusal } from '../ScimRefusal';
 import type { IssuedResponse } from '../types';
 import { cacheTokens, refreshScim } from './cache';
+import { IssuedSecrets } from './IssuedSecrets';
 
 export interface RotateScimTokenState {
   rotate(tokenId: string, onIssued: (issued: IssuedResponse) => void): void;
@@ -17,10 +18,12 @@ export function useRotateScimToken(organizationId: string): RotateScimTokenState
 
   const { mutate, isPending, error, reset } = useMutation({
     mutationFn: (tokenId: string) => scimApi.rotateToken(organizationId, tokenId),
-    onSuccess: ({ token }) =>
+    onSuccess: (issued) => {
+      IssuedSecrets.of(queryClient).keep(organizationId, issued);
       cacheTokens(queryClient, organizationId, (tokens) =>
-        tokens.map((listed) => (listed.id === token.id ? token : listed))
-      ),
+        tokens.map((listed) => (listed.id === issued.token.id ? issued.token : listed))
+      );
+    },
     onSettled: () => refreshScim(queryClient, organizationId),
     gcTime: 0,
   });
