@@ -122,6 +122,7 @@ describe('SettingsNav', () => {
       ['Agent policy', '/settings/organization/agent-policy'],
       ['Members', '/settings/organization/members'],
       ['Roles', '/settings/organization/roles'],
+      ['SCIM provisioning', '/settings/organization/scim'],
       ['Devices', '/settings/organization/devices'],
       ['Audit log', '/settings/organization/audit'],
       ['Audit export', '/settings/organization/audit-export'],

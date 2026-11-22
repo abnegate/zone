@@ -1,0 +1,255 @@
+.scim-section {
+  min-width: 0;
+}
+
+.scim-hint,
+.scim-sync,
+.scim-notice p,
+.scim-lapsed p,
+.scim-dialog p {
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
+}
+
+.scim-hint {
+  color: var(--ui-text-muted);
+}
+
+.scim-sync,
+.scim-dialog p {
+  color: var(--ui-text-primary);
+}
+
+.scim-notice,
+.scim-lapsed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ui-space-3);
+  min-width: 0;
+}
+
+.scim-notice p {
+  color: var(--ui-text-secondary);
+}
+
+.scim-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-3);
+  min-width: 0;
+}
+
+.scim-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ui-space-3);
+  min-width: 0;
+}
+
+.scim-card-title {
+  min-width: 0;
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.scim-subtitle {
+  margin: 0;
+  font-size: var(--ui-text-xs);
+  font-weight: 600;
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-secondary);
+}
+
+.settings-card.scim-secret {
+  border-color: var(--ui-accent);
+}
+
+.scim-copy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  min-width: 0;
+}
+
+.scim-copy-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-3);
+  min-width: 0;
+}
+
+.scim-copy-value {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.scim-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.scim-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--ui-space-3);
+  min-width: 0;
+  padding: var(--ui-space-3) 0;
+}
+
+.scim-failure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  min-width: 0;
+  padding: var(--ui-space-3) 0;
+}
+
+.scim-item:first-child,
+.scim-failure:first-child {
+  padding-top: 0;
+}
+
+.scim-item:last-child,
+.scim-failure:last-child {
+  padding-bottom: 0;
+}
+
+.scim-item + .scim-item,
+.scim-failure + .scim-failure {
+  border-top: 1px solid var(--ui-border-subtle);
+}
+
+.scim-item-identity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  min-width: 0;
+}
+
+.scim-item-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-2);
+  min-width: 0;
+}
+
+.scim-item-name {
+  min-width: 0;
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.scim-item-meta {
+  min-width: 0;
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.scim-token-hint,
+.scim-external-id,
+.scim-request {
+  min-width: 0;
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-normal);
+  overflow-wrap: anywhere;
+}
+
+.scim-token-hint,
+.scim-external-id {
+  color: var(--ui-text-secondary);
+}
+
+.scim-request {
+  color: var(--ui-text-primary);
+}
+
+.scim-failure-detail {
+  min-width: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.scim-item-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-1);
+}
+
+.scim-mapping {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--ui-space-1);
+  min-width: 0;
+}
+
+.scim-mapping .ui-select-control {
+  width: 12rem;
+  max-width: 100%;
+}
+
+.scim-field-error {
+  margin: 0;
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-error-500);
+}
+
+.scim-dialog .modal-actions {
+  margin-top: var(--ui-space-4);
+}
+
+@media (max-width: 768px) {
+  .scim-card-header,
+  .scim-copy-row {
+    flex-wrap: wrap;
+  }
+
+  .scim-item {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--ui-space-2);
+  }
+
+  .scim-item-actions {
+    margin-inline-start: calc(-1 * var(--ui-space-2-5));
+  }
+
+  .scim-mapping {
+    align-items: stretch;
+  }
+
+  .scim-mapping .ui-select-control {
+    width: 100%;
+  }
+
+  .scim-dialog .modal-actions {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+}

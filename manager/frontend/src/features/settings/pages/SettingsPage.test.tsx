@@ -232,7 +232,7 @@ describe('SettingsPage', () => {
       ]);
     });
 
-    it('shows an organization admin with no workspace every organization section and no workspace group', () => {
+    it('shows an organization admin with no workspace every organization section but SCIM provisioning and no workspace group', () => {
       signInAs('admin', null);
 
       renderAt('/settings/organization/ai');
@@ -273,7 +273,7 @@ describe('SettingsPage', () => {
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
     });
 
-    it('shows an organization owner and workspace admin all nineteen sections', () => {
+    it('shows an organization owner and workspace admin all twenty sections', () => {
       signInAs('owner', 'admin');
 
       renderAt('/settings/workspace/general');
@@ -291,6 +291,7 @@ describe('SettingsPage', () => {
         'Agent policy',
         'Members',
         'Roles',
+        'SCIM provisioning',
         'Devices',
         'Audit log',
         'Audit export',
