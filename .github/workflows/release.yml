@@ -11,9 +11,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  PACKAGES_OWNER: abnegate
-
 jobs:
   prepare-release:
     name: Prepare release version
@@ -334,9 +331,10 @@ jobs:
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GH_TOKEN }}
           VERSION: ${{ needs.prepare-release.outputs.version }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           : "${HOMEBREW_TAP_TOKEN:?set HOMEBREW_TAP_TOKEN or GH_TOKEN}"
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${PACKAGES_OWNER}/homebrew-tap.git"
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${REPO_OWNER}/homebrew-tap.git"
           mkdir -p homebrew-tap/Casks
           cp zone.rb homebrew-tap/Casks/
           cd homebrew-tap
@@ -379,9 +377,10 @@ jobs:
       - name: Clone APT repository
         env:
           APT_REPO_TOKEN: ${{ secrets.APT_REPO_TOKEN || secrets.GH_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           : "${APT_REPO_TOKEN:?set APT_REPO_TOKEN or GH_TOKEN}"
-          git clone "https://x-access-token:${APT_REPO_TOKEN}@github.com/${PACKAGES_OWNER}/apt-repo.git"
+          git clone "https://x-access-token:${APT_REPO_TOKEN}@github.com/${REPO_OWNER}/apt-repo.git"
       - name: Update APT repository
         env:
           GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
@@ -398,13 +397,13 @@ jobs:
           gzip -k -f dists/stable/main/binary-arm64/Packages
           cd dists/stable
           printf '%s\n' \
-            'Origin: abnegate' \
-            'Label: abnegate' \
+            'Origin: Bitecode' \
+            'Label: Bitecode' \
             'Suite: stable' \
             'Codename: stable' \
             'Architectures: amd64 arm64' \
             'Components: main' \
-            'Description: APT repository for abnegate packages' \
+            'Description: APT repository for Bitecode software' \
             > Release
           apt-ftparchive release . >> Release
           gpg --batch --yes --default-key "$GPG_KEY_ID" -abs -o Release.gpg Release
