@@ -1,3 +1,4 @@
+use chrono::TimeDelta;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -13,52 +14,66 @@ use crate::db::workspaces::{self, WorkspaceRow};
 use crate::services::fleet::refusal;
 use crate::state::AppState;
 
-/// What became of a task run this runner was refused.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Handoff {
-    /// Another connected runner may take it, so it waits to be picked up.
-    Left,
-    /// No runner could take it, so it failed with this refusal.
-    Failed(Refusal),
-    /// It ended, or another runner claimed it, before it could fail.
-    Taken,
-}
+/// How long a run left for another runner may go unclaimed, counted from its admission, before
+/// the runner that refused it fails it as one no runner took. It is well inside the minute after
+/// which the sweeper would fail the run as orphaned, and well past the pickup interval.
+pub(crate) const DEADLINE: TimeDelta = TimeDelta::seconds(30);
 
 /// Leave a run this runner may not take to another runner that may, or fail it naming what a
-/// runner would need. The fail is fenced on the run being unclaimed, so a runner that picked it
-/// up meanwhile keeps it.
+/// runner would need. A run left for another runner is failed the same way if none claims it by
+/// [`DEADLINE`]. Every fail is fenced on the run being unclaimed, so a runner that picked it up
+/// meanwhile keeps it.
 pub(crate) async fn hand_off(
     state: &AppState,
     run: &TaskRunRow,
     claimant: Claimant,
     shortfall: Shortfall,
-) -> Handoff {
-    let pool = state.db();
-    let code = refusal::of(shortfall).code();
-    match eligibility::exists(pool, run.id, claimant.runner).await {
+) {
+    let code = refusal::of(shortfall.clone()).code();
+    match eligibility::exists(state.db(), run.id, claimant.runner).await {
         Ok(true) => {
             tracing::info!(run = %run.id, code, "This runner may not take the task run, so it is left for another runner");
-            return Handoff::Left;
+            watch(state.clone(), run.clone(), shortfall);
         }
-        Ok(false) => {}
+        Ok(false) => fail(state, run, &shortfall).await,
         Err(error) => {
             tracing::warn!(run = %run.id, code, %error, "Could not look for another runner, so the task run is left for one to pick up");
-            return Handoff::Left;
+            watch(state.clone(), run.clone(), shortfall);
         }
     }
+}
+
+/// Fail `run` once it has gone unclaimed for [`DEADLINE`], unless a runner claims it first: the
+/// runners that could take it may have gone, or be too busy to queue it.
+fn watch(state: AppState, run: TaskRunRow, shortfall: Shortfall) {
+    tokio::spawn(async move {
+        match eligibility::unclaimed_for(state.db(), run.id, DEADLINE).await {
+            Ok(Some(wait)) => tokio::time::sleep(wait).await,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(run = %run.id, %error, "Could not check on the task run left for another runner; the sweeper fails it if none claims it");
+                return;
+            }
+        }
+        fail(&state, &run, &shortfall).await;
+    });
+}
+
+async fn fail(state: &AppState, run: &TaskRunRow, shortfall: &Shortfall) {
+    let pool = state.db();
     let workspace = match workspace(pool, run.task_id).await {
         Ok(Some(workspace)) => workspace,
-        Ok(None) => return Handoff::Taken,
+        Ok(None) => return,
         Err(error) => {
             tracing::warn!(run = %run.id, %error, "Could not read the task run's workspace, so it is left for a runner to pick up");
-            return Handoff::Left;
+            return;
         }
     };
     let refusal = match no_runner(pool, workspace.id).await {
         Ok(refusal) => refusal,
         Err(error) => {
             tracing::warn!(run = %run.id, %error, "Could not read what the task run needs of a runner, so it is left for one to pick up");
-            return Handoff::Left;
+            return;
         }
     };
     let failed = tasks::complete_owned_task_run(
@@ -72,14 +87,20 @@ pub(crate) async fn hand_off(
     .await;
     match failed {
         Ok(Some(_)) => {
-            tracing::warn!(run = %run.id, code = refusal.code(), "No runner in the fleet can take the task run, so it failed");
+            let refused = refusal::of(shortfall.clone());
+            tracing::warn!(
+                run = %run.id,
+                code = refusal.code(),
+                refused = refused.code(),
+                reason = %refused,
+                "No runner in the fleet took the task run, so it failed"
+            );
             audit(pool, &workspace, run.task_id, &refusal).await;
-            Handoff::Failed(refusal)
+            crate::workers::auto_project::poke_task(state, run.task_id);
         }
-        Ok(None) => Handoff::Taken,
+        Ok(None) => {}
         Err(error) => {
             tracing::warn!(run = %run.id, %error, "Could not fail the task run no runner can take; the sweeper will");
-            Handoff::Left
         }
     }
 }
