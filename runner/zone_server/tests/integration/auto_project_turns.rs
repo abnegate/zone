@@ -14,6 +14,7 @@ use zone_server::config::AutoProjectConfig;
 use zone_server::db::auto_projects::{
     self, Claim, Kind, PlannedTask, ProjectPlan, Stage, WriteError,
 };
+use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::migrations;
 use zone_server::db::tasks::{self, Origin};
 use zone_server::state::AppState;
@@ -24,6 +25,10 @@ use crate::common::{self, Database};
 
 const PREFIX: &str = "auto_project_turns";
 const DRIVES_SETTLE_WITHIN: Duration = Duration::from_secs(30);
+const UNENFORCED: Claimant = Claimant {
+    runner: None,
+    enforced: false,
+};
 
 /// A lease short enough for a test to outlast, and a renewal well inside it.
 const SHORT_LEASE: Duration = Duration::from_secs(1);
@@ -143,9 +148,15 @@ impl Fixture {
 
     /// Another instance's claim on whatever is due under `lease`.
     async fn claim(&self, lease: Duration) -> Vec<auto_projects::Claim> {
-        auto_projects::claim_due(&self.database.pool, lease, PROJECTS_PER_TICK, &[])
-            .await
-            .unwrap()
+        auto_projects::claim_due(
+            &self.database.pool,
+            lease,
+            PROJECTS_PER_TICK,
+            &[],
+            UNENFORCED,
+        )
+        .await
+        .unwrap()
     }
 
     /// Leave `project`'s claim unrenewed for longer than the driver's lease.
@@ -265,6 +276,7 @@ async fn a_drive_longer_than_its_lease_keeps_its_claim() {
     let taken = auto_project::lease::holding(
         fixture.database.pool.clone(),
         claim,
+        UNENFORCED,
         SHORT_RENEWAL,
         |_| async {
             tokio::time::sleep(SHORT_LEASE * 3).await;
@@ -298,7 +310,7 @@ async fn a_stale_drivers_release_leaves_the_claim_that_took_over() {
     };
 
     let pool = &fixture.database.pool;
-    let stale_renewed = auto_projects::renew(pool, stale).await.unwrap();
+    let stale_renewed = auto_projects::renew(pool, stale, UNENFORCED).await.unwrap();
     let stale_released = auto_projects::release(pool, stale).await.unwrap();
     let retaken = fixture.claim(Duration::from_secs(60 * 60)).await;
     let current_released = auto_projects::release(pool, current).await.unwrap();
@@ -346,7 +358,7 @@ async fn a_tick_leaves_a_lapsed_claim_to_the_drive_still_running_it() {
     .await;
     let owner = fixture.owner(claim.project_id).await;
     let pool = &fixture.database.pool;
-    let renewed = auto_projects::renew(pool, claim).await.unwrap();
+    let renewed = auto_projects::renew(pool, claim, UNENFORCED).await.unwrap();
     let released = auto_projects::release(pool, claim).await.unwrap();
     fixture.driving.remove(&claim.project_id);
     fixture.database.cleanup().await;
@@ -411,6 +423,7 @@ async fn a_drive_told_its_claim_was_lost_stops_at_its_next_step() {
     let (noticed, driven) = auto_project::lease::holding(
         fixture.database.pool.clone(),
         stale,
+        UNENFORCED,
         SHORT_RENEWAL,
         |lease: Lease| async move {
             let noticed = tokio::time::timeout(NOTICED_WITHIN, async {
@@ -461,6 +474,7 @@ async fn a_drive_whose_claim_was_taken_over_cannot_admit_a_run() {
     let (admission, lost) = auto_project::lease::holding(
         fixture.database.pool.clone(),
         stale,
+        UNENFORCED,
         UNRENEWED,
         |lease: Lease| async move {
             let drive = driver::Drive {

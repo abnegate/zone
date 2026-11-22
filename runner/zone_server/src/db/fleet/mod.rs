@@ -2,6 +2,8 @@ pub mod candidate;
 pub mod claim;
 pub mod claimant;
 pub mod eligibility;
+#[cfg(test)]
+mod enforcement;
 pub mod labels;
 pub mod minimum;
 pub mod mode;

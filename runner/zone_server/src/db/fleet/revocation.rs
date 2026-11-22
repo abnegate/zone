@@ -132,6 +132,11 @@ mod tests {
 
     const LIFETIME: Duration = Duration::from_secs(30);
 
+    const UNENFORCED: Claimant = Claimant {
+        runner: None,
+        enforced: false,
+    };
+
     struct Work {
         task: Uuid,
         run: Uuid,
@@ -206,7 +211,7 @@ mod tests {
         .fetch_one(pool)
         .await
         .expect("a chat");
-        let store = Store::new(pool.clone(), chat, Some(tenant.workspace));
+        let store = Store::new(pool.clone(), chat, Some(tenant.workspace)).claiming(UNENFORCED);
         let lease = store
             .acquire(Uuid::new_v4(), LIFETIME)
             .await
@@ -299,7 +304,7 @@ mod tests {
             .store
             .renew(&revoked_work.lease, LIFETIME)
             .await;
-        let project = auto_projects::renew(pool, revoked_work.claim).await;
+        let project = auto_projects::renew(pool, revoked_work.claim, UNENFORCED).await;
         let cleared: Option<Uuid> =
             sqlx::query_scalar("SELECT auto_claim_id FROM projects WHERE id = $1")
                 .bind(revoked_work.claim.project_id)
@@ -323,7 +328,7 @@ mod tests {
 
         let kept_heartbeat = tasks::heartbeat_task_run(pool, kept_work.run, kept_work.owner).await;
         let kept_renewed = kept_work.store.renew(&kept_work.lease, LIFETIME).await;
-        let kept_project = auto_projects::renew(pool, kept_work.claim).await;
+        let kept_project = auto_projects::renew(pool, kept_work.claim, UNENFORCED).await;
         let kept_state: String =
             sqlx::query_scalar("SELECT state FROM fleet_runners WHERE id = $1")
                 .bind(kept_runner)

@@ -77,10 +77,14 @@ mod denial;
 mod ending;
 pub mod job;
 mod queue;
+mod sent;
+mod turn;
 
 use confinement::Confinement;
 use ending::Ending;
 use queue::{Finished, Interrupted, Queued, Started};
+use sent::Sent;
+pub use turn::Turn;
 
 /// WebSocket polling interval in milliseconds
 const WS_POLL_INTERVAL_MS: u64 = 50;
@@ -479,6 +483,7 @@ fn drive(
                 false,
             )
             .await
+            .saved()
         }
     };
     let running = turn(first);
@@ -2737,7 +2742,8 @@ async fn handle_audio_generation(
 /// which is the right answer when the alternative is acting unasked. Reading
 /// tools are below that tier and run either way, so a watch still works.
 /// Whether the user's message was saved: a queued turn stopped before then has
-/// left nothing in the chat, so the queue puts it back.
+/// left nothing in the chat, so the queue puts it back. A turn fleet policy
+/// refused the chat's lease saved nothing either, and says so.
 async fn handle_send_message(
     state: &AppState,
     stream: &Arc<ChatStream>,
@@ -2748,7 +2754,7 @@ async fn handle_send_message(
     metadata: Option<serde_json::Value>,
     mut request: Generation,
     unattended: bool,
-) -> bool {
+) -> Sent {
     let generation = CHAT_GENERATIONS
         .entry(chat_id)
         .or_insert_with(|| Arc::new(Semaphore::new(1)))
@@ -2757,7 +2763,7 @@ async fn handle_send_message(
         biased;
         _ = request.cancel.recv() => {
             request.cancelled(stream).await;
-            return false;
+            return Sent::Unsaved;
         }
         permit = generation.acquire() => permit.expect("chat semaphore is never closed"),
     };
@@ -2773,7 +2779,7 @@ async fn handle_send_message(
             },
         )
         .await;
-        return false;
+        return Sent::Unsaved;
     }
     let mut session = match Session::acquire(state, chat_id, workspace_id, request.message_id).await
     {
@@ -2786,22 +2792,25 @@ async fn handle_send_message(
                 },
             )
             .await;
-            return false;
+            return match error {
+                db::context::Error::Refused(_) => Sent::Refused,
+                _ => Sent::Unsaved,
+            };
         }
     };
     crate::agent::ApprovalPolicy::register(chat_id, request.approvals.clone());
     let mut jobs: Vec<String> = Vec::new();
     let preparation = tokio::select! {
         biased;
-        _ = session.guard.lost() => { let _=session.close().await; publish(stream,ServerMessage::Error {message:OWNERSHIP_LOST.into()}).await; return false; }
+        _ = session.guard.lost() => { let _=session.close().await; publish(stream,ServerMessage::Error {message:OWNERSHIP_LOST.into()}).await; return Sent::Unsaved; }
         _ = request.cancel.recv() => {
             let _=session.close().await;
                         request.cancelled(stream).await;
-            return false;
+            return Sent::Unsaved;
         }
         result = prepare_message(state, chat_id, workspace_id, user_id, content, metadata.as_ref()) => result,
     };
-    let mut saved = false;
+    let mut saved = Sent::Unsaved;
     let result = async {
         let routing = preparation?;
         if request.is_cancelled() {
@@ -2813,7 +2822,7 @@ async fn handle_send_message(
         // before honouring Stop. Dropping an INSERT future cannot roll it back.
         let mut message=LlmMessage::user(content);message.images=session::images(metadata.as_ref());
         let user_message=session.store.begin(&session.lease,session.turn,Uuid::new_v4(),content,metadata.clone(),ReplayMessage::from(&message)).await?;
-        saved = true;
+        saved = Sent::Saved;
         crate::workers::titles::spawn(state.clone(),&user_message);
         spawn_message_embedding_task(state.clone(),user_message.id,chat_id,content.to_string());
         publish(stream,ServerMessage::MessageSaved {message_id:user_message.id,role:"user".into(),content:content.to_string(),metadata:metadata.clone()}).await;
@@ -3006,7 +3015,9 @@ pub(crate) async fn run_turn(
 }
 
 /// [`run_turn`] with its answer's id chosen by the caller, so the caller can
-/// stop this turn and no other through [`cancel_turn`] while it runs.
+/// stop this turn and no other through [`cancel_turn`] while it runs. Says
+/// whether fleet policy refused this runner the chat, so the caller can leave
+/// the work owed rather than count it run.
 pub(crate) async fn run_turn_as(
     state: &AppState,
     message_id: Uuid,
@@ -3015,10 +3026,10 @@ pub(crate) async fn run_turn_as(
     user_id: Uuid,
     content: &str,
     metadata: Option<serde_json::Value>,
-) {
+) -> Turn {
     let stream = ChatStream::of(chat_id);
     let generation = Generation::registered(chat_id, message_id);
-    handle_send_message(
+    let sent = handle_send_message(
         state,
         &stream,
         chat_id,
@@ -3041,6 +3052,10 @@ pub(crate) async fn run_turn_as(
         Some(Some(started)) => drive(state.clone(), stream, chat_id, workspace_id, started, true),
         Some(None) => announce(&stream, None).await,
         None => {}
+    }
+    match sent {
+        Sent::Refused => Turn::Refused,
+        Sent::Saved | Sent::Unsaved => Turn::Ran,
     }
 }
 

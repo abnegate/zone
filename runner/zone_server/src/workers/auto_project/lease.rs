@@ -20,6 +20,7 @@ use tokio::task::AbortHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::db::auto_projects::{self, Claim};
+use crate::db::fleet::claimant::Claimant;
 
 /// What a drive knows of its hold on the project.
 #[derive(Debug, Clone)]
@@ -73,7 +74,7 @@ impl Drop for Renewal {
 }
 
 /// Runs the drive `start` makes of its lease to completion while renewing
-/// `claim` every `renewal`.
+/// `claim` as `claimant` every `renewal`.
 ///
 /// The renewals run as a task of their own rather than racing the drive, so a
 /// renewal that fails or finds the claim lost never cancels a drive part way
@@ -81,6 +82,7 @@ impl Drop for Renewal {
 pub async fn holding<Start, Drive>(
     pool: PgPool,
     claim: Claim,
+    claimant: Claimant,
     renewal: Duration,
     start: Start,
 ) -> Drive::Output
@@ -89,17 +91,24 @@ where
     Drive: Future,
 {
     let lease = Lease::held(claim);
-    let _renewal =
-        Renewal(tokio::spawn(heartbeat(pool, lease.clone(), claim, renewal)).abort_handle());
+    let _renewal = Renewal(
+        tokio::spawn(heartbeat(pool, lease.clone(), claim, claimant, renewal)).abort_handle(),
+    );
     start(lease).await
 }
 
-async fn heartbeat(pool: PgPool, lease: Lease, claim: Claim, renewal: Duration) {
+async fn heartbeat(
+    pool: PgPool,
+    lease: Lease,
+    claim: Claim,
+    claimant: Claimant,
+    renewal: Duration,
+) {
     let mut interval = tokio::time::interval_at(Instant::now() + renewal, renewal);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
-        match auto_projects::renew(&pool, claim).await {
+        match auto_projects::renew(&pool, claim, claimant).await {
             Ok(true) => {}
             Ok(false) => {
                 tracing::warn!(
