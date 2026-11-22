@@ -7,7 +7,9 @@ onto a host with no internet access, checking it, and installing, licensing
 and upgrading Zone from it.
 
 Bundles exist only for LTS releases (`X.Y.Z-lts`, see [LTS.md](LTS.md)) and
-only for an Enterprise license that is active or in its grace period.
+only for an Enterprise license that is active or in its grace period. An
+air-gapped install is in scope for Enterprise support; [SUPPORT.md](SUPPORT.md)
+shows how to find the license ID a request needs on a server with no network.
 
 ## What's in a bundle
 

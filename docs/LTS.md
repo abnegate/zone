@@ -32,6 +32,9 @@ with Compose and Helm, and how maintainers cut a branch.
   one.
 - When a line's 12 months end, it gets no more tags. Its images stay pullable
   by any license that may pull, but they get no further fixes.
+- A line is in scope for Enterprise support during its 12 months. See
+  [SUPPORT.md](SUPPORT.md) for what a support request needs, starting with the
+  license ID.
 
 ### What gets backported (DRAFT, to be confirmed)
 
