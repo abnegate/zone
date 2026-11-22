@@ -23,6 +23,9 @@ fn main() -> ExitCode {
             sign::run(arguments, &Keyring::production(), &mut io::stdout().lock())
                 .map_err(Into::into)
         }
+        Command::Registry(command) => command
+            .run(&Keyring::production(), &mut io::stdout().lock())
+            .map_err(Into::into),
         Command::Serve => serve::run(&Keyring::production()).map_err(Into::into),
     };
     match outcome {
@@ -44,6 +47,6 @@ fn subscribe(command: &Command) {
         );
     match command {
         Command::Serve => builder.json().init(),
-        Command::Keygen(_) | Command::Sign(_) => builder.init(),
+        Command::Keygen(_) | Command::Sign(_) | Command::Registry(_) => builder.init(),
     }
 }

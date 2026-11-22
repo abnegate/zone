@@ -13,11 +13,14 @@ pub enum Variable {
     SmtpPassword,
     SmtpFrom,
     SmtpFromName,
+    RegistryService,
+    RegistryRepositories,
+    RegistryKeyGeneration,
 }
 
 impl Variable {
     #[cfg(test)]
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 16] = [
         Self::PrivateKeyFile,
         Self::PrivateKey,
         Self::KeyId,
@@ -31,6 +34,9 @@ impl Variable {
         Self::SmtpPassword,
         Self::SmtpFrom,
         Self::SmtpFromName,
+        Self::RegistryService,
+        Self::RegistryRepositories,
+        Self::RegistryKeyGeneration,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -48,6 +54,9 @@ impl Variable {
             Self::SmtpPassword => "SMTP_PASSWORD",
             Self::SmtpFrom => "SMTP_FROM",
             Self::SmtpFromName => "SMTP_FROM_NAME",
+            Self::RegistryService => "ZONE_REGISTRY_SERVICE",
+            Self::RegistryRepositories => "ZONE_REGISTRY_REPOSITORIES",
+            Self::RegistryKeyGeneration => "ZONE_REGISTRY_KEY_GENERATION",
         }
     }
 
@@ -85,6 +94,9 @@ mod tests {
                 "SMTP_PASSWORD",
                 "SMTP_FROM",
                 "SMTP_FROM_NAME",
+                "ZONE_REGISTRY_SERVICE",
+                "ZONE_REGISTRY_REPOSITORIES",
+                "ZONE_REGISTRY_KEY_GENERATION",
             ]
         );
     }
