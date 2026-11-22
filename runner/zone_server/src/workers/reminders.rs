@@ -1,11 +1,14 @@
 //! Persistent reminder dispatch. Database locks coordinate all server instances.
 use crate::db::DbResult;
+use crate::db::fleet::claimant::Claimant;
 use crate::db::reminders;
 use crate::db::reminders::Delivered;
 use crate::db::reminders::Observation;
 use crate::db::reminders::PendingTurn;
 use crate::db::reminders::Sweep;
+use crate::services::fleet;
 use crate::state::AppState;
+use crate::ws::chat::Turn;
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -182,9 +185,11 @@ fn watching(prompt: &str, baseline: Option<&str>) -> String {
     )
 }
 
-/// Runs one claimed firing's turn in its chat, keeping the claim for as long as
-/// the turn runs, and marks it done.
-pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease) {
+/// Runs one claimed firing's turn in its chat, keeping the claim as `claimant`
+/// for as long as the turn runs, and marks it done. A turn fleet policy refuses
+/// the chat gives the claim back without counting the attempt, and the firing
+/// stays owed.
+pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease, claimant: Claimant) {
     // A watch is the same turn with the last firing's answer composed in. Read
     // here rather than at claim time so two firings that queued up behind a
     // restart are compared against each other, not both against the one
@@ -212,12 +217,14 @@ pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease) {
     let pool = state.db().clone();
     let (id, attempts, chat_id) = (turn.id, turn.attempts, turn.chat_id);
     let message_id = Uuid::new_v4();
-    let (_, claim) = renewing(
+    let (ran, claim) = renewing(
         turn.reminder_id,
         lease.renewal,
         move || {
             let pool = pool.clone();
-            async move { reminders::renew_turn(&pool, id, attempts, lease.duration).await }
+            async move {
+                reminders::renew_turn(&pool, id, attempts, lease.duration, claimant).await
+            }
         },
         move || crate::ws::chat::cancel_turn(chat_id, message_id),
         crate::ws::chat::run_turn_as(
@@ -237,6 +244,21 @@ pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease) {
         ),
     )
     .await;
+    if ran == Turn::Refused {
+        match reminders::release_turn(state.db(), turn.id, turn.attempts).await {
+            Ok(_) => tracing::info!(
+                reminder_id = %turn.reminder_id,
+                "Fleet policy refused this runner the reminder's chat; the firing stays owed"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                reminder_id = %turn.reminder_id,
+                "Fleet policy refused this runner the reminder's chat and its claim could not \
+                 be given back; it will be offered again once the claim expires"
+            ),
+        }
+        return;
+    }
     // A turn stopped for losing its claim may not have delivered its firing:
     // whichever claim takes the firing next runs it, so it stays owed and its
     // reading, if it had one, is not this turn's to keep.
@@ -308,8 +330,9 @@ pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
             }
             // Then whatever the claims left owing, which is also where a turn
             // abandoned by a restart is picked back up.
+            let claimant = fleet::claimant(&state).await;
             loop {
-                match reminders::claim_turn(state.db(), sweep, lease.duration).await {
+                match reminders::claim_turn(state.db(), sweep, lease.duration, claimant).await {
                     Ok(None) => break,
                     Ok(Some(turn)) => {
                         // Spawned rather than awaited: a generation takes as
@@ -318,7 +341,7 @@ pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
                         // own semaphore already serialises this turn against
                         // anything the person is typing there.
                         let state = state.clone();
-                        tokio::spawn(async move { run(&state, turn, lease).await });
+                        tokio::spawn(async move { run(&state, turn, lease, claimant).await });
                     }
                     Err(error) => {
                         tracing::warn!(%error, "Reminder turn claim failed; retrying next interval");
@@ -334,15 +357,27 @@ pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
 mod tests {
     use super::Claim;
     use super::LEASE;
+    use super::Lease;
     use super::RENEWAL;
     use super::renewing;
+    use super::run;
     use super::watching;
     use crate::db::DbResult;
+    use crate::db::fleet::{policy, revocation};
+    use crate::db::organization_members::OrgRole;
+    use crate::db::reminders;
+    use crate::db::reminders::Sweep;
+    use crate::db::workspace_members::WorkspaceRole;
+    use crate::services::fleet;
+    use crate::services::fleet::tests::Server;
+    use sqlx::PgPool;
     use std::future::Ready;
     use std::sync::Arc;
     use std::sync::atomic::AtomicU32;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
     use uuid::Uuid;
+    use zone_enterprise::Plan;
 
     fn counting(
         outcome: fn(u32) -> DbResult<bool>,
@@ -511,5 +546,132 @@ mod tests {
             !later.contains("first firing"),
             "a firing with a reading behind it is not told it is the first: {later}"
         );
+    }
+
+    /// A runner revoked between claiming a firing and taking its chat leaves
+    /// the firing owed, gives the claim back and spends none of its attempts,
+    /// so a fleet that keeps refusing can't exhaust them.
+    #[tokio::test]
+    async fn a_turn_refused_its_chat_stays_owed_without_an_attempt() {
+        let server = Server::new(Some(Plan::Enterprise)).await;
+        let pool = server.database.pool.clone();
+        let (workspace, user, chat) = member_chat(&pool).await;
+        let reminder: Uuid = sqlx::query_scalar(
+            "INSERT INTO reminders (workspace_id, chat_id, created_by, content, due_at, prompt) \
+             VALUES ($1, $2, $3, 'Check', NOW(), 'Check the build') RETURNING id",
+        )
+        .bind(workspace)
+        .bind(chat)
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .expect("a reminder");
+        sqlx::query(
+            "INSERT INTO reminder_turns (reminder_id, workspace_id, chat_id, created_by, prompt) \
+             VALUES ($1, $2, $3, $4, 'Check the build')",
+        )
+        .bind(reminder)
+        .bind(workspace)
+        .bind(chat)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("an owed turn");
+        let claimant = fleet::claimant(&server.state).await;
+        let runner = claimant.runner.expect("the server registers to claim");
+        let turn = reminders::claim_turn(&pool, Sweep::All, LEASE, claimant)
+            .await
+            .expect("the claim")
+            .expect("an active runner claims the turn");
+        let mut transaction = pool.begin().await.unwrap();
+        policy::lock(&mut transaction).await.unwrap();
+        revocation::revoke(&mut transaction, runner, None)
+            .await
+            .unwrap()
+            .expect("the runner exists")
+            .publish();
+        transaction.commit().await.unwrap();
+
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            run(&server.state, turn.clone(), Lease::default(), claimant),
+        )
+        .await
+        .expect("the refused turn ends");
+        let owed: Option<(i32, bool)> = sqlx::query_as(
+            "SELECT attempts, claimed_at IS NOT NULL FROM reminder_turns WHERE id = $1",
+        )
+        .bind(turn.id)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
+            .bind(chat)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        server.remove().await;
+
+        assert_eq!(turn.attempts, 1);
+        assert_eq!(
+            owed,
+            Some((0, false)),
+            "the refused firing is owed again with no attempt counted"
+        );
+        assert_eq!(messages, 0, "nothing reached the chat");
+    }
+
+    /// A workspace with one member who may write in it, and a chat there.
+    async fn member_chat(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
+        let organization: Uuid = sqlx::query_scalar(
+            "INSERT INTO organizations (name, slug) VALUES ('Fleet', gen_random_uuid()::text) \
+             RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("an organization");
+        let workspace: Uuid = sqlx::query_scalar(
+            "INSERT INTO workspaces (organization_id, name, slug) \
+             VALUES ($1, 'Fleet', gen_random_uuid()::text) RETURNING id",
+        )
+        .bind(organization)
+        .fetch_one(pool)
+        .await
+        .expect("a workspace");
+        let user: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash) \
+             VALUES (gen_random_uuid()::text || '@zone.test', 'test-only') RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("a user");
+        sqlx::query(
+            "INSERT INTO organization_members (organization_id, user_id, role) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(organization)
+        .bind(user)
+        .bind(OrgRole::Member.as_str())
+        .execute(pool)
+        .await
+        .expect("an organization membership");
+        sqlx::query(
+            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)",
+        )
+        .bind(workspace)
+        .bind(user)
+        .bind(WorkspaceRole::Member.as_str())
+        .execute(pool)
+        .await
+        .expect("a workspace membership");
+        let chat: Uuid = sqlx::query_scalar(
+            "INSERT INTO chats (workspace_id, title, model_name) \
+             VALUES ($1, 'Fleet', 'test') RETURNING id",
+        )
+        .bind(workspace)
+        .fetch_one(pool)
+        .await
+        .expect("a chat");
+        (workspace, user, chat)
     }
 }

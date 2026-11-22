@@ -81,7 +81,13 @@ mod tests {
     use crate::db::chats::provider::{self, Choice};
     use crate::db::chats::{create_chat_with_title, create_message, update_chat};
     use crate::db::context::Store;
+    use crate::db::fleet::claimant::Claimant;
     use crate::services::stages::AUTO;
+
+    const UNENFORCED: Claimant = Claimant {
+        runner: None,
+        enforced: false,
+    };
 
     struct Fixture {
         pool: PgPool,
@@ -160,7 +166,7 @@ mod tests {
         }
 
         fn store(&self, chat: Uuid) -> Store {
-            Store::new(self.pool.clone(), chat, Some(self.workspace))
+            Store::new(self.pool.clone(), chat, Some(self.workspace)).claiming(UNENFORCED)
         }
 
         async fn turn(&self, chat: Uuid, metadata: Option<Value>) {

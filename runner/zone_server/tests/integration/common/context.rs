@@ -23,6 +23,7 @@ use wiremock::{
     matchers::{method, path},
 };
 use zone_server::config::Config;
+use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::{chats, context::Store};
 use zone_server::services::chat::session::{LEASE_LIFETIME, Settings};
 
@@ -386,7 +387,10 @@ impl Harness {
     }
 
     pub fn store(&self) -> Store {
-        Store::new(self.pool.clone(), self.chat, Some(self.workspace))
+        Store::new(self.pool.clone(), self.chat, Some(self.workspace)).claiming(Claimant {
+            runner: None,
+            enforced: false,
+        })
     }
 
     pub async fn requests(&self) -> Vec<Value> {
