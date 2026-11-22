@@ -23,7 +23,7 @@ impl IntoResponse for Failure {
                     HeaderValue::from_static(BEARER_CHALLENGE),
                 );
             }
-            Self::Throttled { retry_after } => {
+            Self::Throttled { retry_after } | Self::Flooded { retry_after } => {
                 response
                     .headers_mut()
                     .insert(header::RETRY_AFTER, HeaderValue::from(retry_after));
@@ -104,10 +104,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_throttled_caller_is_told_when_to_retry() {
-        let response = Failure::Throttled { retry_after: 7 }.into_response();
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(response.headers()[header::RETRY_AFTER], "7");
-        assert_eq!(body(response).await["scimType"], "tooMany");
+        for failure in [
+            Failure::Throttled { retry_after: 7 },
+            Failure::Flooded { retry_after: 7 },
+        ] {
+            let response = failure.into_response();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(response.headers()[header::RETRY_AFTER], "7");
+            assert_eq!(body(response).await["scimType"], "tooMany");
+        }
     }
 
     #[tokio::test]

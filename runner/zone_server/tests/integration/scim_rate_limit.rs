@@ -1,7 +1,3 @@
-//! Each organization's SCIM budget, shared by its tokens and counted only once a token is
-//! accepted: over it, reads and writes alike answer 429 with `Retry-After`, while another
-//! organization carries on and callers without a valid token are still told to authenticate.
-
 use std::time::Duration;
 
 use axum::http::{Method, StatusCode};
@@ -111,8 +107,39 @@ async fn an_organization_over_its_budget_is_told_to_wait_while_another_carries_o
         WINDOW,
     );
 
-    assert_eq!(statuses(&fixture, fixture.organization).await, [429; 3]);
+    assert_eq!(
+        statuses(&fixture, fixture.organization).await,
+        [429],
+        "a window's refusals are recorded once"
+    );
     assert_eq!(statuses(&fixture, other).await, [429]);
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_flood_from_one_network_is_refused_before_any_token_is_read() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    fixture.state().limit_scim_addresses(2);
+
+    assert_scim(
+        &fixture.scim_get("/Users", &token.secret).await,
+        StatusCode::OK,
+    );
+    assert_refused(
+        &fixture.scim_get("/Users", "zscim_wrong").await,
+        StatusCode::UNAUTHORIZED,
+        None,
+    );
+
+    throttled(&fixture.scim_get("/Users", "zscim_wrong").await, WINDOW);
+    throttled(&fixture.scim_get("/Users", &token.secret).await, WINDOW);
+    assert_eq!(
+        statuses(&fixture, fixture.organization).await,
+        Vec::<i16>::new(),
+        "a refusal before any token is read records nothing"
+    );
 
     fixture.cleanup().await;
 }
