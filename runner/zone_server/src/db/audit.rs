@@ -145,6 +145,13 @@ pub mod actions {
     pub const ROLE_CREATED: &str = "role.created";
     pub const ROLE_UPDATED: &str = "role.updated";
     pub const ROLE_DELETED: &str = "role.deleted";
+
+    pub const BUDGET_CREATED: &str = "budget.created";
+    pub const BUDGET_UPDATED: &str = "budget.updated";
+    pub const BUDGET_DELETED: &str = "budget.deleted";
+    pub const BUDGET_THRESHOLD_REACHED: &str = "budget.threshold_reached";
+    pub const BUDGET_EXHAUSTED: &str = "budget.exhausted";
+    pub const SPEND_EXPORT_DOWNLOADED: &str = "spend_export.downloaded";
 }
 
 pub mod resources {
@@ -175,6 +182,8 @@ pub mod resources {
     pub const AUDIT_RETENTION: &str = "audit_retention";
     pub const AUDIT_EXPORT: &str = "audit_export";
     pub const ROLE: &str = "role";
+    pub const BUDGET: &str = "budget";
+    pub const SPEND_EXPORT: &str = "spend_export";
 }
 
 /// Log an action to the audit trail

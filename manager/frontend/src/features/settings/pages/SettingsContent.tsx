@@ -10,6 +10,7 @@ import {
   Permission,
   RolesSection,
   SERVER_SCOPE,
+  SpendPage,
   SsoSection,
   WorkspacePolicySection,
 } from '../../enterprise';
@@ -168,6 +169,8 @@ function organizationContent(
       return <AuditLogsSection orgId={organizationId} />;
     case SettingsSection.AuditExport:
       return <AuditExportSection scope={organizationScope(organizationId)} />;
+    case SettingsSection.Spend:
+      return <SpendPage organizationId={organizationId} />;
     default:
       return null;
   }

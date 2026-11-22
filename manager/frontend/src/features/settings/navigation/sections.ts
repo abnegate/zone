@@ -28,6 +28,7 @@ export const SettingsSection = {
   Devices: 'devices',
   Audit: 'audit',
   AuditExport: 'audit-export',
+  Spend: 'spend',
   GitHub: 'github',
   Mcp: 'mcp',
   Features: 'features',
@@ -189,6 +190,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     section: SettingsSection.AuditExport,
     label: AUDIT_EXPORT_LABEL,
     visible: grantedInOrganization(Permission.AuditUpdate),
+  },
+  {
+    group: SettingsGroup.Organization,
+    section: SettingsSection.Spend,
+    label: 'Spend',
+    visible: administersOrganization,
   },
   {
     group: SettingsGroup.Organization,

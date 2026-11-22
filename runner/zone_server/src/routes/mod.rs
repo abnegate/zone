@@ -30,6 +30,7 @@ pub mod releases;
 pub mod roles;
 pub mod sessions;
 pub mod sources;
+pub mod spend;
 pub mod sso;
 pub mod sync;
 pub mod tasks;
@@ -589,6 +590,22 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/organizations/{org_id}/roles/{role_id}",
             patch(roles::update).delete(roles::delete),
+        )
+        .route(
+            "/api/organizations/{org_id}/spend-reports",
+            get(spend::reports::get),
+        )
+        .route(
+            "/api/organizations/{org_id}/spend-exports",
+            get(spend::exports::get),
+        )
+        .route(
+            "/api/organizations/{org_id}/budgets",
+            get(spend::budgets::list).post(spend::budgets::create),
+        )
+        .route(
+            "/api/organizations/{org_id}/budgets/{budget_id}",
+            patch(spend::budgets::update).delete(spend::budgets::delete),
         )
         .route(
             "/api/organizations/{org_id}/mcp-servers",

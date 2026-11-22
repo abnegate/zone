@@ -71,6 +71,7 @@ mock.module('../../enterprise', () => ({
   Permission,
   RolesSection: licensed('roles-section'),
   SERVER_SCOPE: { kind: 'server' },
+  SpendPage: marker('spend-page'),
   SsoSection: marker('sso-section'),
   WorkspacePolicySection: licensed('workspace-policy-section'),
 }));
@@ -538,6 +539,38 @@ describe('SettingsContent', () => {
           group={SettingsGroup.Server}
           section={SettingsSection.AuditExport}
           access={access('admin', 'owner')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+  });
+
+  describe('spend', () => {
+    for (const role of ['admin', 'owner'] as const) {
+      it(`shows an organization ${role} the spend page of the current organization`, () => {
+        renderSection(SettingsGroup.Organization, SettingsSection.Spend, access('viewer', role));
+        expect(propsOf('spend-page')).toEqual({ organizationId });
+      });
+    }
+
+    it('renders no spend page for an organization member', () => {
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.Spend}
+          access={access('admin', 'member')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('renders no spend page without a current organization', () => {
+      workspaceContext.currentOrganization = null;
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.Spend}
+          access={access('admin', 'admin')}
         />
       );
       expect(container.innerHTML).toBe('');

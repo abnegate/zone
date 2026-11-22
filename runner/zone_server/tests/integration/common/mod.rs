@@ -16,6 +16,7 @@ pub mod logs;
 pub mod mail;
 pub mod mcp;
 pub mod policy;
+pub mod spend;
 pub mod sso;
 pub mod stand_in;
 pub mod transcript;
@@ -64,6 +65,10 @@ pub fn init_tracing() {
 /// mocks it, so no test reaches a real agent's API.
 pub const UNREACHABLE_USAGE: &str = "http://127.0.0.1:1";
 
+/// A loopback port nothing listens on, the instance's LiteLLM unless `LITELLM_HOST` names one,
+/// so no test registers spend keys with a LiteLLM running on this machine.
+pub const UNREACHABLE_LITELLM: &str = "http://127.0.0.1:9";
+
 /// Agent settings whose usage reads go to [`UNREACHABLE_USAGE`].
 pub fn agents() -> AgentConfig {
     AgentConfig {
@@ -90,7 +95,7 @@ pub fn test_config() -> Config {
         model_backend: Default::default(),
         agents: agents(),
         litellm_host: std::env::var("LITELLM_HOST")
-            .unwrap_or_else(|_| "http://localhost:4000".to_string()),
+            .unwrap_or_else(|_| UNREACHABLE_LITELLM.to_string()),
         litellm_key: std::env::var("LITELLM_KEY").unwrap_or_else(|_| "test-key".to_string()),
         ollama_host: std::env::var("OLLAMA_HOST")
             .unwrap_or_else(|_| "http://localhost:11434".to_string()),

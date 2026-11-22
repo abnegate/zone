@@ -43,6 +43,7 @@ const ALL_SECTIONS = [
     section: SettingsSection.AuditExport,
     label: 'Audit export',
   },
+  { group: SettingsGroup.Organization, section: SettingsSection.Spend, label: 'Spend' },
   { group: SettingsGroup.Organization, section: SettingsSection.GitHub, label: 'GitHub' },
   { group: SettingsGroup.Organization, section: SettingsSection.Mcp, label: 'MCP servers' },
   { group: SettingsGroup.Server, section: SettingsSection.Features, label: 'Features' },
@@ -79,6 +80,7 @@ const ORGANIZATION_AUDIT_EXPORT = settingsPath(
   SettingsSection.AuditExport
 );
 const ORGANIZATION_ROLES = settingsPath(SettingsGroup.Organization, SettingsSection.Roles);
+const ORGANIZATION_SPEND = settingsPath(SettingsGroup.Organization, SettingsSection.Spend);
 const SESSIONS = settingsPath(SettingsGroup.You, SettingsSection.Sessions);
 const SOURCES = settingsPath(SettingsGroup.Workspace, SettingsSection.Sources);
 
@@ -106,6 +108,7 @@ describe('settings constants', () => {
       Devices: 'devices',
       Audit: 'audit',
       AuditExport: 'audit-export',
+      Spend: 'spend',
       GitHub: 'github',
       Mcp: 'mcp',
       Features: 'features',
@@ -237,7 +240,7 @@ describe('visibleSections', () => {
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
 
-  it('shows all twenty-two sections to a server admin who owns the organization and administers the workspace', () => {
+  it('shows all twenty-three sections to a server admin who owns the organization and administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -248,7 +251,7 @@ describe('visibleSections', () => {
       administersServer: true,
     });
 
-    expect(visible).toHaveLength(22);
+    expect(visible).toHaveLength(23);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 
@@ -509,6 +512,53 @@ describe('visibleSections', () => {
     });
     expect(findSection(SettingsGroup.Workspace, 'roles')).toBeUndefined();
     expect(ORGANIZATION_ROLES).toBe('/settings/organization/roles');
+  });
+
+  it('shows Spend only to organization owners and admins, right after the organization Audit export', () => {
+    for (const [organizationRole, shown] of [
+      ['owner', true],
+      ['admin', true],
+      ['member', false],
+      [undefined, true],
+    ] as const) {
+      const visible = paths({
+        organization: true,
+        organizationRole,
+        workspace: true,
+        workspaceRole: 'viewer',
+        installsModels: false,
+        readsSources: false,
+        administersServer: false,
+      });
+      expect(visible.includes(ORGANIZATION_SPEND), String(organizationRole)).toBe(shown);
+      if (shown) {
+        expect(visible.indexOf(ORGANIZATION_SPEND), String(organizationRole)).toBe(
+          visible.indexOf(ORGANIZATION_AUDIT_EXPORT) + 1
+        );
+      }
+    }
+  });
+
+  it('hides Spend outside an organization and finds it only in the organization group', () => {
+    expect(
+      paths({
+        organization: false,
+        organizationRole: undefined,
+        workspace: false,
+        workspaceRole: undefined,
+        installsModels: true,
+        readsSources: true,
+        administersServer: true,
+      })
+    ).not.toContain(ORGANIZATION_SPEND);
+    expect(findSection(SettingsGroup.Organization, 'spend')).toMatchObject({
+      group: SettingsGroup.Organization,
+      section: SettingsSection.Spend,
+      label: 'Spend',
+    });
+    expect(findSection(SettingsGroup.Workspace, 'spend')).toBeUndefined();
+    expect(findSection(SettingsGroup.Server, 'spend')).toBeUndefined();
+    expect(ORGANIZATION_SPEND).toBe('/settings/organization/spend');
   });
 
   it('shows the server Audit export only to a server admin', () => {

@@ -27,7 +27,8 @@ for (const name of LOCALE_SENSITIVE_FORMATTERS) {
     continue;
   }
   formatters[name] = new Proxy(native, {
-    construct: (target, args) => Reflect.construct(target, pinnedArguments(args)),
+    construct: (target, args, newTarget) =>
+      Reflect.construct(target, pinnedArguments(args), newTarget),
     apply: (target, self, args) => Reflect.apply(target, self, pinnedArguments(args)),
   });
 }

@@ -622,6 +622,11 @@ fn lazy(database: &str) -> PgPool {
 #[cfg(test)]
 pub(crate) const UNREACHABLE_USAGE: &str = "http://127.0.0.1:1";
 
+/// A loopback port nothing listens on, the instance's LiteLLM in a test's config unless the test
+/// mocks it, so no test registers spend keys with a LiteLLM running on this machine.
+#[cfg(test)]
+pub(crate) const UNREACHABLE_LITELLM: &str = "http://127.0.0.1:9";
+
 #[cfg(test)]
 pub(crate) fn test_agents() -> AgentConfig {
     AgentConfig {
@@ -645,7 +650,7 @@ pub(crate) fn test_config() -> Config {
         session_lifetime: 2_592_000,
         model_backend: Default::default(),
         agents: test_agents(),
-        litellm_host: "http://localhost:4000".to_string(),
+        litellm_host: UNREACHABLE_LITELLM.to_string(),
         litellm_key: "test-key".to_string(),
         ollama_host: "http://localhost:11434".to_string(),
         gpt4all_models_url: crate::config::DEFAULT_GPT4ALL_MODELS_URL.to_string(),
@@ -869,6 +874,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_test_config_sends_litellm_requests_only_to_loopback() {
+        let host = test_config().litellm_host;
+        let parsed = reqwest::Url::parse(&host).expect("a LiteLLM URL");
+        assert_eq!(
+            parsed.host_str(),
+            Some("127.0.0.1"),
+            "{host} would reach a real LiteLLM from a test"
+        );
+    }
+
     fn create_test_config() -> Config {
         Config {
             host: "localhost".to_string(),
@@ -881,7 +897,7 @@ mod tests {
             session_lifetime: 2_592_000,
             model_backend: Default::default(),
             agents: test_agents(),
-            litellm_host: "http://localhost:4000".to_string(),
+            litellm_host: UNREACHABLE_LITELLM.to_string(),
             litellm_key: "test-key".to_string(),
             ollama_host: "http://localhost:11434".to_string(),
             gpt4all_models_url: crate::config::DEFAULT_GPT4ALL_MODELS_URL.to_string(),

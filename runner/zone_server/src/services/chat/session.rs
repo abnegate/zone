@@ -2215,7 +2215,7 @@ mod tests {
         use sqlx::PgPool;
         use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
 
-        const GATEWAY: &str = "http://127.0.0.1:9";
+        const GATEWAY: &str = "http://127.0.0.1:7";
         let pool = PgPool::connect(
             &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
         )

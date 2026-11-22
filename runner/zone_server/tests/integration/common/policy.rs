@@ -33,7 +33,12 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn new(prefix: &'static str) -> Self {
-        let sso = sso::Fixture::new(prefix).await;
+        Self::on(sso::Fixture::new(prefix).await).await
+    }
+
+    /// The organization and workspace on a server already set up, such as one whose config
+    /// points at a stand-in.
+    pub async fn on(sso: sso::Fixture) -> Self {
         let owner = sso.register().await;
         let organization = create_organization(sso.pool(), owner.id).await;
         let workspace = create_workspace(sso.pool(), organization, owner.id).await;

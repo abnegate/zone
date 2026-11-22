@@ -246,6 +246,7 @@ describe('SettingsPage', () => {
         'Devices',
         'Audit log',
         'Audit export',
+        'Spend',
         'GitHub',
         'MCP servers',
       ]);
@@ -293,6 +294,7 @@ describe('SettingsPage', () => {
         'Devices',
         'Audit log',
         'Audit export',
+        'Spend',
         'GitHub',
         'MCP servers',
       ]);

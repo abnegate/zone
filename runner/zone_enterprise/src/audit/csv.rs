@@ -40,7 +40,7 @@ fn json(value: Option<&Value>) -> String {
     value.map(Value::to_string).unwrap_or_default()
 }
 
-fn field(value: &str) -> String {
+pub(crate) fn field(value: &str) -> String {
     let neutralised = value.starts_with(FORMULA_PREFIXES);
     let quoted = neutralised || value.contains([DELIMITER, QUOTE, '\r', '\n']);
     if !quoted {
