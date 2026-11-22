@@ -2089,7 +2089,10 @@ async fn a_failed_furnishing_rolls_back_alone_and_the_account_still_commits() {
     .await
     .unwrap();
     sqlx::query("INSERT INTO organizations (name, slug) VALUES ('Taken', $1)")
-        .bind(format!("adas-organization-{}", &user.id.to_string()[..8]))
+        .bind(provision::organization_slug(
+            &provision::organization_name(user.display_name.as_deref()),
+            user.id,
+        ))
         .execute(&mut *transaction)
         .await
         .unwrap();
