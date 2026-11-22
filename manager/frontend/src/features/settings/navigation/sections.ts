@@ -195,7 +195,7 @@ export const SECTIONS: readonly SectionDefinition[] = [
     group: SettingsGroup.Organization,
     section: SettingsSection.Spend,
     label: 'Spend',
-    visible: administersOrganization,
+    visible: grantedInOrganization(Permission.SpendRead),
   },
   {
     group: SettingsGroup.Organization,

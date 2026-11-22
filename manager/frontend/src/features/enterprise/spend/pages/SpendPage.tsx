@@ -1,5 +1,5 @@
 import { useId, useState } from 'react';
-import { PlanUpgradeNotice } from '../../components/PlanUpgradeNotice';
+import { UpgradeNotice } from '../../components/UpgradeNotice';
 import { Plan } from '../../schemas';
 import { LoadFailure } from '../components/LoadFailure';
 import { SpendBudgets } from '../components/SpendBudgets';
@@ -16,9 +16,10 @@ import './SpendPage.css';
 
 export interface SpendPageProps {
   organizationId: string;
+  editable: boolean;
 }
 
-export function SpendPage({ organizationId }: SpendPageProps) {
+export function SpendPage({ organizationId, editable }: SpendPageProps) {
   const headingId = useId();
   const [query, setQuery] = useState<SpendQuery>(() => monthToDate());
   const report = useSpendReport(organizationId, query);
@@ -42,7 +43,7 @@ export function SpendPage({ organizationId }: SpendPageProps) {
         </div>
       </div>
       {community ? (
-        <PlanUpgradeNotice plan={Plan.Team} message={UPGRADE_NOTICE} />
+        <UpgradeNotice plan={Plan.Team} message={UPGRADE_NOTICE} className="plan-notice" />
       ) : (
         <>
           {license && lapsed(license) && <SpendLapsedNotice />}
@@ -69,6 +70,7 @@ export function SpendPage({ organizationId }: SpendPageProps) {
               organizationId={organizationId}
               response={budgets.response}
               targets={targets}
+              editable={editable && budgets.response.editable}
             />
           )}
         </>

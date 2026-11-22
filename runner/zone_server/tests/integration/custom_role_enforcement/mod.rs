@@ -9,12 +9,15 @@
 //!   with exactly its permission and by one without it.
 //! - `members`: adding, ranking, escalating and licensing through the member
 //!   routes.
+//! - `spend`: spend reports and budgets held by `spend:read` and
+//!   `spend:update`, apart from the custom roles license.
 
 mod assignments;
 mod locking;
 mod members;
 mod oracle;
 mod routes;
+mod spend;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};

@@ -549,7 +549,7 @@ describe('SettingsContent', () => {
     for (const role of ['admin', 'owner'] as const) {
       it(`shows an organization ${role} the spend page of the current organization`, () => {
         renderSection(SettingsGroup.Organization, SettingsSection.Spend, access('viewer', role));
-        expect(propsOf('spend-page')).toEqual({ organizationId });
+        expect(propsOf('spend-page')).toEqual({ organizationId, editable: true });
       });
     }
 
@@ -835,6 +835,35 @@ describe('SettingsContent', () => {
         <SettingsContent
           group={SettingsGroup.Organization}
           section={SettingsSection.Roles}
+          access={{ ...holding(BASE, undefined), organizationRole: 'admin' }}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('renders the spend page with spend:read, its budgets read-only without spend:update', () => {
+      renderSection(
+        SettingsGroup.Organization,
+        SettingsSection.Spend,
+        holding([...BASE, Permission.SpendRead], undefined)
+      );
+      expect(propsOf('spend-page')).toEqual({ organizationId, editable: false });
+    });
+
+    it('lets spend:update change the budgets', () => {
+      renderSection(
+        SettingsGroup.Organization,
+        SettingsSection.Spend,
+        holding([...BASE, Permission.SpendRead, Permission.SpendUpdate], undefined)
+      );
+      expect(propsOf('spend-page')).toEqual({ organizationId, editable: true });
+    });
+
+    it('renders no spend page to an organization admin rank whose permissions lack spend:read', () => {
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.Spend}
           access={{ ...holding(BASE, undefined), organizationRole: 'admin' }}
         />
       );

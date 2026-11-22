@@ -26,6 +26,7 @@ use super::{
 };
 use crate::common::TestResponse;
 use crate::common::policy::Fixture;
+use crate::common::spend;
 use crate::common::sso::Account;
 
 const REFUSED_URL: &str = "http://127.0.0.1:1/mcp";
@@ -34,6 +35,8 @@ const REFUSED_URL: &str = "http://127.0.0.1:1/mcp";
 const PROBE_SUFFIX: usize = 12;
 
 const EXPORTED_RANGE: &str = "start_date=2020-01-01&end_date=2020-12-31";
+
+const BUDGET_LIMIT: i64 = 50_000_000;
 
 /// What a guard tells someone it turns away as outside the tenant.
 const TURNED_AWAY: [&str; 3] = [
@@ -92,6 +95,12 @@ enum Route {
     ReadAuditRetention,
     UpdateAuditRetention,
     ListAuditExports,
+    ReadSpendReports,
+    ExportSpend,
+    ListBudgets,
+    CreateBudget,
+    UpdateBudget,
+    DeleteBudget,
     CreateRole,
     ReadWorkspace,
     ListWorkspaceMembers,
@@ -122,7 +131,7 @@ enum Route {
     RotateProjectSyncSecret,
 }
 
-const ORGANIZATION_ROUTES: [Route; 46] = [
+const ORGANIZATION_ROUTES: [Route; 52] = [
     Route::ReadOrganization,
     Route::ListMembers,
     Route::ListWorkspaces,
@@ -168,6 +177,12 @@ const ORGANIZATION_ROUTES: [Route; 46] = [
     Route::ReadAuditRetention,
     Route::UpdateAuditRetention,
     Route::ListAuditExports,
+    Route::ReadSpendReports,
+    Route::ExportSpend,
+    Route::ListBudgets,
+    Route::CreateBudget,
+    Route::UpdateBudget,
+    Route::DeleteBudget,
     Route::CreateRole,
 ];
 
@@ -245,6 +260,8 @@ impl Route {
             | Self::ReadAuditRetention
             | Self::UpdateAuditRetention
             | Self::ListAuditExports => Permission::AuditUpdate,
+            Self::ReadSpendReports | Self::ExportSpend | Self::ListBudgets => Permission::SpendRead,
+            Self::CreateBudget | Self::UpdateBudget | Self::DeleteBudget => Permission::SpendUpdate,
             Self::CreateRole => Permission::RolesUpdate,
             Self::ReadWorkspace
             | Self::ListWorkspaceMembers
@@ -294,7 +311,8 @@ impl Route {
             | Self::CreateMcpServer
             | Self::CreateTask
             | Self::CreateChat
-            | Self::AddWorkspaceMember => StatusCode::CREATED,
+            | Self::AddWorkspaceMember
+            | Self::CreateBudget => StatusCode::CREATED,
             Self::RemoveMember
             | Self::SyncGitHubInstallations
             | Self::ClearAiSettings
@@ -313,7 +331,9 @@ impl Route {
             | Self::ReadAuditLog
             | Self::ReadAuditDestination
             | Self::DeleteProjectSync
-            | Self::RotateProjectSyncSecret => StatusCode::NOT_FOUND,
+            | Self::RotateProjectSyncSecret
+            | Self::UpdateBudget
+            | Self::DeleteBudget => StatusCode::NOT_FOUND,
             Self::CreateAuditDestination => StatusCode::BAD_REQUEST,
             Self::ReadOrganization
             | Self::ListMembers
@@ -340,6 +360,9 @@ impl Route {
             | Self::ReadAuditRetention
             | Self::UpdateAuditRetention
             | Self::ListAuditExports
+            | Self::ReadSpendReports
+            | Self::ExportSpend
+            | Self::ListBudgets
             | Self::ReadWorkspace
             | Self::ListWorkspaceMembers
             | Self::ReadHostDirectories
@@ -479,6 +502,18 @@ impl Route {
             Self::ListAuditExports => {
                 Call::get(format!("{organization}/audit-exports?{EXPORTED_RANGE}"))
             }
+            Self::ReadSpendReports => Call::get(spend::reports_path(fixture.organization)),
+            Self::ExportSpend => Call::get(spend::exports_path(fixture.organization)),
+            Self::ListBudgets => Call::get(spend::budgets_path(fixture.organization)),
+            Self::CreateBudget => Call::post(
+                spend::budgets_path(fixture.organization),
+                json!({ "scope": "organization", "limit_microdollars": BUDGET_LIMIT }),
+            ),
+            Self::UpdateBudget => Call::patch(
+                spend::budget_path(fixture.organization, absent),
+                json!({ "hard": true }),
+            ),
+            Self::DeleteBudget => Call::delete(spend::budget_path(fixture.organization, absent)),
             Self::CreateRole => Call::post(
                 format!("{organization}/roles"),
                 json!({

@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../../../api/ApiError';
 import { clientModule } from '../../../../test/client';
 import { chooseSelect } from '../../../../test/select';
+import { AdministersServerProvider } from '../../components/AdministersServer';
 import {
   ACTIVE_BUDGETS,
   ACTIVE_EMPTY_REPORT,
@@ -77,23 +78,29 @@ afterAll(() => {
   mock.restore();
 });
 
-function renderPage() {
+function renderPage(editable = true) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
-        <SpendPage organizationId={ORGANIZATION_ID} />
+        <AdministersServerProvider value={true}>
+          <SpendPage organizationId={ORGANIZATION_ID} editable={editable} />
+        </AdministersServerProvider>
       </MemoryRouter>
     </QueryClientProvider>
   );
 }
 
-async function loaded(response: SpendReportResponse, budgetsResponse = ACTIVE_BUDGETS) {
+async function loaded(
+  response: SpendReportResponse,
+  budgetsResponse = ACTIVE_BUDGETS,
+  editable = true
+) {
   report.mockResolvedValue(response);
   budgets.mockResolvedValue(budgetsResponse);
-  const view = renderPage();
+  const view = renderPage(editable);
   await screen.findByRole('heading', { name: PAGE_TITLE });
   return view;
 }
@@ -405,6 +412,35 @@ describe('SpendPage', () => {
       expect(within(budgetsRegion).getByText('Used up')).toBeInTheDocument();
       expect(within(budgetsRegion).getByText('Past its warning')).toBeInTheDocument();
       expect(within(budgetsRegion).getByText('On track')).toBeInTheDocument();
+    });
+
+    it('opens the budgets when the server and the role both allow changing them', async () => {
+      await loaded(ACTIVE_REPORT, ACTIVE_BUDGETS, true);
+      const budgetsRegion = await screen.findByRole('region', { name: 'Monthly budgets' });
+
+      expect(within(budgetsRegion).getAllByRole('button', { name: /^Edit/ })).toHaveLength(3);
+      expect(within(budgetsRegion).getAllByRole('button', { name: /^Delete/ })).toHaveLength(3);
+      expect(within(budgetsRegion).getByLabelText(LIMIT_LABEL)).toBeEnabled();
+      expect(within(budgetsRegion).getByRole('button', { name: ADD_LABEL })).toBeInTheDocument();
+    });
+
+    it('keeps the budgets read-only to a role that cannot change them, though the server allows it', async () => {
+      await loaded(ACTIVE_REPORT, ACTIVE_BUDGETS, false);
+      const budgetsRegion = await screen.findByRole('region', { name: 'Monthly budgets' });
+
+      expect(within(budgetsRegion).getAllByRole('meter')).toHaveLength(3);
+      expect(
+        within(budgetsRegion).queryByRole('button', { name: /^Edit/ })
+      ).not.toBeInTheDocument();
+      expect(
+        within(budgetsRegion).queryByRole('button', { name: /^Delete/ })
+      ).not.toBeInTheDocument();
+      expect(within(budgetsRegion).getByLabelText(LIMIT_LABEL)).toBeDisabled();
+      expect(within(budgetsRegion).getByRole('checkbox')).toBeDisabled();
+      expect(
+        within(budgetsRegion).queryByRole('button', { name: ADD_LABEL })
+      ).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: DOWNLOAD_LABEL })).toBeEnabled();
     });
 
     it('deletes a budget after confirming', async () => {

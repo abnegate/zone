@@ -713,13 +713,14 @@ describe('permission-gated organization sections', () => {
     ]);
   });
 
-  it('gates AI defaults, Roles, Devices, Audit log and Audit export on their own permissions', () => {
+  it('gates AI defaults, Roles, Devices, Audit log, Audit export and Spend on their own permissions', () => {
     const gates: [string, string][] = [
       [ORGANIZATION_AI, Permission.AiSettingsRead],
       [ORGANIZATION_ROLES, Permission.RolesUpdate],
       [ORGANIZATION_DEVICES, Permission.DevicesRead],
       [ORGANIZATION_AUDIT, Permission.AuditLogsRead],
       [ORGANIZATION_AUDIT_EXPORT, Permission.AuditUpdate],
+      [ORGANIZATION_SPEND, Permission.SpendRead],
     ];
     for (const [path, name] of gates) {
       expect(organizationPaths(holding([Permission.OrganizationRead, name])), name).toContain(path);

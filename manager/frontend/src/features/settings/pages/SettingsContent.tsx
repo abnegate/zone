@@ -170,7 +170,12 @@ function organizationContent(
     case SettingsSection.AuditExport:
       return <AuditExportSection scope={organizationScope(organizationId)} />;
     case SettingsSection.Spend:
-      return <SpendPage organizationId={organizationId} />;
+      return (
+        <SpendPage
+          organizationId={organizationId}
+          editable={inOrganization(access, Permission.SpendUpdate)}
+        />
+      );
     default:
       return null;
   }

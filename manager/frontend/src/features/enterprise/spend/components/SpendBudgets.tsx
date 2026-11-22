@@ -14,13 +14,13 @@ interface SpendBudgetsProps {
   organizationId: string;
   response: BudgetsResponse;
   targets: SpendTargets;
+  editable: boolean;
 }
 
-export function SpendBudgets({ organizationId, response, targets }: SpendBudgetsProps) {
+export function SpendBudgets({ organizationId, response, targets, editable }: SpendBudgetsProps) {
   const mutations = useBudgetMutations(organizationId);
   const [editing, setEditing] = useState<Budget | null>(null);
   const [deleting, setDeleting] = useState<Budget | null>(null);
-  const editable = response.editable;
 
   return (
     <SectionCard title={BUDGETS_TITLE} description={budgetsDescription(response.month)} wide>

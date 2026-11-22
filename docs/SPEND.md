@@ -12,8 +12,9 @@ every minute, and keeps the rows sent under its keys. Traffic that doesn't go
 through Zone's LiteLLM is never given a number; the report lists it by reason
 instead.
 
-Organization owners and admins find reports and budgets under **Settings →
-Organization → Spend**.
+Holders of `spend:read`, which organization owners and admins have, find
+reports and budgets under **Settings → Organization → Spend**, and holders of
+`spend:update` change budgets there (see [Who can see and change](#who-can-see-and-change)).
 
 ## Licensing
 
@@ -25,7 +26,7 @@ the license under **Settings → This server → License**.
 
 | License state | Attribution, ingestion and hard limits | Reports and CSV | Budgets |
 |---|---|---|---|
-| Team or Enterprise, active or in grace | Running | Available | Editable by organization owners and admins |
+| Team or Enterprise, active or in grace | Running | Available | Editable by holders of `spend:update` |
 | Lapsed (past grace) | Still running | Available | Read-only, with a lapsed notice |
 | Stored key that no longer verifies | Still running | Available | Read-only, with a lapsed notice |
 | Removed, or never installed (Community) | Stopped | An upgrade notice; the report is `null` and the CSV is refused | Changes refused |
@@ -63,15 +64,24 @@ unblocked.
 
 | What | Who |
 |---|---|
-| Reports and the CSV export | Organization owners and admins |
-| Budgets, to see | Organization owners and admins |
-| Budgets, to change | Organization owners and admins, with an entitled license |
+| Reports and the CSV export | Holders of `spend:read` |
+| Budgets, to see | Holders of `spend:read` |
+| Budgets, to change | Holders of `spend:update`, with an entitled license |
 | Budget notices | Active organization owners and admins, and for a workspace budget, that workspace's owners and admins too |
+
+Organization owners and admins hold both permissions. With Zone Enterprise an
+organization can also give either one to a custom role (see
+[ROLES.md](ROLES.md)); the two are independent, so a role that only changes
+budgets doesn't see reports, and the reports and budgets answers say
+`editable: false` to a caller without `spend:update`. The spend license gate
+and the custom roles one are separate: a member who holds a custom role keeps
+its spend permissions on a Team license, and a Team license is all spend
+needs.
 
 Other members of the organization, workspace admins included, get `403` "Only
 organization owners and admins can see spend or change budgets". Someone who
-isn't a member gets `404` "Organization not found", as if the organization
-didn't exist.
+isn't a member, or whose custom role grants nothing in the organization, gets
+`404` "Organization not found", as if the organization didn't exist.
 
 ## What's counted
 
@@ -479,14 +489,14 @@ These responses carry no code:
 | `PATCH /api/organizations/{org_id}/budgets/{budget_id}` | Change a budget. |
 | `DELETE /api/organizations/{org_id}/budgets/{budget_id}` | Delete a budget. |
 
-A report and a CSV export are checked in this order: membership (404), the
-caller's role (403), then the query (400 `spend_range_invalid`). A CSV export
+A report and a CSV export are checked in this order: membership (404),
+`spend:read` (403), then the query (400 `spend_range_invalid`). A CSV export
 then checks the license (403 `license_required`).
 
 Creating a budget is checked in this order:
 
 1. membership (404);
-2. the caller's role (403);
+2. `spend:update` (403);
 3. the license (403 `license_required`);
 4. whether the body can be read (400 `spend_body_invalid`);
 5. the limit, then the threshold, then whether the scope carries the IDs it

@@ -1,6 +1,7 @@
-//! An organization's spend reports, their CSV export, and its monthly budgets. Only the
-//! organization's owners and admins see any of it; changing a budget also takes a Team license
-//! that is active or in its grace period.
+//! An organization's spend reports, their CSV export, and its monthly budgets. Seeing any of it
+//! takes `spend:read` and changing a budget takes `spend:update`, which the organization's owners
+//! and admins hold; changing a budget also takes a Team license that is active or in its grace
+//! period.
 
 pub mod access;
 pub mod audited_budget;

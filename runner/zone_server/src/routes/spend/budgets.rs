@@ -15,7 +15,7 @@ use super::budget_response::BudgetResponse;
 use super::budgets_response::BudgetsResponse;
 use super::refusal::Refusal;
 use super::{caller, organization};
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, Permission};
 use crate::db::audit::{actions, resources};
 use crate::db::organization_members;
 use crate::db::spend::budgets::{self, BudgetRow};
@@ -85,7 +85,7 @@ async fn listed(
     let user = caller(auth)?;
     let organization = organization(path)?;
     let month = Month::current();
-    access::admit(state.db(), organization, user).await?;
+    let grant = access::admit(state.db(), organization, user).await?;
     let rows = budgets::list(state.db(), organization, month).await?;
     let standing = Standing::read(state).await;
     Ok(BudgetsResponse {
@@ -93,7 +93,7 @@ async fn listed(
         enforced: standing.enforced,
         edition: standing.edition,
         status: standing.status,
-        editable: standing.editable(true),
+        editable: standing.editable(grant.allows(Permission::SpendUpdate)),
         month: month.label(),
         budgets: rows.into_iter().map(BudgetResponse::from).collect(),
     })
@@ -248,7 +248,7 @@ async fn covered(
         return Err(Error::ScopeInvalid.into());
     }
     if let Some(member) = target.user
-        && organization_members::lock_role(connection, organization, member)
+        && organization_members::lock_membership(connection, organization, member)
             .await?
             .is_none()
     {
