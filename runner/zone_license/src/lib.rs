@@ -3,6 +3,7 @@ mod command;
 pub mod config;
 mod config_error;
 pub mod decision;
+pub mod gate;
 pub mod grant;
 pub mod http;
 pub mod ignored;

@@ -9806,6 +9806,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hmac",
  "http-body-util",
+ "ipnet",
  "lettre",
  "reqwest 0.13.5",
  "serde",

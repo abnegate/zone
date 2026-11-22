@@ -1,5 +1,6 @@
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::num::NonZeroU32;
 use std::path::Path;
 
 use abnegate_notify::{Sender, SmtpConfig};
@@ -7,6 +8,7 @@ use lettre::Address;
 use zone_enterprise::Keyring;
 
 use crate::config_error::ConfigError;
+use crate::gate::{DEFAULT_ADDRESS_LIMIT, DEFAULT_LICENSE_LIMIT, Limits, Revoked, TrustedProxies};
 use crate::polar::{AccessToken, WebhookSecret};
 use crate::private_key::PrivateKey;
 use crate::problem::Problem;
@@ -23,6 +25,7 @@ const LISTEN_REASON: &str = "it must be an IP address and port, such as 0.0.0.0:
 const PORT_REASON: &str = "it must be a port number from 1 to 65535";
 const FROM_REASON: &str = "it must be a bare email address, such as licenses@example.com";
 const FROM_NAME_REASON: &str = "it must be a single line";
+const LIMIT_REASON: &str = "it must be a whole number of requests a minute, at least 1";
 
 pub struct Config {
     pub signer: Signer,
@@ -32,6 +35,9 @@ pub struct Config {
     pub keyring: Keyring,
     pub listen: SocketAddr,
     pub smtp: SmtpConfig,
+    pub revoked: Revoked,
+    pub proxies: TrustedProxies,
+    pub limits: Limits,
 }
 
 impl Config {
@@ -77,6 +83,30 @@ impl Config {
             |text| text.parse().ok(),
         );
         let signer = signer(&value, keyring, &mut problems);
+        let revoked = listed(
+            value(Variable::Revoked),
+            Variable::Revoked,
+            &mut problems,
+            Revoked::parse,
+        );
+        let proxies = listed(
+            value(Variable::TrustedProxies),
+            Variable::TrustedProxies,
+            &mut problems,
+            TrustedProxies::parse,
+        );
+        let address_limit = limit(
+            value(Variable::AddressLimit),
+            Variable::AddressLimit,
+            DEFAULT_ADDRESS_LIMIT,
+            &mut problems,
+        );
+        let license_limit = limit(
+            value(Variable::KeyLimit),
+            Variable::KeyLimit,
+            DEFAULT_LICENSE_LIMIT,
+            &mut problems,
+        );
 
         let host = required(value(Variable::SmtpHost), Variable::SmtpHost, &mut problems);
         let port = parsed(
@@ -127,6 +157,12 @@ impl Config {
                     password?,
                     Sender::new(from?).with_name(name?),
                 ),
+                revoked: revoked?,
+                proxies: proxies?,
+                limits: Limits {
+                    address: address_limit?,
+                    license: license_limit?,
+                },
             })
         })();
         match assembled {
@@ -150,6 +186,9 @@ impl fmt::Debug for Config {
             .field("smtp_user", &self.smtp.user)
             .field("smtp_from", &self.smtp.sender.address)
             .field("smtp_from_name", &self.smtp.sender.name)
+            .field("revoked", &self.revoked)
+            .field("proxies", &self.proxies)
+            .field("limits", &self.limits)
             .finish_non_exhaustive()
     }
 }
@@ -204,6 +243,31 @@ fn parsed<T>(
     parsed
 }
 
+fn listed<T: Default, E: fmt::Display>(
+    found: Option<String>,
+    variable: Variable,
+    problems: &mut Vec<Problem>,
+    parse: impl FnOnce(&str) -> Result<T, E>,
+) -> Option<T> {
+    let Some(text) = found else {
+        return Some(T::default());
+    };
+    parse(&text)
+        .map_err(|error| problems.push(invalid(variable, &error.to_string())))
+        .ok()
+}
+
+fn limit(
+    found: Option<String>,
+    variable: Variable,
+    default: NonZeroU32,
+    problems: &mut Vec<Problem>,
+) -> Option<NonZeroU32> {
+    parsed(found, variable, default, LIMIT_REASON, problems, |text| {
+        text.parse().ok()
+    })
+}
+
 fn checked(
     found: String,
     variable: Variable,
@@ -243,6 +307,8 @@ mod tests {
     const PASSWORD: &str = "hunter2-not-a-real-password";
     const PRODUCT: &str = "prod_a";
     const ACCESS_TOKEN: &str = "polar_oat_config-test-token";
+    const REVOKED_UPPER: &str = "0193A8E2-7C4B-7D10-8F00-4D2C5A9B1E01";
+    const REVOKED_OTHER: &str = "0193a8e2-7c4b-7d10-8f00-4d2c5a9b1e02";
     const REQUIRED: [Variable; 7] = [
         Variable::WebhookSecret,
         Variable::Products,
@@ -575,6 +641,128 @@ mod tests {
     fn keeps_the_keyring_it_was_given() {
         let config = load(&complete()).unwrap();
         assert_eq!(config.keyring, keyring());
+    }
+
+    #[test]
+    fn distribution_defaults_to_no_revocations_no_proxies_and_the_default_limits() {
+        let config = load(&complete()).unwrap();
+        assert!(config.revoked.is_empty());
+        assert!(config.proxies.is_empty());
+        assert_eq!(config.limits, Limits::default());
+        assert_eq!(config.limits.address.get(), 120);
+        assert_eq!(config.limits.license.get(), 240);
+    }
+
+    #[test]
+    fn every_distribution_variable_is_honoured() {
+        let config = load(&with(&[
+            (
+                Variable::Revoked,
+                &format!("{REVOKED_UPPER} , ,{REVOKED_OTHER},"),
+            ),
+            (
+                Variable::TrustedProxies,
+                " 172.18.0.0/16, 10.0.0.5 ,fd00::/8",
+            ),
+            (Variable::AddressLimit, "30"),
+            (Variable::KeyLimit, " 60 "),
+        ]))
+        .unwrap();
+        assert_eq!(config.revoked.len(), 2);
+        assert!(config.revoked.contains(REVOKED_UPPER.parse().unwrap()));
+        assert!(config.revoked.contains(REVOKED_OTHER.parse().unwrap()));
+        assert_eq!(
+            config.proxies.to_string(),
+            "172.18.0.0/16,10.0.0.5/32,fd00::/8"
+        );
+        assert!(config.proxies.trusts("172.18.4.2".parse().unwrap()));
+        assert!(!config.proxies.trusts("10.0.0.6".parse().unwrap()));
+        assert_eq!(config.limits.address.get(), 30);
+        assert_eq!(config.limits.license.get(), 60);
+    }
+
+    #[test]
+    fn blank_distribution_variables_count_as_unset() {
+        for blank in ["", "  "] {
+            let config = load(&with(&[
+                (Variable::Revoked, blank),
+                (Variable::TrustedProxies, blank),
+                (Variable::AddressLimit, blank),
+                (Variable::KeyLimit, blank),
+            ]))
+            .unwrap();
+            assert!(config.revoked.is_empty(), "{blank:?}");
+            assert!(config.proxies.is_empty(), "{blank:?}");
+            assert_eq!(config.limits, Limits::default(), "{blank:?}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_trusted_proxy_that_is_not_a_range_naming_it() {
+        for entry in [
+            "172.18.0.0/33",
+            "proxy.internal",
+            "10.0.0.0/8/1",
+            "fd00::/129",
+        ] {
+            let problems = problems(&with(&[(
+                Variable::TrustedProxies,
+                &format!("172.18.0.0/16,{entry}"),
+            )]));
+            assert_eq!(invalid(&problems), [Variable::TrustedProxies], "{entry}");
+            let shown = problems[0].to_string();
+            assert!(
+                shown.starts_with("ZONE_LICENSE_TRUSTED_PROXIES is invalid: "),
+                "{shown}"
+            );
+            assert!(shown.contains(&format!("{entry:?}")), "{shown}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_revoked_entry_that_is_not_a_uuid_naming_it() {
+        for entry in ["not-a-uuid", "0193a8e2-7c4b-7d10-8f00", "42"] {
+            let problems = problems(&with(&[(
+                Variable::Revoked,
+                &format!("{REVOKED_OTHER},{entry}"),
+            )]));
+            assert_eq!(invalid(&problems), [Variable::Revoked], "{entry}");
+            let shown = problems[0].to_string();
+            assert!(
+                shown.starts_with("ZONE_LICENSE_REVOKED is invalid: "),
+                "{shown}"
+            );
+            assert!(shown.contains(&format!("{entry:?}")), "{shown}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_zero_or_unreadable_limit() {
+        for variable in [Variable::AddressLimit, Variable::KeyLimit] {
+            for limit in ["0", "-1", "ten", "1.5", "4294967296"] {
+                let problems = problems(&with(&[(variable, limit)]));
+                assert_eq!(invalid(&problems), [variable], "{variable:?} {limit}");
+            }
+        }
+    }
+
+    #[test]
+    fn reports_every_invalid_distribution_variable_together() {
+        let problems = problems(&with(&[
+            (Variable::Revoked, "nobody"),
+            (Variable::TrustedProxies, "everywhere"),
+            (Variable::AddressLimit, "0"),
+            (Variable::KeyLimit, "0"),
+        ]));
+        assert_eq!(
+            invalid(&problems),
+            [
+                Variable::Revoked,
+                Variable::TrustedProxies,
+                Variable::AddressLimit,
+                Variable::KeyLimit,
+            ]
+        );
     }
 
     #[test]

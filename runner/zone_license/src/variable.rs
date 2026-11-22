@@ -13,11 +13,15 @@ pub enum Variable {
     SmtpPassword,
     SmtpFrom,
     SmtpFromName,
+    Revoked,
+    TrustedProxies,
+    AddressLimit,
+    KeyLimit,
 }
 
 impl Variable {
     #[cfg(test)]
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 17] = [
         Self::PrivateKeyFile,
         Self::PrivateKey,
         Self::KeyId,
@@ -31,6 +35,10 @@ impl Variable {
         Self::SmtpPassword,
         Self::SmtpFrom,
         Self::SmtpFromName,
+        Self::Revoked,
+        Self::TrustedProxies,
+        Self::AddressLimit,
+        Self::KeyLimit,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -48,6 +56,10 @@ impl Variable {
             Self::SmtpPassword => "SMTP_PASSWORD",
             Self::SmtpFrom => "SMTP_FROM",
             Self::SmtpFromName => "SMTP_FROM_NAME",
+            Self::Revoked => "ZONE_LICENSE_REVOKED",
+            Self::TrustedProxies => "ZONE_LICENSE_TRUSTED_PROXIES",
+            Self::AddressLimit => "ZONE_LICENSE_ADDRESS_LIMIT",
+            Self::KeyLimit => "ZONE_LICENSE_KEY_LIMIT",
         }
     }
 
@@ -85,6 +97,10 @@ mod tests {
                 "SMTP_PASSWORD",
                 "SMTP_FROM",
                 "SMTP_FROM_NAME",
+                "ZONE_LICENSE_REVOKED",
+                "ZONE_LICENSE_TRUSTED_PROXIES",
+                "ZONE_LICENSE_ADDRESS_LIMIT",
+                "ZONE_LICENSE_KEY_LIMIT",
             ]
         );
     }
