@@ -55,6 +55,11 @@ impl Slot {
         Some(due)
     }
 
+    /// Hand a taken turn back to be taken again at `until`, keeping the turn it was serving.
+    pub fn defer(&mut self, until: Instant) {
+        self.due = Some(until);
+    }
+
     /// Put the next turn back, once the sweep that claimed one has finished.
     pub fn settle(&mut self, schedule: &Schedule, now: Instant) {
         self.due = Some(schedule.next(self.origin, self.serving, now));
@@ -144,6 +149,27 @@ mod tests {
             slot.due(),
             Some(first + Duration::from_secs(1_800)),
             "three periods of work rejoins at the fourth turn, not 1500s past the third"
+        );
+    }
+
+    #[test]
+    fn a_deferred_turn_comes_back_at_the_moment_given_and_keeps_its_grid() {
+        let start = Instant::now();
+        let schedule = schedule(Catchup::Skip);
+        let mut slot = Slot::first(&schedule, start, Duration::ZERO);
+        let first = start + PERIOD;
+        let later = first + Duration::from_secs(20);
+
+        slot.take(first);
+        slot.defer(later);
+
+        assert_eq!(slot.due(), Some(later));
+        assert_eq!(slot.take(later), Some(later));
+        slot.settle(&schedule, later + Duration::from_secs(5));
+        assert_eq!(
+            slot.due(),
+            Some(first + PERIOD),
+            "the deferred turn still settles onto the grid it started on"
         );
     }
 

@@ -6,6 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use super::schedule::Schedule;
+use super::scope::Scope;
 
 /// A sweep in flight.
 ///
@@ -53,6 +54,9 @@ pub trait Job: Send + Sync + 'static {
 
     /// How often it sweeps, and what it owes for a turn it missed.
     fn schedule(&self) -> Schedule;
+
+    /// Whether one replica runs it for the cluster, or every replica runs it for itself.
+    fn scope(&self) -> Scope;
 
     /// Do one sweep.
     fn sweep(&self) -> Sweeping;

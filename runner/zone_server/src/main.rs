@@ -7,9 +7,10 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
@@ -33,6 +34,7 @@ use zone_server::services::mail;
 use zone_server::services::mail::AccountMail;
 use zone_server::state::AppState;
 use zone_server::state::default_adapter_registry;
+use zone_server::workers::housekeeping::{Leadership, Timing};
 
 #[tokio::main]
 async fn main() {
@@ -207,7 +209,11 @@ async fn main() {
     };
     state.prepare().await;
 
-    zone_server::workers::housekeeping::spawn(state.clone());
+    let leadership = Leadership::start(
+        PgConnectOptions::from_str(&config.database_url).expect("DATABASE_URL is not a valid URL"),
+        Timing::default(),
+    );
+    zone_server::workers::housekeeping::spawn(state.clone(), leadership.clone());
     zone_server::workers::reminders::spawn(state.clone(), Sweep::All);
     zone_server::workers::audit::spawn(
         state.clone(),
@@ -275,6 +281,7 @@ async fn main() {
         callback.abort();
         let _ = callback.await;
     }
+    leadership.release().await;
     if let Some(result) = result {
         result.expect("Server error");
     }

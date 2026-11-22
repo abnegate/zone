@@ -851,6 +851,11 @@ CREATE INDEX github_connection_states_expires_at_idx ON github_connection_states
 CREATE INDEX github_connection_states_user_id_idx ON github_connection_states (user_id);
 CREATE INDEX github_connection_states_github_app_id_idx ON github_connection_states (github_app_id) WHERE (github_app_id IS NOT NULL);
 
+CREATE TABLE report_deliveries (
+    workspace_id uuid NOT NULL PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+    slot timestamp without time zone NOT NULL
+);
+
 CREATE TABLE sources (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     workspace_id uuid REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -1696,6 +1701,12 @@ CREATE INDEX idx_context_gatherings_status ON context_gatherings (status);
 CREATE INDEX idx_context_gatherings_task ON context_gatherings (task_id);
 CREATE INDEX idx_context_gatherings_user ON context_gatherings (user_id);
 CREATE INDEX idx_context_gatherings_workspace ON context_gatherings (workspace_id);
+
+CREATE TABLE regression_alerts (
+    task_id uuid NOT NULL PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    alerted_at timestamp without time zone NOT NULL
+);
+CREATE INDEX idx_regression_alerts_alerted_at ON regression_alerts (alerted_at);
 
 CREATE TABLE synced_items (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
