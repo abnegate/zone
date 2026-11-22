@@ -84,6 +84,7 @@ mod github_connection;
 mod github_connection_routes;
 mod github_sources;
 mod gitlab_sources;
+mod high_availability_chat;
 mod host_directories;
 mod housekeeping_election;
 mod indexing;
