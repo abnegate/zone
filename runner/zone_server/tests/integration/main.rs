@@ -79,6 +79,7 @@ mod discovery_crossing;
 mod discovery_store;
 mod email_verification;
 mod fleet_enforcement;
+mod fleet_routes;
 mod gathering_worker;
 mod github_connection;
 mod github_connection_routes;
