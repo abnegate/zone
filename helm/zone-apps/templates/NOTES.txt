@@ -69,7 +69,13 @@ Horizontal Pod Autoscaler is enabled for the server:
 {{- end }}
 
 {{- if .Values.server.enabled }}
-{{- if or .Values.server.autoscaling.enabled (gt (int .Values.server.replicaCount) 1) }}
+{{- if include "zone-apps.server.sharedState" . }}
+
+NOTE: every zone-server replica shares agent state, clones, artifacts and the
+chat workspace on the ReadWriteMany claim {{ include "zone-apps.server.agentStateClaim" . }}.
+A coding agent sign-in in progress still lives in one pod's memory: the ingress
+keeps a browser on that pod, and a sign-in whose pod is replaced must be retried.
+{{- else if or .Values.server.autoscaling.enabled (gt (int .Values.server.replicaCount) 1) }}
 
 NOTE: zone-server can run more than one replica, so the coding agent providers
 will not work reliably. A sign-in in progress lives in one pod's memory and

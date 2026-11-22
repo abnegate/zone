@@ -80,6 +80,16 @@ spec:
           port: 5432
     {{- end }}
     # Allow Valkey connections
+    {{- if .Values.highAvailability.enabled }}
+    {{- $externalValkeyCIDR := required "networkPolicy.externalValkeyCIDR is required when networkPolicy.enabled=true and highAvailability.enabled=true" .Values.networkPolicy.externalValkeyCIDR }}
+    {{- $externalValkeyPort := required "networkPolicy.externalValkeyPort is required when networkPolicy.enabled=true and highAvailability.enabled=true" .Values.networkPolicy.externalValkeyPort }}
+    - to:
+        - ipBlock:
+            cidr: {{ $externalValkeyCIDR | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ $externalValkeyPort | int }}
+    {{- else }}
     - to:
         - podSelector:
             matchLabels:
@@ -87,6 +97,7 @@ spec:
       ports:
         - protocol: TCP
           port: 6379
+    {{- end }}
     # Allow LiteLLM connections
     - to:
         - podSelector:

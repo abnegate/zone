@@ -67,14 +67,82 @@ app.kubernetes.io/component: server
 {{- end }}
 
 {{/*
-Claim holding zone-server's agent state, or nothing. The claim is
-ReadWriteOnce and that state is per pod, so it is used only while the server
-runs a single replica.
+Claim holding zone-server's agent state, or nothing. A ReadWriteOnce claim
+holds per-pod state, so it is used only while the server runs a single
+replica. A ReadWriteMany claim is shared by every replica, however many run,
+and has its own name because a claim's access modes cannot change.
 */}}
 {{- define "zone-apps.server.agentStateClaim" -}}
 {{- $persistence := dig "agentState" "persistence" dict .Values.server -}}
-{{- if and .Values.server.enabled $persistence.enabled (not .Values.server.autoscaling.enabled) (eq (int .Values.server.replicaCount) 1) -}}
+{{- $single := and (not .Values.server.autoscaling.enabled) (eq (int .Values.server.replicaCount) 1) -}}
+{{- if include "zone-apps.server.sharedState" . -}}
+{{ include "zone-apps.fullname" . }}-shared-state
+{{- else if and .Values.server.enabled $persistence.enabled $single -}}
 {{ include "zone-apps.fullname" . }}-agent-state
+{{- end -}}
+{{- end }}
+
+{{/*
+"true" when the agent-state claim is ReadWriteMany, so every replica mounts
+agent state, clones, artifacts and the chat workspace from it; otherwise
+nothing.
+*/}}
+{{- define "zone-apps.server.sharedState" -}}
+{{- $persistence := dig "agentState" "persistence" dict .Values.server -}}
+{{- if and .Values.server.enabled $persistence.enabled (eq ($persistence.accessMode | default "ReadWriteOnce") "ReadWriteMany") -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Probe rendered from a server.probes entry, in a fixed field order.
+*/}}
+{{- define "zone-apps.probe" -}}
+httpGet:
+  path: {{ .path }}
+  port: http
+{{- if not (kindIs "invalid" .initialDelaySeconds) }}
+initialDelaySeconds: {{ .initialDelaySeconds }}
+{{- end }}
+periodSeconds: {{ .periodSeconds }}
+timeoutSeconds: {{ .timeoutSeconds }}
+failureThreshold: {{ .failureThreshold }}
+{{- end }}
+
+{{/*
+secrets.redisUrl, refused unless its scheme is redis or rediss.
+*/}}
+{{- define "zone-apps.secrets.redisUrl" -}}
+{{- $url := .Values.secrets.redisUrl | default "" | toString -}}
+{{- if $url -}}
+{{- if not (has (urlParse $url).scheme (list "redis" "rediss")) -}}
+{{- fail "secrets.redisUrl must start with redis:// or rediss://" -}}
+{{- end -}}
+{{- $url -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Fails a highAvailability.enabled render whose replicas would not share one
+external, managed Redis or Valkey. helm template cannot read an existing
+secret, so without secrets.create the operator vouches for it with
+highAvailability.externalValkey.
+*/}}
+{{- define "zone-apps.highAvailability.validate" -}}
+{{- if .Values.secrets.create -}}
+{{- $url := include "zone-apps.secrets.redisUrl" . -}}
+{{- if not $url -}}
+{{- fail "highAvailability.enabled needs an external Redis or Valkey: set secrets.redisUrl to its redis:// or rediss:// URL" -}}
+{{- end -}}
+{{- $hostname := regexReplaceAll ":[0-9]*$" (urlParse $url).host "" | trimPrefix "[" | trimSuffix "]" | trimSuffix "." | lower -}}
+{{- if not $hostname -}}
+{{- fail "secrets.redisUrl must name the host of the external Redis or Valkey" -}}
+{{- end -}}
+{{- if regexMatch "^valkey(\\.[^.]+(\\.svc(\\..+)?)?)?$" $hostname -}}
+{{- fail (printf "highAvailability.enabled needs an external Redis or Valkey, but secrets.redisUrl names the in-cluster valkey service (%s)" $hostname) -}}
+{{- end -}}
+{{- else if not .Values.highAvailability.externalValkey -}}
+{{- fail (printf "highAvailability.enabled needs an external Redis or Valkey: point key %s of secrets.existingSecret at it and set highAvailability.externalValkey=true, or set secrets.create with secrets.redisUrl" (include "zone-apps.secretKey" (dict "root" . "name" "redisUrl" "default" "valkey-url"))) -}}
 {{- end -}}
 {{- end }}
 
@@ -125,7 +193,7 @@ Common environment variables for all containers
 */}}
 {{- define "zone-apps.commonEnv" -}}
 {{- range $key, $value := .Values.commonEnv }}
-{{- if ne $key "APP_BASE_URL" }}
+{{- if not (has $key (list "APP_BASE_URL" "REDIS_URL")) }}
 - name: {{ $key }}
   value: {{ $value | quote }}
 {{- end }}

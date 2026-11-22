@@ -1,5 +1,7 @@
 {{- if .Values.server.enabled }}
 {{- $agentStateClaim := include "zone-apps.server.agentStateClaim" . }}
+{{- $sharedState := and $agentStateClaim (include "zone-apps.server.sharedState" .) }}
+{{- $probes := .Values.server.probes }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,8 +13,10 @@ spec:
   replicas: {{ .Values.server.replicaCount }}
   {{- end }}
   strategy:
-    {{- if $agentStateClaim }}
+    {{- if and $agentStateClaim (not $sharedState) }}
     type: Recreate
+    {{- else if .Values.server.strategy }}
+    {{- toYaml .Values.server.strategy | nindent 4 }}
     {{- else }}
     type: RollingUpdate
     rollingUpdate:
@@ -107,7 +111,7 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- range $key, $value := .Values.server.env }}
-            {{- if ne $key "APP_BASE_URL" }}
+            {{- if not (has $key (list "APP_BASE_URL" "REDIS_URL")) }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
@@ -151,37 +155,44 @@ spec:
                   name: {{ include "zone-apps.secretsName" . }}
                   key: smtpPassword
             {{- end }}
+          {{- if $probes.startup.enabled }}
+          startupProbe:
+            {{- include "zone-apps.probe" $probes.startup | nindent 12 }}
+          {{- end }}
           livenessProbe:
-            httpGet:
-              path: /health
-              port: http
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
+            {{- include "zone-apps.probe" $probes.liveness | nindent 12 }}
           readinessProbe:
-            httpGet:
-              path: /health
-              port: http
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            timeoutSeconds: 3
-            failureThreshold: 3
+            {{- include "zone-apps.probe" $probes.readiness | nindent 12 }}
           resources:
             {{- toYaml .Values.server.resources | nindent 12 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if $sharedState }}
+            - name: agent-state
+              mountPath: /app/artifacts
+              subPath: artifacts
+            {{- else }}
             - name: artifacts
               mountPath: /app/artifacts
+            {{- end }}
             - name: embed-cache
               mountPath: /app/embed-cache
             - name: home
               mountPath: /home/zone
+            {{- if $sharedState }}
+            - name: agent-state
+              mountPath: /app/workspace
+              subPath: workspace
+            - name: agent-state
+              mountPath: /app/agent-state
+              subPath: agent-state
+            {{- else }}
             - name: workspace
               mountPath: /app/workspace
             - name: agent-state
               mountPath: /app/agent-state
+            {{- end }}
             - name: agent-state
               mountPath: /app/clones
               subPath: clones
@@ -189,17 +200,24 @@ spec:
             - name: host
               mountPath: /host
             {{- end }}
+      {{- if not (kindIs "invalid" .Values.server.terminationGracePeriodSeconds) }}
+      terminationGracePeriodSeconds: {{ .Values.server.terminationGracePeriodSeconds }}
+      {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if not $sharedState }}
         - name: artifacts
           emptyDir: {}
+        {{- end }}
         - name: embed-cache
           emptyDir: {}
         - name: home
           emptyDir: {}
+        {{- if not $sharedState }}
         - name: workspace
           emptyDir: {}
+        {{- end }}
         - name: agent-state
           {{- if $agentStateClaim }}
           persistentVolumeClaim:

@@ -1,0 +1,128 @@
+# The supported high-availability topology for zone-apps. Layer it over your
+# own values:
+#
+#   helm upgrade --install zone-apps helm/zone-apps -f helm/zone-apps/values-ha.yaml \
+#     --set server.agentState.persistence.storageClass=<ReadWriteMany class> \
+#     --set highAvailability.externalValkey=true
+#
+# It needs Kubernetes 1.26 or later, at least 3 schedulable nodes, a
+# ReadWriteMany storage class (NFSv4.1+, EFS, Filestore, Azure Files NFS or
+# CephFS) and an external, managed Redis or Valkey with failover. Either set
+# highAvailability.externalValkey once secrets.existingSecret's redisUrl key
+# points at it, or set secrets.create with secrets.redisUrl.
+
+highAvailability:
+  enabled: true
+  externalValkey: false
+
+server:
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+
+  probes:
+    startup:
+      enabled: true
+      path: /health
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 60
+    liveness:
+      path: /health
+      initialDelaySeconds: 0
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      path: /health/ready
+      initialDelaySeconds: 0
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 2
+
+  terminationGracePeriodSeconds: 60
+
+  env:
+    ZONE_SHUTDOWN_DELAY_SECONDS: "10"
+    ZONE_SHUTDOWN_GRACE_SECONDS: "30"
+
+  agentState:
+    persistence:
+      enabled: true
+      accessMode: ReadWriteMany
+      size: 100Gi
+      storageClass: ""
+
+  # Agent CLI sign-ins in flight live in one replica's memory, so a browser
+  # keeps reaching the replica that started its sign-in. HAProxy Kubernetes
+  # Ingress reads cookie-persistence from the Service; on an Ingress it is
+  # deprecated.
+  service:
+    annotations:
+      haproxy.org/cookie-persistence: zone-server
+
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: server
+          topologyKey: kubernetes.io/hostname
+
+  # nodeTaintsPolicy Honor keeps tainted and cordoned nodes out of the skew,
+  # or they count as empty domains and deadlock rollouts and the HPA.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      nodeTaintsPolicy: Honor
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: server
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      nodeTaintsPolicy: Honor
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: server
+
+manager:
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: manager
+          topologyKey: kubernetes.io/hostname
+
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      nodeTaintsPolicy: Honor
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: manager

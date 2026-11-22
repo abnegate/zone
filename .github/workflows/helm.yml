@@ -8,6 +8,7 @@ on:
       - 'k8s/values-tilt-*.yaml'
       - 'Makefile'
       - 'scripts/test-helm-base-url.sh'
+      - 'scripts/test-helm-ha.sh'
       - '.github/workflows/helm.yml'
   pull_request:
     paths:
@@ -15,6 +16,7 @@ on:
       - 'k8s/values-tilt-*.yaml'
       - 'Makefile'
       - 'scripts/test-helm-base-url.sh'
+      - 'scripts/test-helm-ha.sh'
       - '.github/workflows/helm.yml'
 
 permissions:
@@ -41,3 +43,8 @@ jobs:
 
       - name: Verify the server is handed its public origin
         run: sh scripts/test-helm-base-url.sh
+
+      - name: Verify the high-availability profile
+        run: |
+          yq --version
+          sh scripts/test-helm-ha.sh
