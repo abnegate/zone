@@ -50,7 +50,8 @@ mod tests {
 
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
-    use tracing::Level;
+    use tracing::subscriber::NoSubscriber;
+    use tracing::{Dispatch, Level};
 
     use super::*;
 
@@ -71,7 +72,11 @@ mod tests {
         }
     }
 
-    fn logged(refusal: Unentitled) -> String {
+    fn captured(work: impl FnOnce()) -> String {
+        // tracing-core takes a lone registered dispatcher to be every thread's, so a callsite
+        // another thread reaches first is cached from that thread's no-op default and never
+        // reaches this subscriber. A second registered dispatcher makes every thread consult both.
+        let _bystander = Dispatch::new(NoSubscriber::default());
         let captured = Captured::default();
         let writer = captured.clone();
         let subscriber = tracing_subscriber::fmt()
@@ -79,8 +84,26 @@ mod tests {
             .with_max_level(Level::DEBUG)
             .with_ansi(false)
             .finish();
-        tracing::subscriber::with_default(subscriber, || refusal.into_response());
+        tracing::subscriber::with_default(subscriber, work);
         String::from_utf8_lossy(&captured.0.lock().expect("the captured log")).into_owned()
+    }
+
+    fn logged(refusal: Unentitled) -> String {
+        captured(|| drop(refusal.into_response()))
+    }
+
+    #[test]
+    fn a_capture_sees_an_event_another_thread_reached_first() {
+        fn announce() {
+            tracing::debug!("Announced");
+        }
+        let log = captured(|| {
+            std::thread::spawn(announce)
+                .join()
+                .expect("the other thread announces");
+            announce();
+        });
+        assert!(log.contains("Announced"), "{log}");
     }
 
     #[test]
