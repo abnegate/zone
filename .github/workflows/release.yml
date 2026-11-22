@@ -397,13 +397,13 @@ jobs:
           gzip -k -f dists/stable/main/binary-arm64/Packages
           cd dists/stable
           printf '%s\n' \
-            'Origin: abnegate' \
-            'Label: abnegate' \
+            'Origin: Bitecode' \
+            'Label: Bitecode' \
             'Suite: stable' \
             'Codename: stable' \
             'Architectures: amd64 arm64' \
             'Components: main' \
-            'Description: APT repository for abnegate packages' \
+            'Description: APT repository for Bitecode software' \
             > Release
           apt-ftparchive release . >> Release
           gpg --batch --yes --default-key "$GPG_KEY_ID" -abs -o Release.gpg Release

@@ -57,7 +57,7 @@ Architecture: ${arch}
 Depends: libc6 (>= 2.35), libssl3, libwebkit2gtk-4.1-0, libgtk-3-0
 Maintainer: Jake Barnby <jakeb994@gmail.com>
 Installed-Size: ${size_kb}
-Homepage: https://github.com/abnegate/zone
+Homepage: https://github.com/bitecodehq/zone
 Description: Zone desktop app and CLI
  Tauri desktop client for the Zone self-hosted AI platform, plus the
  zone CLI.

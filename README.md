@@ -331,15 +331,15 @@ The Zone desktop app ships the manager console. On first launch it asks for your
 **Homebrew** (macOS):
 
 ```bash
-brew tap abnegate/tap
+brew tap bitecodehq/tap
 brew install --cask zone
 ```
 
 **APT** (Debian / Ubuntu):
 
 ```bash
-curl -fsSL https://abnegate.github.io/apt-repo/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/abnegate.gpg
-echo "deb [signed-by=/usr/share/keyrings/abnegate.gpg] https://abnegate.github.io/apt-repo stable main" | sudo tee /etc/apt/sources.list.d/abnegate.list
+curl -fsSL https://apt.bitecode.ltd/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/bitecode.gpg
+echo "deb [signed-by=/usr/share/keyrings/bitecode.gpg] https://apt.bitecode.ltd stable main" | sudo tee /etc/apt/sources.list.d/bitecode.list
 sudo apt update && sudo apt install zone
 ```
 

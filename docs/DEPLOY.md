@@ -53,7 +53,7 @@ Verified on `main` (`d3fb7cf`). Reuse is the default; each row says whether it's
 | Protocol capabilities | `abnegate_exec::Capability` (`Cancel`, `Stdin`, `Logs`, `ProcessGroup`, and the confinement capabilities) | Keep; add a separate *environment* capability list |
 | WS progress | `runner/zone_server/src/ws/task_run.rs` — `ProgressMessage{init,status_update,log,completed,failed,error}`, polls Postgres every 500ms, **never checks workspace membership** | Reuse the message shape; fix auth; replace polling (§3, workspace-state) |
 | Artifact store | `runner/zone_server/src/services/artifacts.rs:17` `ArtifactStore { persist, read, open, cleanup_* }` under `COMFYUI_ARTIFACT_ROOT`; HMAC-signed URLs in `artifact_access.rs` | Extend with `persist_bundle`; signed URLs serve sideload/OTA downloads |
-| Zone ships non-web artifacts of itself | Tauri desktop + mobile (`make desktop\|android\|ios`, `runner/zone_desktop/tauri.{conf,android.conf,ios.conf}.json`, id `com.abnegate.zone`); `.github/workflows/release.yml` → `package-tauri.sh`, `package-deb.sh`, `.github/cask/zone.rb.template` → `abnegate/homebrew-tap`, `abnegate/apt-repo`, GitHub Releases | Lift into the `desktop_app`/`cli` builders and the `github_release`/`homebrew_tap`/`apt_repo` drivers |
+| Zone ships non-web artifacts of itself | Tauri desktop + mobile (`make desktop\|android\|ios`, `runner/zone_desktop/tauri.{conf,android.conf,ios.conf}.json`, id `com.abnegate.zone`); `.github/workflows/release.yml` → `package-tauri.sh`, `package-deb.sh`, `.github/cask/zone.rb.template` → `bitecodehq/homebrew-tap`, `bitecodehq/apt-repo`, GitHub Releases | Lift into the `desktop_app`/`cli` builders and the `github_release`/`homebrew_tap`/`apt_repo` drivers |
 | Vision | `abnegate-vision` + configured vision model (`services/stages.rs`) | Screenshot grading (advisory) |
 | MQTT broker | `~/Local/mqtt` (Swoole) | OTA substrate for `ota_fleet` |
 | Appwrite | Sites, Functions, Storage, Messaging | Delivery targets + backend provisioning (v1.5) |
@@ -66,7 +66,7 @@ Verified on `main` (`d3fb7cf`). Reuse is the default; each row says whether it's
 - The task workspace directory is never created and the repo is never cloned (`workers/task.rs:271-278`). Tasks without a repo run in the server's own cwd.
 - `tasks.status` never advances during a run; `tasks.created_by` (migration 006) is never written.
 - The prod image installs only `curl ca-certificates libssl3t64 libstdc++6` (`manager/Dockerfile:50`): no `git` (the PR worker is broken in prod), no `docker`, `kubectl`, `helm`. No docker socket on `manager`. Helm runs the server with `readOnlyRootFilesystem`.
-- No container registry anywhere; CI publishes binaries, never images. No `kube-rs`/`bollard`. `run_command`'s allowlist (`abnegate-agent` `DEFAULT_COMMANDS` in `src/tool/command/run/mod.rs:55` plus `EXTRA_COMMANDS` in `runner/zone_core/src/commands.rs:20`) has no deploy tooling and rejects `| > && ;`.
+- No container registry for Zone itself; CI publishes binaries and one image, the license signer (`ghcr.io/bitecodehq/zone-license` from 1.2.0, `ghcr.io/abnegate/zone-license` for 1.0.0 and 1.1.0; see [LICENSING.md](LICENSING.md#ci-and-publishing-the-image)), never the manager or runner. No `kube-rs`/`bollard`. `run_command`'s allowlist (`abnegate-agent` `DEFAULT_COMMANDS` in `src/tool/command/run/mod.rs:55` plus `EXTRA_COMMANDS` in `runner/zone_core/src/commands.rs:20`) has no deploy tooling and rejects `| > && ;`.
 
 ## 3. What we take from Imagine
 

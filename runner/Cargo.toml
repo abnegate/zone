@@ -7,7 +7,7 @@ default-members = ["zone_runner", "zone_core", "zone_enterprise", "zone_license"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/zone-dev/zone"
+repository = "https://github.com/bitecodehq/zone"
 rust-version = "1.97.1"
 
 [workspace.dependencies]

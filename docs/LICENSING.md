@@ -1154,7 +1154,10 @@ that the binary starts in it.
 
 Pushing a tag such as `license-signer-v1.0.0` also runs its `publish` job,
 once the others pass, which pushes the image to
-`ghcr.io/abnegate/zone-license` as `1.0.0` and `latest`. Only that job can
-write packages. The image holds no secrets: the signing key, the webhook
+`ghcr.io/<owner>/zone-license` as `1.0.0` and `latest`, where `<owner>` is the
+repository's owner. From 1.2.0 on that is `ghcr.io/bitecodehq/zone-license`.
+1.0.0 and 1.1.0 were published before the repository moved and stay at
+`ghcr.io/abnegate/zone-license`, so a signer still on one of them pulls from
+there until it is upgraded. Only that job can write packages. The image holds no secrets: the signing key, the webhook
 secret, the Polar access token and the SMTP password all reach the container
 at runtime.
