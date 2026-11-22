@@ -28,7 +28,12 @@ import { PRICING_URL } from '../pricing';
 import { LICENSE_REFUSAL_CODES, UNVERIFIED_CODES } from '../schemas';
 import { refusalMessage, unverifiedReason } from '../status';
 import type { LicenseResponse } from '../types';
-import { LICENSE_ID_COPY_FAILED, LICENSE_ID_HINT } from './LicenseId';
+import {
+  LICENSE_ID_COPIED,
+  LICENSE_ID_COPY_FAILED,
+  LICENSE_ID_HINT,
+  LICENSE_ID_LAPSED_HINT,
+} from './LicenseId';
 
 const get = mock();
 const set = mock();
@@ -117,6 +122,17 @@ function renewalOutcome(): HTMLElement {
 const LICENSE_ID = 'License ID';
 
 const LICENSE_ID_ROW = `${ACME_LICENSE.id}Copy${LICENSE_ID_HINT}`;
+
+const LAPSED_LICENSE_ID_ROW = `${ACME_LICENSE.id}Copy${LICENSE_ID_LAPSED_HINT}`;
+
+function licenseIdAnnouncement(): HTMLElement {
+  const term = screen.getAllByRole('term').find((element) => element.textContent === LICENSE_ID);
+  const region = term?.nextElementSibling?.querySelector('[aria-live]');
+  if (!(region instanceof HTMLElement)) {
+    throw new Error('The license ID row has no live region');
+  }
+  return region;
+}
 
 function terms(): string[] {
   return screen.getAllByRole('term', { hidden: true }).map((term) => term.textContent ?? '');
@@ -350,18 +366,37 @@ describe('LicenseSection', () => {
       const copy = screen.getByRole('button', { name: 'Copy license ID' });
       expect(copy).toHaveTextContent('Copy');
       expect(copy.getAttribute('aria-describedby')).toBe(hint.id);
+      expect(licenseIdAnnouncement()).toHaveAttribute('aria-live', 'polite');
+      expect(licenseIdAnnouncement()).toHaveClass('sr-only');
+      expect(licenseIdAnnouncement()).toHaveTextContent(/^$/);
     });
 
     for (const [name, response] of [
       ['a license in its grace period', GRACE],
-      ['a lapsed license', LAPSED],
       ['a Team license', TEAM],
     ] as const) {
-      it(`shows the license ID for ${name}`, async () => {
+      it(`shows the license ID and the support hint for ${name}`, async () => {
         await loaded(response);
 
         expect(terms()[0]).toBe(LICENSE_ID);
         expect(details()[LICENSE_ID]).toBe(LICENSE_ID_ROW);
+      });
+    }
+
+    for (const [name, response] of [
+      ['a lapsed license', LAPSED],
+      ['a lapsed Team license', TEAM_LAPSED],
+    ] as const) {
+      it(`shows the license ID for ${name} without sending the admin to paid support`, async () => {
+        await loaded(response);
+
+        expect(terms()[0]).toBe(LICENSE_ID);
+        expect(details()[LICENSE_ID]).toBe(LAPSED_LICENSE_ID_ROW);
+        expect(screen.queryByText(LICENSE_ID_HINT)).not.toBeInTheDocument();
+        const hint = screen.getByText(LICENSE_ID_LAPSED_HINT);
+        expect(
+          screen.getByRole('button', { name: 'Copy license ID' }).getAttribute('aria-describedby')
+        ).toBe(hint.id);
       });
     }
 
@@ -386,6 +421,7 @@ describe('LicenseSection', () => {
       await waitFor(() => expect(writeText).toHaveBeenCalledWith(ACME_LICENSE.id));
       const copied = await screen.findByRole('button', { name: 'Copied license ID' });
       expect(copied).toHaveTextContent('Copied');
+      expect(licenseIdAnnouncement()).toHaveTextContent(LICENSE_ID_COPIED);
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     });
 
@@ -395,7 +431,13 @@ describe('LicenseSection', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Copy license ID' }));
 
-      expect(await screen.findByRole('alert')).toHaveTextContent(LICENSE_ID_COPY_FAILED);
+      await waitFor(() =>
+        expect(licenseIdAnnouncement()).toHaveTextContent(LICENSE_ID_COPY_FAILED)
+      );
+      expect(
+        screen.getByText(LICENSE_ID_COPY_FAILED, { selector: '.field-error' })
+      ).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Copy license ID' })).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Copied license ID' })).not.toBeInTheDocument();
       expect(screen.getByText(ACME_LICENSE.id, { selector: 'code' })).toBeInTheDocument();
