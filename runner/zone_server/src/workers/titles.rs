@@ -11,6 +11,7 @@ use crate::services::policy::Subject;
 use crate::services::policy::background::{self, Background};
 use crate::services::route::Route;
 use crate::services::stages;
+use crate::services::task_relay;
 use crate::state::AppState;
 
 const TEMPERATURE: f32 = 0.2;
@@ -34,6 +35,12 @@ pub fn subscribe() -> broadcast::Receiver<(Uuid, String)> {
     UPDATES.subscribe()
 }
 
+/// Hands a title to the sockets in this process only; [`task_relay::title`]
+/// also reaches the other replicas.
+pub(crate) fn deliver(chat: Uuid, title: String) {
+    let _ = UPDATES.send((chat, title));
+}
+
 /// Only the message insertion transaction can grant the one-shot claim.
 pub fn spawn(state: AppState, message: &chats::MessageRow) {
     if !message.title_claimed {
@@ -46,9 +53,7 @@ pub fn spawn(state: AppState, message: &chats::MessageRow) {
             _ => fallback(&message.content),
         };
         match chats::complete_title(state.db(), message.chat_id, message.id, &title).await {
-            Ok(true) => {
-                let _ = UPDATES.send((message.chat_id, title));
-            }
+            Ok(true) => task_relay::title(message.chat_id, title),
             Ok(false) => {}
             Err(error) => tracing::warn!(%error, "Could not save automatic chat title"),
         }

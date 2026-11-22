@@ -219,6 +219,7 @@ async fn main() {
         zone_server::metrics::cluster_bus_connected(),
     );
     let state = state.with_bus(bus);
+    zone_server::services::task_relay::serve(state.bus()).await;
     state.prepare().await;
 
     let leadership = Leadership::start(

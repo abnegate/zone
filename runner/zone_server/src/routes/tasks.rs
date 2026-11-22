@@ -17,6 +17,7 @@ use crate::db::{task_access, tasks, workspace_members};
 use crate::routes::policy::asked::Asked;
 use crate::services::policy::Subject;
 use crate::services::route::Route;
+use crate::services::task_relay;
 use crate::state::AppState;
 use crate::workers::titles;
 
@@ -872,10 +873,9 @@ const NOTHING_CHOSEN: &str = "Choose an option for at least one question";
 
 /// POST /api/tasks/runs/:run_id/answers
 ///
-/// The waiter registry is process-local, so this resolves a question only on
-/// the instance running the parked worker; anywhere else the run reads as
-/// waiting and the answer finds nothing to deliver to. The same single-instance
-/// assumption the run socket already documents holds here.
+/// The parked worker may run on another replica, which the answer then reaches
+/// over the cluster bus; with no replica claiming it in time it finds nothing
+/// to deliver to.
 pub async fn answer_run(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -912,7 +912,7 @@ pub async fn answer_run(
         Ok(_) => {}
     }
     let answered = body.answers.len();
-    if !question::answer(run_id, body.answers) {
+    if !task_relay::answer(run_id, body.answers).await {
         return *denied(StatusCode::NOT_FOUND, NOT_FOUND);
     }
     (
