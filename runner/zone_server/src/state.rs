@@ -11,7 +11,7 @@ use sqlx::PgPool;
 use std::num::NonZeroUsize;
 #[cfg(any(test, feature = "testing"))]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 use tokio::sync::OnceCell;
 use tokio::sync::Semaphore;
@@ -43,6 +43,7 @@ use crate::services::mail::AccountMail;
 use crate::services::mcp_servers::hubs::Hubs;
 use crate::services::mcp_servers::status::Policy;
 use crate::services::network_denial::NetworkDenial;
+use crate::services::scim::limit;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
 use crate::train_jobs::TrainRegistry;
@@ -57,6 +58,10 @@ const MAX_CONCURRENT_TRAIN: usize = 1;
 const MAX_CONCURRENT_FRAME_EXTRACT: usize = 4;
 /// Without a sweep, every client the rate limiter has ever seen stays in it.
 const RATE_LIMITER_CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
+
+fn read(limiter: &RwLock<Arc<RateLimiter<Uuid>>>) -> Arc<RateLimiter<Uuid>> {
+    Arc::clone(&limiter.read().unwrap_or_else(PoisonError::into_inner))
+}
 
 fn max_concurrent_saml() -> usize {
     std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
@@ -119,6 +124,7 @@ struct AppStateInner {
     pub context_service: Option<Arc<ContextService>>,
     pub mail: Option<Arc<AccountMail>>,
     pub rate_limiter: Arc<RateLimiter<Uuid>>,
+    pub scim_limiter: Arc<RwLock<Arc<RateLimiter<Uuid>>>>,
     pub sync_registry: SyncRegistry,
     pub pull_registry: PullRegistry,
     /// The one LoRA training run. Survives the HTTP request that started it.
@@ -241,12 +247,15 @@ impl AppState {
             .expect("Encryption key should be valid (validated in Config::from_env)");
 
         let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::default()));
+        let scim_limiter = Arc::new(RwLock::new(Arc::new(limit::limiter())));
         let cleaned = Arc::clone(&rate_limiter);
+        let scim_cleaned = Arc::clone(&scim_limiter);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(RATE_LIMITER_CLEANUP_INTERVAL);
             loop {
                 interval.tick().await;
                 cleaned.cleanup();
+                read(&scim_cleaned).cleanup();
                 tracing::debug!("Rate limiter cleanup completed");
             }
         });
@@ -271,6 +280,7 @@ impl AppState {
                 context_service,
                 mail,
                 rate_limiter,
+                scim_limiter,
                 sync_registry: SyncRegistry::new(Arc::clone(&master_key)),
                 pull_registry: PullRegistry::new(),
                 train_jobs: TrainRegistry::new(),
@@ -356,6 +366,20 @@ impl AppState {
     /// Get the rate limiter
     pub fn rate_limiter(&self) -> &Arc<RateLimiter<Uuid>> {
         &self.inner.rate_limiter
+    }
+
+    pub fn scim_limiter(&self) -> Arc<RateLimiter<Uuid>> {
+        read(&self.inner.scim_limiter)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn limit_scim(&self, requests: u32, window: Duration) {
+        let limiter = Arc::new(RateLimiter::new(RateLimitConfig::new(requests, window)));
+        *self
+            .inner
+            .scim_limiter
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = limiter;
     }
 
     /// Get the index semaphore for limiting concurrent indexing operations

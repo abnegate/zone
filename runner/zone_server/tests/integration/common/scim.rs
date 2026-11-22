@@ -17,6 +17,10 @@ use super::sso::{self, Account, Audit};
 
 pub const BASE_PATH: &str = "/api/scim/v2/organizations";
 pub const CONTENT_TYPE: &str = "application/scim+json";
+pub const USER_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:User";
+pub const GROUP_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:Group";
+pub const PATCH_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
+pub const ERROR_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:Error";
 
 const TOKEN_NAME: &str = "Identity provider";
 
@@ -166,6 +170,40 @@ impl Fixture {
             None => request.body(Body::empty()),
         };
         self.inner.client.send_request(request.unwrap()).await
+    }
+
+    pub async fn provision(&self, token: &str, user_name: &str) -> Uuid {
+        let response = self
+            .scim_post(
+                "/Users",
+                token,
+                &json!({
+                    "schemas": [USER_SCHEMA],
+                    "userName": user_name,
+                    "name": { "givenName": "Ada", "familyName": "Lovelace" },
+                    "emails": [{ "value": user_name, "type": "work", "primary": true }],
+                    "active": true,
+                }),
+            )
+            .await;
+        response.assert_status(StatusCode::CREATED);
+        response.json_value()["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    pub async fn holding(&self, user: Uuid) -> Option<(String, Option<Uuid>, bool)> {
+        sqlx::query_as(
+            "SELECT role, custom_role_id, is_active FROM organization_members \
+             WHERE organization_id = $1 AND user_id = $2",
+        )
+        .bind(self.organization)
+        .bind(user)
+        .fetch_optional(self.pool())
+        .await
+        .unwrap()
     }
 
     pub async fn audits(&self, action: &str) -> Vec<Audit> {
