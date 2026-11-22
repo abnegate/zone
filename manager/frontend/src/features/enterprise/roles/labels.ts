@@ -91,6 +91,14 @@ export const PERMISSION_LABELS: Readonly<Record<PermissionName, PermissionLabel>
     label: 'Manage audit export',
     description: 'Change how long audit events are kept and where they are sent.',
   },
+  [Permission.SpendRead]: {
+    label: 'See spend',
+    description: "See the organization's spend reports and budgets, and download spend as CSV.",
+  },
+  [Permission.SpendUpdate]: {
+    label: 'Manage budgets',
+    description: "Create, change and delete the organization's monthly budgets.",
+  },
   [Permission.RolesUpdate]: {
     label: 'Manage roles',
     description: 'Create, edit and delete custom roles. Only owners and admins can do this.',

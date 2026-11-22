@@ -38,6 +38,8 @@ pub enum Permission {
     PoliciesUpdate,
     AuditLogsRead,
     AuditUpdate,
+    SpendRead,
+    SpendUpdate,
     RolesUpdate,
     WorkspaceRead,
     WorkspaceWrite,
@@ -56,9 +58,11 @@ pub enum Permission {
 
 const ORGANIZATION_ADMIN_REQUIRED: &str = "Organization admin access required";
 const WORKSPACE_ADMIN_REQUIRED: &str = "Workspace admin access required";
+pub const SPEND_REFUSED: &str =
+    "Only organization owners and admins can see spend or change budgets";
 
 impl Permission {
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 41] = [
         Self::ModelsCreate,
         Self::ModelsDelete,
         Self::PullRequestsUpdate,
@@ -84,6 +88,8 @@ impl Permission {
         Self::PoliciesUpdate,
         Self::AuditLogsRead,
         Self::AuditUpdate,
+        Self::SpendRead,
+        Self::SpendUpdate,
         Self::RolesUpdate,
         Self::WorkspaceRead,
         Self::WorkspaceWrite,
@@ -127,6 +133,8 @@ impl Permission {
             Self::PoliciesUpdate => "policies:update",
             Self::AuditLogsRead => "audit_logs:read",
             Self::AuditUpdate => "audit:update",
+            Self::SpendRead => "spend:read",
+            Self::SpendUpdate => "spend:update",
             Self::RolesUpdate => "roles:update",
             Self::WorkspaceRead => "workspace:read",
             Self::WorkspaceWrite => "workspace:write",
@@ -171,6 +179,8 @@ impl Permission {
             | Self::PoliciesUpdate
             | Self::AuditLogsRead
             | Self::AuditUpdate
+            | Self::SpendRead
+            | Self::SpendUpdate
             | Self::RolesUpdate => Scope::Organization,
             Self::WorkspaceRead
             | Self::WorkspaceWrite
@@ -244,6 +254,7 @@ impl Permission {
             | Self::DevicesUpdate
             | Self::GitHubUpdate => ORGANIZATION_ADMIN_REQUIRED.to_string(),
             Self::OrganizationDelete => "Organization owner access required".to_string(),
+            Self::SpendRead | Self::SpendUpdate => SPEND_REFUSED.to_string(),
             Self::WorkspaceRead => "Not a member of this workspace".to_string(),
             Self::WorkspaceWrite => "Workspace write access required".to_string(),
             Self::WorkspaceUpdate

@@ -115,6 +115,8 @@ composable, and neither is deleting the organization or a workspace.
 | `policies:update` | Change the organization's agent policy, and the agent policy of every workspace in it | admin, owner | Yes |
 | `audit_logs:read` | Read and download the organization's audit log | admin, owner | Yes |
 | `audit:update` | Manage audit streaming destinations, exports and retention | admin, owner | Yes |
+| `spend:read` | See the organization's spend reports and budgets, and download spend as CSV (see [SPEND.md](SPEND.md)) | admin, owner | Yes |
+| `spend:update` | Create, change and delete the organization's budgets | admin, owner | Yes |
 | `roles:update` | Create, edit and delete custom roles | admin, owner | No |
 
 ### Workspace permissions

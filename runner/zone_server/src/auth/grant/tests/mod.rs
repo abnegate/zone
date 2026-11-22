@@ -42,6 +42,7 @@ fn threshold(permission: Permission) -> Threshold {
         Permission::PoliciesUpdate => Organization(OrgRole::Admin),
         Permission::AuditLogsRead => Organization(OrgRole::Admin),
         Permission::AuditUpdate => Organization(OrgRole::Admin),
+        Permission::SpendRead | Permission::SpendUpdate => Organization(OrgRole::Admin),
         Permission::RolesUpdate => Organization(OrgRole::Admin),
         Permission::WorkspaceRead => Workspace(WorkspaceRole::Viewer),
         Permission::WorkspaceWrite => Workspace(WorkspaceRole::Member),
@@ -103,7 +104,7 @@ fn the_threshold_table_agrees_with_the_catalogue_on_every_permission() {
 }
 
 #[test]
-fn the_catalogue_holds_four_server_twenty_two_organization_and_thirteen_workspace_permissions() {
+fn the_catalogue_holds_four_server_twenty_four_organization_and_thirteen_workspace_permissions() {
     let count = |scope| {
         Permission::ALL
             .into_iter()
@@ -111,7 +112,7 @@ fn the_catalogue_holds_four_server_twenty_two_organization_and_thirteen_workspac
             .count()
     };
     assert_eq!(count(Scope::Server), 4);
-    assert_eq!(count(Scope::Organization), 22);
+    assert_eq!(count(Scope::Organization), 24);
     assert_eq!(count(Scope::Workspace), 13);
 }
 
@@ -421,6 +422,9 @@ fn refusals_keep_the_legacy_guard_texts() {
             | Permission::DevicesUpdate
             | Permission::GitHubUpdate => "Organization admin access required".to_string(),
             Permission::OrganizationDelete => "Organization owner access required".to_string(),
+            Permission::SpendRead | Permission::SpendUpdate => {
+                "Only organization owners and admins can see spend or change budgets".to_string()
+            }
             Permission::WorkspaceRead => "Not a member of this workspace".to_string(),
             Permission::WorkspaceWrite => "Workspace write access required".to_string(),
             Permission::WorkspaceUpdate

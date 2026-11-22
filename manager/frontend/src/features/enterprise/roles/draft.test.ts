@@ -34,7 +34,9 @@ describe('choices', () => {
   it('never offers the base or an owner-only permission', () => {
     const offered = choices(CATALOGUE, RoleScope.Organization).map((entry) => entry.name);
 
-    expect(offered).toHaveLength(18);
+    expect(offered).toHaveLength(20);
+    expect(offered).toContain(Permission.SpendRead);
+    expect(offered).toContain(Permission.SpendUpdate);
     for (const reserved of [
       Permission.OrganizationRead,
       Permission.OrganizationDelete,

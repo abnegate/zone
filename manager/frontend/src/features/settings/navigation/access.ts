@@ -32,6 +32,8 @@ export const ORGANIZATION_FLOOR: Readonly<Record<OrganizationPermission, OrgRole
   [Permission.PoliciesUpdate]: 'admin',
   [Permission.AuditLogsRead]: 'admin',
   [Permission.AuditUpdate]: 'admin',
+  [Permission.SpendRead]: 'admin',
+  [Permission.SpendUpdate]: 'admin',
   [Permission.RolesUpdate]: 'admin',
 };
 

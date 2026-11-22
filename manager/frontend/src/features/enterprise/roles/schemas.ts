@@ -30,6 +30,8 @@ export const Permission = {
   PoliciesUpdate: 'policies:update',
   AuditLogsRead: 'audit_logs:read',
   AuditUpdate: 'audit:update',
+  SpendRead: 'spend:read',
+  SpendUpdate: 'spend:update',
   RolesUpdate: 'roles:update',
   WorkspaceRead: 'workspace:read',
   WorkspaceWrite: 'workspace:write',
@@ -86,6 +88,8 @@ export const ORGANIZATION_PERMISSIONS = [
   Permission.PoliciesUpdate,
   Permission.AuditLogsRead,
   Permission.AuditUpdate,
+  Permission.SpendRead,
+  Permission.SpendUpdate,
   Permission.RolesUpdate,
 ] as const;
 
