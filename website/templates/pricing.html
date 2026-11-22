@@ -81,14 +81,13 @@
         <div class="plan-body">
           <ul class="checklist">
             <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Everything in Team</li>
-            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>SSO over OIDC, with SSO-only login and a break-glass admin</li>
+            <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>SSO over OIDC or SAML, with SSO-only login and a break-glass admin</li>
             <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Agent and model policy per organization and workspace</li>
             <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Custom roles per organization and workspace</li>
             <li><svg class="check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Audit export, streaming to a webhook, S3 or syslog, and retention</li>
           </ul>
           <p class="plan-coming-heading"><span class="badge">Coming</span></p>
           <ul class="coming-list">
-            <li>SAML</li>
             <li>SCIM provisioning</li>
             <li>HA reference architecture</li>
             <li>LTS releases</li>
@@ -188,9 +187,10 @@
         <summary>What happens when our license expires?</summary>
         <p>
           You get a 30-day grace period after the expiry date. After that, expiry still never locks
-          anyone out or loosens security: SSO login keeps working, and existing policies and custom
-          roles keep being enforced. What pauses until you renew is editing policies and custom
-          roles, and audit export and streaming.
+          anyone out or loosens security: SSO login keeps working, and existing policies, custom
+          roles and budget limits keep being enforced. What pauses until you renew is editing
+          policies, custom roles and budgets, and audit export and streaming. New people are held
+          to the Community limit of {{ communityMemberLimit }} active members again.
         </p>
       </details>
       <details>
