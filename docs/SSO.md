@@ -11,6 +11,10 @@ Single sign-on applies to the whole server. A server admin configures it
 under **Settings → This server → Single sign-on**, and only server admins
 see that section.
 
+Single sign-on signs people in; it doesn't add them to organizations or
+remove them when they leave. For that, see [SCIM provisioning](SCIM.md),
+which each organization sets up for itself.
+
 ## Licensing
 
 Single sign-on is part of Zone Enterprise; a Zone Team license doesn't
@@ -919,7 +923,10 @@ Each time someone signs in, Zone looks for their account in this order.
    has **Require verified email** on, Zone looks for an account with the
    same email, ignoring case. If it finds one, it links that account to the
    subject, and the user signs in to their existing account. This never
-   happens for SAML providers, which can't require a verified email.
+   happens for SAML providers, which can't require a verified email, with
+   one exception: an account that SCIM provisioning created and that nobody
+   has used yet links by email through any provider (see
+   [SCIM.md](SCIM.md#single-sign-on)).
 3. **Just-in-time (JIT) provisioning.** If no account matches, Zone
    creates one.
 
@@ -995,7 +1002,9 @@ A new account created at sign-in:
   account mail.
 
 JIT users don't join your company's organization automatically. Invite
-them from the organization's **Members** settings.
+them from the organization's **Members** settings, or have your identity
+provider add and remove members with
+[SCIM provisioning](SCIM.md), which Okta and Entra ID support.
 
 ## Allowed domains
 
