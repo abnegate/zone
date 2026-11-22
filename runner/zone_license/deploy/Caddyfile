@@ -1,0 +1,44 @@
+licenses.bitecode.ltd {
+	@signer path /webhooks/polar /licenses/renew /health
+	handle @signer {
+		reverse_proxy zone-license:8080
+	}
+	@token {
+		path /token
+		method GET POST HEAD
+	}
+	handle @token {
+		reverse_proxy zone-license:8080
+	}
+	@bundles {
+		path /bundles/*
+		method GET HEAD
+	}
+	handle @bundles {
+		reverse_proxy zone-license:8080
+	}
+	handle {
+		respond 404
+	}
+}
+
+registry.bitecode.ltd {
+	@pull {
+		path /v2/*
+		method GET HEAD
+	}
+	handle @pull {
+		reverse_proxy registry:5000
+	}
+	@refused {
+		path /v2/*
+		not method GET HEAD
+	}
+	handle @refused {
+		header Allow "GET, HEAD"
+		respond 405
+	}
+	handle {
+		respond 404
+	}
+}
