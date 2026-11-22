@@ -169,10 +169,9 @@ fn unavailable(error: &sqlx::Error) -> Response {
 mod tests {
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
-    use zone_enterprise::MEMBER_CAP_REACHED;
+    use zone_enterprise::{MEMBER_ADMISSION_BUSY, MEMBER_CAP_REACHED};
 
     use super::*;
-    use crate::services::members::MEMBER_ADMISSION_BUSY;
 
     #[tokio::test]
     async fn a_full_server_refuses_the_callback_with_the_member_cap_code() {

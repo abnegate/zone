@@ -94,7 +94,7 @@ The check and the change that adds the person are one step. Additions on a
 capped server take turns, so with one place left exactly one of several
 people joining at the same moment gets in and the rest are refused. A new
 account counts from the moment its sign-up or first single sign-on succeeds.
-If an addition waits more than 5 seconds for its turn, it answers `503`
+If an addition waits more than about 5 seconds for its turn, it answers `503`
 instead, and changes nothing:
 
 ```json

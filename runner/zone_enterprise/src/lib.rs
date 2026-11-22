@@ -34,7 +34,7 @@ pub use error::{Error, MALFORMED, PAYLOAD_INVALID, SIGNATURE_INVALID, UNKNOWN_KE
 pub use key_error::KeyError;
 pub use keyring::Keyring;
 pub use license::License;
-pub use members::{COMMUNITY_MEMBERS, MEMBER_CAP_REACHED, Members};
+pub use members::{COMMUNITY_MEMBERS, MEMBER_ADMISSION_BUSY, MEMBER_CAP_REACHED, Members};
 pub use payload::Payload;
 pub use plan::Plan;
 pub use seats::{Seats, period_start};

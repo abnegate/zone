@@ -260,7 +260,7 @@ organization add of an admin or owner by someone without
 `administrators:update` is refused with a plain 403 before the cap is
 counted. The count and the addition are one step, so with one place left
 exactly one of several simultaneous adds gets in; an add that waits more than
-5 seconds for its turn answers 503 `member_admission_busy` and changes
+about 5 seconds for its turn answers 503 `member_admission_busy` and changes
 nothing.
 
 A workspace takes only members of its organization: adding anyone else is
@@ -400,7 +400,7 @@ choosing **Manage budgets** chooses **See spend**.
 | `role_name_taken` | 409 | Another role in the organization has this name, ignoring case. |
 | `role_in_use` | 409 | Active members hold the role. The response's `members` says how many. |
 | `member_cap_reached` | 403 | The Community member cap is reached, and the person added, reactivated or invited isn't already an active member. See [Adding and reactivating members](#adding-and-reactivating-members). |
-| `member_admission_busy` | 503 | Too many people were joining the capped server at once, and the add, reactivation or acceptance waited more than 5 seconds for its turn. Nothing changed; try again. |
+| `member_admission_busy` | 503 | Too many people were joining the capped server at once, and the add, reactivation or acceptance waited more than about 5 seconds for its turn. Nothing changed; try again. |
 | `outside_organization` | 409 | The person added to a workspace isn't a member of its organization. |
 
 A refusal without a code carries its reason in `error`, such as

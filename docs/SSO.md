@@ -60,9 +60,9 @@ applies to single sign-on, OIDC and SAML alike: once the server has 3 active
 members, a first sign-in that would create an account is refused with
 `member_cap_reached`. The count and the new account are one step, so with
 one place left exactly one of several simultaneous first sign-ins gets in; one
-that waits more than 5 seconds for its turn answers `member_admission_busy`.
-People who already have an account keep signing in, including, for OIDC, one
-linked by email.
+that waits more than about 5 seconds for its turn answers
+`member_admission_busy`. People who already have an account keep signing in,
+including, for OIDC, one linked by email.
 
 An SSO user who signs in counts toward licensed seats in the same way as a
 user who signs in with a password.

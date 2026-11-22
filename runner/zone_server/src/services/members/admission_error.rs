@@ -1,11 +1,9 @@
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use zone_enterprise::MEMBER_CAP_REACHED;
+use zone_enterprise::{MEMBER_ADMISSION_BUSY, MEMBER_CAP_REACHED};
 
 use crate::routes::common::ErrorResponse;
-
-pub const MEMBER_ADMISSION_BUSY: &str = "member_admission_busy";
 
 const UNAVAILABLE: &str = "Internal server error";
 const LOCK_NOT_AVAILABLE: &str = "55P03";

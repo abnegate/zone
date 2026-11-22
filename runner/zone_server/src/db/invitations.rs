@@ -4,13 +4,13 @@
 //! Tokens are hashed before storage for security.
 
 use chrono::{DateTime, Duration, Utc};
-use sqlx::{Acquire, PgPool, Postgres, Transaction};
+use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::DbResult;
 use crate::utils::crypto::{generate_token, hash_token};
 
-const TOKEN_EXPIRY_DAYS: i64 = 7; // Invitations expire in 7 days
+const TOKEN_EXPIRY_DAYS: i64 = 7;
 
 /// Invitation row from database
 #[derive(Debug, Clone)]
@@ -129,25 +129,12 @@ pub async fn get_invitation_by_token(pool: &PgPool, token: &str) -> DbResult<Opt
 /// unit: a transaction of its own, or a savepoint when `connection` is already in one.
 ///
 /// Fails with [`sqlx::Error::RowNotFound`] if the token is unknown, expired or already accepted.
-// As an `async fn`, a handler awaiting this fails its `Send` check (launchbadge/sqlx#1015).
-#[allow(clippy::manual_async_fn)]
-pub fn accept_invitation<'a, 'c, A>(
-    connection: A,
-    token: &'a str,
-    user_id: Uuid,
-) -> impl Future<Output = DbResult<()>> + Send + 'a
-where
-    'c: 'a,
-    A: Acquire<'c, Database = Postgres> + Send + 'a,
-{
-    async move { accept(connection.begin().await?, token, user_id).await }
-}
-
-async fn accept(
-    mut transaction: Transaction<'_, Postgres>,
+pub async fn accept_invitation(
+    connection: &mut PgConnection,
     token: &str,
     user_id: Uuid,
 ) -> DbResult<()> {
+    let mut transaction = connection.begin().await?;
     let token_hash = hash_token(token);
 
     let row = sqlx::query!(

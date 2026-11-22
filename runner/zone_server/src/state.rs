@@ -624,6 +624,9 @@ const LAZY_DATABASE: &str = "postgres://localhost/test";
 const TEST_SAML_PERMIT_WAIT: Duration = Duration::from_millis(50);
 
 #[cfg(test)]
+const TEST_ADMISSION_WAIT: Duration = Duration::from_millis(100);
+
+#[cfg(test)]
 const UNREACHABLE_DATABASE: &str = "postgres://127.0.0.1:1/unreachable";
 
 #[cfg(test)]
@@ -717,6 +720,7 @@ pub(crate) fn test_config() -> Config {
         trusted_proxies: Default::default(),
         sso_requests_per_minute: crate::config::DEFAULT_SSO_REQUESTS_PER_MINUTE,
         saml_permit_wait: TEST_SAML_PERMIT_WAIT,
+        admission_wait: TEST_ADMISSION_WAIT,
     }
 }
 
@@ -974,6 +978,7 @@ mod tests {
             trusted_proxies: Default::default(),
             sso_requests_per_minute: crate::config::DEFAULT_SSO_REQUESTS_PER_MINUTE,
             saml_permit_wait: TEST_SAML_PERMIT_WAIT,
+            admission_wait: TEST_ADMISSION_WAIT,
         }
     }
 

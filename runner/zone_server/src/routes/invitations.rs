@@ -242,7 +242,8 @@ pub async fn create_invitation(
         }
     }
 
-    members::check(&state, existing_user.map(|user| user.id)).await?;
+    let cap = members::cap(&state).await?;
+    members::check(&state, cap, existing_user.map(|user| user.id)).await?;
 
     let existing_invitation =
         invitations::get_pending_invitation_for_email(state.db(), &request.email, organization_id)
@@ -430,9 +431,10 @@ pub async fn accept_invitation(
         ));
     }
 
+    let cap = members::cap(&state).await?;
     let mut transaction = state.db().begin().await.map_err(unavailable)?;
-    members::admit(&state, &mut *transaction, Some(user_id)).await?;
-    invitations::accept_invitation(&mut *transaction, &token, user_id)
+    members::admit(&mut transaction, cap, Some(user_id)).await?;
+    invitations::accept_invitation(&mut transaction, &token, user_id)
         .await
         .map_err(accepting)?;
     transaction.commit().await.map_err(accepting)?;

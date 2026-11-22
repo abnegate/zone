@@ -167,7 +167,9 @@ pub async fn complete(
         )
         .await;
     }
-    if let Err(error) = users::update_last_login(state.db(), settlement.user).await {
+    if !settlement.provisioned
+        && let Err(error) = users::update_last_login(state.db(), settlement.user).await
+    {
         tracing::warn!(user_id = %settlement.user, %error, "Failed to update last login");
     }
     let response = session::issue(
@@ -317,10 +319,11 @@ async fn create(
     identity: &Identity,
     email_verified: bool,
 ) -> Result<Uuid, SignInFailure> {
-    members::check(state, None).await?;
+    let cap = members::cap(state).await?;
+    members::check(state, cap, None).await?;
     let password_hash = unusable().await?;
     let mut transaction = state.db().begin().await?;
-    members::admit(state, &mut *transaction, None).await?;
+    members::admit(&mut transaction, cap, None).await?;
     let user = provision::insert(
         &mut transaction,
         &identity.email,

@@ -73,6 +73,9 @@ pub const UNREACHABLE_LITELLM: &str = "http://127.0.0.1:9";
 /// Short, so a test that holds every SAML response check isn't kept waiting for the refusal.
 pub const SAML_PERMIT_WAIT: Duration = Duration::from_millis(50);
 
+/// Short, so a test that holds the seat lock isn't kept waiting for the busy answer.
+pub const ADMISSION_WAIT: Duration = Duration::from_millis(100);
+
 /// Agent settings whose usage reads go to [`UNREACHABLE_USAGE`].
 pub fn agents() -> AgentConfig {
     AgentConfig {
@@ -132,6 +135,7 @@ pub fn test_config() -> Config {
         trusted_proxies: Default::default(),
         sso_requests_per_minute: DEFAULT_SSO_REQUESTS_PER_MINUTE,
         saml_permit_wait: SAML_PERMIT_WAIT,
+        admission_wait: ADMISSION_WAIT,
     }
 }
 
@@ -605,6 +609,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         trusted_proxies: Default::default(),
         sso_requests_per_minute: DEFAULT_SSO_REQUESTS_PER_MINUTE,
         saml_permit_wait: SAML_PERMIT_WAIT,
+        admission_wait: ADMISSION_WAIT,
     }
 }
 

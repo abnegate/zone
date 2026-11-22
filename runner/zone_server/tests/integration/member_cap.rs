@@ -4,23 +4,27 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::StatusCode;
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::future::join_all;
 use reqwest::Url;
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::pool::PoolConnection;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, Postgres};
 use uuid::Uuid;
 use zone_enterprise::sso::{Claims, testing};
-use zone_enterprise::{COMMUNITY_MEMBERS, MEMBER_CAP_REACHED, period_start};
+use zone_enterprise::{COMMUNITY_MEMBERS, MEMBER_ADMISSION_BUSY, MEMBER_CAP_REACHED, period_start};
 use zone_server::db::seats;
 use zone_server::routes::workspaces::OUTSIDE_ORGANIZATION;
-use zone_server::services::members::{MEMBER_ADMISSION_BUSY, SEATS_LOCK};
+use zone_server::services::members::SEATS_LOCK;
+use zone_server::state::AppState;
 
 use crate::common::identity_provider::IdentityProvider;
 use crate::common::sso::{Fixture, active, grace, lapsed, lapsed_team, team};
-use crate::common::{TestResponse, test_email, test_password};
+use crate::common::{TestClient, TestResponse, test_config, test_email, test_password};
 
 const PREFIX: &str = "member_cap";
 const REGISTER: &str = "/api/auth/register";
@@ -32,6 +36,9 @@ const PUBLIC_PROVIDERS: &str = "/api/auth/sso/providers";
 const CALLBACKS: &str = "/api/auth/sso/callbacks";
 const UNVERIFIED_KEY: &str = "garbage";
 const ATTEMPTS: usize = 3;
+const HOLD_SEATS: &str = "SELECT pg_advisory_lock($1)";
+const RELEASE_SEATS: &str = "SELECT pg_advisory_unlock($1)";
+const SINGLE_CONNECTION_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 struct Member {
@@ -279,6 +286,40 @@ impl Server {
             .fetch_one(self.pool())
             .await
             .unwrap()
+    }
+
+    /// Holds [`SEATS_LOCK`] on a session of its own until [`Server::release_seats`].
+    async fn hold_seats(&self) -> PoolConnection<Postgres> {
+        let mut holder = self.pool().acquire().await.unwrap();
+        sqlx::query(HOLD_SEATS)
+            .bind(SEATS_LOCK)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        holder
+    }
+
+    async fn release_seats(mut holder: PoolConnection<Postgres>) {
+        sqlx::query(RELEASE_SEATS)
+            .bind(SEATS_LOCK)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+    }
+
+    /// A capped server on this one's database whose pool has a single connection and whose
+    /// license has never been read.
+    async fn single_connection(&self) -> (TestClient, PgPool) {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(SINGLE_CONNECTION_WAIT)
+            .connect_with((*self.pool().connect_options()).clone())
+            .await
+            .unwrap();
+        let state = AppState::new(test_config(), pool.clone(), None);
+        state.disable_mcp();
+        state.cap_members();
+        (TestClient::with_state(state), pool)
     }
 
     async fn cleanup(self) {
@@ -956,22 +997,12 @@ async fn concurrent_reactivations_one_below_the_cap_reactivate_exactly_one() {
 #[tokio::test]
 async fn a_seat_lock_held_past_the_timeout_answers_busy() {
     let server = Server::capped().await;
-    let mut holder = server.pool().acquire().await.unwrap();
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(SEATS_LOCK)
-        .execute(&mut *holder)
-        .await
-        .unwrap();
+    let holder = server.hold_seats().await;
     let email = test_email();
 
     let response = server.sign_up(&email).await;
 
-    sqlx::query("SELECT pg_advisory_unlock($1)")
-        .bind(SEATS_LOCK)
-        .execute(&mut *holder)
-        .await
-        .unwrap();
-    drop(holder);
+    Server::release_seats(holder).await;
     response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         response.json_value(),
@@ -981,5 +1012,39 @@ async fn a_seat_lock_held_past_the_timeout_answers_busy() {
         })
     );
     assert_eq!(server.users_with_email(&email).await, 0);
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_existing_member_joins_another_organization_without_waiting_for_the_seat_lock() {
+    let server = Server::capped().await;
+    let member = server.join().await;
+    let holder = server.hold_seats().await;
+
+    let response = server.create_organization(&member).await;
+
+    Server::release_seats(holder).await;
+    response.assert_status(StatusCode::CREATED);
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_admission_reads_the_cap_before_its_transaction_takes_the_only_connection() {
+    let server = Server::capped().await;
+    let founder = server.stranded(1).await.remove(0);
+    let (client, pool) = server.single_connection().await;
+
+    let response = client
+        .post_json_auth(
+            ORGANIZATIONS,
+            &json!({ "name": "Single", "slug": format!("single-{}", Uuid::new_v4().simple()) }),
+            &founder.access,
+        )
+        .await;
+
+    drop(client);
+    pool.close().await;
+    response.assert_status(StatusCode::CREATED);
+    assert!(seats::member(server.pool(), founder.id).await.unwrap());
     server.cleanup().await;
 }

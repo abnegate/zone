@@ -17,7 +17,7 @@ use crate::db::users::UserRow;
 use crate::db::{password_reset, refresh_tokens, sessions, users};
 use crate::services::account::{AuthResponse, Credential, Grant, Refusal, provision, session};
 use crate::services::mail::Template;
-use crate::services::members;
+use crate::services::members::{self, Cap};
 use crate::services::sso::enforcement;
 use crate::state::AppState;
 use crate::utils::crypto::hash_token;
@@ -108,7 +108,11 @@ pub async fn register(
         Ok(None) => {}
     }
 
-    if let Err(refusal) = members::check(&state, None).await {
+    let cap = match members::cap(&state).await {
+        Ok(cap) => cap,
+        Err(refusal) => return refusal.into_response(),
+    };
+    if let Err(refusal) = members::check(&state, cap, None).await {
         return refusal.into_response();
     }
 
@@ -126,7 +130,7 @@ pub async fn register(
         Err(error) => return unavailable(&error),
     };
 
-    let user = match enroll(&state, &request, &password_hash, is_admin).await {
+    let user = match enroll(&state, cap, &request, &password_hash, is_admin).await {
         Ok(user) => user,
         Err(refusal) => return *refusal,
     };
@@ -141,12 +145,13 @@ pub async fn register(
 /// the member cap from the moment it commits.
 async fn enroll(
     state: &AppState,
+    cap: Cap,
     request: &RegisterRequest,
     password_hash: &str,
     is_admin: bool,
 ) -> Result<UserRow, Box<Response>> {
     let mut transaction = state.db().begin().await.map_err(rejected)?;
-    members::admit(state, &mut *transaction, None).await?;
+    members::admit(&mut transaction, cap, None).await?;
     let user = provision::insert(
         &mut transaction,
         &request.email,

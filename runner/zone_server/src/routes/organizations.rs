@@ -173,6 +173,11 @@ pub async fn create(
         return refusal(StatusCode::UNAUTHORIZED, "Invalid user ID in token");
     };
 
+    let cap = match members::cap(&state).await {
+        Ok(cap) => cap,
+        Err(refusal) => return refusal.into_response(),
+    };
+
     let mut transaction = match state.db().begin().await {
         Ok(transaction) => transaction,
         Err(error) => {
@@ -181,7 +186,7 @@ pub async fn create(
         }
     };
 
-    if let Err(refusal) = members::admit(&state, &mut *transaction, Some(user_id)).await {
+    if let Err(refusal) = members::admit(&mut transaction, cap, Some(user_id)).await {
         return refusal.into_response();
     }
 
@@ -290,9 +295,13 @@ async fn apply(
     organization: Uuid,
     request: &UpdateOrganizationRequest,
 ) -> Result<Option<organizations::OrganizationRow>, Box<Response>> {
+    let cap = match request.is_active {
+        Some(true) => Some(members::cap(state).await?),
+        _ => None,
+    };
     let mut transaction = state.db().begin().await.map_err(failed)?;
-    if request.is_active == Some(true) {
-        members::reactivate(state, &mut *transaction, organization).await?;
+    if let Some(cap) = cap {
+        members::reactivate(&mut transaction, cap, organization).await?;
     }
     let updated = organizations::update_organization(
         &mut *transaction,
@@ -632,8 +641,9 @@ async fn seat(
 ) -> Result<(OrganizationMemberRow, StatusCode), Box<Response>> {
     let organization = member.organization_id;
     let invited_by = Some(member.user_id);
+    let cap = members::cap(state).await?;
     let mut transaction = state.db().begin().await.map_err(failed)?;
-    members::admit(state, &mut *transaction, Some(target)).await?;
+    members::admit(&mut transaction, cap, Some(target)).await?;
     let existing = organization_members::get_member(&mut *transaction, organization, target)
         .await
         .map_err(failed)?;

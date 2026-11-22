@@ -21,6 +21,7 @@ use zone_core::flag::Flag;
 use crate::services::hosts::Hosts;
 use crate::services::license::renewal;
 use crate::services::login::claude::ROOT_PATH;
+use crate::services::members::ADMISSION_WAIT;
 use crate::services::sso::parse_permit::PARSE_PERMIT_WAIT;
 use crate::workers::evaluation::EvaluationSettings;
 
@@ -163,6 +164,9 @@ pub struct Config {
     pub sso_requests_per_minute: u32,
     /// How long a SAML post waits for a response check to free up before it is refused.
     pub saml_permit_wait: Duration,
+    /// How long an addition at the Community member cap waits for its turn before it is refused
+    /// as busy.
+    pub admission_wait: Duration,
 }
 
 /// The instance-wide default backend.
@@ -1510,6 +1514,7 @@ impl Config {
                 env::var(SSO_REQUESTS_PER_MINUTE).ok(),
             )?,
             saml_permit_wait: PARSE_PERMIT_WAIT,
+            admission_wait: ADMISSION_WAIT,
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
@@ -1568,6 +1573,7 @@ impl std::fmt::Debug for Config {
             .field("trusted_proxies", &self.trusted_proxies)
             .field("sso_requests_per_minute", &self.sso_requests_per_minute)
             .field("saml_permit_wait", &self.saml_permit_wait)
+            .field("admission_wait", &self.admission_wait)
             .finish()
     }
 }
@@ -1745,6 +1751,7 @@ mod tests {
             trusted_proxies: TrustedProxies::default(),
             sso_requests_per_minute: DEFAULT_SSO_REQUESTS_PER_MINUTE,
             saml_permit_wait: PARSE_PERMIT_WAIT,
+            admission_wait: ADMISSION_WAIT,
         }
     }
 
@@ -2591,6 +2598,8 @@ mod tests {
         );
         assert_eq!(config.sso_requests_per_minute, 120);
         assert_eq!(config.saml_permit_wait, PARSE_PERMIT_WAIT);
+        assert_eq!(config.admission_wait, ADMISSION_WAIT);
+        assert_eq!(config.admission_wait, Duration::from_secs(5));
         assert_eq!(config.trusted_proxies, TrustedProxies::default());
 
         environment.set(SSO_REQUESTS_PER_MINUTE, " 30 ");
