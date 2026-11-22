@@ -180,6 +180,7 @@ async fn custom_role(fixture: &Fixture, organization: Uuid, name: &str, scope: S
             id: role.id,
             name: role.name,
         },
+        Creation::Forbidden => panic!("the creator does not hold roles:update"),
         Creation::NameTaken => panic!("{name} is already taken"),
     }
 }
@@ -289,10 +290,10 @@ async fn only_owners_reach_scim_provisioning() {
     let (token, secret) = issued(&fixture, "Okta").await;
     let engineering = group(&fixture, fixture.organization, "Engineering", &[]).await;
 
-    for (who, account) in [
-        ("admin", &admin),
-        ("member", &member),
-        ("stranger", &stranger),
+    for (who, account, needed) in [
+        ("admin", &admin, Permission::ScimUpdate),
+        ("member", &member, Permission::ScimUpdate),
+        ("stranger", &stranger, Permission::OrganizationRead),
     ] {
         let token_body = json!({ "name": "Entra" });
         let mapping_body = json!({ "role": "admin" });
@@ -309,6 +310,11 @@ async fn only_owners_reach_scim_provisioning() {
                 StatusCode::FORBIDDEN,
                 "{who}: {}",
                 response.text()
+            );
+            assert_eq!(
+                response.json_value(),
+                json!({ "error": needed.refusal() }),
+                "{who}"
             );
         }
     }
