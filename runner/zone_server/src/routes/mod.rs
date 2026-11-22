@@ -28,6 +28,7 @@ pub mod pull_requests;
 pub mod refresh_query;
 pub mod releases;
 pub mod roles;
+pub mod scim;
 pub mod sessions;
 pub mod sources;
 pub mod spend;
@@ -156,7 +157,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             SETUP_CALLBACK_PATH,
             get(github::callbacks::setup).head(github::callbacks::refuse),
-        );
+        )
+        // SCIM provisioning (public - a SCIM bearer token of the organization in
+        // the path, checked by the ScimClient extractor)
+        .nest(scim::BASE_PATH, scim::router(state.clone()));
 
     // Protected routes (auth required)
     let protected_routes = Router::new()
