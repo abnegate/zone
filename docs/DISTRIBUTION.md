@@ -147,6 +147,9 @@ An `issued` response is:
 {"token":"<jwt>","access_token":"<jwt>","expires_in":300,"issued_at":"2026-11-23T04:05:06Z"}
 ```
 
+It carries `Cache-Control: no-store`, as RFC 6749 section 5.1 requires of a
+token response, and so does every other `GET` answer, refusals included.
+
 The token is a compact JWS with the header
 `{"alg":"EdDSA","typ":"JWT","kid":"registry-<key id>-<generation>"}` and these
 claims:
@@ -234,8 +237,8 @@ error code and any status without one, they log at `error`, because bundle
 downloads keep failing until you fix the key or the bucket. Storage that can't
 be reached or doesn't answer within 10 seconds logs at `warn` instead.
 
-The `issued` response carries `Cache-Control: no-store`, so no proxy or browser
-keeps the presigned links.
+Every `GET` answer carries `Cache-Control: no-store`, as on `/token`, so no
+proxy or browser keeps the presigned links or a refusal.
 
 ## Rate limits and client addresses
 

@@ -8,7 +8,7 @@ use std::num::NonZeroU32;
 use chrono::{DateTime, TimeDelta, Utc};
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
-use reqwest::header::{ALLOW, CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE};
+use reqwest::header::{ALLOW, CACHE_CONTROL, CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE};
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
@@ -170,6 +170,7 @@ async fn issued(service: &Service, scopes: &[&str]) -> Value {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get(CACHE_CONTROL).unwrap(), "no-store");
     json(response).await
 }
 
@@ -227,6 +228,11 @@ fn pulls(names: &[&str]) -> Value {
 
 async fn assert_unauthorized(response: Response, case: &str) {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{case}");
+    assert_eq!(
+        response.headers().get(CACHE_CONTROL).unwrap(),
+        "no-store",
+        "{case}"
+    );
     assert_eq!(
         response.headers().get(WWW_AUTHENTICATE).unwrap(),
         CHALLENGE,

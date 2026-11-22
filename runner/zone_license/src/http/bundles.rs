@@ -5,7 +5,6 @@ use axum::Json;
 use axum::extract::rejection::{ExtensionRejection, PathRejection};
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::HeaderMap;
-use axum::http::header::CACHE_CONTROL;
 use axum::response::{IntoResponse, Response};
 use tracing::field;
 use uuid::Uuid;
@@ -16,8 +15,6 @@ use crate::http::bundle_outcome::BundleOutcome;
 use crate::http::bundle_response::BundleResponse;
 use crate::http::context::Context;
 use crate::http::distributor::Distributor;
-
-const NO_STORE: &str = "no-store";
 
 /// The version and architecture are parsed only after the gate, and only
 /// parsed values reach S3 or the log, so a hostile path segment never does.
@@ -96,7 +93,7 @@ async fn distribute(
                 %architecture,
                 "Issued bundle download links"
             );
-            (outcome.status(), [(CACHE_CONTROL, NO_STORE)], Json(body)).into_response()
+            (outcome.status(), Json(body)).into_response()
         }
         Ok(Presence::Absent { code }) => {
             let outcome = BundleOutcome::Unknown;

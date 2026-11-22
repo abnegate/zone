@@ -290,6 +290,39 @@ async fn without_a_peer_address_it_fails_closed_and_presigns_nothing() {
 }
 
 #[tokio::test]
+async fn no_answer_from_an_enabled_bundle_route_is_cached() {
+    let storage = storage(ResponseTemplate::new(404)).await;
+    let anonymous = Request::builder().uri(BUNDLE).body(Body::empty()).unwrap();
+    let requests = [
+        (
+            peered(distributed(&storage, DELAY)),
+            anonymous,
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            peered(distributed(&storage, DELAY)),
+            request(Method::GET, BUNDLE),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            peered(distributed(&storage, DELAY)),
+            request(Method::GET, "/bundles/1.4.3-lts/riscv64"),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            distributed(&storage, DELAY),
+            request(Method::GET, BUNDLE),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+    ];
+    for (app, request, expected) in requests {
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), expected);
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store", "{expected}");
+    }
+}
+
+#[tokio::test]
 async fn storage_that_times_out_is_unavailable_and_logged_as_a_warning() {
     let storage = storage(ResponseTemplate::new(206).set_delay(DELAY)).await;
     let app = peered(distributed(&storage, SHORT));

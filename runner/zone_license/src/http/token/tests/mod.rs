@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::connect_info::MockConnectInfo;
-use axum::http::header::{ALLOW, AUTHORIZATION, CONTENT_TYPE};
+use axum::http::header::{ALLOW, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{Method, Request, StatusCode};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -192,6 +192,71 @@ async fn issues_at_the_injected_clock_with_a_fresh_jti_each_time() {
     let jti: Uuid = claims_first["jti"].as_str().unwrap().parse().unwrap();
     assert_eq!(jti.get_version_num(), 4);
     assert_ne!(claims_first["jti"], claims_second["jti"]);
+}
+
+#[tokio::test]
+async fn no_answer_from_an_enabled_token_route_is_cached() {
+    let query = format!("service={SERVICE}&scope={SERVER_PULL}");
+    let requests = [
+        (app(Some(registrar())), get(&query), StatusCode::OK),
+        (
+            app(Some(registrar())),
+            requesting(Method::GET, &query, "garbage"),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            app(Some(registrar())),
+            requesting(Method::GET, &query, &key(Plan::Team)),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            app(Some(registrar())),
+            get("service=other"),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            router(context(Some(registrar()))),
+            get(&query),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+    ];
+    for (app, request, expected) in requests {
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), expected);
+        assert_eq!(
+            response.headers().get(CACHE_CONTROL).unwrap(),
+            "no-store",
+            "{expected}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_limited_token_request_is_not_cached() {
+    let gate = Gate::new(keyring(), Revoked::default(), TrustedProxies::default());
+    let limits = Limits {
+        address: NonZeroU32::MIN,
+        ..Limits::default()
+    };
+    let registrar = Registrar::new(
+        gate,
+        TokenKey::derive(&signer(), generation()),
+        RegistrySettings {
+            service: SERVICE.to_owned(),
+            repositories: Repositories::default(),
+            generation: generation(),
+        },
+        Throttle::new(limits),
+    )
+    .with_clock(now);
+    let app = app(Some(registrar));
+    let query = format!("service={SERVICE}");
+    app.clone().oneshot(get(&query)).await.unwrap();
+
+    let response = app.oneshot(get(&query)).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers().get(CACHE_CONTROL).unwrap(), "no-store");
 }
 
 #[tokio::test]

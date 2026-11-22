@@ -20,12 +20,14 @@ mod skipped;
 mod token;
 mod token_outcome;
 mod token_response;
+mod uncached;
 mod webhook;
 
 use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::middleware::map_response;
 use axum::routing::{get, post};
 
 pub use bundle_link::BundleLink;
@@ -47,6 +49,7 @@ pub use skipped::Skipped;
 pub use token::{SCOPE_PARAMETER, SERVICE_PARAMETER};
 pub use token_outcome::TokenOutcome;
 pub use token_response::TokenResponse;
+pub use uncached::NO_STORE;
 
 pub const WEBHOOK_PATH: &str = "/webhooks/polar";
 pub const RENEW_PATH: &str = "/licenses/renew";
@@ -65,8 +68,14 @@ pub fn router(context: Context) -> Router {
             post(renew::respond).layer(DefaultBodyLimit::max(RENEW_BODY_LIMIT)),
         )
         .route(HEALTH_PATH, get(health::check))
-        .route(TOKEN_PATH, get_only(token::respond))
-        .route(BUNDLES_PATH, get_only(bundles::respond))
+        .route(
+            TOKEN_PATH,
+            get_only(token::respond).layer(map_response(uncached::uncached)),
+        )
+        .route(
+            BUNDLES_PATH,
+            get_only(bundles::respond).layer(map_response(uncached::uncached)),
+        )
         .with_state(Arc::new(context))
 }
 
