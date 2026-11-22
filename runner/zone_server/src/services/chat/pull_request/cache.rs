@@ -9,6 +9,12 @@ use super::status::Status;
 /// panel left open refreshes no faster than this however often it asks.
 const FRESHNESS: Duration = Duration::from_secs(30);
 
+/// How long a merged or closed pull request's status is shown before GitHub
+/// is asked again. Its numbers stopped moving the moment it settled, so there
+/// is no reason to read it as often as one still open: this is the floor a
+/// settled reading gets even when a caller asked for a narrower window.
+const SETTLED_FRESHNESS: Duration = Duration::from_secs(60 * 60);
+
 /// What GitHub last said of each recorded pull request, by its row.
 #[derive(Debug, Default)]
 pub struct StatusCache {
@@ -30,6 +36,11 @@ impl StatusCache {
     fn within_at(&self, id: Uuid, age: Duration, now: Instant) -> Option<Status> {
         let entry = self.entries.get(&id)?;
         let (observed, status) = entry.value();
+        let age = if status.open() {
+            age
+        } else {
+            age.max(SETTLED_FRESHNESS)
+        };
         now.checked_duration_since(*observed)
             .is_some_and(|elapsed| elapsed < age)
             .then(|| status.clone())
@@ -69,6 +80,7 @@ mod tests {
             draft_unavailable: None,
             merge_unavailable: None,
             threads: Some(Threads::default()),
+            comments: Some(0),
             observed_at: Utc::now(),
         }
     }
@@ -93,6 +105,46 @@ mod tests {
             cache.within_at(id, FRESHNESS, later),
             None,
             "a minute-old reading was served as fresh to the panel"
+        );
+    }
+
+    #[test]
+    fn a_settled_status_is_served_long_after_an_open_one_would_have_gone_stale() {
+        let cache = StatusCache::default();
+        let id = Uuid::new_v4();
+        cache.put(
+            id,
+            Status {
+                state: State::Merged,
+                ..status()
+            },
+        );
+        let later = Instant::now()
+            .checked_add(Duration::from_secs(60))
+            .expect("a representable instant");
+
+        assert_eq!(
+            cache
+                .within_at(id, FRESHNESS, later)
+                .map(|served| served.title),
+            Some(status().title),
+            "a minute-old merged status was not served under the settled floor"
+        );
+    }
+
+    #[test]
+    fn an_open_status_keeps_the_thirty_second_window_whatever_age_is_asked_for() {
+        let cache = StatusCache::default();
+        let id = Uuid::new_v4();
+        cache.put(id, status());
+        let later = Instant::now()
+            .checked_add(Duration::from_secs(60))
+            .expect("a representable instant");
+
+        assert_eq!(
+            cache.within_at(id, FRESHNESS, later),
+            None,
+            "a minute-old open status was served under the settled floor"
         );
     }
 
