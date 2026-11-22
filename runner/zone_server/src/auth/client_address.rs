@@ -50,7 +50,8 @@ where
 
 /// An untrusted peer is the client, whatever it forwards. Behind a trusted one, `X-Forwarded-For`
 /// is walked from the right past every trusted hop; the first untrusted hop is the client, the
-/// leftmost when every hop is trusted, and the last trusted hop when an entry is not an address.
+/// leftmost when every hop is trusted, and the last trusted hop when an entry is not an address
+/// (with or without a port).
 pub fn resolve(peer: IpAddr, headers: &HeaderMap, trusted: &TrustedProxies) -> IpAddr {
     let mut client = peer.to_canonical();
     if !trusted.trusts(client) {
@@ -81,17 +82,21 @@ fn hops(headers: &HeaderMap) -> Vec<Option<IpAddr>> {
     let mut hops = Vec::new();
     for value in headers.get_all(FORWARDED_FOR) {
         match value.to_str() {
-            Ok(value) => hops.extend(value.split(SEPARATOR).map(|entry| {
-                entry
-                    .trim()
-                    .parse::<IpAddr>()
-                    .ok()
-                    .map(|hop| hop.to_canonical())
-            })),
+            Ok(value) => hops.extend(value.split(SEPARATOR).map(hop)),
             Err(_) => hops.push(None),
         }
     }
     hops
+}
+
+/// Azure Application Gateway and IIS ARR forward the client's port with its address.
+fn hop(entry: &str) -> Option<IpAddr> {
+    let entry = entry.trim();
+    entry
+        .parse::<IpAddr>()
+        .or_else(|_| entry.parse::<SocketAddr>().map(|address| address.ip()))
+        .ok()
+        .map(|hop| hop.to_canonical())
 }
 
 #[cfg(test)]
@@ -197,11 +202,32 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_with_a_port_is_its_address() {
+        for (entry, client) in [
+            ("198.51.100.7:4711", "198.51.100.7"),
+            ("[2001:db8::1]:443", "2001:db8::1"),
+            ("[::ffff:198.51.100.7]:443", "198.51.100.7"),
+        ] {
+            assert_eq!(resolved(LOOPBACK, &[entry]), address(client), "{entry}");
+        }
+        assert_eq!(
+            resolve(
+                address("172.31.0.3"),
+                &forwarded(&["198.51.100.7:4711, 172.31.0.9:8080"]),
+                &edge(),
+            ),
+            address("198.51.100.7")
+        );
+    }
+
+    #[test]
     fn an_unparsable_entry_stops_at_the_last_trusted_hop() {
         for garbage in [
             "unknown",
-            "198.51.100.7:4711",
-            "[2001:db8::1]:443",
+            "198.51.100.7:port",
+            "2001:db8::1:443:x",
+            "[2001:db8::1]",
+            "198.51.100.7:99999",
             "",
             "_hidden",
             "198.51.100.7 extra",
