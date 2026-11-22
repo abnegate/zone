@@ -35,7 +35,7 @@ use crate::config::{Config, ModelBackend};
 use crate::db::DbResult;
 use crate::pull::PullRegistry;
 use crate::services::chat::pull_request::StatusCache;
-use crate::services::fleet::Identity;
+use crate::services::fleet::{Flight, Identity};
 use crate::services::github::snapshots::Snapshots;
 use crate::services::github_app::Provider;
 use crate::services::license::renewal;
@@ -162,6 +162,7 @@ struct AppStateInner {
     pub instance: Uuid,
     pub runner: RwLock<Option<Uuid>>,
     pub identity: OnceLock<Identity>,
+    pub registration: Flight,
     /// Whether the Community member cap applies, which a test build leaves off
     /// until a test opts in with [`AppState::cap_members`].
     #[cfg(any(test, feature = "testing"))]
@@ -304,6 +305,7 @@ impl AppState {
                 instance: Uuid::new_v4(),
                 runner: RwLock::new(None),
                 identity: OnceLock::new(),
+                registration: Flight::default(),
                 #[cfg(any(test, feature = "testing"))]
                 capped: AtomicBool::new(false),
             }),
@@ -337,6 +339,11 @@ impl AppState {
             .runner
             .write()
             .unwrap_or_else(PoisonError::into_inner) = Some(runner);
+    }
+
+    /// The one lazy registration as a runner that concurrent claims share.
+    pub fn registration(&self) -> &Flight {
+        &self.inner.registration
     }
 
     /// What this process registers as a runner with: [`Identity::detected`] unless

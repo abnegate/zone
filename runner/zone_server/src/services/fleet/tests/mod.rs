@@ -1,4 +1,11 @@
+use std::future::Future;
+use std::io::Write;
+use std::sync::{Arc, Mutex};
+
 use chrono::{TimeDelta, Utc};
+use futures::future::join_all;
+use tracing::subscriber::NoSubscriber;
+use tracing::{Dispatch, Level};
 use uuid::Uuid;
 use zone_enterprise::fleet::Labels;
 use zone_enterprise::{Keyring, Payload, Plan, SigningKey, TrustedKey, sign};
@@ -13,6 +20,14 @@ use crate::services::fleet::{Identity, claimant, registration};
 use crate::state::{AppState, test_config, unreachable_pool};
 
 const KEY_ID: &str = "test-1";
+
+fn signing() -> SigningKey {
+    SigningKey::from_bytes(&[0x11; 32])
+}
+
+fn keyring() -> Keyring {
+    Keyring::new([TrustedKey::new(KEY_ID, signing().verifying_key().to_bytes()).unwrap()]).unwrap()
+}
 
 pub(crate) struct Server {
     pub(crate) database: Database,
@@ -29,11 +44,8 @@ impl Server {
             version: version(),
             labels: Labels::parse_list("gpu").unwrap(),
         });
-        let signing = SigningKey::from_bytes(&[0x11; 32]);
-        state.install_keyring(
-            Keyring::new([TrustedKey::new(KEY_ID, signing.verifying_key().to_bytes()).unwrap()])
-                .unwrap(),
-        );
+        let signing = signing();
+        state.install_keyring(keyring());
         if let Some(plan) = plan {
             let now = Utc::now();
             let license = sign(
@@ -54,6 +66,20 @@ impl Server {
                 .expect("the license");
         }
         Self { database, state }
+    }
+
+    /// Another server process on this server's database, under its license, with an identity
+    /// of its own that carries `labels`. It hasn't registered.
+    pub(crate) fn peer(&self, labels: &str) -> AppState {
+        let state = AppState::new(test_config(), self.database.pool.clone(), None);
+        state.disable_mcp();
+        state.set_identity(Identity {
+            name: format!("runner-{}", Uuid::new_v4().simple()),
+            version: version(),
+            labels: Labels::parse_list(labels).unwrap(),
+        });
+        state.install_keyring(keyring());
+        state
     }
 
     async fn registered(&self) -> i64 {
@@ -188,4 +214,84 @@ async fn an_unreadable_license_enforces_and_an_unregistered_claimant_has_no_runn
         }
     );
     assert_eq!(state.runner(), None);
+}
+
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Captured {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("the captured log")
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// What `work` logs, run to its end on a runtime of its own.
+pub(crate) fn logged(work: impl Future<Output = ()>) -> String {
+    // A second registered dispatcher makes every thread consult the capture, as in
+    // `auth::entitlement`'s tests.
+    let _bystander = Dispatch::new(NoSubscriber::default());
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_max_level(Level::INFO)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(work)
+    });
+    String::from_utf8_lossy(&captured.0.lock().expect("the captured log")).into_owned()
+}
+
+#[test]
+fn concurrent_claims_register_once_and_announce_it_once() {
+    let log = logged(async {
+        let server = Server::new(Some(Plan::Enterprise)).await;
+
+        let claims = join_all((0..8).map(|_| claimant(&server.state))).await;
+
+        let runner = server.state.runner().expect("a registered runner");
+        assert!(
+            claims.iter().all(|claim| claim.runner == Some(runner)),
+            "{claims:?}"
+        );
+        server.remove().await;
+    });
+
+    assert_eq!(log.matches("Registered as a runner").count(), 1, "{log}");
+}
+
+#[test]
+fn concurrent_claims_that_cannot_register_try_once_and_warn_once() {
+    let log = logged(async {
+        let state = AppState::new(test_config(), unreachable_pool(), None);
+        state.disable_mcp();
+
+        let claims = join_all((0..8).map(|_| claimant(&state))).await;
+
+        assert!(
+            claims
+                .iter()
+                .all(|claim| claim.enforced && claim.runner.is_none()),
+            "{claims:?}"
+        );
+    });
+
+    assert_eq!(
+        log.matches("Could not register as a runner").count(),
+        1,
+        "{log}"
+    );
 }
