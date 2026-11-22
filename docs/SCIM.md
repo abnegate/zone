@@ -397,7 +397,12 @@ affects them:
 - they're created, or added to or removed from a group;
 - a group they're in is mapped, remapped or unmapped, or a mapped group
   they're in is deleted;
+- the custom role a group they're in maps to is deleted;
 - they're reactivated.
+
+A group change and the roles it settles are saved together, and every
+member a request names is worked out again, even one already in or out of
+the group, so a retried request settles roles a failed one left behind.
 
 Some consequences:
 
@@ -409,6 +414,10 @@ Some consequences:
 - **Editing a mapped custom role's permissions** applies at once, to
   everyone who holds the role. Which group's role wins is settled again on
   each member's next SCIM change.
+- **Deleting a mapped custom role**, which Zone allows only once nobody
+  holds it, leaves its groups unmapped. Each unmapping is audited as
+  `scim_group.unmapped` by whoever deleted the role, and the groups' members
+  are worked out again.
 - **A role set in the console** for a member SCIM governs lasts until their
   next SCIM change, which applies the mapping again.
 - **Owners** are never changed by SCIM, and SCIM never makes anyone an
@@ -515,11 +524,20 @@ the usual SSO rules from the start.
 
 ## Rate limit
 
-Each organization can make 600 SCIM requests a minute, across all its
-tokens. Zone counts a request only after its token is accepted, so requests
-with a wrong token don't use up the budget. Over the limit, Zone answers 429
-with `scimType` `tooMany` and a `Retry-After` header giving the seconds to
-wait. Okta and Entra slow down and retry.
+Each organization can make 600 SCIM requests a minute to each server
+replica, across all its tokens. Zone counts a request against the
+organization only after its token is accepted, so requests with a wrong
+token don't use up the budget.
+
+Before it reads a token, Zone also limits each client address to 1,200 SCIM
+requests a minute per replica, whatever organization or token they name, so
+a flood of guessed tokens can't keep the database busy. The address is the
+connecting peer, or behind a proxy listed in `ZONE_TRUSTED_PROXIES` the
+client that proxy saw. IPv6 clients are counted by their /64.
+
+Over either limit, Zone answers 429 with `scimType` `tooMany` and a
+`Retry-After` header giving the seconds to wait. Okta and Entra slow down
+and retry.
 
 ## Requests
 
@@ -557,8 +575,9 @@ core schema URN, such as `urn:ietf:params:scim:schemas:core:2.0:User:userName`.
 | Users | `id`, `userName` (ignoring case), `externalId`, `displayName` |
 | Groups | `id`, `displayName`, `externalId`, and membership as `members eq "{user_id}"`, `members.value eq "{user_id}"` or `members[value eq "{user_id}"]` |
 
-Values may be quoted, with `\"`, `\\` and `\/` as escapes, or bare words.
-For example:
+Values may be quoted JSON strings, with any JSON escape, or bare words. An
+unquoted `null` is refused with `invalidFilter`; quote it to compare with
+the text `null`. For example:
 
 ```
 GET /Users?filter=userName eq "jane@acme.com"
@@ -612,10 +631,17 @@ value that isn't an ID, answers 400 `invalidValue` and changes nothing.
 that isn't an ID, does nothing.
 
 Zone accepts and ignores paths for attributes it doesn't store, including
-the enterprise extension. It refuses with 400: a path it can't read
-(`invalidPath`), `remove` without a path (`noTarget`), and removing a
+the enterprise extension. It refuses with 400: a path it can't read,
+including an empty path, an empty sub-attribute such as `name.`, and one
+nested deeper than a sub-attribute such as `name.givenName.x`
+(`invalidPath`); `remove` without a path (`noTarget`); and removing a
 required attribute, `userName`, `active` or `emails` on a user or
 `displayName` on a group (`mutability`).
+
+Attribute names in a path-less `value` are case-insensitive; when one
+object names an attribute twice in different case, the later one wins.
+`replace` of `name` with `null` clears the given and family names. An
+email entry whose `value` is `null` is skipped.
 
 `PUT` on a group sets its `displayName` and `externalId`, and replaces its
 members only when the request includes `members`.
@@ -668,8 +694,8 @@ The SCIM provisioning section shows when the organization's tokens were
 last used, and the 20 most recent failed requests: each one's method, route
 (such as `/api/scim/v2/organizations/{org_id}/Users/{user_id}`), status,
 `scimType`, detail and time. Zone records every failed request whose token
-it accepted, requests refused by the [rate limit](#rate-limit) included, and
-keeps them for 30 days. A request with a wrong or missing token isn't
+it accepted, and keeps them for 30 days. Of the requests the organization's
+[rate limit](#rate-limit) refuses, it records the first in each minute. A request with a wrong or missing token isn't
 recorded, because Zone can't tell who sent it; look at the
 identity provider's logs instead (Okta's **View Logs**, Entra's
 **Provisioning logs**).
@@ -684,7 +710,7 @@ identity provider's logs instead (Okta's **View Logs**, Entra's
 | Entra's lookups fail with `invalidFilter` | The matching attribute is `userName`, not an email attribute. |
 | A group's members don't get its role | The group is mapped. The identity provider has created or updated the members. They aren't owners. Another mapped group they're in may win. |
 | Someone removed in Zone keeps coming back | Remove them at the identity provider; it adds people it still assigns. |
-| Requests fail with 429 | The provider is sending more than 600 requests a minute. It retries after `Retry-After`. |
+| Requests fail with 429 | The provider is sending more than 600 requests a minute for the organization, or more than 1,200 from one address, to one replica. It retries after `Retry-After`. |
 | Provisioning stopped after a token change | Paste the new secret into the provider. A rotated secret stops working at once. |
 
 ## Audit log
@@ -727,7 +753,7 @@ the actor:
 | `scim_token.rotated` | A token is rotated | `scim_token` |
 | `scim_token.revoked` | A token is revoked | `scim_token` |
 | `scim_group.mapped` | A group is mapped to a role, or its mapping changes | `scim_group` |
-| `scim_group.unmapped` | A group's mapping is removed | `scim_group` |
+| `scim_group.unmapped` | A group's mapping is removed, or the custom role it maps to is deleted | `scim_group` |
 
 ## Console API
 
