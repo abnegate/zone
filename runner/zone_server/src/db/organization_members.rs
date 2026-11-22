@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use super::DbResult;
 use super::custom_roles::{self, Assignment, Membership, Reference, Summary};
+use super::suspensions::{self, Suspension};
 use crate::auth::{Grant, Permission, Scope};
 
 /// Organization role hierarchy
@@ -149,21 +150,24 @@ where
     })
 }
 
-/// Remove a member from an organization (set inactive)
+/// Remove a member from an organization, suspending their workspace
+/// memberships in it. Returns whether they had a membership to remove.
 pub async fn remove_member(pool: &PgPool, organization_id: Uuid, user_id: Uuid) -> DbResult<bool> {
-    let result = sqlx::query!(
-        r#"
-        UPDATE organization_members
-        SET is_active = FALSE, updated_at = NOW()
-        WHERE organization_id = $1 AND user_id = $2
-        "#,
-        organization_id,
-        user_id
+    let mut transaction = pool.begin().await?;
+    lock_owners(&mut transaction, organization_id).await?;
+    let member: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM organization_members WHERE organization_id = $1 AND user_id = $2 FOR UPDATE",
     )
-    .execute(pool)
+    .bind(organization_id)
+    .bind(user_id)
+    .fetch_optional(&mut *transaction)
     .await?;
-
-    Ok(result.rows_affected() > 0)
+    if member.is_none() {
+        return Ok(false);
+    }
+    suspensions::suspend(&mut transaction, organization_id, user_id).await?;
+    transaction.commit().await?;
+    Ok(true)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -272,7 +276,7 @@ fn outranked(caller: &Grant, target: &Membership<OrgRole>) -> bool {
 
 /// The organization's active owners, held for the length of the transaction so
 /// a count taken from them still describes the table when the update lands.
-async fn lock_owners(
+pub async fn lock_owners(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     organization_id: Uuid,
 ) -> DbResult<Vec<Uuid>> {
@@ -292,7 +296,7 @@ async fn lock_owners(
 /// Outcome of a removal that must leave an owner seated.
 #[derive(Debug)]
 pub enum Removal {
-    Removed,
+    Removed(Suspension),
     Revoked,
     Forbidden,
     Uncovered,
@@ -337,25 +341,9 @@ pub async fn remove_guarded(
         return Ok(Removal::LastOwner);
     }
 
-    let result = sqlx::query(
-        r#"
-        UPDATE organization_members
-        SET is_active = FALSE, updated_at = NOW()
-        WHERE organization_id = $1 AND user_id = $2 AND is_active = TRUE
-        "#,
-    )
-    .bind(organization_id)
-    .bind(user_id)
-    .execute(&mut *transaction)
-    .await?;
-
+    let suspension = suspensions::suspend(&mut transaction, organization_id, user_id).await?;
     transaction.commit().await?;
-
-    if result.rows_affected() > 0 {
-        Ok(Removal::Removed)
-    } else {
-        Ok(Removal::Missing)
-    }
+    Ok(Removal::Removed(suspension))
 }
 
 /// Get a member by organization and user ID

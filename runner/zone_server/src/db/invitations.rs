@@ -4,7 +4,7 @@
 //! Tokens are hashed before storage for security.
 
 use chrono::{DateTime, Duration, Utc};
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool, Postgres};
 use uuid::Uuid;
 
 use super::DbResult;
@@ -163,6 +163,8 @@ pub async fn accept_invitation(pool: &PgPool, token: &str, user_id: Uuid) -> DbR
         .parse()
         .unwrap_or(super::organization_members::OrgRole::Member);
 
+    super::suspensions::forget(&mut *tx, invitation.organization_id, user_id).await?;
+
     // Use reactivate_member to handle cases where user was previously a member
     super::organization_members::reactivate_member(
         &mut *tx,
@@ -250,6 +252,28 @@ pub async fn revoke_invitation(pool: &PgPool, invitation_id: Uuid) -> DbResult<(
     }
 
     Ok(())
+}
+
+/// Deletes every invitation to an organization still waiting on `email`,
+/// expired or not, whatever case the email was invited in.
+pub async fn revoke_pending<'a, E>(executor: E, organization_id: Uuid, email: &str) -> DbResult<u64>
+where
+    E: Executor<'a, Database = Postgres>,
+{
+    let result = sqlx::query(
+        r#"
+        DELETE FROM invitations
+        WHERE organization_id = $1
+          AND lower(email) = lower($2)
+          AND accepted_at IS NULL
+        "#,
+    )
+    .bind(organization_id)
+    .bind(email)
+    .execute(executor)
+    .await?;
+
+    Ok(result.rows_affected())
 }
 
 /// Get a pending invitation for a specific email in an organization

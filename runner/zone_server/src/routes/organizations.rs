@@ -20,6 +20,7 @@ use crate::db::organization_members::{
     self, Assigned, MemberWithUser, OrgRole, OrganizationMemberRow, Removal as MemberRemoval,
     RoleChange,
 };
+use crate::db::suspensions::{self, Successor};
 use crate::db::{organizations, users, workspaces};
 use crate::services::login::devices;
 use crate::services::members;
@@ -507,6 +508,24 @@ async fn audit_member(
     .await;
 }
 
+async fn audit_successor(state: &AppState, actor: &OrganizationMember, successor: &Successor) {
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: Some(actor.organization_id),
+            workspace_id: Some(successor.workspace_id),
+            actor_id: actor.user_id,
+            actor_email: &actor.email,
+            action: actions::WORKSPACE_OWNER_SEATED,
+            resource_type: resources::WORKSPACE,
+            resource_id: Some(successor.workspace_id),
+            old_values: None,
+            new_values: Some(serde_json::json!({ "user_id": successor.user_id })),
+        },
+    )
+    .await;
+}
+
 /// Add member request. The console's organization form names the invitee by
 /// email, the workspace form and the API's own callers by id, so either
 /// identifies the member and exactly one must be given.
@@ -605,14 +624,7 @@ pub async fn add_member(
                 );
             }
             Ok(Some(_)) => (
-                organization_members::reactivate_member(
-                    state.db(),
-                    member.organization_id,
-                    target,
-                    role,
-                    Some(member.user_id),
-                )
-                .await,
+                readmit(&state, member.organization_id, target, role, member.user_id).await,
                 StatusCode::OK,
             ),
             Ok(None) => (
@@ -652,6 +664,29 @@ pub async fn add_member(
             internal()
         }
     }
+}
+
+/// Reactivates a former member as a newcomer: the workspace access and roles
+/// they held before they were removed stay with the removal.
+async fn readmit(
+    state: &AppState,
+    organization_id: Uuid,
+    user_id: Uuid,
+    role: OrgRole,
+    invited_by: Uuid,
+) -> DbResult<OrganizationMemberRow> {
+    let mut transaction = state.db().begin().await?;
+    suspensions::forget(&mut *transaction, organization_id, user_id).await?;
+    let row = organization_members::reactivate_member(
+        &mut *transaction,
+        organization_id,
+        user_id,
+        role,
+        Some(invited_by),
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(row)
 }
 
 #[derive(Debug, Deserialize)]
@@ -749,8 +784,14 @@ pub async fn remove_member(
     )
     .await
     {
-        Ok(MemberRemoval::Removed) => {
+        Ok(MemberRemoval::Removed(suspension)) => {
             audit_member(&state, &member, actions::MEMBER_REMOVED, path.user_id, None).await;
+            for successor in &suspension.successors {
+                audit_successor(&state, &member, successor).await;
+            }
+            if let Err(error) = members::halt(&state, member.organization_id, path.user_id).await {
+                tracing::error!(%error, user_id = %path.user_id, "Failed to halt a removed member's running work");
+            }
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(MemberRemoval::Revoked) => revoked(Permission::MembersDelete).into_response(),

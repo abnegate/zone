@@ -701,7 +701,7 @@ struct MembershipRow {
 /// The workspace's active admins and owners, held for the length of a
 /// transaction so a count taken from them still describes the table when the
 /// update lands.
-struct Privileged {
+pub(crate) struct Privileged {
     all: Vec<Uuid>,
     owners: Vec<Uuid>,
 }
@@ -761,8 +761,8 @@ fn outranked(caller: &Grant, target: &Membership<WorkspaceRole>) -> bool {
     target.role >= WorkspaceRole::Admin && !caller.allows(Permission::WorkspaceAdministratorsUpdate)
 }
 
-async fn lock_privileged(
-    transaction: &mut sqlx::Transaction<'_, Postgres>,
+pub(crate) async fn lock_privileged(
+    connection: &mut PgConnection,
     workspace_id: Uuid,
 ) -> DbResult<Privileged> {
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
@@ -775,7 +775,7 @@ async fn lock_privileged(
         "#,
     )
     .bind(workspace_id)
-    .fetch_all(&mut **transaction)
+    .fetch_all(connection)
     .await?;
 
     Ok(Privileged {
@@ -786,6 +786,83 @@ async fn lock_privileged(
             .collect(),
         all: rows.into_iter().map(|(user_id, _)| user_id).collect(),
     })
+}
+
+/// Seats an owner in an active workspace left without one, and returns who.
+///
+/// The candidate is the active member who is also an active member of the
+/// organization, preferring whoever created the workspace (nobody invited
+/// them), then admins over members over viewers, then the earliest to join.
+/// With nobody to seat the workspace stays without an owner. A custom role
+/// gives way to the owner role.
+pub async fn seat_successor(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+) -> DbResult<Option<Uuid>> {
+    sqlx::query(
+        r#"
+        SELECT owner.id
+        FROM organization_members AS owner
+        JOIN workspaces AS workspace ON workspace.organization_id = owner.organization_id
+        WHERE workspace.id = $1 AND owner.role = 'owner' AND owner.is_active
+        FOR UPDATE OF owner
+        "#,
+    )
+    .bind(workspace_id)
+    .execute(&mut *connection)
+    .await?;
+    lock_privileged(connection, workspace_id).await?;
+
+    let candidate: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT candidate.id
+        FROM workspace_members AS candidate
+        JOIN workspaces AS workspace ON workspace.id = candidate.workspace_id
+        WHERE candidate.workspace_id = $1
+          AND candidate.is_active
+          AND workspace.is_active
+          AND EXISTS (
+              SELECT 1
+              FROM organization_members AS membership
+              WHERE membership.organization_id = workspace.organization_id
+                AND membership.user_id = candidate.user_id
+                AND membership.is_active
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM workspace_members AS existing
+              WHERE existing.workspace_id = candidate.workspace_id
+                AND existing.is_active
+                AND existing.role = 'owner'
+          )
+        ORDER BY
+            (candidate.invited_by IS NULL) DESC,
+            CASE candidate.role
+                WHEN 'admin' THEN 0
+                WHEN 'member' THEN 1
+                WHEN 'viewer' THEN 2
+                ELSE 3
+            END,
+            candidate.created_at,
+            candidate.id
+        LIMIT 1
+        FOR UPDATE OF candidate
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(candidate) = candidate else {
+        return Ok(None);
+    };
+
+    sqlx::query_scalar(
+        "UPDATE workspace_members SET role = 'owner', custom_role_id = NULL, updated_at = NOW() \
+         WHERE id = $1 RETURNING user_id",
+    )
+    .bind(candidate)
+    .fetch_optional(connection)
+    .await
 }
 
 /// A role change as it landed: the updated row, and what it holds as read

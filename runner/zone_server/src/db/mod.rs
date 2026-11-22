@@ -47,6 +47,7 @@ pub mod sessions;
 pub mod sources;
 pub mod spend;
 pub mod sso;
+pub mod suspensions;
 pub mod sync_config;
 pub mod task_access;
 pub mod task_tool_calls;

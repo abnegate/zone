@@ -78,6 +78,7 @@ pub mod actions {
     pub const WORKSPACE_CREATED: &str = "workspace.created";
     pub const WORKSPACE_UPDATED: &str = "workspace.updated";
     pub const WORKSPACE_DELETED: &str = "workspace.deleted";
+    pub const WORKSPACE_OWNER_SEATED: &str = "workspace.owner_seated";
 
     pub const PROJECT_CREATED: &str = "project.created";
     pub const PROJECT_UPDATED: &str = "project.updated";

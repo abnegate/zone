@@ -718,6 +718,28 @@ CREATE TABLE audit_deliveries (
     CONSTRAINT audit_deliveries_batch_check CHECK (((batch_transaction_id IS NULL) = (batch_sequence IS NULL)))
 );
 
+CREATE TABLE organization_suspensions (
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role text NOT NULL,
+    custom_role_id uuid REFERENCES custom_roles(id) ON DELETE SET NULL,
+    suspended_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (organization_id, user_id),
+    CONSTRAINT organization_suspensions_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text])))
+);
+
+CREATE TABLE workspace_suspensions (
+    workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    role text NOT NULL,
+    custom_role_id uuid REFERENCES custom_roles(id) ON DELETE SET NULL,
+    suspended_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (workspace_id, user_id),
+    CONSTRAINT workspace_suspensions_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text, 'viewer'::text])))
+);
+CREATE INDEX workspace_suspensions_member_idx ON workspace_suspensions (organization_id, user_id);
+
 CREATE TABLE audit_logs (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     organization_id uuid REFERENCES organizations(id) ON DELETE SET NULL,

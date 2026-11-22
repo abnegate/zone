@@ -115,6 +115,7 @@ mod model_permissions;
 mod model_setup;
 mod models;
 mod organization_console_contract;
+mod organization_deprovisioning;
 mod organization_members;
 mod password_reset;
 mod policy_chat;
