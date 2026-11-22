@@ -2,6 +2,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::scim::error::Error;
+use crate::scim::folded::Folded;
 use crate::scim::op::Op;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -15,7 +16,7 @@ pub struct Operation {
 
 impl Operation {
     pub(crate) fn path(&self) -> Option<&str> {
-        self.path.as_deref().filter(|path| !path.trim().is_empty())
+        self.path.as_deref()
     }
 
     pub(crate) fn required_value(&self) -> Result<&Value, Error> {
@@ -28,5 +29,5 @@ impl Operation {
 fn present_even_when_null<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Value>, D::Error> {
-    Value::deserialize(deserializer).map(Some)
+    Folded::deserialize(deserializer).map(|Folded(value)| Some(value))
 }

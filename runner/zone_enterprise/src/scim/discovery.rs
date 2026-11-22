@@ -127,9 +127,9 @@ fn user_schema() -> Value {
             ]),
             boolean("active", "Whether the member can use the organization. False suspends the membership."),
             complex("groups", "The groups the member belongs to.", true, READ_ONLY, vec![
-                string("value", "The group's id.", false, NOT_UNIQUE),
+                read_only(string("value", "The group's id.", false, NOT_UNIQUE)),
                 reference("$ref", "The group's URI.", "Group"),
-                string("display", "The group's display name.", false, NOT_UNIQUE),
+                read_only(string("display", "The group's display name.", false, NOT_UNIQUE)),
             ]),
         ],
         "meta": { "resourceType": SCHEMA_RESOURCE },
@@ -166,6 +166,11 @@ fn string(name: &str, description: &str, required: bool, uniqueness: &str) -> Va
         "returned": "default",
         "uniqueness": uniqueness,
     })
+}
+
+fn read_only(mut attribute: Value) -> Value {
+    attribute["mutability"] = json!(READ_ONLY);
+    attribute
 }
 
 fn boolean(name: &str, description: &str) -> Value {

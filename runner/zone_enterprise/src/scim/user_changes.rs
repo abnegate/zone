@@ -117,6 +117,9 @@ impl UserChanges {
     }
 
     fn assign_name(&mut self, value: &Value) -> Result<(), Error> {
+        if value.is_null() {
+            return self.remove(&Target::Name);
+        }
         let object = value
             .as_object()
             .ok_or_else(|| Error::InvalidValue("name must be an object.".to_owned()))?;

@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::scim::{
     Attribute, Email, Error, Failure, Filter, Flag, GroupChanges, GroupDocument, GroupResource,
     ListQuery, ListResponse, MemberChanges, MemberReference, Meta, Name, Op, Page, PatchRequest,
-    ScimType, Target, UserChanges, UserDocument, UserResource, discovery, parse_filter, urn,
+    ScimType, Target, UserChanges, UserDocument, UserResource, discovery, urn,
 };
 
 const USER: &str = "2819c223-7f76-453a-919d-413861904646";
@@ -119,7 +119,7 @@ fn equals(attribute: Attribute, value: &str) -> Filter {
 }
 
 fn refused_filter(input: &str) -> String {
-    match parse_filter(input) {
+    match Filter::parse(input) {
         Err(Error::InvalidFilter(detail)) => detail,
         other => panic!("{input} should be refused as an invalid filter, got {other:?}"),
     }
@@ -457,32 +457,31 @@ fn every_entra_query_parses() {
 #[test]
 fn filters_accept_eq_and_and_in_any_case() {
     assert_eq!(
-        parse_filter("userName eq \"bjensen\""),
+        Filter::parse("userName eq \"bjensen\""),
         Ok(equals(Attribute::UserName, "bjensen"))
     );
     assert_eq!(
-        parse_filter("USERNAME EQ \"bjensen\""),
+        Filter::parse("USERNAME EQ \"bjensen\""),
         Ok(equals(Attribute::UserName, "bjensen"))
     );
     assert_eq!(
-        parse_filter("externalId eq \"a\" AND displayName Eq \"b\" and id eq \"c\""),
+        Filter::parse("externalId eq \"a\" AND displayName Eq \"b\" and id eq \"c\""),
         Ok(Filter::And(vec![
             equals(Attribute::ExternalId, "a"),
             equals(Attribute::DisplayName, "b"),
             equals(Attribute::Id, "c"),
         ]))
     );
-    assert_eq!(Filter::parse("id eq \"c\""), parse_filter("id eq \"c\""));
 }
 
 #[test]
 fn filters_accept_urn_qualified_attributes() {
     assert_eq!(
-        parse_filter("urn:ietf:params:scim:schemas:core:2.0:User:userName eq \"bjensen\""),
+        Filter::parse("urn:ietf:params:scim:schemas:core:2.0:User:userName eq \"bjensen\""),
         Ok(equals(Attribute::UserName, "bjensen"))
     );
     assert_eq!(
-        parse_filter("urn:ietf:params:scim:schemas:core:2.0:Group:displayName eq \"Admins\""),
+        Filter::parse("urn:ietf:params:scim:schemas:core:2.0:Group:displayName eq \"Admins\""),
         Ok(equals(Attribute::DisplayName, "Admins"))
     );
 }
@@ -497,13 +496,13 @@ fn filters_accept_every_member_form() {
         "members eq u",
     ] {
         assert_eq!(
-            parse_filter(input),
+            Filter::parse(input),
             Ok(Filter::Member("u".to_owned())),
             "{input}"
         );
     }
     assert_eq!(
-        parse_filter("id eq \"g\" and members[value eq \"u\"]"),
+        Filter::parse("id eq \"g\" and members[value eq \"u\"]"),
         Ok(Filter::And(vec![
             equals(Attribute::Id, "g"),
             Filter::Member("u".to_owned())
@@ -514,7 +513,7 @@ fn filters_accept_every_member_form() {
 #[test]
 fn filter_strings_unescape_quotes_and_backslashes() {
     assert_eq!(
-        parse_filter(r#"userName eq "a\"b\\c""#),
+        Filter::parse(r#"userName eq "a\"b\\c""#),
         Ok(equals(Attribute::UserName, "a\"b\\c"))
     );
 }
@@ -522,15 +521,15 @@ fn filter_strings_unescape_quotes_and_backslashes() {
 #[test]
 fn injection_shaped_values_stay_literal() {
     assert_eq!(
-        parse_filter("userName eq \"x' OR 1=1 --\""),
+        Filter::parse("userName eq \"x' OR 1=1 --\""),
         Ok(equals(Attribute::UserName, "x' OR 1=1 --"))
     );
     assert_eq!(
-        parse_filter(r#"userName eq "x\" or userName eq \"y""#),
+        Filter::parse(r#"userName eq "x\" or userName eq \"y""#),
         Ok(equals(Attribute::UserName, "x\" or userName eq \"y"))
     );
     assert_eq!(
-        parse_filter("displayName eq \"'; DROP TABLE users; --\""),
+        Filter::parse("displayName eq \"'; DROP TABLE users; --\""),
         Ok(equals(Attribute::DisplayName, "'; DROP TABLE users; --"))
     );
 }
@@ -558,7 +557,7 @@ fn filters_refuse_what_zone_does_not_support() {
         "userName",
         "userName eq",
         "userName eq \"a",
-        "userName eq \"a\\n\"",
+        "userName eq \"a\\x\"",
         "userName eq \"a\" \"b\"",
         "userName eq \"a\" and",
         "and userName eq \"a\"",
@@ -569,7 +568,7 @@ fn filters_refuse_what_zone_does_not_support() {
 
 #[test]
 fn a_refused_filter_answers_400_invalid_filter() {
-    let error = parse_filter("userName co \"a\"").unwrap_err();
+    let error = Filter::parse("userName co \"a\"").unwrap_err();
     assert_eq!(error.status(), 400);
     assert_eq!(error.scim_type(), Some(ScimType::InvalidFilter));
     assert_eq!(
@@ -895,7 +894,14 @@ fn targets_refuse_malformed_paths() {
         "name.givenName[value eq \"a\"]",
         "display Name",
         "[value eq \"a\"]",
-        "emails[type eq \"wo\\rk\"].value",
+        "emails[type eq \"wo\\qrk\"].value",
+        "name.",
+        ".name",
+        "name.givenName.extra",
+        "emails.value.extra",
+        "emails[type eq \"work\"].",
+        "members.",
+        "   ",
     ] {
         assert!(
             matches!(Target::parse(path), Err(Error::InvalidPath(_))),
@@ -1473,4 +1479,147 @@ fn urns_are_the_wire_contract() {
     );
     assert_eq!(urn::SCHEMA, "urn:ietf:params:scim:schemas:core:2.0:Schema");
     assert_eq!(urn::CONTENT_TYPE, "application/scim+json");
+}
+
+#[test]
+fn keys_that_differ_only_in_case_apply_in_document_order() {
+    let changes = |body: &str| {
+        UserChanges::from_patch(&serde_json::from_str(body).expect("a patch request")).unwrap()
+    };
+    assert_eq!(
+        changes(
+            r#"{"Operations": [{"op": "replace", "value":
+                {"userName": "first@example.com", "USERNAME": "last@example.com"}}]}"#
+        )
+        .user_name,
+        Some("last@example.com".to_owned())
+    );
+    assert_eq!(
+        changes(
+            r#"{"Operations": [{"op": "replace", "value":
+                {"USERNAME": "first@example.com", "userName": "last@example.com"}}]}"#
+        )
+        .user_name,
+        Some("last@example.com".to_owned())
+    );
+    assert_eq!(
+        changes(
+            r#"{"Operations": [{"op": "replace", "path": "name", "value":
+                {"familyName": "First", "FamilyName": "Last", "givenName": "Barbara"}}]}"#
+        )
+        .family_name,
+        some("Last")
+    );
+}
+
+#[test]
+fn an_empty_path_is_an_invalid_path() {
+    for path in ["", " "] {
+        let error = user_patch(operations(
+            json!([{ "op": "replace", "path": path, "value": { "displayName": "Babs" } }]),
+        ))
+        .unwrap_err();
+        assert_eq!(error.scim_type(), Some(ScimType::InvalidPath), "{path:?}");
+        let error = group_patch(operations(json!([{ "op": "remove", "path": path }]))).unwrap_err();
+        assert_eq!(error.scim_type(), Some(ScimType::InvalidPath), "{path:?}");
+    }
+}
+
+#[test]
+fn filter_strings_read_every_json_escape() {
+    assert_eq!(
+        Filter::parse(r#"userName eq "a\nb\tc\rd\be\ff\/gé😀""#),
+        Ok(equals(
+            Attribute::UserName,
+            "a\nb\tc\rd\u{8}e\u{c}f/g\u{e9}\u{1f600}"
+        ))
+    );
+    for input in [
+        r#"userName eq "a\x""#,
+        r#"userName eq "a\u12""#,
+        r#"userName eq "a\u12zz""#,
+        r#"userName eq "a\u+123""#,
+        r#"userName eq "a\ud83d""#,
+        r#"userName eq "a\ud83dA""#,
+        r#"userName eq "a\udc00""#,
+    ] {
+        assert!(!refused_filter(input).is_empty(), "{input}");
+    }
+}
+
+#[test]
+fn an_unquoted_null_is_refused_rather_than_compared_as_text() {
+    for input in ["externalId eq null", "userName eq NULL", "members eq null"] {
+        assert!(!refused_filter(input).is_empty(), "{input}");
+    }
+    assert_eq!(
+        Filter::parse("externalId eq \"null\""),
+        Ok(equals(Attribute::ExternalId, "null"))
+    );
+}
+
+#[test]
+fn an_email_without_a_value_is_skipped() {
+    let document: UserDocument = serde_json::from_value(json!({
+        "userName": "bjensen",
+        "emails": [
+            { "value": null, "type": "work", "primary": true },
+            { "value": "home@example.com", "type": "home" }
+        ]
+    }))
+    .unwrap();
+    assert_eq!(document.primary_email(), Some("home@example.com"));
+    let changes = user_patch(operations(json!([{
+        "op": "replace",
+        "path": "emails",
+        "value": [{ "value": null, "primary": true }, { "value": "work@example.com" }]
+    }])))
+    .unwrap();
+    assert_eq!(changes.email, Some("work@example.com".to_owned()));
+}
+
+#[test]
+fn replacing_the_name_with_null_clears_it() {
+    let cleared = UserChanges {
+        given_name: Some(None),
+        family_name: Some(None),
+        ..UserChanges::default()
+    };
+    assert_eq!(
+        user_patch(operations(
+            json!([{ "op": "replace", "path": "name", "value": null }])
+        )),
+        Ok(cleared.clone())
+    );
+    assert_eq!(
+        user_patch(operations(
+            json!([{ "op": "replace", "value": { "name": null } }])
+        )),
+        Ok(cleared)
+    );
+}
+
+#[test]
+fn discovery_marks_group_references_read_only_and_emails_optional() {
+    let user = discovery::schema(urn::USER).unwrap();
+    let attribute = |name: &str| {
+        user["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|attribute| attribute["name"] == name)
+            .unwrap_or_else(|| panic!("no {name} attribute"))
+            .clone()
+    };
+    assert_eq!(attribute("emails")["required"], json!(false));
+    let groups = attribute("groups");
+    assert_eq!(groups["mutability"], json!("readOnly"));
+    for sub_attribute in groups["subAttributes"].as_array().unwrap() {
+        assert_eq!(
+            sub_attribute["mutability"],
+            json!("readOnly"),
+            "{}",
+            sub_attribute["name"]
+        );
+    }
 }

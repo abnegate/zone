@@ -1,10 +1,9 @@
 use serde::Deserialize;
 
+use crate::scim::attribute::MEMBERS;
 use crate::scim::error::Error;
 use crate::scim::filter::Filter;
 use crate::scim::urn;
-
-const MEMBERS: &str = "members";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]

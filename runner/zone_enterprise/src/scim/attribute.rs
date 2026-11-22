@@ -1,5 +1,7 @@
 use crate::scim::urn;
 
+pub(crate) const MEMBERS: &str = "members";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Attribute {
     Id,
