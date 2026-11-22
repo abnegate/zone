@@ -8,6 +8,7 @@ use std::time::Duration;
 use crate::common::create_test_pool;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
+use zone_server::db::custom_roles::Assignment;
 use zone_server::db::organization_members::{
     OrgRole, Removal, RoleChange, change_role, remove_guarded,
 };
@@ -79,7 +80,16 @@ async fn a_demotion_waits_for_one_already_in_flight_and_then_sees_it() {
 
     let racing = tokio::spawn({
         let pool = pool.clone();
-        async move { change_role(&pool, organization, second, OrgRole::Member, OrgRole::Owner).await }
+        async move {
+            change_role(
+                &pool,
+                organization,
+                second,
+                Assignment::BuiltIn(OrgRole::Member),
+                second,
+            )
+            .await
+        }
     });
 
     tokio::time::sleep(Duration::from_millis(750)).await;
@@ -137,7 +147,7 @@ async fn a_removal_waits_for_a_demotion_already_in_flight_and_then_sees_it() {
 
     let racing = tokio::spawn({
         let pool = pool.clone();
-        async move { remove_guarded(&pool, organization, second, OrgRole::Owner).await }
+        async move { remove_guarded(&pool, organization, second, second).await }
     });
 
     tokio::time::sleep(Duration::from_millis(750)).await;
@@ -183,17 +193,21 @@ async fn a_removal_waits_for_a_demotion_already_in_flight_and_then_sees_it() {
 async fn a_demotion_sees_the_rank_the_target_holds_when_it_lands() {
     let pool = create_test_pool().await;
     let owner = user(&pool).await;
+    let admin = user(&pool).await;
     let target = user(&pool).await;
     let organization = organization_owned_by(&pool, &[owner]).await;
 
-    sqlx::query(
-        "INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, 'member')",
-    )
-    .bind(organization)
-    .bind(target)
-    .execute(&pool)
-    .await
-    .expect("the target is seated as a member");
+    for (member, role) in [(admin, "admin"), (target, "member")] {
+        sqlx::query(
+            "INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, $3)",
+        )
+        .bind(organization)
+        .bind(member)
+        .bind(role)
+        .execute(&pool)
+        .await
+        .expect("a member is seated");
+    }
 
     let mut holder = pool.begin().await.expect("a transaction to hold the lock");
     sqlx::query(
@@ -208,7 +222,16 @@ async fn a_demotion_sees_the_rank_the_target_holds_when_it_lands() {
     // An admin re-seating a member: allowed, on the rank the target holds now.
     let racing = tokio::spawn({
         let pool = pool.clone();
-        async move { change_role(&pool, organization, target, OrgRole::Member, OrgRole::Admin).await }
+        async move {
+            change_role(
+                &pool,
+                organization,
+                target,
+                Assignment::BuiltIn(OrgRole::Member),
+                admin,
+            )
+            .await
+        }
     });
 
     tokio::time::sleep(Duration::from_millis(750)).await;

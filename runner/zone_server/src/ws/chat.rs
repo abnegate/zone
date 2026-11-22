@@ -3072,7 +3072,7 @@ async fn prepare_message(
     if chat.workspace_id != Some(workspace_id) {
         return Err("Chat does not belong to the authenticated workspace".into());
     }
-    let route = Route::for_chat(state, &chat).await;
+    let route = Route::for_turn(state, &chat, user_id).await;
     let endpoint = route.endpoint()?.clone();
     let chat = route.apply(chat);
     let mut image_config = state.config().comfyui.clone();

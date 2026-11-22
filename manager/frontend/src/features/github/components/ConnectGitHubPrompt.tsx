@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
-import { administersOrganization } from '../../settings/navigation/sections';
+import { Permission } from '../../enterprise/roles/schemas';
+import { grantsOrganization } from '../../settings/navigation/access';
 import { GITHUB_SETTINGS_PATH } from '../callback';
 
 interface ConnectGitHubPromptProps {
@@ -14,12 +15,15 @@ export function ConnectGitHubPrompt({ className }: ConnectGitHubPromptProps) {
     return null;
   }
 
-  const administers = administersOrganization({
-    organization: currentOrganization !== null,
-    organizationRole: currentOrganization?.role,
-  });
+  const connects =
+    currentOrganization !== null &&
+    grantsOrganization(
+      currentOrganization?.permissions,
+      currentOrganization?.role,
+      Permission.GitHubUpdate
+    );
 
-  return administers ? (
+  return connects ? (
     <Link className={className} to={GITHUB_SETTINGS_PATH}>
       Connect GitHub
     </Link>

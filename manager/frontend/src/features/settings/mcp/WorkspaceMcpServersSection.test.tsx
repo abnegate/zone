@@ -147,7 +147,7 @@ describe('WorkspaceMcpServersSection', () => {
       'magentsCommandConnectedOnInstanceSet by the instance',
     ]);
     expect(workspace).toHaveBeenCalledWith('org-1', 'ws-1');
-    expect(screen.queryByText('Only workspace admins can change MCP servers.')).toBeNull();
+    expect(screen.queryByText("Your role can't change workspace MCP servers.")).toBeNull();
   });
 
   it('checks the radio matching each workspace override', async () => {
@@ -241,7 +241,7 @@ describe('WorkspaceMcpServersSection', () => {
     renderSection(false);
     await row('docs');
 
-    const hint = screen.getByText('Only workspace admins can change MCP servers.');
+    const hint = screen.getByText("Your role can't change workspace MCP servers.");
     expect(hint).toHaveClass('form-hint');
     expect(hint).toHaveAttribute('role', 'status');
     const inputs = ['docs', 'notes', 'github'].flatMap(radios);

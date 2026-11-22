@@ -739,8 +739,9 @@ install-cli: ## Install zone CLI to /usr/local/bin
 
 ##@ Desktop & Mobile
 
-icons: ## Rasterize light/night theme-blue launcher icons into Tauri desktop/Android sets
+icons: ## Rasterize the launcher icons into Tauri desktop/Android sets and the console favicons
 	@./scripts/generate-tauri-icons.sh
+	@./scripts/generate-console-icons.sh
 
 sync-tauri-ui: ## Build the manager UI and copy it into the Tauri client
 	@echo "$(BLUE)Building manager frontend for the Zone client...$(NC)"

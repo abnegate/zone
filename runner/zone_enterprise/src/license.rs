@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::payload::Payload;
+use crate::plan::Plan;
 use crate::status::{self, Status};
 
 #[derive(Clone, PartialEq, Eq)]
@@ -58,6 +59,10 @@ impl License {
         self.payload.subscription.as_deref()
     }
 
+    pub fn plan(&self) -> Plan {
+        self.payload.plan.unwrap_or(Plan::Enterprise)
+    }
+
     pub fn grace_ends_at(&self) -> DateTime<Utc> {
         self.payload
             .expires_at
@@ -98,6 +103,25 @@ mod tests {
         assert_eq!(license.expires_at(), payload.expires_at);
         assert_eq!(license.key_id(), payload.key_id);
         assert_eq!(license.subscription(), None);
+        assert_eq!(license.plan(), Plan::Enterprise);
+    }
+
+    #[test]
+    fn exposes_the_plan() {
+        for plan in Plan::ALL {
+            let license = fixtures::license(&Payload {
+                plan: Some(plan),
+                ..fixtures::payload()
+            });
+            assert_eq!(license.plan(), plan);
+        }
+    }
+
+    #[test]
+    fn a_license_without_a_plan_is_enterprise() {
+        let license = fixtures::license(&fixtures::payload());
+        assert_eq!(license.payload().plan, None);
+        assert_eq!(license.plan(), Plan::Enterprise);
     }
 
     #[test]

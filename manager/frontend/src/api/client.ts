@@ -88,6 +88,8 @@ import {
   ResendVerificationResponseSchema,
   ResetPasswordResponseSchema,
   SessionsResponseSchema,
+  UpdateOrgMemberRequestSchema,
+  UpdateWorkspaceMemberRequestSchema,
   VerifyEmailResponseSchema,
   WorkspaceAiSettingsResponseSchema,
   WorkspaceMemberSchema,
@@ -728,23 +730,24 @@ class Client {
       body: JSON.stringify({ token, new_password: newPassword }),
     });
     if (!response.ok) {
-      const errorData = await this.parseErrorResponse(response);
-      const message = errorData.message || `Failed to reset password: ${response.status}`;
-      throw errorData.code ? new AuthRequestError(message, errorData.code) : new Error(message);
+      throw this.refusal(
+        await this.parseErrorResponse(response),
+        `Failed to reset password: ${response.status}`
+      );
     }
     return parse(ResetPasswordResponseSchema, await response.json());
+  }
+
+  private refusal({ message, code }: { message?: string; code?: string }, fallback: string): Error {
+    const text = message || fallback;
+    return code ? new AuthRequestError(text, code) : new Error(text);
   }
 
   private async parseErrorResponse(
     response: Response
   ): Promise<{ message?: string; code?: string }> {
-    try {
-      const data = await response.json();
-      const code = typeof data?.code === 'string' && data.code ? data.code : undefined;
-      return { message: data.message || data.error || data.detail, code };
-    } catch {
-      return {};
-    }
+    const { reason, code } = ApiError.refusal(await ApiError.body(response));
+    return { message: reason, code };
   }
 
   // Session Management API
@@ -871,8 +874,10 @@ class Client {
       }
     );
     if (!response.ok) {
-      const errorData = await this.parseErrorResponse(response);
-      throw new Error(errorData.message || `Failed to add organization member: ${response.status}`);
+      throw this.refusal(
+        await this.parseErrorResponse(response),
+        `Failed to add organization member: ${response.status}`
+      );
     }
     return parse(OrganizationMemberSchema, await response.json());
   }
@@ -887,14 +892,11 @@ class Client {
       {
         method: 'PATCH',
         headers: this.getHeaders(),
-        body: JSON.stringify(request),
+        body: JSON.stringify(parse(UpdateOrgMemberRequestSchema, request)),
       }
     );
     if (!response.ok) {
-      const errorData = await this.parseErrorResponse(response);
-      throw new Error(
-        errorData.message || `Failed to update organization member role: ${response.status}`
-      );
+      throw await ApiError.refused(response, 'Failed to update organization member role');
     }
     return parse(OrganizationMemberSchema, await response.json());
   }
@@ -960,14 +962,11 @@ class Client {
       {
         method: 'PATCH',
         headers: this.getHeaders(),
-        body: JSON.stringify(request),
+        body: JSON.stringify(parse(UpdateWorkspaceMemberRequestSchema, request)),
       }
     );
     if (!response.ok) {
-      const errorData = await this.parseErrorResponse(response);
-      throw new Error(
-        errorData.message || `Failed to update workspace member role: ${response.status}`
-      );
+      throw await ApiError.refused(response, 'Failed to update workspace member role');
     }
     return parse(WorkspaceMemberSchema, await response.json());
   }
@@ -998,8 +997,10 @@ class Client {
       }
     );
     if (!response.ok) {
-      const errorData = await this.parseErrorResponse(response);
-      throw new Error(errorData.message || `Failed to create invitation: ${response.status}`);
+      throw this.refusal(
+        await this.parseErrorResponse(response),
+        `Failed to create invitation: ${response.status}`
+      );
     }
     return parse(InvitationSchema, await response.json());
   }
@@ -1054,8 +1055,10 @@ class Client {
       }
     );
     if (!response.ok) {
-      const errorData = await this.parseErrorResponse(response);
-      throw new Error(errorData.message || `Failed to accept invitation: ${response.status}`);
+      throw this.refusal(
+        await this.parseErrorResponse(response),
+        `Failed to accept invitation: ${response.status}`
+      );
     }
   }
 

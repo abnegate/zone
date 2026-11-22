@@ -1,4 +1,5 @@
 import { AuthRequestError } from '../../api/auth';
+import { isMemberCapRefusal, memberCapMessage } from '../enterprise/members';
 import { SsoCode } from './SsoCode';
 
 export const SSO_INCOMPLETE = "Sign-in didn't complete. Start again from the sign-in page.";
@@ -25,6 +26,12 @@ export const SSO_MESSAGES: Record<SsoCode, string> = {
   [SsoCode.DomainNotAllowed]: "Your email domain isn't allowed to sign in to this server.",
   [SsoCode.EmailConflict]:
     'Your email address already belongs to a different Zone account. Ask a server admin for help.',
+  [SsoCode.AssertionInvalid]:
+    "Zone couldn't verify the sign-in from your identity provider. Try again, or ask a server admin to check the provider's metadata.",
+  [SsoCode.SignInRefused]:
+    "Your identity provider refused the sign-in. Check that you're assigned to Zone there.",
+  [SsoCode.SignInFailed]:
+    "Zone couldn't finish signing you in. Try again in a moment, or ask a server admin to check the server logs.",
 };
 
 function isSsoCode(code: string): code is SsoCode {
@@ -36,6 +43,9 @@ export function ssoMessage(code: string): string | null {
 }
 
 export function messageOf(error: unknown, fallback: string): string {
+  if (isMemberCapRefusal(error)) {
+    return memberCapMessage();
+  }
   if (error instanceof AuthRequestError) {
     return ssoMessage(error.code) ?? error.message;
   }

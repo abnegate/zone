@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { chooseSelect } from '../../../../test/select';
+import { AdministersServerProvider } from '../../components/AdministersServer';
 import { AuditRefusal } from '../AuditRefusal';
 import { FAILING_WEBHOOK, HEALTHY_S3, ORGANIZATION_SCOPE, PAUSED_SYSLOG } from '../fixtures';
 import {
@@ -73,7 +74,9 @@ function renderForm(destination?: DestinationResponse) {
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
-        <DestinationForm scope={ORGANIZATION_SCOPE} destination={destination} onClose={onClose} />
+        <AdministersServerProvider value>
+          <DestinationForm scope={ORGANIZATION_SCOPE} destination={destination} onClose={onClose} />
+        </AdministersServerProvider>
       </MemoryRouter>
     </QueryClientProvider>
   );

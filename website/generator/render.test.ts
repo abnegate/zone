@@ -91,7 +91,7 @@ describe('price', () => {
 });
 
 describe('site', () => {
-  const baseURL = baseURLFrom('https://abnegate.github.io/zone');
+  const baseURL = baseURLFrom('https://bitecodehq.github.io/zone');
   const rendered = renderSite(baseURL);
 
   test('renders every page', () => {
@@ -120,7 +120,7 @@ describe('site', () => {
         test('names its canonical address under the deployment base URL', () => {
           const canonical = new URL(directoryOf(page.output), baseURL).href;
           expect(html).toContain(`<link rel="canonical" href="${canonical}">`);
-          expect(canonical.startsWith('https://abnegate.github.io/zone/')).toBe(true);
+          expect(canonical.startsWith('https://bitecodehq.github.io/zone/')).toBe(true);
         });
       }
 

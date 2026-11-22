@@ -5,29 +5,32 @@ import { createElement, type ReactNode } from 'react';
 import { ApiError } from '../../../api/ApiError';
 import { HttpStatus } from '../../../api/HttpStatus';
 import { ACTIVE, COMMUNITY, UNVERIFIED } from '../fixtures';
+import { RETRY_LIMIT } from '../retry';
 
 const get = mock();
 
 mock.module('../api', () => ({ licenseApi: { get, set: mock(), remove: mock() } }));
 
 let useLicense: typeof import('./useLicense').useLicense;
-let LICENSE_RETRY_LIMIT: number;
 
 beforeAll(async () => {
-  ({ useLicense, LICENSE_RETRY_LIMIT } = await import('./useLicense'));
+  ({ useLicense } = await import('./useLicense'));
 });
 
 afterAll(() => {
   mock.restore();
 });
 
-function render() {
-  const queryClient = new QueryClient({
+function client(): QueryClient {
+  return new QueryClient({
     defaultOptions: { queries: { retryDelay: 0, gcTime: 0 } },
   });
+}
+
+function render(options?: Parameters<typeof useLicense>[0], queryClient: QueryClient = client()) {
   const wrapper = ({ children }: { children: ReactNode }) =>
     createElement(QueryClientProvider, { client: queryClient }, children);
-  return renderHook(() => useLicense(), { wrapper });
+  return renderHook(() => useLicense(options), { wrapper });
 }
 
 describe('useLicense', () => {
@@ -44,6 +47,25 @@ describe('useLicense', () => {
     await waitFor(() => expect(result.current.response).toEqual(COMMUNITY));
     expect(result.current.loading).toBe(false);
     expect(result.current.error).toBeNull();
+  });
+
+  it('never asks for the license while disabled', async () => {
+    get.mockResolvedValue(COMMUNITY);
+    const { result } = render({ enabled: false });
+
+    await act(async () => {});
+
+    expect(get).not.toHaveBeenCalled();
+    expect(result.current.response).toBeUndefined();
+    expect(result.current.error).toBeNull();
+  });
+
+  it('asks for the license when enabled', async () => {
+    get.mockResolvedValue(COMMUNITY);
+    const { result } = render({ enabled: true });
+
+    await waitFor(() => expect(result.current.response).toEqual(COMMUNITY));
+    expect(get).toHaveBeenCalledTimes(1);
   });
 
   it('reads a stored key that no longer verifies', async () => {
@@ -99,7 +121,7 @@ describe('useLicense', () => {
     const { result } = render();
 
     await waitFor(() => expect(result.current.error).toBe('Failed to load the license: 502'));
-    expect(get).toHaveBeenCalledTimes(LICENSE_RETRY_LIMIT + 1);
+    expect(get).toHaveBeenCalledTimes(RETRY_LIMIT + 1);
   });
 
   it('retries a network failure that never reached the server', async () => {
@@ -108,6 +130,39 @@ describe('useLicense', () => {
 
     await waitFor(() => expect(result.current.response).toEqual(ACTIVE));
     expect(get).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows a refusal to a later reader without asking again', async () => {
+    get.mockRejectedValue(
+      new ApiError('Failed to load the license: This needs a server admin.', HttpStatus.Forbidden)
+    );
+    const shared = client();
+    const first = render(undefined, shared);
+    await waitFor(() => expect(first.result.current.error).not.toBeNull());
+
+    const second = render(undefined, shared);
+    await act(async () => {});
+
+    expect(second.result.current.loading).toBe(false);
+    expect(second.result.current.error).toBe(
+      'Failed to load the license: This needs a server admin.'
+    );
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks again for a later reader after the server kept failing', async () => {
+    get.mockRejectedValue(new ApiError('Failed to load the license: 502', HttpStatus.BadGateway));
+    const shared = client();
+    const first = render(undefined, shared);
+    await waitFor(() => expect(first.result.current.error).not.toBeNull());
+    expect(get).toHaveBeenCalledTimes(RETRY_LIMIT + 1);
+
+    get.mockReset();
+    get.mockResolvedValue(ACTIVE);
+    const second = render(undefined, shared);
+
+    await waitFor(() => expect(second.result.current.response).toEqual(ACTIVE));
+    expect(get).toHaveBeenCalledTimes(1);
   });
 
   it('loads again on refresh', async () => {

@@ -1,5 +1,6 @@
 import { Button, Modal } from '@zone/ui';
 import { type FormEvent, useState } from 'react';
+import { UpgradeNotice } from '../../components/UpgradeNotice';
 import {
   changed,
   createRequest,
@@ -21,7 +22,6 @@ import {
 import { refusalField, refusalMessage } from '../messages';
 import { AuditCode } from '../schemas';
 import type { AuditScope, DestinationResponse, SecretName } from '../types';
-import { AuditUpgradeNotice } from './AuditUpgradeNotice';
 import { DestinationFields, type FieldError } from './DestinationFields';
 
 const NO_ERRORS: DraftErrors = {};
@@ -102,7 +102,10 @@ export function DestinationForm({ scope, destination, onClose }: DestinationForm
           onChange={change}
         />
         {licenseRequired && (
-          <AuditUpgradeNotice message={refusalMessage(AuditCode.LicenseRequired)} />
+          <UpgradeNotice
+            message={refusalMessage(AuditCode.LicenseRequired)}
+            className="audit-notice"
+          />
         )}
         {formError && (
           <div className="modal-error" role="alert">

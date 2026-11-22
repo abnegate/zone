@@ -28,18 +28,18 @@ A template that uses a value `config.ts` does not have fails the build.
 
 - **`plans`**: if a plan's price changes, change its Polar products too. The two must match. `memberLimit` must match the Community limit the server enforces.
 - **`contactEmail`**: a mailbox that someone reads.
-- **`domain`**: the custom domain configured for GitHub Pages. Deployed builds take canonical links from the base URL Pages reports (`SITE_BASE_URL`), so until the custom domain is live they point at `https://abnegate.github.io/zone/`. Local builds and the preview server fall back to `https://<domain>/`. Once it is final, set the success URL of both Polar checkout links to `https://<domain>/thanks/`.
+- **`domain`**: the custom domain configured for GitHub Pages. Deployed builds take canonical links from the base URL Pages reports (`SITE_BASE_URL`), so until the custom domain is live they point at `https://bitecodehq.github.io/zone/`. Local builds and the preview server fall back to `https://<domain>/`. Once it is final, set the success URL of both Polar checkout links to `https://<domain>/thanks/`.
 
 ## Deploying
 
 `.github/workflows/website.yml` lints, typechecks and tests every pull request that touches `website/`, and on pushes to `main` builds the site and deploys it to GitHub Pages.
 
 1. In the repository's **Settings → Pages**, set **Source** to **GitHub Actions**. Until then the deploy job fails.
-2. Without a custom domain the site is served at `https://abnegate.github.io/zone/`. The build reads that base URL from Pages, so links and canonical links work there too.
+2. Without a custom domain the site is served at `https://bitecodehq.github.io/zone/`. The build reads that base URL from Pages, so links and canonical links work there too.
 
 ### Adding a custom domain
 
-1. At the DNS provider, add a `CNAME` record pointing the domain (for example `zone.bitecode.ltd`) at `abnegate.github.io`.
+1. At the DNS provider, add a `CNAME` record pointing the domain (for example `zone.bitecode.ltd`) at `bitecodehq.github.io`.
 2. In **Settings → Pages**, enter the domain under **Custom domain**, wait for the DNS check, then tick **Enforce HTTPS**.
 3. Set `domain` in `config.ts` to the same value.
 

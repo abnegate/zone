@@ -19,6 +19,7 @@ import {
   EnforcementResponseSchema,
   PROTOCOLS,
   ProviderResponseSchema,
+  ServiceProviderResponseSchema,
   SettingsResponseSchema,
   SSO_ADMIN_CODES,
   SsoAdminCode,
@@ -54,6 +55,10 @@ const ADMIN_CODES = [
   'CLIENT_SECRET_INVALID',
   'DOMAIN_INVALID',
   'DISCOVERY_FAILED',
+  'METADATA_INVALID',
+  'DOMAIN_REQUIRED',
+  'VERIFIED_EMAIL_UNSUPPORTED',
+  'PROTOCOL_MISMATCH',
 ];
 
 /** The codes only public sign-in and the password paths answer with. */
@@ -66,7 +71,13 @@ const SIGN_IN_CODES = [
   'EMAIL_UNVERIFIED',
   'DOMAIN_NOT_ALLOWED',
   'EMAIL_CONFLICT',
+  'ASSERTION_INVALID',
+  'SIGN_IN_REFUSED',
+  'SIGN_IN_FAILED',
 ];
+
+/** The connection fields a provider of the other protocol sends as null. */
+const CONNECTION_NULLABLE = ['client_id', 'metadata_url', 'sso_url'];
 
 type Shaped = z.ZodObject<z.ZodRawShape>;
 
@@ -146,6 +157,7 @@ function code(path: string, name: string): string {
 describe('the single sign-on settings read as the server serialises them', () => {
   test.each<[string, string, Shaped]>([
     ['SettingsResponse', SETTINGS_RS, SettingsResponseSchema],
+    ['ServiceProviderResponse', SETTINGS_RS, ServiceProviderResponseSchema],
     ['ProviderResponse', PROVIDERS_RS, ProviderResponseSchema],
     ['EnforcementResponse', ENFORCEMENT_RS, EnforcementResponseSchema],
   ])(
@@ -157,16 +169,23 @@ describe('the single sign-on settings read as the server serialises them', () =>
 
   test.each<[string, string, Shaped]>([
     ['SettingsResponse', SETTINGS_RS, SettingsResponseSchema],
-    ['ProviderResponse', PROVIDERS_RS, ProviderResponseSchema],
+    ['ServiceProviderResponse', SETTINGS_RS, ServiceProviderResponseSchema],
     ['EnforcementResponse', ENFORCEMENT_RS, EnforcementResponseSchema],
   ])('%s is never null', (structName, path, schema) => {
     expect(rustNullable(path, structName)).toEqual([]);
     expect(zodNullable(schema)).toEqual([]);
   });
 
-  test('a provider never carries its client secret', () => {
-    expect(keys(ProviderResponseSchema)).not.toContain('client_secret');
-    expect(Object.keys(rustShape(PROVIDERS_RS, 'ProviderResponse'))).not.toContain('client_secret');
+  test('a provider sends null only for the connection fields of the other protocol', () => {
+    expect(rustNullable(PROVIDERS_RS, 'ProviderResponse')).toEqual(CONNECTION_NULLABLE);
+    expect(zodNullable(ProviderResponseSchema)).toEqual(CONNECTION_NULLABLE);
+  });
+
+  test('a provider never carries its client secret or its raw certificates', () => {
+    for (const secret of ['client_secret', 'certificates']) {
+      expect(keys(ProviderResponseSchema)).not.toContain(secret);
+      expect(Object.keys(rustShape(PROVIDERS_RS, 'ProviderResponse'))).not.toContain(secret);
+    }
   });
 
   test('protocols', () => {
@@ -195,10 +214,16 @@ describe('the console sends the single sign-on requests the server reads', () =>
     }
   });
 
-  test('a creation may leave out the domains, the verified-email switch and enabled', () => {
+  test('a creation must name the provider and may leave out every protocol field', () => {
     expect(zodOptional(CreateProviderRequestSchema)).toEqual([
       'allowed_domains',
+      'client_id',
+      'client_secret',
       'enabled',
+      'issuer',
+      'metadata',
+      'metadata_url',
+      'protocol',
       'require_verified_email',
     ]);
   });

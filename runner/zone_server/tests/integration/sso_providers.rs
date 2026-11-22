@@ -11,14 +11,14 @@ use zone_enterprise::sso::{
     DOMAIN_INVALID, ISSUER_INVALID, PROVIDER_DUPLICATE, PROVIDER_NOT_FOUND,
 };
 use zone_server::auth::admin_guard::REQUIRED;
-use zone_server::auth::entitlement::MESSAGE;
+use zone_server::auth::entitlement::ENTERPRISE_MESSAGE;
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::sso::providers;
 
 use crate::common::identity_provider::{
     CLIENT_ID, CLIENT_SECRET, DISCOVERY_PATH, DISPLAY_NAME, IdentityProvider, MISMATCHED_ISSUER,
 };
-use crate::common::sso::{Account, ENFORCEMENT, Fixture, PROVIDERS, SETTINGS, grace, lapsed};
+use crate::common::sso::{Account, ENFORCEMENT, Fixture, PROVIDERS, SETTINGS, grace, lapsed, team};
 use crate::common::{REFUSED_URL, TestResponse};
 
 const PREFIX: &str = "sso_providers";
@@ -38,7 +38,7 @@ fn assert_code(response: &TestResponse, status: StatusCode, code: &str) {
 
 fn assert_license_required(response: &TestResponse) {
     assert_code(response, StatusCode::FORBIDDEN, LICENSE_REQUIRED);
-    assert_eq!(response.json_value()["error"], MESSAGE);
+    assert_eq!(response.json_value()["error"], ENTERPRISE_MESSAGE);
 }
 
 async fn licensed(fixture: &Fixture) -> Account {
@@ -134,6 +134,11 @@ async fn community_can_read_but_not_change_anything() {
             "status": "community",
             "required": false,
             "redirect_uri": "http://localhost:3000/sso/callback",
+            "service_provider": {
+                "entity_id": "http://localhost:3000/api/auth/sso/saml/metadata",
+                "acs_url": "http://localhost:3000/api/auth/sso/saml/acs",
+                "metadata_url": "http://localhost:3000/api/auth/sso/saml/metadata",
+            },
             "providers": [],
         })
     );
@@ -216,6 +221,24 @@ async fn a_lapsed_license_still_takes_a_provider_out_of_service() {
 }
 
 #[tokio::test]
+async fn a_team_license_can_read_but_not_change_anything() {
+    let fixture = Fixture::new(PREFIX).await;
+    let admin = fixture.register().await;
+    fixture.install(&admin, &team()).await;
+
+    let body = fixture.settings(&admin.token).await.json_value();
+    assert_eq!(body["entitled"], false, "{body}");
+    assert_eq!(body["edition"], "team", "{body}");
+    assert_eq!(body["status"], "active", "{body}");
+
+    for response in licensed_writes(&fixture, &admin.token, Uuid::new_v4()).await {
+        assert_license_required(&response);
+    }
+    assert_eq!(fixture.providers().await, 0);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn a_license_in_grace_is_entitled() {
     let fixture = Fixture::new(PREFIX).await;
     let admin = fixture.register().await;
@@ -265,6 +288,9 @@ async fn an_admin_adds_a_provider_through_a_loopback_identity_provider() {
         "display_name": "Okta",
         "issuer": identity_provider.issuer(),
         "client_id": CLIENT_ID,
+        "sso_url": null,
+        "metadata_url": null,
+        "certificate_fingerprints": [],
         "allowed_domains": ["acme.com", "acme.io"],
         "require_verified_email": false,
         "enabled": false,

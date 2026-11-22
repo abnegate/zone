@@ -40,6 +40,7 @@ const communityLicense: LicenseResponse = {
   status: LicenseStatus.Community,
   license: null,
   seats: { used: 1, licensed: null, over: false },
+  members: { active: 1, cap: 3, over: false },
   unverified: null,
   renewal: null,
 };

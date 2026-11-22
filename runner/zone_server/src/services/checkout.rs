@@ -2357,19 +2357,7 @@ mod tests {
             PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
                 .await
                 .unwrap();
-        // Database identifiers contain only this prefix and UUID hexadecimal.
-        let database = format!("checkout_{}", Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
-            .execute(&pool)
-            .await
-            .unwrap();
-        let other = PgPool::connect_with((*pool.connect_options()).clone().database(&database))
-            .await
-            .unwrap();
-        sqlx::query("CREATE TABLE task_runs(id uuid PRIMARY KEY, status text NOT NULL)")
-            .execute(&other)
-            .await
-            .unwrap();
+        let other = crate::db::testing::Database::create("checkout").await;
         let organization = Uuid::new_v4();
         let workspace = Uuid::new_v4();
         sqlx::query("INSERT INTO organizations(id,name,slug) VALUES($1,'Checkout database isolation',$1::text)").bind(organization).execute(&pool).await.unwrap();
@@ -2405,7 +2393,7 @@ mod tests {
         .await
         .unwrap();
         std::fs::write(checkout.path().join("keep.txt"), "Live private content").unwrap();
-        let removed = Checkout::recover(&other).await.unwrap();
+        let removed = Checkout::recover(&other.pool).await.unwrap();
         let preserved = checkout.path().join("keep.txt").exists();
         drop(checkout);
         sqlx::query("DELETE FROM organizations WHERE id=$1")
@@ -2413,11 +2401,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        other.close().await;
-        sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE {database}")))
-            .execute(&pool)
-            .await
-            .unwrap();
+        other.remove().await;
         assert!(
             preserved,
             "another database recovery deleted this database's live checkout"

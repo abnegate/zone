@@ -4,22 +4,49 @@ use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use zone_enterprise::Feature;
 
-use crate::auth::{AuthUser, OrgAdmin, OrgMember, OrgOwner, WorkspaceAdmin, WorkspaceMember};
+use crate::auth::{
+    AuthUser, Grant, OrganizationMember, OrganizationPermit, Permission, entitlement,
+};
 use crate::db::DbResult;
 use crate::db::audit::{actions, resources};
-use crate::db::{organization_members, organizations, workspaces};
+use crate::db::custom_roles::{AMBIGUOUS_ASSIGNMENT, Assignment, Invalid};
+use crate::db::organization_members::{
+    self, Assigned, MemberWithUser, OrgRole, OrganizationMemberRow, Removal as MemberRemoval,
+    RoleChange,
+};
+use crate::db::{organizations, users, workspaces};
 use crate::services::login::devices;
+use crate::services::members;
 use crate::state::AppState;
 use crate::sync::hook::Removal;
 
-use super::common::{AuditEvent, ErrorResponse, Timestamps, audit};
+use super::common::{
+    AuditEvent, ErrorResponse, MembershipResponse, Timestamps, audit, exceeds, revoked,
+};
 
-/// Organization response
+const INVALID_ROLE: &str = "Invalid role. Must be one of: member, admin, owner";
+const INTERNAL_ERROR: &str = "Internal server error";
+const ORGANIZATION_NOT_FOUND: &str = "Organization not found";
+const MEMBER_NOT_FOUND: &str = "Member not found";
+
+fn refusal(status: StatusCode, message: &str) -> Response {
+    (status, Json(ErrorResponse::new(message))).into_response()
+}
+
+fn internal() -> Response {
+    refusal(StatusCode::INTERNAL_SERVER_ERROR, INTERNAL_ERROR)
+}
+
+fn held(member: &OrganizationMember) -> MembershipResponse {
+    MembershipResponse::organization(member.custom_role.clone(), member.grant.clone())
+}
+
 #[derive(Debug, Serialize)]
 pub struct OrganizationResponse {
     id: Uuid,
@@ -27,8 +54,8 @@ pub struct OrganizationResponse {
     slug: String,
     description: Option<String>,
     is_active: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    role: Option<String>,
+    #[serde(flatten)]
+    membership: Option<MembershipResponse>,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -41,20 +68,19 @@ impl From<organizations::OrganizationRow> for OrganizationResponse {
             slug: row.slug,
             description: row.description,
             is_active: row.is_active.unwrap_or(true),
-            role: None,
+            membership: None,
             timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
 }
 
 impl OrganizationResponse {
-    fn with_role(mut self, role: organization_members::OrgRole) -> Self {
-        self.role = Some(role.as_str().to_string());
+    fn with_membership(mut self, membership: MembershipResponse) -> Self {
+        self.membership = Some(membership);
         self
     }
 }
 
-/// Workspace response
 #[derive(Debug, Serialize)]
 pub struct WorkspaceResponse {
     id: Uuid,
@@ -81,7 +107,6 @@ impl From<workspaces::WorkspaceRow> for WorkspaceResponse {
     }
 }
 
-/// Create organization request
 #[derive(Debug, Deserialize)]
 pub struct CreateOrganizationRequest {
     name: String,
@@ -89,7 +114,6 @@ pub struct CreateOrganizationRequest {
     description: Option<String>,
 }
 
-/// Update organization request
 #[derive(Debug, Deserialize)]
 pub struct UpdateOrganizationRequest {
     name: Option<String>,
@@ -97,7 +121,6 @@ pub struct UpdateOrganizationRequest {
     is_active: Option<bool>,
 }
 
-/// Create workspace request
 #[derive(Debug, Deserialize)]
 pub struct CreateWorkspaceRequest {
     name: String,
@@ -105,20 +128,11 @@ pub struct CreateWorkspaceRequest {
     description: Option<String>,
 }
 
-/// Update workspace request
-#[derive(Debug, Deserialize)]
-pub struct UpdateWorkspaceRequest {
-    name: Option<String>,
-    description: Option<String>,
-    is_active: Option<bool>,
-}
-
 #[derive(Debug, Serialize)]
 struct SingleOrganizationResponse {
     organization: OrganizationResponse,
 }
 
-/// Organizations list response wrapper
 #[derive(Debug, Serialize)]
 struct OrganizationsListResponse {
     organizations: Vec<OrganizationResponse>,
@@ -126,34 +140,25 @@ struct OrganizationsListResponse {
 
 /// GET /api/organizations - List user's organizations
 pub async fn list(State(state): State<AppState>, auth: AuthUser) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&auth.0.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
-        }
+    let Ok(user_id) = Uuid::parse_str(&auth.0.sub) else {
+        return refusal(StatusCode::UNAUTHORIZED, "Invalid user ID in token");
     };
 
     match organization_members::list_user_organizations_with_role(state.db(), user_id).await {
-        Ok(orgs) => Json(OrganizationsListResponse {
-            organizations: orgs
+        Ok(memberships) => Json(OrganizationsListResponse {
+            organizations: memberships
                 .into_iter()
                 .map(|membership| {
-                    OrganizationResponse::from(membership.organization).with_role(membership.role)
+                    OrganizationResponse::from(membership.organization).with_membership(
+                        MembershipResponse::organization(membership.custom_role, membership.grant),
+                    )
                 })
                 .collect(),
         })
         .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
+        Err(error) => {
+            tracing::error!("Database error: {}", error);
+            internal()
         }
     }
 }
@@ -162,143 +167,120 @@ pub async fn list(State(state): State<AppState>, auth: AuthUser) -> impl IntoRes
 pub async fn create(
     State(state): State<AppState>,
     auth: AuthUser,
-    Json(req): Json<CreateOrganizationRequest>,
+    Json(request): Json<CreateOrganizationRequest>,
 ) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&auth.0.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
+    let Ok(user_id) = Uuid::parse_str(&auth.0.sub) else {
+        return refusal(StatusCode::UNAUTHORIZED, "Invalid user ID in token");
+    };
+
+    if let Err(refusal) = members::admit(&state, Some(user_id)).await {
+        return refusal.into_response();
+    }
+
+    let mut transaction = match state.db().begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            tracing::error!("Failed to start transaction: {}", error);
+            return internal();
         }
     };
 
-    // MAJOR-1: Wrap organization creation in a transaction
-    let mut tx = match state.db().begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::error!("Failed to start transaction: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
-
-    // Create organization
-    let org = match organizations::create_organization_tx(
-        &mut tx,
-        &req.name,
-        &req.slug,
-        req.description.as_deref(),
+    let organization = match organizations::create_organization_tx(
+        &mut transaction,
+        &request.name,
+        &request.slug,
+        request.description.as_deref(),
     )
     .await
     {
-        Ok(org) => org,
-        Err(e) => {
-            tracing::error!("Database error creating organization: {}", e);
-            let _ = tx.rollback().await;
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+        Ok(organization) => organization,
+        Err(error) => {
+            tracing::error!("Database error creating organization: {}", error);
+            let _ = transaction.rollback().await;
+            return internal();
         }
     };
 
-    // Add creator as owner
-    if let Err(e) = organization_members::add_member_tx(
-        &mut tx,
-        org.id,
+    if let Err(error) = organization_members::add_member_tx(
+        &mut transaction,
+        organization.id,
         user_id,
-        organization_members::OrgRole::Owner,
+        OrgRole::Owner,
         None,
     )
     .await
     {
-        tracing::error!("Failed to add organization owner: {}", e);
-        let _ = tx.rollback().await;
-        return (
+        tracing::error!("Failed to add organization owner: {}", error);
+        let _ = transaction.rollback().await;
+        return refusal(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new(
-                "Failed to create organization membership",
-            )),
-        )
-            .into_response();
+            "Failed to create organization membership",
+        );
     }
 
-    // Commit transaction
-    if let Err(e) = tx.commit().await {
-        tracing::error!("Failed to commit transaction: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("Internal server error")),
-        )
-            .into_response();
+    if let Err(error) = transaction.commit().await {
+        tracing::error!("Failed to commit transaction: {}", error);
+        return internal();
     }
 
     (
         StatusCode::CREATED,
         Json(SingleOrganizationResponse {
-            organization: OrganizationResponse::from(org),
+            organization: OrganizationResponse::from(organization),
         }),
     )
         .into_response()
 }
 
 /// GET /api/organizations/:org_id - Get org details (requires membership)
-pub async fn get(State(state): State<AppState>, member: OrgMember) -> impl IntoResponse {
-    match organizations::get_organization(state.db(), member.org_id).await {
-        Ok(Some(org)) => Json(SingleOrganizationResponse {
-            organization: OrganizationResponse::from(org).with_role(member.role),
+pub async fn get(State(state): State<AppState>, member: OrganizationMember) -> impl IntoResponse {
+    match organizations::get_organization(state.db(), member.organization_id).await {
+        Ok(Some(organization)) => Json(SingleOrganizationResponse {
+            organization: OrganizationResponse::from(organization).with_membership(held(&member)),
         })
         .into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Organization not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
+        Ok(None) => refusal(StatusCode::NOT_FOUND, ORGANIZATION_NOT_FOUND),
+        Err(error) => {
+            tracing::error!("Database error: {}", error);
+            internal()
         }
     }
 }
 
-/// PATCH /api/organizations/:org_id - Update org (requires admin)
+/// PATCH /api/organizations/:org_id - Update org (requires organization:update)
 pub async fn update(
     State(state): State<AppState>,
-    admin: OrgAdmin,
-    Json(req): Json<UpdateOrganizationRequest>,
+    OrganizationPermit(member): OrganizationPermit<{ Permission::OrganizationUpdate.index() }>,
+    Json(request): Json<UpdateOrganizationRequest>,
 ) -> impl IntoResponse {
+    if request.is_active == Some(true)
+        && let Err(refusal) = members::reactivate(&state, member.organization_id).await
+    {
+        return refusal.into_response();
+    }
+
     match organizations::update_organization(
         state.db(),
-        admin.org_id,
-        req.name.as_deref(),
-        req.description.as_deref(),
-        req.is_active,
+        member.organization_id,
+        request.name.as_deref(),
+        request.description.as_deref(),
+        request.is_active,
     )
     .await
     {
-        Ok(Some(org)) => {
-            let organization = OrganizationResponse::from(org).with_role(admin.role);
+        Ok(Some(organization)) => {
+            let organization =
+                OrganizationResponse::from(organization).with_membership(held(&member));
             audit(
                 state.db(),
                 AuditEvent {
-                    organization_id: Some(admin.org_id),
+                    organization_id: Some(member.organization_id),
                     workspace_id: None,
-                    actor_id: admin.user_id,
-                    actor_email: &admin.email,
+                    actor_id: member.user_id,
+                    actor_email: &member.email,
                     action: actions::ORGANIZATION_UPDATED,
                     resource_type: resources::ORGANIZATION,
-                    resource_id: Some(admin.org_id),
+                    resource_id: Some(member.organization_id),
                     old_values: None,
                     new_values: Some(serde_json::json!({
                         "name": organization.name,
@@ -310,44 +292,31 @@ pub async fn update(
             .await;
             Json(SingleOrganizationResponse { organization }).into_response()
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Organization not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
+        Ok(None) => refusal(StatusCode::NOT_FOUND, ORGANIZATION_NOT_FOUND),
+        Err(error) => {
+            tracing::error!("Database error: {}", error);
+            internal()
         }
     }
 }
 
-/// DELETE /api/organizations/:org_id - Delete org (requires owner)
-pub async fn delete(State(state): State<AppState>, owner: OrgOwner) -> impl IntoResponse {
-    let removal = match Removal::of_organization(&state, owner.org_id).await {
+/// DELETE /api/organizations/:org_id - Delete org (requires organization:delete)
+pub async fn delete(
+    State(state): State<AppState>,
+    OrganizationPermit(member): OrganizationPermit<{ Permission::OrganizationDelete.index() }>,
+) -> impl IntoResponse {
+    let removal = match Removal::of_organization(&state, member.organization_id).await {
         Ok(removal) => removal,
         Err(error) => {
             tracing::error!(%error, "Failed to read the syncs whose webhooks the delete removes");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+            return internal();
         }
     };
-    let deleted = match tokio::spawn(erase(state.clone(), owner.org_id)).await {
+    let deleted = match tokio::spawn(erase(state.clone(), member.organization_id)).await {
         Ok(deleted) => deleted,
         Err(error) => {
-            tracing::error!(organization = %owner.org_id, %error, "The delete did not finish");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+            tracing::error!(organization = %member.organization_id, %error, "The delete did not finish");
+            return internal();
         }
     };
     match deleted {
@@ -356,39 +325,31 @@ pub async fn delete(State(state): State<AppState>, owner: OrgOwner) -> impl Into
             audit(
                 state.db(),
                 AuditEvent {
-                    organization_id: Some(owner.org_id),
+                    organization_id: Some(member.organization_id),
                     workspace_id: None,
-                    actor_id: owner.user_id,
-                    actor_email: &owner.email,
+                    actor_id: member.user_id,
+                    actor_email: &member.email,
                     action: actions::ORGANIZATION_DELETED,
                     resource_type: resources::ORGANIZATION,
-                    resource_id: Some(owner.org_id),
+                    resource_id: Some(member.organization_id),
                     old_values: None,
                     new_values: None,
                 },
             )
             .await;
-            if let Err(error) = devices::forget(&state, owner.org_id).await {
+            if let Err(error) = devices::forget(&state, member.organization_id).await {
                 tracing::error!(
-                    organization = %owner.org_id,
+                    organization = %member.organization_id,
                     %error,
                     "Could not forget a deleted organization's coding agent sign-ins"
                 );
             }
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Organization not found")),
-        )
-            .into_response(),
+        Ok(false) => refusal(StatusCode::NOT_FOUND, ORGANIZATION_NOT_FOUND),
         Err(error) => {
             tracing::error!("Database error: {}", error);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
+            internal()
         }
     }
 }
@@ -409,68 +370,36 @@ struct SingleWorkspaceResponse {
     workspace: WorkspaceResponse,
 }
 
-/// Workspaces list response wrapper
-#[derive(Debug, Serialize)]
-struct WorkspacesListResponse {
-    workspaces: Vec<WorkspaceResponse>,
-}
-
-/// GET /api/organizations/:org_id/workspaces
-pub async fn list_workspaces(
-    State(state): State<AppState>,
-    member: OrgMember,
-) -> impl IntoResponse {
-    match workspaces::list_workspaces(state.db(), member.org_id).await {
-        Ok(ws) => Json(WorkspacesListResponse {
-            workspaces: ws.into_iter().map(WorkspaceResponse::from).collect(),
-        })
-        .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
-}
-
 /// POST /api/organizations/:org_id/workspaces
 pub async fn create_workspace(
     State(state): State<AppState>,
-    admin: OrgAdmin,
-    Json(req): Json<CreateWorkspaceRequest>,
+    OrganizationPermit(member): OrganizationPermit<{ Permission::WorkspacesCreate.index() }>,
+    Json(request): Json<CreateWorkspaceRequest>,
 ) -> impl IntoResponse {
-    let ws = match workspaces::create_workspace_with_owner(
+    let workspace = match workspaces::create_workspace_with_owner(
         state.db(),
-        admin.org_id,
-        &req.name,
-        &req.slug,
-        req.description.as_deref(),
-        admin.user_id,
+        member.organization_id,
+        &request.name,
+        &request.slug,
+        request.description.as_deref(),
+        member.user_id,
     )
     .await
     {
-        Ok(ws) => ws,
-        Err(e) => {
-            tracing::error!("Database error creating workspace: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+        Ok(workspace) => WorkspaceResponse::from(workspace),
+        Err(error) => {
+            tracing::error!("Database error creating workspace: {}", error);
+            return internal();
         }
     };
 
-    let workspace = WorkspaceResponse::from(ws);
     audit(
         state.db(),
         AuditEvent {
-            organization_id: Some(admin.org_id),
+            organization_id: Some(member.organization_id),
             workspace_id: Some(workspace.id),
-            actor_id: admin.user_id,
-            actor_email: &admin.email,
+            actor_id: member.user_id,
+            actor_email: &member.email,
             action: actions::WORKSPACE_CREATED,
             resource_type: resources::WORKSPACE,
             resource_id: Some(workspace.id),
@@ -487,153 +416,13 @@ pub async fn create_workspace(
         .into_response()
 }
 
-/// GET /api/workspaces/:id
-pub async fn get_workspace(
-    State(state): State<AppState>,
-    member: WorkspaceMember,
-) -> impl IntoResponse {
-    match workspaces::get_workspace(state.db(), member.workspace_id).await {
-        Ok(Some(ws)) => Json(SingleWorkspaceResponse {
-            workspace: WorkspaceResponse::from(ws),
-        })
-        .into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Workspace not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
-}
-
-/// PUT /api/workspaces/:id
-pub async fn update_workspace(
-    State(state): State<AppState>,
-    admin: WorkspaceAdmin,
-    Json(req): Json<UpdateWorkspaceRequest>,
-) -> impl IntoResponse {
-    match workspaces::update_workspace(
-        state.db(),
-        admin.workspace_id,
-        req.name.as_deref(),
-        req.description.as_deref(),
-        req.is_active,
-    )
-    .await
-    {
-        Ok(Some(ws)) => {
-            let workspace = WorkspaceResponse::from(ws);
-            audit(
-                state.db(),
-                AuditEvent {
-                    organization_id: Some(workspace.organization_id),
-                    workspace_id: Some(admin.workspace_id),
-                    actor_id: admin.user_id,
-                    actor_email: &admin.email,
-                    action: actions::WORKSPACE_UPDATED,
-                    resource_type: resources::WORKSPACE,
-                    resource_id: Some(admin.workspace_id),
-                    old_values: None,
-                    new_values: serde_json::to_value(&workspace).ok(),
-                },
-            )
-            .await;
-            Json(SingleWorkspaceResponse { workspace }).into_response()
-        }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Workspace not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
-}
-
-/// DELETE /api/workspaces/:id
-pub async fn delete_workspace(
-    State(state): State<AppState>,
-    admin: WorkspaceAdmin,
-) -> impl IntoResponse {
-    let organization_id = match workspaces::get_workspace(state.db(), admin.workspace_id).await {
-        Ok(workspace) => workspace.map(|workspace| workspace.organization_id),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
-
-    let removal = match Removal::of_workspace(&state, admin.workspace_id).await {
-        Ok(removal) => removal,
-        Err(error) => {
-            tracing::error!(%error, "Failed to read the syncs whose webhooks the delete removes");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
-    match workspaces::delete_workspace(state.db(), admin.workspace_id).await {
-        Ok(true) => {
-            removal.run(&state).await;
-            audit(
-                state.db(),
-                AuditEvent {
-                    organization_id,
-                    workspace_id: Some(admin.workspace_id),
-                    actor_id: admin.user_id,
-                    actor_email: &admin.email,
-                    action: actions::WORKSPACE_DELETED,
-                    resource_type: resources::WORKSPACE,
-                    resource_id: Some(admin.workspace_id),
-                    old_values: None,
-                    new_values: None,
-                },
-            )
-            .await;
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Workspace not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
-}
-
-/// Organization member response
 #[derive(Debug, Serialize)]
 pub struct OrganizationMemberResponse {
     id: Uuid,
     organization_id: Uuid,
     user_id: Uuid,
-    role: String,
+    #[serde(flatten)]
+    membership: MembershipResponse,
     is_active: bool,
     invited_by: Option<Uuid>,
     email: Option<String>,
@@ -642,13 +431,13 @@ pub struct OrganizationMemberResponse {
     timestamps: Timestamps,
 }
 
-impl From<organization_members::OrganizationMemberRow> for OrganizationMemberResponse {
-    fn from(row: organization_members::OrganizationMemberRow) -> Self {
+impl OrganizationMemberResponse {
+    fn seat(row: OrganizationMemberRow, membership: MembershipResponse) -> Self {
         Self {
             id: row.id,
             organization_id: row.organization_id,
             user_id: row.user_id,
-            role: row.role.as_str().to_string(),
+            membership,
             is_active: row.is_active,
             invited_by: row.invited_by,
             email: None,
@@ -658,53 +447,61 @@ impl From<organization_members::OrganizationMemberRow> for OrganizationMemberRes
     }
 }
 
-impl From<organization_members::MemberWithUser> for OrganizationMemberResponse {
-    fn from(member: organization_members::MemberWithUser) -> Self {
+impl From<MemberWithUser> for OrganizationMemberResponse {
+    fn from(member: MemberWithUser) -> Self {
         Self {
             email: Some(member.email),
             display_name: member.display_name,
-            ..Self::from(member.member)
+            ..Self::seat(
+                member.member,
+                MembershipResponse::organization(member.custom_role, member.grant),
+            )
         }
     }
 }
 
-/// The member as the console lists them: with the account's email and name
-/// when the account can be read, the bare seat otherwise.
-async fn describe_member(
+/// A member as the console lists them, holding what the write that seated or
+/// changed them recorded, with the account's email and name when it can be
+/// read.
+async fn describe(
     state: &AppState,
-    row: organization_members::OrganizationMemberRow,
+    row: OrganizationMemberRow,
+    membership: MembershipResponse,
 ) -> OrganizationMemberResponse {
-    match organization_members::get_member_with_user(state.db(), row.organization_id, row.user_id)
-        .await
-    {
-        Ok(Some(member)) => OrganizationMemberResponse::from(member),
-        Ok(None) => OrganizationMemberResponse::from(row),
+    let seated = OrganizationMemberResponse::seat(row, membership);
+    match users::get_user_by_id(state.db(), seated.user_id).await {
+        Ok(Some(user)) => OrganizationMemberResponse {
+            email: Some(user.email),
+            display_name: user.display_name,
+            ..seated
+        },
+        Ok(None) => seated,
         Err(error) => {
-            tracing::warn!(%error, user_id = %row.user_id, "Failed to read the member's account");
-            OrganizationMemberResponse::from(row)
+            tracing::warn!(%error, user_id = %seated.user_id, "Failed to read the member's account");
+            seated
         }
     }
 }
 
 async fn audit_member(
     state: &AppState,
-    admin: &OrgAdmin,
+    actor: &OrganizationMember,
     action: &str,
     user_id: Uuid,
-    role: Option<&str>,
+    membership: Option<&MembershipResponse>,
 ) {
     audit(
         state.db(),
         AuditEvent {
-            organization_id: Some(admin.org_id),
+            organization_id: Some(actor.organization_id),
             workspace_id: None,
-            actor_id: admin.user_id,
-            actor_email: &admin.email,
+            actor_id: actor.user_id,
+            actor_email: &actor.email,
             action,
             resource_type: resources::MEMBER,
             resource_id: Some(user_id),
             old_values: None,
-            new_values: role.map(|role| serde_json::json!({ "user_id": user_id, "role": role })),
+            new_values: membership.map(|membership| membership.audited(user_id)),
         },
     )
     .await;
@@ -720,10 +517,11 @@ pub struct AddMemberRequest {
     role: String,
 }
 
-/// Update member role request
+/// A member's new role: a built-in `role` or a `custom_role_id`, exactly one.
 #[derive(Debug, Deserialize)]
 pub struct UpdateMemberRoleRequest {
-    role: String,
+    role: Option<String>,
+    custom_role_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -731,9 +529,12 @@ struct OrganizationMembersListResponse {
     members: Vec<OrganizationMemberResponse>,
 }
 
-/// GET /api/organizations/:org_id/members - List members (requires member)
-pub async fn list_members(State(state): State<AppState>, member: OrgMember) -> impl IntoResponse {
-    match organization_members::list_members_with_users(state.db(), member.org_id).await {
+/// GET /api/organizations/:org_id/members - List members (requires membership)
+pub async fn list_members(
+    State(state): State<AppState>,
+    member: OrganizationMember,
+) -> impl IntoResponse {
+    match organization_members::list_members_with_users(state.db(), member.organization_id).await {
         Ok(members) => Json(OrganizationMembersListResponse {
             members: members
                 .into_iter()
@@ -741,167 +542,114 @@ pub async fn list_members(State(state): State<AppState>, member: OrgMember) -> i
                 .collect(),
         })
         .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
+        Err(error) => {
+            tracing::error!("Database error: {}", error);
+            internal()
         }
     }
 }
 
-/// POST /api/organizations/:org_id/members - Add member (requires admin)
+/// POST /api/organizations/:org_id/members - Add member (requires members:create)
 pub async fn add_member(
     State(state): State<AppState>,
-    admin: OrgAdmin,
-    Json(req): Json<AddMemberRequest>,
+    OrganizationPermit(member): OrganizationPermit<{ Permission::MembersCreate.index() }>,
+    Json(request): Json<AddMemberRequest>,
 ) -> impl IntoResponse {
-    let role = match req.role.parse::<organization_members::OrgRole>() {
-        Ok(r) => r,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "Invalid role. Must be one of: member, admin, owner",
-                )),
-            )
-                .into_response();
-        }
+    let Ok(role) = request.role.parse::<OrgRole>() else {
+        return refusal(StatusCode::BAD_REQUEST, INVALID_ROLE);
     };
 
-    if role >= organization_members::OrgRole::Admin
-        && admin.role != organization_members::OrgRole::Owner
-    {
-        return (
+    if role >= OrgRole::Admin && !member.allows(Permission::AdministratorsUpdate) {
+        return refusal(
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "Only owners can grant admin or owner role",
-            )),
-        )
-            .into_response();
+            "Only owners can grant admin or owner role",
+        );
+    }
+    if !member.grant.covers(&Grant::organization(role)) {
+        return exceeds().into_response();
     }
 
-    let target = match (req.user_id, req.email.as_deref()) {
+    let target = match (request.user_id, request.email.as_deref()) {
         (Some(user_id), None) => user_id,
-        (None, Some(email)) => match crate::db::users::get_user_by_email(state.db(), email).await {
+        (None, Some(email)) => match users::get_user_by_email(state.db(), email).await {
             Ok(Some(user)) => user.id,
             Ok(None) => {
-                return (
+                return refusal(
                     StatusCode::NOT_FOUND,
-                    Json(ErrorResponse::new(
-                        "No account uses that email. Send an invitation instead.",
-                    )),
-                )
-                    .into_response();
+                    "No account uses that email. Send an invitation instead.",
+                );
             }
-            Err(e) => {
-                tracing::error!("Database error resolving email: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
+            Err(error) => {
+                tracing::error!("Database error resolving email: {}", error);
+                return internal();
             }
         },
         _ => {
-            return (
+            return refusal(
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "Name the member by either user_id or email",
-                )),
-            )
-                .into_response();
+                "Name the member by either user_id or email",
+            );
         }
     };
 
-    // CRITICAL-7: Check if member already exists (active or inactive)
-    match organization_members::get_member(state.db(), admin.org_id, target).await {
-        Ok(Some(existing)) => {
-            if existing.is_active {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::new(
-                        "User is already a member of this organization",
-                    )),
-                )
-                    .into_response();
-            } else {
-                // Member exists but is inactive - use reactivate instead
-                match organization_members::reactivate_member(
-                    state.db(),
-                    admin.org_id,
-                    target,
-                    role,
-                    Some(admin.user_id),
-                )
-                .await
-                {
-                    Ok(member) => {
-                        audit_member(
-                            &state,
-                            &admin,
-                            actions::MEMBER_ADDED,
-                            member.user_id,
-                            Some(member.role.as_str()),
-                        )
-                        .await;
-                        let response = describe_member(&state, member).await;
-                        return (StatusCode::OK, Json(response)).into_response();
-                    }
-                    Err(e) => {
-                        tracing::error!("Database error reactivating member: {}", e);
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse::new("Internal server error")),
-                        )
-                            .into_response();
-                    }
-                }
-            }
-        }
-        Ok(None) => {
-            // Member doesn't exist, proceed with add
-        }
-        Err(e) => {
-            tracing::error!("Database error checking existing member: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+    if let Err(refusal) = members::admit(&state, Some(target)).await {
+        return refusal.into_response();
     }
 
-    match organization_members::add_member(
-        state.db(),
-        admin.org_id,
-        target,
-        role,
-        Some(admin.user_id),
-    )
-    .await
-    {
-        Ok(member) => {
+    let (added, status) =
+        match organization_members::get_member(state.db(), member.organization_id, target).await {
+            Ok(Some(existing)) if existing.is_active => {
+                return refusal(
+                    StatusCode::CONFLICT,
+                    "User is already a member of this organization",
+                );
+            }
+            Ok(Some(_)) => (
+                organization_members::reactivate_member(
+                    state.db(),
+                    member.organization_id,
+                    target,
+                    role,
+                    Some(member.user_id),
+                )
+                .await,
+                StatusCode::OK,
+            ),
+            Ok(None) => (
+                organization_members::add_member(
+                    state.db(),
+                    member.organization_id,
+                    target,
+                    role,
+                    Some(member.user_id),
+                )
+                .await,
+                StatusCode::CREATED,
+            ),
+            Err(error) => {
+                tracing::error!("Database error checking existing member: {}", error);
+                return internal();
+            }
+        };
+
+    match added {
+        Ok(row) => {
+            let user_id = row.user_id;
+            let membership = MembershipResponse::organization(None, Grant::organization(row.role));
+            let response = describe(&state, row, membership).await;
             audit_member(
                 &state,
-                &admin,
+                &member,
                 actions::MEMBER_ADDED,
-                member.user_id,
-                Some(member.role.as_str()),
+                user_id,
+                Some(&response.membership),
             )
             .await;
-            let response = describe_member(&state, member).await;
-            (StatusCode::CREATED, Json(response)).into_response()
+            (status, Json(response)).into_response()
         }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
+        Err(error) => {
+            tracing::error!("Database error adding member: {}", error);
+            internal()
         }
     }
 }
@@ -912,127 +660,113 @@ pub struct MemberPath {
     user_id: Uuid,
 }
 
-/// PATCH /api/organizations/:org_id/members/:user_id - Update role (requires admin)
+/// PATCH /api/organizations/:org_id/members/:user_id - Update role (requires members:update)
 pub async fn update_member_role(
     State(state): State<AppState>,
-    admin: OrgAdmin,
+    OrganizationPermit(member): OrganizationPermit<{ Permission::MembersUpdate.index() }>,
     Path(path): Path<MemberPath>,
-    Json(req): Json<UpdateMemberRoleRequest>,
+    Json(request): Json<UpdateMemberRoleRequest>,
 ) -> impl IntoResponse {
-    let role = match req.role.parse::<organization_members::OrgRole>() {
-        Ok(r) => r,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "Invalid role. Must be one of: member, admin, owner",
-                )),
-            )
-                .into_response();
-        }
-    };
+    let assignment =
+        match Assignment::<OrgRole>::parse(request.role.as_deref(), request.custom_role_id) {
+            Ok(assignment) => assignment,
+            Err(Invalid::Unknown) => return refusal(StatusCode::BAD_REQUEST, INVALID_ROLE),
+            Err(Invalid::Ambiguous) => {
+                return refusal(StatusCode::BAD_REQUEST, AMBIGUOUS_ASSIGNMENT);
+            }
+        };
 
-    // CRITICAL-4: Prevent privilege escalation - only owners can grant owner role
-    if role == organization_members::OrgRole::Owner
-        && admin.role != organization_members::OrgRole::Owner
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new("Only owners can grant owner role")),
-        )
-            .into_response();
+    match assignment {
+        Assignment::Custom(_) => {
+            if let Err(unentitled) = entitlement::require(&state, Feature::CustomRoles).await {
+                return unentitled.into_response();
+            }
+        }
+        Assignment::BuiltIn(OrgRole::Owner) if !member.allows(Permission::AdministratorsUpdate) => {
+            return refusal(StatusCode::FORBIDDEN, "Only owners can grant owner role");
+        }
+        Assignment::BuiltIn(_) => {}
     }
 
     match organization_members::change_role(
         state.db(),
-        admin.org_id,
+        member.organization_id,
         path.user_id,
-        role,
-        admin.role,
+        assignment,
+        member.user_id,
     )
     .await
     {
-        Ok(organization_members::RoleChange::Applied(member)) => {
+        Ok(RoleChange::Applied(assigned)) => {
+            let Assigned {
+                member: row,
+                membership,
+            } = *assigned;
+            let user_id = row.user_id;
+            let membership =
+                MembershipResponse::organization(membership.custom_role, membership.grant);
+            let response = describe(&state, row, membership).await;
             audit_member(
                 &state,
-                &admin,
+                &member,
                 actions::MEMBER_ROLE_CHANGED,
-                member.user_id,
-                Some(member.role.as_str()),
+                user_id,
+                Some(&response.membership),
             )
             .await;
-            let response = describe_member(&state, *member).await;
             Json(response).into_response()
         }
-        Ok(organization_members::RoleChange::Forbidden) => (
+        Ok(RoleChange::Revoked) => revoked(Permission::MembersUpdate).into_response(),
+        Ok(RoleChange::Forbidden) => refusal(
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "Only owners can change the role of an admin or owner",
-            )),
-        )
-            .into_response(),
-        Ok(organization_members::RoleChange::Missing) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Member not found")),
-        )
-            .into_response(),
-        Ok(organization_members::RoleChange::LastOwner) => (
+            "Only owners can change the role of an admin or owner",
+        ),
+        Ok(RoleChange::Uncovered | RoleChange::Exceeds) => exceeds().into_response(),
+        Ok(RoleChange::Missing) => refusal(StatusCode::NOT_FOUND, MEMBER_NOT_FOUND),
+        Ok(RoleChange::LastOwner) => refusal(
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "Cannot demote the last owner of the organization",
-            )),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
+            "Cannot demote the last owner of the organization",
+        ),
+        Ok(RoleChange::RoleMissing) => refusal(StatusCode::NOT_FOUND, "Role not found"),
+        Err(error) => {
+            tracing::error!("Database error: {}", error);
+            internal()
         }
     }
 }
 
-/// DELETE /api/organizations/:org_id/members/:user_id - Remove member (requires admin)
+/// DELETE /api/organizations/:org_id/members/:user_id - Remove member (requires members:delete)
 pub async fn remove_member(
     State(state): State<AppState>,
-    admin: OrgAdmin,
+    OrganizationPermit(member): OrganizationPermit<{ Permission::MembersDelete.index() }>,
     Path(path): Path<MemberPath>,
 ) -> impl IntoResponse {
-    match organization_members::remove_guarded(state.db(), admin.org_id, path.user_id, admin.role)
-        .await
+    match organization_members::remove_guarded(
+        state.db(),
+        member.organization_id,
+        path.user_id,
+        member.user_id,
+    )
+    .await
     {
-        Ok(organization_members::Removal::Removed) => {
-            audit_member(&state, &admin, actions::MEMBER_REMOVED, path.user_id, None).await;
+        Ok(MemberRemoval::Removed) => {
+            audit_member(&state, &member, actions::MEMBER_REMOVED, path.user_id, None).await;
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(organization_members::Removal::Forbidden) => (
+        Ok(MemberRemoval::Revoked) => revoked(Permission::MembersDelete).into_response(),
+        Ok(MemberRemoval::Forbidden) => refusal(
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "Only owners can remove admins or owners",
-            )),
-        )
-            .into_response(),
-        Ok(organization_members::Removal::LastOwner) => (
+            "Only owners can remove admins or owners",
+        ),
+        Ok(MemberRemoval::Uncovered) => exceeds().into_response(),
+        Ok(MemberRemoval::LastOwner) => refusal(
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "Cannot remove the last owner of the organization",
-            )),
-        )
-            .into_response(),
-        Ok(organization_members::Removal::Missing) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Member not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
+            "Cannot remove the last owner of the organization",
+        ),
+        Ok(MemberRemoval::Missing) => refusal(StatusCode::NOT_FOUND, MEMBER_NOT_FOUND),
+        Err(error) => {
+            tracing::error!("Database error: {}", error);
+            internal()
         }
     }
 }
@@ -1073,12 +807,15 @@ mod tests {
     const BLOCKING: &str = "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
          WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)))";
 
-    fn owner(tenant: &Tenant) -> OrgOwner {
-        OrgOwner {
-            org_id: tenant.organization,
+    fn owner(tenant: &Tenant) -> OrganizationPermit<{ Permission::OrganizationDelete.index() }> {
+        OrganizationPermit(OrganizationMember {
+            organization_id: tenant.organization,
             user_id: tenant.user,
             email: tenant.email.clone(),
-        }
+            role: OrgRole::Owner,
+            custom_role: None,
+            grant: Grant::organization(OrgRole::Owner),
+        })
     }
 
     /// How many servers the organization's hub connected, and the hub, held only weakly.

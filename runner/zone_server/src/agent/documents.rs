@@ -18,7 +18,7 @@ use abnegate_agent::tool::Tier;
 use super::identifier::Kind;
 use super::tools::WorkspaceScope;
 use crate::db::knowledge::{self, Document, DocumentUpdate};
-use crate::db::workspace_members::{self, WorkspaceRole};
+use crate::db::workspace_members;
 use crate::db::{DbResult, chat_sources};
 
 const LIST_LIMIT: i64 = 25;
@@ -181,18 +181,17 @@ impl Tool for DocumentTool {
 impl DocumentTool {
     async fn run(&self, params: &Value) -> Result<ToolResult, sqlx::Error> {
         let scope = &self.scope;
-        let required = match self.operation {
-            Operation::List | Operation::Read => WorkspaceRole::Viewer,
-            Operation::Create | Operation::Update => WorkspaceRole::Member,
+        let permitted = match self.operation {
+            Operation::List | Operation::Read => {
+                workspace_members::can_read(scope.state.db(), scope.workspace_id, scope.user_id)
+                    .await?
+            }
+            Operation::Create | Operation::Update => {
+                workspace_members::can_write(scope.state.db(), scope.workspace_id, scope.user_id)
+                    .await?
+            }
         };
-        if !workspace_members::has_role_or_higher(
-            scope.state.db(),
-            scope.user_id,
-            scope.workspace_id,
-            required,
-        )
-        .await?
-        {
+        if !permitted {
             return Ok(ToolResult::error(
                 "You do not have permission to perform this document operation in this workspace.",
             ));
@@ -539,6 +538,7 @@ mod tests {
     use super::*;
     use crate::agent::citations::{self, CitationKind};
     use crate::agent::identifier;
+    use crate::db::workspace_members::WorkspaceRole;
     use crate::state::{AppState, test_config};
     use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;
@@ -944,6 +944,55 @@ mod tests {
         assert!(integer(&json!({"offset":1.5}), "offset", 0, 0).is_err());
         assert!(page_stored("hello", 0, 0).is_err());
         assert!(page_stored("hello", 6, 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn document_tools_follow_the_callers_custom_role() {
+        use crate::auth::Permission;
+        use crate::db::testing::Tenant;
+
+        let tenant = Tenant::new().await;
+        let writer = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;
+        let reader = tenant.workspace_holder(&[]).await;
+        let mut results = Vec::new();
+        for (user, name) in [
+            (writer, "create_document"),
+            (reader, "create_document"),
+            (reader, LIST_TOOL),
+        ] {
+            let scope = WorkspaceScope {
+                state: AppState::new(test_config(), tenant.pool.clone(), None),
+                workspace_id: tenant.workspace,
+                chat_id: Some(Uuid::new_v4()),
+                user_id: user,
+                offline: false,
+                origin: crate::db::tasks::Origin::Member,
+            };
+            let mut registry = ToolRegistry::new();
+            register(&mut registry, &scope);
+            let result = registry
+                .get(name)
+                .expect("the document tool")
+                .execute(
+                    json!({"title": "Held by a role", "content": "Custom roles"}),
+                    &ToolContext::default(),
+                )
+                .await
+                .expect("the tool answers");
+            results.push((result.success, result.error));
+        }
+        tenant.cleanup().await;
+
+        let refusal =
+            "You do not have permission to perform this document operation in this workspace.";
+        assert_eq!(
+            results,
+            [
+                (true, None),
+                (false, Some(refusal.to_string())),
+                (true, None)
+            ]
+        );
     }
 
     #[tokio::test]

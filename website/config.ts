@@ -3,7 +3,7 @@ import type { Site } from './generator/Site.ts';
 export const site: Site = {
   name: 'Zone',
   domain: 'zone.bitecode.ltd',
-  repository: 'https://github.com/abnegate/zone',
+  repository: 'https://github.com/bitecodehq/zone',
   contactEmail: 'zone@bitecode.ltd',
   currency: 'USD',
   plans: {

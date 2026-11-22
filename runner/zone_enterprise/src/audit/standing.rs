@@ -47,7 +47,7 @@ pub struct Standing {
 
 impl Standing {
     /// `applies` deliberately ignores the status: a lapse keeps deleting what the company committed
-    /// to delete, and only removing the license returns to Community.
+    /// to delete, and only removing the license, or moving to a plan without retention, stops it.
     pub fn of(license: Option<&License>, unverified: bool, now: DateTime<Utc>) -> Self {
         let entitled = |feature: Feature| !unverified && feature.entitled(license, now);
         let status = status(license, now);
@@ -57,7 +57,7 @@ impl Standing {
             export: entitled(Feature::AuditExport),
             streaming: entitled(Feature::AuditStreaming),
             retention: entitled(Feature::AuditRetention),
-            applies: unverified || license.is_some(),
+            applies: unverified || Feature::AuditRetention.enforced(license),
             pause: pause(license, unverified, status),
         }
     }
@@ -67,7 +67,7 @@ fn pause(license: Option<&License>, unverified: bool, status: Status) -> Option<
     if unverified {
         return Some(Pause::Unverified);
     }
-    if license.is_none() {
+    if !Feature::AuditStreaming.enforced(license) {
         return Some(Pause::Unlicensed);
     }
     if status == Status::Lapsed {
@@ -83,9 +83,18 @@ mod tests {
 
     use super::*;
     use crate::fixtures;
+    use crate::payload::Payload;
+    use crate::plan::Plan;
 
     fn license() -> License {
         fixtures::license(&fixtures::payload())
+    }
+
+    fn team() -> License {
+        fixtures::license(&Payload {
+            plan: Some(Plan::Team),
+            ..fixtures::payload()
+        })
     }
 
     fn active(license: &License) -> DateTime<Utc> {
@@ -192,6 +201,39 @@ mod tests {
         assert_eq!(standing.pause, Some(Pause::Unverified));
         assert!(!standing.export && !standing.streaming && !standing.retention);
         assert!(standing.applies);
+    }
+
+    #[test]
+    fn team_is_unlicensed_for_audit_whatever_its_status() {
+        let team = team();
+        for (now, status) in [
+            (active(&team), Status::Active),
+            (grace(&team), Status::Grace),
+            (lapsed(&team), Status::Lapsed),
+        ] {
+            assert_eq!(
+                Standing::of(Some(&team), false, now),
+                Standing {
+                    edition: Edition::Team,
+                    status,
+                    export: false,
+                    streaming: false,
+                    retention: false,
+                    applies: false,
+                    pause: Some(Pause::Unlicensed),
+                },
+                "while {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unverified_key_over_a_team_license_still_applies_retention() {
+        let team = team();
+        let standing = Standing::of(Some(&team), true, active(&team));
+        assert_eq!(standing.pause, Some(Pause::Unverified));
+        assert!(standing.applies);
+        assert!(!standing.export && !standing.streaming && !standing.retention);
     }
 
     #[test]

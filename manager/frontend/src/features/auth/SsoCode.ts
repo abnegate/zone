@@ -10,6 +10,9 @@ export const SsoCode = {
   EmailUnverified: 'sso_email_unverified',
   DomainNotAllowed: 'sso_domain_not_allowed',
   EmailConflict: 'sso_email_conflict',
+  AssertionInvalid: 'sso_assertion_invalid',
+  SignInRefused: 'sso_sign_in_refused',
+  SignInFailed: 'sso_sign_in_failed',
 } as const;
 
 export type SsoCode = (typeof SsoCode)[keyof typeof SsoCode];

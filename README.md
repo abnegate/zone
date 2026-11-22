@@ -43,9 +43,9 @@ Zone is one platform with three parts: a shared core, and Zone Code and Zone Stu
 - **Apps**: Desktop (macOS, Linux), Android and iOS clients and the `zone` CLI, with an admin list to allow or block each device
 - **Private Web Search** (optional): VPN-protected metasearch engine; when the VPN is on, all stack internet traffic uses the same tunnel
 - **Multi-Tenant Architecture**: Organizations and workspaces for team collaboration, with email invitations
-- **Role-Based Access Control**: Fine-grained permissions with users, roles, policies and an audit log
-- **Enterprise controls**: With a Zone Enterprise license, single sign-on ([docs/SSO.md](docs/SSO.md)), agent and model policy ([docs/POLICY.md](docs/POLICY.md)), and audit log download, streaming to a SIEM and retention ([docs/AUDIT.md](docs/AUDIT.md))
-- **Licensing**: How Zone Enterprise licenses are sold through Polar, signed and emailed, and how to run the signer ([docs/LICENSING.md](docs/LICENSING.md))
+- **Role-Based Access Control**: Every organization and workspace check is a permission; built-in roles are fixed permission sets, alongside policies and an audit log (see [docs/ROLES.md](docs/ROLES.md))
+- **Enterprise controls**: With a Zone Enterprise license, single sign-on ([docs/SSO.md](docs/SSO.md)), custom roles composed from individual permissions ([docs/ROLES.md](docs/ROLES.md)), agent and model policy ([docs/POLICY.md](docs/POLICY.md)), and audit log download, streaming to a SIEM and retention ([docs/AUDIT.md](docs/AUDIT.md))
+- **Licensing**: Community is free, with every feature, for up to 3 active members per server. A Zone Team license lifts the cap and adds spend reports and budgets ([docs/SPEND.md](docs/SPEND.md)); Zone Enterprise adds the controls above. How licenses are sold through Polar, signed and emailed, and how to run the signer ([docs/LICENSING.md](docs/LICENSING.md), [pricing](https://zone.bitecode.ltd/pricing/))
 - **Theme Customization**: Workspace-specific theming
 
 ### Zone Code
@@ -331,15 +331,15 @@ The Zone desktop app ships the manager console. On first launch it asks for your
 **Homebrew** (macOS):
 
 ```bash
-brew tap abnegate/tap
+brew tap bitecodehq/tap
 brew install --cask zone
 ```
 
 **APT** (Debian / Ubuntu):
 
 ```bash
-curl -fsSL https://abnegate.github.io/apt-repo/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/abnegate.gpg
-echo "deb [signed-by=/usr/share/keyrings/abnegate.gpg] https://abnegate.github.io/apt-repo stable main" | sudo tee /etc/apt/sources.list.d/abnegate.list
+curl -fsSL https://apt.bitecode.ltd/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/bitecode.gpg
+echo "deb [signed-by=/usr/share/keyrings/bitecode.gpg] https://apt.bitecode.ltd stable main" | sudo tee /etc/apt/sources.list.d/bitecode.list
 sudo apt update && sudo apt install zone
 ```
 
@@ -498,7 +498,7 @@ zone/
 
 - **Basic Auth**: Traefik-level authentication for all services
 - **JWT Tokens**: API authentication with refresh tokens
-- **RBAC**: Role-based access control for fine-grained permissions
+- **RBAC**: Permission checks on every organization and workspace route, with built-in and custom roles (see [docs/ROLES.md](docs/ROLES.md))
 
 ## System Requirements
 
@@ -596,8 +596,8 @@ MIT, except `runner/zone_enterprise/` and
 `manager/frontend/src/features/enterprise/`, which are under the Zone Enterprise
 License in each directory's `LICENSE`. The license signer, `runner/zone_license/`,
 is MIT. See [LICENSE](LICENSE) for details, and
-[docs/LICENSING.md](docs/LICENSING.md) for how Zone Enterprise licenses are
-issued.
+[docs/LICENSING.md](docs/LICENSING.md) for how Zone Team and Enterprise
+licenses are issued.
 
 ## Contributing
 

@@ -55,6 +55,18 @@ export const LAPSED_ORGANIZATION: OrganizationPolicyResponse = {
   updated_at: UPDATED_AT,
 };
 
+export const TEAM_ORGANIZATION: OrganizationPolicyResponse = {
+  ...COMMUNITY_ORGANIZATION,
+  edition: Edition.Team,
+  status: LicenseStatus.Active,
+};
+
+export const TEAM_LAPSED_ORGANIZATION: OrganizationPolicyResponse = {
+  ...COMMUNITY_ORGANIZATION,
+  edition: Edition.Team,
+  status: LicenseStatus.Lapsed,
+};
+
 export const COMMUNITY_WORKSPACE: WorkspacePolicyResponse = {
   entitled: false,
   enforced: false,

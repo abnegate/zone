@@ -7,6 +7,7 @@ use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::auth::Permission;
 use crate::services::chat::notice;
 use crate::services::github::pull_requests;
 use crate::services::task_progress;
@@ -14,7 +15,7 @@ use crate::services::task_progress;
 use super::{
     DbResult,
     auto_projects::{self, Claim},
-    workspace_members::{self, WorkspaceRole},
+    workspace_members,
 };
 
 mod origin;
@@ -329,8 +330,8 @@ pub struct Execution {
 impl Execution {
     /// Legacy tasks may execute without an actor, but can never publish.
     pub async fn authorized(&self, pool: &PgPool, publication: bool) -> DbResult<bool> {
-        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT EXISTS(SELECT 1 FROM tasks t JOIN task_runs r ON r.task_id=t.id WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.owner=$3 AND r.triggered_by IS NOT DISTINCT FROM $4 AND r.status IN {ACTIVE_RUN_STATUSES} AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND (NOT $5 OR (t.created_by IS NOT NULL AND $4::uuid IS NOT NULL)) AND (($4::uuid IS NULL AND t.created_by IS NULL) OR EXISTS(SELECT 1 FROM workspace_members m WHERE m.workspace_id=t.workspace_id AND m.user_id=$4 AND m.is_active AND m.role IN ('member','admin','owner'))))")))
-            .bind(self.task).bind(self.run).bind(self.owner).bind(self.actor).bind(publication).fetch_one(pool).await
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT EXISTS(SELECT 1 FROM tasks t JOIN task_runs r ON r.task_id=t.id WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.owner=$3 AND r.triggered_by IS NOT DISTINCT FROM $4 AND r.status IN {ACTIVE_RUN_STATUSES} AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND (NOT $5 OR (t.created_by IS NOT NULL AND $4::uuid IS NOT NULL)) AND (($4::uuid IS NULL AND t.created_by IS NULL) OR workspace_permits($4, t.workspace_id, $6)))")))
+            .bind(self.task).bind(self.run).bind(self.owner).bind(self.actor).bind(publication).bind(Permission::WorkspaceWrite.name()).fetch_one(pool).await
     }
 }
 
@@ -407,9 +408,9 @@ async fn lock_writer(
     user_id: Uuid,
 ) -> DbResult<bool> {
     Ok(
-        workspace_members::lock_role(connection, workspace_id, user_id)
+        workspace_members::lock_membership(connection, workspace_id, user_id)
             .await?
-            .is_some_and(|role| role >= WorkspaceRole::Member),
+            .is_some_and(|membership| membership.grant.allows(Permission::WorkspaceWrite)),
     )
 }
 
@@ -2021,8 +2022,8 @@ pub async fn update_task_pr(
     branch: &str,
     status: pull_requests::Status,
 ) -> DbResult<bool> {
-    Ok(sqlx::query("UPDATE tasks t SET pr_url=$5, branch_name=$6, pr_status=$7, pr_created_at=NOW(), updated_at=NOW() FROM task_runs r, workspace_members m WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.task_id=t.id AND r.owner=$3 AND r.triggered_by=$4 AND r.status='running' AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND t.created_by IS NOT NULL AND m.workspace_id=t.workspace_id AND m.user_id=$4 AND m.is_active AND m.role IN ('member','admin','owner')")
-        .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(url).bind(branch).bind(status.as_str()).execute(pool).await?.rows_affected() == 1)
+    Ok(sqlx::query("UPDATE tasks t SET pr_url=$5, branch_name=$6, pr_status=$7, pr_created_at=NOW(), updated_at=NOW() FROM task_runs r WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.task_id=t.id AND r.owner=$3 AND r.triggered_by=$4 AND r.status='running' AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND t.created_by IS NOT NULL AND workspace_permits($4, t.workspace_id, $8)")
+        .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(url).bind(branch).bind(status.as_str()).bind(Permission::WorkspaceWrite.name()).execute(pool).await?.rows_affected() == 1)
 }
 
 /// Record how a task's pull request stands once its reception has been read.
@@ -2043,8 +2044,8 @@ pub async fn update_task_branch(
     execution: &Execution,
     branch: &str,
 ) -> DbResult<bool> {
-    Ok(sqlx::query("UPDATE tasks t SET branch_name=$5, updated_at=NOW() FROM task_runs r, workspace_members m WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.task_id=t.id AND r.owner=$3 AND r.triggered_by=$4 AND r.status='running' AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND t.created_by IS NOT NULL AND m.workspace_id=t.workspace_id AND m.user_id=$4 AND m.is_active AND m.role IN ('member','admin','owner')")
-        .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(branch).execute(pool).await?.rows_affected() == 1)
+    Ok(sqlx::query("UPDATE tasks t SET branch_name=$5, updated_at=NOW() FROM task_runs r WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.task_id=t.id AND r.owner=$3 AND r.triggered_by=$4 AND r.status='running' AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND t.created_by IS NOT NULL AND workspace_permits($4, t.workspace_id, $6)")
+        .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(branch).bind(Permission::WorkspaceWrite.name()).execute(pool).await?.rows_affected() == 1)
 }
 
 /// Insert a task inside a caller's transaction, for a write that makes several
@@ -2229,6 +2230,8 @@ pub async fn mark_pr_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::Scope;
+    use crate::db::testing::Tenant;
 
     #[test]
     fn a_placeholder_is_the_first_line_of_the_description_cut_on_a_word() {
@@ -2271,5 +2274,69 @@ mod tests {
             "[ ] Rotate the keys"
         );
         assert_eq!(placeholder_title("* Rotate the keys"), "Rotate the keys");
+    }
+
+    /// The run's publication checks follow the actor's custom role: a viewer
+    /// holding `workspace:write` publishes, and the same actor narrowed to the
+    /// base permission is fenced out.
+    #[tokio::test]
+    async fn a_custom_writer_publishes_until_its_role_stops_granting_write() {
+        let tenant = Tenant::new().await;
+        let actor = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;
+        let task = create_task_as(
+            &tenant.pool,
+            tenant.workspace,
+            &[],
+            "Publication",
+            "Held by a role",
+            None,
+            None,
+            true,
+            None,
+            Some(actor),
+        )
+        .await
+        .expect("a task");
+        let run = create_task_run_as(&tenant.pool, task.id, Some(actor))
+            .await
+            .expect("a run");
+        let owner = Uuid::new_v4();
+        let claimed = claim_task_run(&tenant.pool, run.id, owner)
+            .await
+            .expect("the claim");
+        let execution = Execution {
+            task: task.id,
+            run: run.id,
+            owner,
+            actor: Some(actor),
+        };
+        let pool = &tenant.pool;
+        let publish = |branch: &'static str| async move {
+            (
+                execution.authorized(pool, false).await.expect("the check"),
+                execution.authorized(pool, true).await.expect("the check"),
+                update_task_branch(pool, &execution, branch)
+                    .await
+                    .expect("the branch"),
+                update_task_pr(pool, &execution, "url", branch, pull_requests::Status::Open)
+                    .await
+                    .expect("the pull request"),
+            )
+        };
+
+        let writing = publish("written").await;
+        let reading = tenant.custom_role(Scope::Workspace, &[]).await;
+        tenant.hold_workspace_role(actor, reading).await;
+        let narrowed = publish("narrowed").await;
+        let stored = get_task(&tenant.pool, task.id).await.expect("the task");
+        tenant.cleanup().await;
+
+        assert!(claimed, "the run was not claimed");
+        assert_eq!(writing, (true, true, true, true));
+        assert_eq!(narrowed, (false, false, false, false));
+        assert_eq!(
+            stored.and_then(|task| task.branch_name).as_deref(),
+            Some("written")
+        );
     }
 }

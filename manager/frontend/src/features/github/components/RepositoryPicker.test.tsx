@@ -6,6 +6,7 @@ import { type ComponentType, type ReactNode, useState } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import type { GitHubRepositorySearch } from '../../../api/github';
 import type { OrgRole } from '../../../types';
+import { Permission } from '../../enterprise/roles/schemas';
 import type {
   GitHubRepositoriesResponse,
   GitHubRepository,
@@ -29,7 +30,12 @@ mock.module('../../../api/github', () => ({
 }));
 
 interface WorkspaceState {
-  currentOrganization: { id: string; name: string; role?: OrgRole } | null;
+  currentOrganization: {
+    id: string;
+    name: string;
+    role?: OrgRole;
+    permissions?: readonly string[];
+  } | null;
   loading: boolean;
   resolvingRole: boolean;
 }
@@ -720,6 +726,34 @@ describe('RepositoryPicker empty and error states', () => {
       ).not.toBeInTheDocument();
     });
   }
+
+  it('links a holder of github:update whatever their rank', async () => {
+    workspaceState.currentOrganization = {
+      id: 'org-1',
+      name: 'Acme',
+      role: 'member',
+      permissions: [Permission.OrganizationRead, Permission.GitHubUpdate],
+    };
+    listRepositories.mockImplementation(async () => page([], { installations: [] }));
+    renderPicker();
+
+    expect(await screen.findByRole('link', { name: 'Connect GitHub' })).toBeInTheDocument();
+  });
+
+  it('tells an admin rank without github:update to ask instead of linking', async () => {
+    workspaceState.currentOrganization = {
+      id: 'org-1',
+      name: 'Acme',
+      role: 'admin',
+      permissions: [Permission.OrganizationRead, Permission.RolesUpdate],
+    };
+    listRepositories.mockImplementation(async () => page([], { installations: [] }));
+    renderPicker();
+
+    expect(
+      await screen.findByText('Ask an organization admin to connect GitHub.')
+    ).toBeInTheDocument();
+  });
 
   it('tells members to ask an admin instead of linking', async () => {
     workspaceState.currentOrganization = { id: 'org-1', name: 'Acme', role: 'member' };

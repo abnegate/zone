@@ -53,12 +53,17 @@ const CALLBACK_CODES = [
   'EMAIL_UNVERIFIED',
   'DOMAIN_NOT_ALLOWED',
   'EMAIL_CONFLICT',
+  'ASSERTION_INVALID',
+  'SIGN_IN_REFUSED',
+  'SIGN_IN_FAILED',
 ];
 
 const PUBLIC_ROUTES = [
   '"/api/auth/sso/providers"',
   '"/api/auth/sso/providers/{provider_id}/authorizations"',
   '"/api/auth/sso/callbacks"',
+  '"/api/auth/sso/saml/metadata"',
+  '"/api/auth/sso/saml/acs"',
 ];
 
 type Shaped = z.ZodObject<z.ZodRawShape>;

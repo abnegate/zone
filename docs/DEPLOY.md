@@ -47,13 +47,13 @@ Verified on `main` (`d3fb7cf`). Reuse is the default; each row says whether it's
 | Durable claim precedent | `runner/zone_server/src/db/reminders.rs:61-63` — `FOR UPDATE SKIP LOCKED` inside one transaction | Copy for `db/deployments.rs::claim_next` and `runner_jobs` |
 | Worker patterns | `runner/zone_server/src/workers/` — boot interval loops started at `main.rs:186-188`; `pr.rs:38` is the closest analogue (reads project creds, drives abnegate-vcs, compensates with `checkout(original_branch)`) | Copy pattern A (boot loop) |
 | Encrypted-at-rest precedent | `sources.credentials_encrypted` written with `abnegate_secret::encrypt_value(.., state.master_key())` and read with `secret::Unseal::open_strict` (`routes/sources.rs:432`, `agent/integrations.rs:442`; `runner/zone_server/src/secret/unseal.rs`): `ENC[v1:…]` envelopes, AES-256-GCM under an Argon2id key derived from `ENCRYPTION_KEY` (`secret/derivation.rs`). Values sealed before envelopes existed still open; `zone-server --seal-secrets` reseals them (see "Sealing stored credentials") | Copy for target credentials. **Anti-precedents:** all `*_ai_settings` keys are plaintext; `ai_settings` routes have no admin guard |
-| Auth extractors | `runner/zone_server/src/auth/workspace_guard.rs` — `WorkspaceMember` (:16), `WorkspaceWriter` (:95), `WorkspaceAdmin` (:130) | Use consistently (only `organizations.rs`/`workspaces.rs` do today) |
+| Auth extractors | `runner/zone_server/src/auth/workspace_guard.rs` — `WorkspaceMember` (holds `workspace:read`) and `WorkspacePermit<{ Permission::WorkspaceWrite.index() }>` or `WorkspacePermit<{ Permission::WorkspaceUpdate.index() }>` for a named permission (see [ROLES.md](ROLES.md)) | Use consistently; every workspace route checks a permission through them |
 | Error path | `runner/zone_server/src/error.rs` `ServerError` + `Result` | Use; avoid the match-pyramid style of `routes/projects.rs` |
 | Subprocess job substrate | `runner/zone_server/src/services/runner.rs:96` `RunnerService` ↔ `zone-runner serve --stdio` NDJSON (`Spawn{job_id, workspace, command, args, env, timeout_secs}/Cancel` → `Ready{version, capabilities}/Output/JobCompleted/JobFailed`). Complete, tested, **never constructed in prod**. `abnegate-exec` executor: timeout, output caps, process-group kill, `Proxy` env | Reuse as the in-server pseudo-runner; add a remote transport (§6) |
 | Protocol capabilities | `abnegate_exec::Capability` (`Cancel`, `Stdin`, `Logs`, `ProcessGroup`, and the confinement capabilities) | Keep; add a separate *environment* capability list |
 | WS progress | `runner/zone_server/src/ws/task_run.rs` — `ProgressMessage{init,status_update,log,completed,failed,error}`, polls Postgres every 500ms, **never checks workspace membership** | Reuse the message shape; fix auth; replace polling (§3, workspace-state) |
 | Artifact store | `runner/zone_server/src/services/artifacts.rs:17` `ArtifactStore { persist, read, open, cleanup_* }` under `COMFYUI_ARTIFACT_ROOT`; HMAC-signed URLs in `artifact_access.rs` | Extend with `persist_bundle`; signed URLs serve sideload/OTA downloads |
-| Zone ships non-web artifacts of itself | Tauri desktop + mobile (`make desktop\|android\|ios`, `runner/zone_desktop/tauri.{conf,android.conf,ios.conf}.json`, id `com.abnegate.zone`); `.github/workflows/release.yml` → `package-tauri.sh`, `package-deb.sh`, `.github/cask/zone.rb.template` → `abnegate/homebrew-tap`, `abnegate/apt-repo`, GitHub Releases | Lift into the `desktop_app`/`cli` builders and the `github_release`/`homebrew_tap`/`apt_repo` drivers |
+| Zone ships non-web artifacts of itself | Tauri desktop + mobile (`make desktop\|android\|ios`, `runner/zone_desktop/tauri.{conf,android.conf,ios.conf}.json`, id `com.abnegate.zone`); `.github/workflows/release.yml` → `package-tauri.sh`, `package-deb.sh`, `.github/cask/zone.rb.template` → `bitecodehq/homebrew-tap`, `bitecodehq/apt-repo`, GitHub Releases | Lift into the `desktop_app`/`cli` builders and the `github_release`/`homebrew_tap`/`apt_repo` drivers |
 | Vision | `abnegate-vision` + configured vision model (`services/stages.rs`) | Screenshot grading (advisory) |
 | MQTT broker | `~/Local/mqtt` (Swoole) | OTA substrate for `ota_fleet` |
 | Appwrite | Sites, Functions, Storage, Messaging | Delivery targets + backend provisioning (v1.5) |
@@ -66,7 +66,7 @@ Verified on `main` (`d3fb7cf`). Reuse is the default; each row says whether it's
 - The task workspace directory is never created and the repo is never cloned (`workers/task.rs:271-278`). Tasks without a repo run in the server's own cwd.
 - `tasks.status` never advances during a run; `tasks.created_by` (migration 006) is never written.
 - The prod image installs only `curl ca-certificates libssl3t64 libstdc++6` (`manager/Dockerfile:50`): no `git` (the PR worker is broken in prod), no `docker`, `kubectl`, `helm`. No docker socket on `manager`. Helm runs the server with `readOnlyRootFilesystem`.
-- No container registry anywhere; CI publishes binaries, never images. No `kube-rs`/`bollard`. `run_command`'s allowlist (`abnegate-agent` `DEFAULT_COMMANDS` in `src/tool/command/run/mod.rs:55` plus `EXTRA_COMMANDS` in `runner/zone_core/src/commands.rs:20`) has no deploy tooling and rejects `| > && ;`.
+- No container registry for Zone itself; CI publishes binaries and one image, the license signer (`ghcr.io/bitecodehq/zone-license` from 1.2.0, `ghcr.io/abnegate/zone-license` for 1.0.0 and 1.1.0; see [LICENSING.md](LICENSING.md#ci-and-publishing-the-image)), never the manager or runner. No `kube-rs`/`bollard`. `run_command`'s allowlist (`abnegate-agent` `DEFAULT_COMMANDS` in `src/tool/command/run/mod.rs:55` plus `EXTRA_COMMANDS` in `runner/zone_core/src/commands.rs:20`) has no deploy tooling and rejects `| > && ;`.
 
 ## 3. What we take from Imagine
 
@@ -161,7 +161,7 @@ flowchart TD
     A["Agent: task run or chat"] -->|"deploy_app(manifest, target)"| T["deploy_app tool"]
     T -->|"insert pending_approval"| DB[("deployments")]
     T --> N["Notifier: Discord webhook, email, in-app"]
-    N --> H{"WorkspaceAdmin"}
+    N --> H{"Holder of workspace:update"}
     H -->|"approve via UI deep link or chat prompt"| DB
     T -.->|"awaits broadcast until deadline"| DB
     DB --> W["workers::deploy leased loop"]
@@ -289,7 +289,7 @@ Heartbeat every 15 s; a runner is `offline` after 45 s of silence and its `assig
 
 ### 6.3 Registration
 
-1. A `WorkspaceAdmin` creates a one-time **registration token** (1 h TTL): `POST /api/workspaces/{ws}/runners/registration-tokens`. The Runners page shows the exact `zone-runner connect …` command.
+1. A holder of `workspace:update` creates a one-time **registration token** (1 h TTL): `POST /api/workspaces/{ws}/runners/registration-tokens`. The Runners page shows the exact `zone-runner connect …` command.
 2. The first `connect` exchanges it for a long-lived **runner token** (32 random bytes; stored hashed in `runners.token_hash`; revocable from the UI). The runner persists it in `~/.zone-runner/config.toml`.
 3. Runners are workspace-scoped in v1.
 
@@ -358,7 +358,7 @@ sequenceDiagram
     A->>S: deploy_app(target = testflight, manifest = deploy/zone.yaml)
     S->>DB: deployments(pending_approval)
     S-->>A: tool blocks, Discord alert sent
-    Note over S: WorkspaceAdmin approves (deep link)
+    Note over S: a holder of workspace:update approves (deep link)
     S->>DB: approved → building, runner_jobs(Build, required = os:macos, xcode>=16)
     S->>R: Assign(Build)
     R->>R: clone task branch, inject ASC key to tmp (0600)
@@ -620,7 +620,7 @@ Two rules borrowed from Appwrite's build worker. **Readiness is a join, failure 
 
 ### 7.4 Approval
 
-The gate is **the deployment row**, not an in-memory oneshot. Policy is per target (`required` by default, `auto` opt-in). Approver is `WorkspaceAdmin`; self-approval is allowed in v1 (a single-admin self-hosted install is the first user; a four-eyes flag comes later).
+The gate is **the deployment row**, not an in-memory oneshot. Policy is per target (`required` by default, `auto` opt-in). Approver is a holder of `workspace:update` (a workspace admin or owner, or a custom role that includes it), until deployments get a permission of their own; self-approval is allowed in v1 (a single-admin self-hosted install is the first user; a four-eyes flag comes later).
 
 **Blocking flow in `deploy_app`:**
 
@@ -658,7 +658,7 @@ Registered with the `actions.rs` pattern (`enum DeployAction { DeployApp, GetDep
 
 ### 7.7 API and streaming
 
-All under `/api/workspaces/{ws}/…`, using `ServerError` + `Result` and the `WorkspaceMember/Writer/Admin` extractors. Credentials are write-only.
+All under `/api/workspaces/{ws}/…`, using `ServerError` + `Result`, the `WorkspaceMember` extractor for reads and `WorkspacePermit<…>` for `workspace:write` and `workspace:update`. Credentials are write-only.
 
 | Route | Guard |
 |---|---|

@@ -27,8 +27,10 @@ pub mod projects;
 pub mod pull_requests;
 pub mod refresh_query;
 pub mod releases;
+pub mod roles;
 pub mod sessions;
 pub mod sources;
+pub mod spend;
 pub mod sso;
 pub mod sync;
 pub mod tasks;
@@ -110,6 +112,11 @@ pub fn create_router(state: AppState) -> Router {
             post(sso::sign_in::authorize),
         )
         .route("/api/auth/sso/callbacks", post(sso::sign_in::callback))
+        .route("/api/auth/sso/saml/metadata", get(sso::saml::metadata))
+        .route(
+            "/api/auth/sso/saml/acs",
+            post(sso::saml::acs).layer(DefaultBodyLimit::max(sso::saml::BODY_LIMIT)),
+        )
         // Public invitation route (to view invitation details)
         .route("/api/invitations/{token}", get(invitations::get_invitation))
         // Artifact reads (public - a bearer header or an HMAC-signed URL, checked
@@ -580,6 +587,30 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/organizations/{org_id}/workspaces/{ws_id}/agent-policy",
             get(policy::workspace::get).patch(policy::workspace::update),
+        )
+        .route(
+            "/api/organizations/{org_id}/roles",
+            get(roles::list).post(roles::create),
+        )
+        .route(
+            "/api/organizations/{org_id}/roles/{role_id}",
+            patch(roles::update).delete(roles::delete),
+        )
+        .route(
+            "/api/organizations/{org_id}/spend-reports",
+            get(spend::reports::get),
+        )
+        .route(
+            "/api/organizations/{org_id}/spend-exports",
+            get(spend::exports::get),
+        )
+        .route(
+            "/api/organizations/{org_id}/budgets",
+            get(spend::budgets::list).post(spend::budgets::create),
+        )
+        .route(
+            "/api/organizations/{org_id}/budgets/{budget_id}",
+            patch(spend::budgets::update).delete(spend::budgets::delete),
         )
         .route(
             "/api/organizations/{org_id}/mcp-servers",

@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../../../api/ApiError';
+import { AdministersServerProvider } from '../../components/AdministersServer';
 import { AuditRefusal } from '../AuditRefusal';
 import {
   COMMUNITY_DESTINATIONS,
@@ -30,6 +31,9 @@ import {
 } from '../fixtures';
 import {
   ADD_DESTINATION_LABEL,
+  ASK_FOR_KEY_LABEL,
+  ASK_FOR_LICENSE_LABEL,
+  ASK_FOR_RENEWAL_LABEL,
   DELETE_CONFIRM_LABEL,
   DESTINATIONS_TITLE,
   DOWNLOAD_LABEL,
@@ -106,14 +110,16 @@ afterAll(() => {
   mock.restore();
 });
 
-function renderSection(scope: AuditScope = ORGANIZATION_SCOPE) {
+function renderSection(scope: AuditScope = ORGANIZATION_SCOPE, administersServer = true) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
-        <AuditExportSection scope={scope} />
+        <AdministersServerProvider value={administersServer}>
+          <AuditExportSection scope={scope} />
+        </AdministersServerProvider>
       </MemoryRouter>
     </QueryClientProvider>
   );
@@ -122,11 +128,12 @@ function renderSection(scope: AuditScope = ORGANIZATION_SCOPE) {
 async function loaded(
   list: DestinationsResponse,
   policy: RetentionResponse,
-  scope: AuditScope = ORGANIZATION_SCOPE
+  scope: AuditScope = ORGANIZATION_SCOPE,
+  administersServer = true
 ) {
   destinations.mockResolvedValue(list);
   retention.mockResolvedValue(policy);
-  renderSection(scope);
+  renderSection(scope, administersServer);
   await screen.findByRole('heading', { name: SECTION_TITLE });
 }
 
@@ -238,6 +245,31 @@ describe('AuditExportSection', () => {
       expect(within(card(RETENTION_TITLE)).getByText(READ_ONLY_UNVERIFIED)).toBeInTheDocument();
       expect(screen.queryByText(RETENTION_NOT_APPLIED)).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: SAVE_RETENTION_LABEL })).not.toBeInTheDocument();
+    });
+
+    it('asks an organization owner who does not administer the server for a license instead of linking to it', async () => {
+      await loaded(COMMUNITY_DESTINATIONS, COMMUNITY_RETENTION, ORGANIZATION_SCOPE, false);
+
+      const notice = screen.getByRole('note');
+      expect(notice).toHaveTextContent(UPGRADE_NOTICE);
+      expect(notice).toHaveTextContent(ASK_FOR_LICENSE_LABEL);
+      expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    });
+
+    it('asks an organization owner who does not administer the server to get a lapsed license renewed', async () => {
+      await loaded(LAPSED_DESTINATIONS, LAPSED_RETENTION, ORGANIZATION_SCOPE, false);
+
+      const warning = screen.getByRole('status', { name: '' });
+      expect(warning).toHaveTextContent(ASK_FOR_RENEWAL_LABEL);
+      expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    });
+
+    it('asks an organization owner who does not administer the server to get the license key pasted again', async () => {
+      await loaded(UNVERIFIED_DESTINATIONS, UNVERIFIED_RETENTION, ORGANIZATION_SCOPE, false);
+
+      const warning = screen.getByRole('status', { name: '' });
+      expect(warning).toHaveTextContent(ASK_FOR_KEY_LABEL);
+      expect(screen.queryByRole('link')).not.toBeInTheDocument();
     });
 
     it('shows the server-wide audit export with its own description and data', async () => {

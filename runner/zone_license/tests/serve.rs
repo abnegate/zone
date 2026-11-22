@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
-use zone_enterprise::{Keyring, License, TrustedKey};
+use zone_enterprise::{Keyring, License, Plan, TrustedKey};
 use zone_license::http::{HEALTH_PATH, RENEW_PATH, WEBHOOK_PATH};
 use zone_license::mail::MailError;
 use zone_license::polar::{AccessToken, ID_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, signature};
@@ -33,6 +33,7 @@ const WEBHOOK: &str = "msg_2kWm9Q4tYpS3vB7xN1cR8dLe";
 const EMAIL: &str = "billing@acme.test";
 const CUSTOMER: &str = "Acme Ltd";
 const PRODUCT: &str = "5f0c8a9e-6b1d-4c2e-9a3f-7d4e1b2c3a40";
+const OTHER_PRODUCT: &str = "8a2b6c1d-4e3f-4a5b-9c6d-7e8f9a0b1c2d";
 
 struct Service {
     address: SocketAddr,
@@ -45,9 +46,13 @@ struct Service {
 /// The sink speaks plain SMTP without sign-in, which the environment can't
 /// configure, so only the relay's security is overridden.
 fn config(sink: &SmtpSink, key: &PrivateKey, keyring: &Keyring) -> Config {
+    listing(sink, key, keyring, PRODUCT)
+}
+
+fn listing(sink: &SmtpSink, key: &PrivateKey, keyring: &Keyring, products: &str) -> Config {
     let variables = HashMap::from([
         (Variable::WebhookSecret, SECRET.to_owned()),
-        (Variable::Products, PRODUCT.to_owned()),
+        (Variable::Products, products.to_owned()),
         (Variable::PrivateKey, key.encode()),
         (Variable::KeyId, KEY_ID.to_owned()),
         (Variable::Listen, "127.0.0.1:0".to_owned()),
@@ -80,8 +85,12 @@ impl Service {
     }
 
     async fn starting(sink: &SmtpSink, access_token: Option<AccessToken>) -> Self {
+        Self::launch(sink, PRODUCT, access_token).await
+    }
+
+    async fn launch(sink: &SmtpSink, products: &str, access_token: Option<AccessToken>) -> Self {
         let (key, keyring) = signing_key();
-        let mut config = config(sink, &key, &keyring);
+        let mut config = listing(sink, &key, &keyring, products);
         config.access_token = access_token;
         let server = serve::start(config).await.unwrap();
         let address = server.address().unwrap();
@@ -222,6 +231,68 @@ async fn a_seat_change_in_the_same_period_gets_a_new_license() {
     assert_eq!(service.license(&messages[0]).1.payload().seats, 5);
     assert_eq!(service.license(&messages[1]).1.payload().seats, 8);
     service.stop().await;
+}
+
+#[tokio::test]
+async fn a_mapped_product_list_emails_each_product_its_plan() {
+    let products = format!(" {OTHER_PRODUCT} , {PRODUCT} = team ,");
+    for (body, seats) in [(CREATE, 5), (UPDATE, 8)] {
+        let sink = SmtpSink::start().await;
+        let service = Service::launch(&sink, &products, None).await;
+
+        let (status, answer) = service.deliver(body, now()).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{answer}");
+        let messages = sink.messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].header("Subject"),
+            Some("Your Zone Team license key")
+        );
+        let (_, license) = service.license(&messages[0]);
+        assert_eq!(license.plan(), Plan::Team);
+        assert_eq!(license.payload().plan, Some(Plan::Team));
+        assert_eq!(license.payload().seats, seats);
+        assert_eq!(license.payload().id, license_id(&answer));
+        service.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_bare_product_still_emails_an_enterprise_license() {
+    let sink = SmtpSink::start().await;
+    let service = Service::start(&sink).await;
+
+    let (status, _) = service.deliver(CREATE, now()).await;
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let messages = sink.messages();
+    assert_eq!(
+        messages[0].header("Subject"),
+        Some("Your Zone Enterprise license key")
+    );
+    assert_eq!(service.license(&messages[0]).1.plan(), Plan::Enterprise);
+    service.stop().await;
+}
+
+#[test]
+fn an_unknown_plan_stops_the_service_before_it_starts() {
+    let (key, keyring) = signing_key();
+    let variables = HashMap::from([
+        (Variable::WebhookSecret, SECRET.to_owned()),
+        (Variable::Products, format!("{PRODUCT}=business")),
+        (Variable::PrivateKey, key.encode()),
+        (Variable::KeyId, KEY_ID.to_owned()),
+        (Variable::SmtpHost, "127.0.0.1".to_owned()),
+        (Variable::SmtpUser, "unused".to_owned()),
+        (Variable::SmtpPassword, String::new()),
+        (Variable::SmtpFrom, SENDER.to_owned()),
+    ]);
+    let error = Config::from_variables(|variable| variables.get(&variable).cloned(), &keyring)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("POLAR_PRODUCT_IDS is invalid"), "{error}");
+    assert!(error.contains(&format!("{PRODUCT}=business")), "{error}");
 }
 
 #[tokio::test]

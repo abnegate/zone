@@ -13,10 +13,11 @@ use uuid::Uuid;
 
 use super::connection::AuditedApp;
 use super::outcome::{Outcome, location};
+use crate::auth::Permission;
 use crate::db::audit::{actions, resources};
 use crate::db::github_apps::{self, AppRow, NewApp, OwnerType};
 use crate::db::github_connection_states::{self, ConsumedState, Purpose};
-use crate::db::organization_members::{self, OrgRole};
+use crate::db::organization_members;
 use crate::db::users;
 use crate::routes::common::{AuditEvent, audit};
 use crate::services::github_app::address::addressable;
@@ -293,14 +294,18 @@ async fn install(
     Ok(())
 }
 
-/// The state outlives a change of role, so the admin who started the
-/// connection must still be one when GitHub sends the browser back.
+/// The state outlives a change of role, so the member who started the
+/// connection must still hold the permission when GitHub sends the browser back.
 async fn administering(state: &AppState, consumed: &ConsumedState) -> Result<(), Failure> {
-    organization_members::get_member(state.db(), consumed.organization_id, consumed.user_id)
-        .await?
-        .filter(|member| member.is_active && member.role >= OrgRole::Admin)
-        .map(|_| ())
-        .ok_or(Failure::NotAdmin)
+    organization_members::permits(
+        state.db(),
+        consumed.organization_id,
+        consumed.user_id,
+        Permission::GitHubUpdate,
+    )
+    .await?
+    .then_some(())
+    .ok_or(Failure::NotAdmin)
 }
 
 /// Audits as the user who started the connection, skipping the entry when

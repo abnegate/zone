@@ -11,8 +11,9 @@ Enterprise license you can also:
   has delivered them.
 
 Each organization has its own destinations, retention period and downloads,
-managed by its owners and admins under **Settings → Organization → Audit
-export**. Events that belong to no organization, such as sign-ins, license
+managed by holders of `audit:update`, which organization owners and admins
+hold and a custom role can include (see [ROLES.md](ROLES.md)), under
+**Settings → Organization → Audit export**. Events that belong to no organization, such as sign-ins, license
 changes and SSO changes, form the server scope, which server admins manage
 under **Settings → This server → Audit export**.
 
@@ -26,6 +27,7 @@ rows), unchanged and with no license.
 | License | Download | Streaming | Retention period | Changing destinations or retention |
 |---|---|---|---|---|
 | None (Community) | Refused | Nothing is sent | Not applied: events are kept forever | Refused, except [disabling and deleting](#what-needs-a-license) |
+| Team, in any state | Refused | Nothing is sent (`unlicensed`) | Not applied: events are kept forever | Refused, except disabling and deleting |
 | Enterprise, active or in grace | Allowed | Running | Applied | Allowed |
 | Enterprise, lapsed (past grace) | Refused | Paused (`lapsed`), backlog kept | Still applied | Refused, except disabling and deleting |
 | Stored key that no longer verifies | Refused | Paused (`unverified`), backlog kept | Still applied | Refused, except disabling and deleting |
@@ -33,8 +35,9 @@ rows), unchanged and with no license.
 Install the license under **Settings → This server → License**. Grace is the
 30 days after the license expires. Downloading, streaming and changing the
 retention period each need a Zone Enterprise license that verifies and is
-active or in its grace period. A lapse never loosens anything: downloads and
-streaming pause, and a period already set keeps applying.
+active or in its grace period; a Zone Team license doesn't include them. A
+lapse never loosens anything: downloads and streaming pause, and a period
+already set keeps applying.
 
 **A lapse pauses, it doesn't lose.** While streaming is paused, every enabled
 destination keeps its place in the log. Events written meanwhile wait, and
@@ -45,8 +48,8 @@ events also hold retention back, so nothing is deleted before it's delivered.
 keeps deleting expired events under a lapsed license and under a stored key
 that no longer verifies, because neither must silently stop deleting data you
 committed to delete. Removing the license returns the server to Community,
-which keeps every event forever; the saved period applies again as soon as a
-license is installed.
+which keeps every event forever, and so does replacing it with a Team license;
+the saved period applies again as soon as an Enterprise license is installed.
 
 ### What needs a license
 
@@ -70,13 +73,13 @@ Every response carries the license as `standing`:
 
 | Field | Meaning |
 |---|---|
-| `edition` | `community` or `enterprise`. |
+| `edition` | `community`, `team` or `enterprise`. |
 | `status` | `community`, `active`, `grace` or `lapsed`. |
 | `export` | Downloads are allowed. |
 | `streaming` | Destinations can be added, changed and tested, and they deliver. |
 | `retention` | The retention period can be changed. |
-| `applies` | A retention period that's set is applied: a license is installed, or the stored key doesn't verify. |
-| `pause` | Why delivery is paused: `unlicensed`, `lapsed` or `unverified`; `null` while it runs. |
+| `applies` | A retention period that's set is applied: an Enterprise license is installed, or the stored key doesn't verify. |
+| `pause` | Why delivery is paused: `unlicensed` (no license, or a Team license), `lapsed` or `unverified`; `null` while it runs. |
 
 ## Destinations
 
@@ -578,8 +581,8 @@ destination.
 | `PUT /api/organizations/{org_id}/audit-retention` | Set or clear the period. |
 | `GET /api/organizations/{org_id}/audit-exports` | [Download](#downloading-the-audit-log) the audit log. |
 
-Organization owners and admins can use these. A member gets 403, and someone
-outside the organization 404. Server admins use the same routes without
+Holders of `audit:update` can use these (see [ROLES.md](ROLES.md)). A member
+without it gets 403, and someone outside the organization 404. Server admins use the same routes without
 `/organizations/{org_id}` for the server scope: `/api/audit-destinations`,
 `/api/audit-destinations/{destination_id}`,
 `/api/audit-destinations/{destination_id}/tests`, `/api/audit-retention` and

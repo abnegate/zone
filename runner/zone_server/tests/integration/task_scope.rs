@@ -11,9 +11,18 @@ use uuid::Uuid;
 use zone_server::agent::ChatTools;
 use zone_server::agent::discovery::RECORD_DISCOVERY;
 use zone_server::auth::jwt::create_session_access_token;
+use zone_server::auth::{Grant, Permission, Scope};
+use zone_server::db::custom_roles::{self, Creation, Definition};
 use zone_server::db::knowledge::discovery::CATEGORY;
+use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::db::{sessions, task_access, tasks, workspace_members};
 use zone_server::state::AppState;
+
+const BACKEND: &str = "SELECT pg_backend_pid()";
+const BLOCKED: &str = "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+     WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)))";
+const POLL: std::time::Duration = std::time::Duration::from_millis(20);
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Mint an access token backed by a live session.
 ///
@@ -892,4 +901,147 @@ async fn task_write_access_admits_writers_and_refuses_viewers() {
     cleanup(&pool, organization, user).await;
     assert!(viewer.is_none(), "a viewer answered for the workspace");
     assert!(stranger.is_none(), "a non-member answered for a run");
+}
+
+/// Moves `user` onto a fresh workspace custom role holding `permissions` and
+/// the base, pinned to viewer as every custom holder is.
+async fn hold(
+    pool: &PgPool,
+    organization: Uuid,
+    workspace: Uuid,
+    user: Uuid,
+    permissions: &[Permission],
+) {
+    let names: Vec<String> = permissions
+        .iter()
+        .map(|permission| permission.name().to_string())
+        .collect();
+    let grant = Grant::compose(Scope::Workspace, &names).expect("the role composes");
+    let name = format!("Custom {}", Uuid::new_v4());
+    let definition = Definition {
+        name: &name,
+        description: None,
+        scope: Scope::Workspace,
+        grant: &grant,
+    };
+    let Creation::Created(role) = custom_roles::create(pool, organization, &definition, user)
+        .await
+        .expect("the role is created")
+    else {
+        panic!("a fresh role name was taken");
+    };
+    sqlx::query(
+        "UPDATE workspace_members SET role = $3, custom_role_id = $4 \
+         WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace)
+    .bind(user)
+    .bind(WorkspaceRole::Viewer.as_str())
+    .bind(role.id)
+    .execute(pool)
+    .await
+    .expect("the custom role is assigned");
+}
+
+async fn parked(pool: &PgPool, workspace: Uuid) -> Uuid {
+    let task = tasks::create_task(
+        pool,
+        workspace,
+        &[],
+        "Answerable run",
+        "Waiting on an answer",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    tasks::create_task_run(pool, task.id).await.unwrap().id
+}
+
+/// A viewer whose custom role grants `workspace:write` answers for a run, as
+/// a member would, and one whose role grants only the base watches it.
+#[tokio::test]
+async fn task_access_follows_the_custom_role_a_viewer_holds() {
+    let (pool, _, organization, workspace, user) = fixture().await;
+    let run = parked(&pool, workspace).await;
+
+    hold(
+        &pool,
+        organization,
+        workspace,
+        user,
+        &[Permission::WorkspaceWrite],
+    )
+    .await;
+    let writer = (
+        task_access::read(&pool, run, user).await.unwrap().is_some(),
+        task_access::write(&pool, run, user)
+            .await
+            .unwrap()
+            .is_some(),
+    );
+    hold(&pool, organization, workspace, user, &[]).await;
+    let reader = (
+        task_access::read(&pool, run, user).await.unwrap().is_some(),
+        task_access::write(&pool, run, user)
+            .await
+            .unwrap()
+            .is_some(),
+    );
+    cleanup(&pool, organization, user).await;
+
+    assert_eq!(writer, (true, true), "a custom writer was refused the run");
+    assert_eq!(
+        reader,
+        (true, false),
+        "a custom reader answered for the run"
+    );
+}
+
+/// A demotion that holds the member row when the writer check starts wins:
+/// the check waits for it and judges the role it commits, not the one the
+/// check's statement first saw.
+#[tokio::test]
+async fn task_write_access_waits_out_a_demotion_and_refuses_after_it() {
+    let (pool, _, organization, workspace, user) = fixture().await;
+    let run = parked(&pool, workspace).await;
+    let mut demotion = pool.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar(BACKEND)
+        .fetch_one(&mut *demotion)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2")
+        .bind(workspace)
+        .bind(user)
+        .bind(WorkspaceRole::Viewer.as_str())
+        .execute(&mut *demotion)
+        .await
+        .unwrap();
+
+    let writing = tokio::spawn({
+        let pool = pool.clone();
+        async move { task_access::write(&pool, run, user).await }
+    });
+    tokio::time::timeout(PATIENCE, async {
+        while !sqlx::query_scalar::<_, bool>(BLOCKED)
+            .bind(blocker)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await
+    .expect("the writer check waits on the demotion");
+    demotion.commit().await.unwrap();
+    let authorized = writing.await.unwrap().unwrap();
+    cleanup(&pool, organization, user).await;
+
+    assert!(
+        authorized.is_none(),
+        "a member demoted while the check waited answered for the run"
+    );
 }

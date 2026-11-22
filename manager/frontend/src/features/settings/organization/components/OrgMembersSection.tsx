@@ -1,7 +1,22 @@
-import { Button, EmptyState, Input, Modal, Select } from '@zone/ui';
+import { Button, EmptyState, Input, Modal, Select, type SelectOption } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useAuth } from '../../../auth';
+import { isMemberCapRefusal, MemberCapRefusal, useRoles } from '../../../enterprise';
+import {
+  type Assignment,
+  assignmentFailure,
+  assignmentOf,
+  assignsCustomRole,
+  customRoleOptions,
+  grantableRoles,
+  heldRole,
+  ORGANIZATION_LADDER,
+  reaches,
+  roleBadgeClass,
+  roleLabel,
+  type Standing,
+} from '../../assignment';
 import { memberLabel } from '../../memberLabel';
 import type { AddOrgMemberRequest, OrganizationMember, OrgRole } from '../types';
 import './OrgMembersSection.css';
@@ -10,19 +25,15 @@ interface OrgMembersSectionProps {
   orgId: string;
 }
 
-const roleOptions: Array<{ value: OrgRole; label: string }> = [
-  { value: 'member', label: 'Member' },
-  { value: 'admin', label: 'Admin' },
-  { value: 'owner', label: 'Owner' },
-];
+const UNSEATED: Standing<OrgRole> = { role: 'member', permissions: undefined };
 
 const isValidEmail = (email: string): boolean => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email);
 };
 
-const toUserMessage = (err: unknown, fallback: string) => {
-  const message = err instanceof Error ? err.message : fallback;
+const toUserMessage = (error: unknown, fallback: string) => {
+  const message = error instanceof Error ? error.message : fallback;
   return message.startsWith('Validation failed') ? fallback : message;
 };
 
@@ -33,9 +44,8 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
   const [error, setError] = useState<string | undefined>(undefined);
   const [success, setSuccess] = useState<string | undefined>(undefined);
   const [members, setMembers] = useState<OrganizationMember[]>([]);
-  const [currentUserRole, setCurrentUserRole] = useState<OrgRole>('member');
+  const [standing, setStanding] = useState<Standing<OrgRole>>(UNSEATED);
 
-  // Track which member is being modified to prevent race conditions
   const [updatingMemberId, setUpdatingMemberId] = useState<string | null>(null);
 
   const [showAddModal, setShowAddModal] = useState(false);
@@ -43,6 +53,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
   const [addEmailError, setAddEmailError] = useState<string | undefined>(undefined);
   const [addRole, setAddRole] = useState<OrgRole>('member');
   const [adding, setAdding] = useState(false);
+  const [capped, setCapped] = useState(false);
 
   const [showRemoveModal, setShowRemoveModal] = useState(false);
   const [memberToRemove, setMemberToRemove] = useState<OrganizationMember | null>(null);
@@ -61,12 +72,12 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
       const response = await client.getOrgMembers(orgId);
       setMembers(response.members);
 
-      const currentMember = response.members.find((m) => m.user_id === user?.id);
-      if (currentMember) {
-        setCurrentUserRole(currentMember.role);
+      const caller = response.members.find((member) => member.user_id === user?.id);
+      if (caller) {
+        setStanding({ role: caller.role, permissions: caller.permissions });
       }
-    } catch (err) {
-      setError(toUserMessage(err, 'Couldn’t load members'));
+    } catch (error) {
+      setError(toUserMessage(error, 'Couldn’t load members'));
     } finally {
       setLoading(false);
     }
@@ -81,8 +92,8 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
     setTimeout(() => setSuccess(undefined), 3000);
   };
 
-  const handleAddMember = async (e: FormEvent) => {
-    e.preventDefault();
+  const handleAddMember = async (event: FormEvent) => {
+    event.preventDefault();
     setAddEmailError(undefined);
 
     if (!addEmail.trim()) {
@@ -97,6 +108,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
 
     setAdding(true);
     setError(undefined);
+    setCapped(false);
 
     try {
       const request: AddOrgMemberRequest = {
@@ -110,14 +122,30 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
       setAddRole('member');
       setAddEmailError(undefined);
       await loadMembers();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to add member');
+    } catch (error) {
+      if (isMemberCapRefusal(error)) {
+        setCapped(true);
+      } else {
+        setError(error instanceof Error ? error.message : 'Failed to add member');
+      }
     } finally {
       setAdding(false);
     }
   };
 
-  const handleRoleChangeRequest = (member: OrganizationMember, newRole: OrgRole) => {
+  const closeAddModal = () => {
+    setShowAddModal(false);
+    setAddEmailError(undefined);
+    setCapped(false);
+  };
+
+  const handleRoleChangeRequest = (member: OrganizationMember, value: string) => {
+    const assignment = assignmentOf<OrgRole>(value);
+    if (assignsCustomRole(assignment)) {
+      handleRoleChange(member.user_id, assignment);
+      return;
+    }
+    const newRole = assignment.role;
     if ((newRole === 'admin' || newRole === 'owner') && member.role === 'member') {
       setPendingRoleChange({ member, newRole });
       setShowRoleConfirmModal(true);
@@ -125,23 +153,26 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
       setPendingRoleChange({ member, newRole });
       setShowRoleConfirmModal(true);
     } else {
-      handleRoleChange(member.user_id, newRole);
+      handleRoleChange(member.user_id, assignment);
     }
   };
 
-  const handleRoleChange = async (userId: string, newRole: OrgRole) => {
-    const member = members.find((m) => m.user_id === userId);
+  const handleRoleChange = async (userId: string, assignment: Assignment<OrgRole>) => {
+    const member = members.find((candidate) => candidate.user_id === userId);
     if (!member) return;
 
     setUpdatingMemberId(member.id);
     setError(undefined);
 
     try {
-      await client.updateOrgMemberRole(orgId, userId, { role: newRole });
+      await client.updateOrgMemberRole(orgId, userId, assignment);
+      if (assignsCustomRole(assignment) || member.custom_role !== null) {
+        void refreshRoles();
+      }
       showSuccessMessage('Role updated successfully');
       await loadMembers();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update role');
+    } catch (error) {
+      setError(assignmentFailure(error, 'Failed to update role'));
     } finally {
       setUpdatingMemberId(null);
     }
@@ -151,7 +182,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
     if (!pendingRoleChange) return;
 
     setShowRoleConfirmModal(false);
-    await handleRoleChange(pendingRoleChange.member.user_id, pendingRoleChange.newRole);
+    await handleRoleChange(pendingRoleChange.member.user_id, { role: pendingRoleChange.newRole });
     setPendingRoleChange(null);
   };
 
@@ -167,15 +198,11 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
       setShowRemoveModal(false);
       setMemberToRemove(null);
       await loadMembers();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to remove member');
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Failed to remove member');
     } finally {
       setRemoving(false);
     }
-  };
-
-  const getRoleBadgeClass = (role: OrgRole): string => {
-    return `role-badge role-badge-${role}`;
   };
 
   const formatDate = (dateString: string): string => {
@@ -190,49 +217,35 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
   };
 
   const countOwners = (): number => {
-    return members.filter((m) => m.role === 'owner').length;
+    return members.filter((member) => member.role === 'owner').length;
   };
 
-  const canManageMembers = currentUserRole === 'admin' || currentUserRole === 'owner';
+  const adds = ORGANIZATION_LADDER.grants(standing, ORGANIZATION_LADDER.create);
+  const updates = ORGANIZATION_LADDER.grants(standing, ORGANIZATION_LADDER.update);
+  const removes = ORGANIZATION_LADDER.grants(standing, ORGANIZATION_LADDER.remove);
+  const manages = updates || removes;
+  const grantable = grantableRoles(ORGANIZATION_LADDER, standing);
+
+  const { response: customRoles, refresh: refreshRoles } = useRoles(updates ? orgId : null);
 
   const canModifyMember = (member: OrganizationMember): boolean => {
-    if (!canManageMembers) return false;
     if (member.user_id === user?.id) return false;
     if (member.role === 'owner' && countOwners() === 1) return false;
-    if (currentUserRole !== 'owner' && (member.role === 'admin' || member.role === 'owner')) {
-      return false;
-    }
-    return true;
+    return reaches(ORGANIZATION_LADDER, standing, member);
   };
 
-  // `add_member` refuses an admin granting admin or owner; the role route
-  // refuses them granting owner. Offer only what both accept, so nothing on
-  // offer comes back a 403.
-  const grantableRoles = (): Array<{ value: OrgRole; label: string }> => {
-    if (!canManageMembers) return [];
-    if (currentUserRole === 'admin') {
-      return roleOptions.filter((r) => r.value !== 'owner' && r.value !== 'admin');
-    }
-    return roleOptions;
-  };
-
-  const getAssignableRoles = (
-    member: OrganizationMember
-  ): Array<{ value: OrgRole; label: string }> => {
-    if (!canManageMembers) return [];
-    // Only an owner may re-seat someone already holding admin or owner.
-    if (currentUserRole === 'admin' && (member.role === 'admin' || member.role === 'owner')) {
-      return roleOptions.filter((r) => r.value === member.role);
-    }
-    return grantableRoles();
-  };
-
-  const getAvailableRoles = (
-    member: OrganizationMember
-  ): Array<{ value: OrgRole; label: string }> =>
-    canManageMembers
-      ? getAssignableRoles(member)
-      : roleOptions.filter((r) => r.value === member.role);
+  const getAvailableRoles = (member: OrganizationMember): SelectOption[] =>
+    updates && canModifyMember(member)
+      ? [
+          ...grantable,
+          ...customRoleOptions(
+            customRoles,
+            ORGANIZATION_LADDER.scope,
+            member.custom_role,
+            standing.permissions
+          ),
+        ]
+      : [];
 
   if (loading) {
     return <div className="loading-state">Loading members...</div>;
@@ -247,7 +260,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
             Manage members and their roles in this organization.
           </p>
         </div>
-        {canManageMembers && (
+        {adds && (
           <div className="section-row-actions">
             <Button size="sm" onClick={() => setShowAddModal(true)}>
               Add Member
@@ -275,7 +288,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
                 <th>Member</th>
                 <th>Role</th>
                 <th>Joined</th>
-                {canManageMembers && <th className="members-actions-head">Actions</th>}
+                {manages && <th className="members-actions-head">Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -283,7 +296,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
                 const isUpdating = updatingMemberId === member.id;
                 const canModify = canModifyMember(member);
                 const availableRoles = getAvailableRoles(member);
-                const editable = canModify && availableRoles.length > 1;
+                const editable = availableRoles.length > 1;
                 return (
                   <tr key={member.id}>
                     <td>
@@ -303,21 +316,19 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
                       {editable ? (
                         <Select
                           compact
-                          value={member.role}
-                          onValueChange={(next) => handleRoleChangeRequest(member, next as OrgRole)}
+                          value={heldRole(member)}
+                          onValueChange={(next) => handleRoleChangeRequest(member, next)}
                           disabled={isUpdating}
                           className="role-select"
                           aria-label={`Change role for ${memberLabel(member)}`}
                           options={availableRoles}
                         />
                       ) : (
-                        <span className={getRoleBadgeClass(member.role)}>
-                          {member.role.charAt(0).toUpperCase() + member.role.slice(1)}
-                        </span>
+                        <span className={roleBadgeClass(member)}>{roleLabel(member)}</span>
                       )}
                     </td>
                     <td className="member-joined">{formatDate(member.joined_at)}</td>
-                    {canManageMembers && (
+                    {manages && (
                       <td>
                         <div className="member-actions">
                           {isUpdating && (
@@ -325,18 +336,20 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
                               Updating...
                             </span>
                           )}
-                          <Button
-                            className="member-remove"
-                            onClick={() => {
-                              setMemberToRemove(member);
-                              setShowRemoveModal(true);
-                            }}
-                            disabled={!canModify || isUpdating}
-                            variant="ghost"
-                            size="sm"
-                          >
-                            Remove
-                          </Button>
+                          {removes && (
+                            <Button
+                              className="member-remove"
+                              onClick={() => {
+                                setMemberToRemove(member);
+                                setShowRemoveModal(true);
+                              }}
+                              disabled={!canModify || isUpdating}
+                              variant="ghost"
+                              size="sm"
+                            >
+                              Remove
+                            </Button>
+                          )}
                         </div>
                       </td>
                     )}
@@ -347,21 +360,15 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
           </table>
         </div>
       )}
-      <Modal
-        isOpen={showAddModal}
-        onClose={() => {
-          setShowAddModal(false);
-          setAddEmailError(undefined);
-        }}
-        title="Add Organization Member"
-      >
+      <Modal isOpen={showAddModal} onClose={closeAddModal} title="Add Organization Member">
         <form onSubmit={handleAddMember} className="add-member-form">
+          {capped && <MemberCapRefusal className="modal-error" />}
           <Input
             label="Email"
             type="email"
             value={addEmail}
-            onChange={(e) => {
-              setAddEmail(e.target.value);
+            onChange={(event) => {
+              setAddEmail(event.target.value);
               setAddEmailError(undefined);
             }}
             placeholder="member@example.com"
@@ -371,18 +378,11 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
           <Select
             label="Role"
             value={addRole}
-            onChange={(e) => setAddRole(e.target.value as OrgRole)}
-            options={grantableRoles()}
+            onChange={(event) => setAddRole(event.target.value as OrgRole)}
+            options={grantable}
           />
           <div className="modal-actions">
-            <Button
-              type="button"
-              onClick={() => {
-                setShowAddModal(false);
-                setAddEmailError(undefined);
-              }}
-              variant="secondary"
-            >
+            <Button type="button" onClick={closeAddModal} variant="secondary">
               Cancel
             </Button>
             <Button type="submit" loading={adding} variant="primary">

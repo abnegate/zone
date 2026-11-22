@@ -28,8 +28,13 @@ import type { AiProvider, AiSettings } from '../types';
 
 const SUCCESS_DURATION_MS = 3000;
 const SAVE_LABEL = 'Save Changes';
+const READ_ONLY_HINT = 'You can see these defaults, but your role doesn’t let you change them.';
 
-export function OrganizationAiSection() {
+interface OrganizationAiSectionProps {
+  editable: boolean;
+}
+
+export function OrganizationAiSection({ editable }: OrganizationAiSectionProps) {
   const { isAuthenticated } = useAuth();
   const { currentOrganization, resolvingRole } = useWorkspace();
   const { models: installedModels } = useModels();
@@ -159,25 +164,33 @@ export function OrganizationAiSection() {
 
         <div className="settings-card">
           <h3 className="card-title">Provider</h3>
-          <AiProviderFields
-            level="organization"
-            provider={provider}
-            onProviderChange={(next) => {
-              setProvider(next);
-              setModels((previous) => ({ ...previous, fast: '', reasoning: '' }));
-            }}
-            credentials={credentials}
-            configured={configured}
-            onChange={(key, value) => setCredentials((previous) => ({ ...previous, [key]: value }))}
-            saved={saved}
-            policy={policy?.enforced ? policy.policy : null}
-          />
+          <fieldset disabled={!editable} className="settings-fieldset">
+            <AiProviderFields
+              level="organization"
+              provider={provider}
+              onProviderChange={(next) => {
+                setProvider(next);
+                setModels((previous) => ({ ...previous, fast: '', reasoning: '' }));
+              }}
+              credentials={credentials}
+              configured={configured}
+              onChange={(key, value) =>
+                setCredentials((previous) => ({ ...previous, [key]: value }))
+              }
+              saved={saved}
+              policy={policy?.enforced ? policy.policy : null}
+            />
+          </fieldset>
           {agent && (
             <AgentSignIn
               key={`${currentOrganization.id}:${agent}`}
               organizationId={currentOrganization.id}
               agent={agent}
-              access={agentAccess(currentOrganization.role, resolvingRole)}
+              access={agentAccess(
+                currentOrganization.permissions,
+                currentOrganization.role,
+                resolvingRole
+              )}
               heading="h4"
               level="organization"
               unsaved={provider !== savedProvider}
@@ -193,26 +206,32 @@ export function OrganizationAiSection() {
 
         <div className="settings-card">
           <h3 className="card-title">Default Models</h3>
-          <AiModelFields
-            provider={provider}
-            models={models}
-            onChange={(key, value) => setModels((previous) => ({ ...previous, [key]: value }))}
-            fastOptions={choices.fast}
-            reasoningOptions={choices.reasoning}
-            embeddingOptions={choices.embedding}
-            installedModels={installedModels}
-            inheritedLabel="Use server default"
-          />
+          <fieldset disabled={!editable} className="settings-fieldset">
+            <AiModelFields
+              provider={provider}
+              models={models}
+              onChange={(key, value) => setModels((previous) => ({ ...previous, [key]: value }))}
+              fastOptions={choices.fast}
+              reasoningOptions={choices.reasoning}
+              embeddingOptions={choices.embedding}
+              installedModels={installedModels}
+              inheritedLabel="Use server default"
+            />
+          </fieldset>
         </div>
 
-        <div className="settings-actions">
-          <Button type="button" variant="ghost" size="sm" onClick={handleReset} disabled={saving}>
-            Reset to Defaults
-          </Button>
-          <Button type="submit" loading={saving}>
-            {saving ? 'Saving...' : SAVE_LABEL}
-          </Button>
-        </div>
+        {editable ? (
+          <div className="settings-actions">
+            <Button type="button" variant="ghost" size="sm" onClick={handleReset} disabled={saving}>
+              Reset to Defaults
+            </Button>
+            <Button type="submit" loading={saving}>
+              {saving ? 'Saving...' : SAVE_LABEL}
+            </Button>
+          </div>
+        ) : (
+          <p className="form-hint">{READ_ONLY_HINT}</p>
+        )}
       </form>
     </>
   );

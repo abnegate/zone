@@ -1,19 +1,26 @@
 import { Button } from '@zone/ui';
 import { useId, useState } from 'react';
-import { LicenseStatus } from '../../schemas';
+import { LapsedNotice } from '../../components/LapsedNotice';
+import { UpgradeNotice } from '../../components/UpgradeNotice';
+import { includes } from '../../plans';
+import { LicenseStatus, Plan } from '../../schemas';
 import { useSso } from '../hooks';
+import { LAPSED_NOTICE, UPGRADE_NOTICE } from '../messages';
 import type { ProviderResponse, SettingsResponse } from '../types';
 import { DeleteSsoProviderDialog } from './DeleteSsoProviderDialog';
 import { RedirectUri } from './RedirectUri';
+import { ServiceProviderDetails } from './ServiceProviderDetails';
 import { SsoEnforcement } from './SsoEnforcement';
-import { SsoLapsedNotice } from './SsoLapsedNotice';
 import { SsoProviderForm } from './SsoProviderForm';
 import { SsoProviderList } from './SsoProviderList';
-import { SsoUpgradeNotice } from './SsoUpgradeNotice';
 import './SsoSection.css';
 
 function lapsed(settings: SettingsResponse): boolean {
-  return !settings.entitled && settings.status === LicenseStatus.Lapsed;
+  return (
+    !settings.entitled &&
+    settings.status === LicenseStatus.Lapsed &&
+    includes(settings.edition, Plan.Enterprise)
+  );
 }
 
 function SsoSettings({ settings }: { settings: SettingsResponse }) {
@@ -24,8 +31,18 @@ function SsoSettings({ settings }: { settings: SettingsResponse }) {
 
   return (
     <>
-      {!entitled && (lapsed(settings) ? <SsoLapsedNotice /> : <SsoUpgradeNotice />)}
-      {entitled && <RedirectUri uri={settings.redirect_uri} />}
+      {!entitled &&
+        (lapsed(settings) ? (
+          <LapsedNotice message={LAPSED_NOTICE} className="sso-lapsed" />
+        ) : (
+          <UpgradeNotice message={UPGRADE_NOTICE} className="sso-notice" />
+        ))}
+      {entitled && (
+        <>
+          <RedirectUri uri={settings.redirect_uri} />
+          <ServiceProviderDetails serviceProvider={settings.service_provider} />
+        </>
+      )}
       <SsoEnforcement settings={settings} editable={entitled} />
       {(entitled || providers.length > 0) && (
         <SsoProviderList

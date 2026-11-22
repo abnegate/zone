@@ -1,5 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen } from '@testing-library/react';
+import { Permission } from '../../enterprise/roles/schemas';
 import { AiProviderSchema } from '../workspace/schemas';
 import type { AiProvider, AiSettings, OrganizationKeys } from '../workspace/types';
 import {
@@ -70,17 +71,29 @@ describe('coding agent providers', () => {
 
 describe('agentAccess', () => {
   it('lets owners and admins manage the organization sign-ins', () => {
-    expect(agentAccess('owner', false)).toBe('manage');
-    expect(agentAccess('admin', false)).toBe('manage');
+    expect(agentAccess(undefined, 'owner', false)).toBe('manage');
+    expect(agentAccess(undefined, 'admin', false)).toBe('manage');
   });
 
   it('shows only the status while the role is still resolving', () => {
-    expect(agentAccess(undefined, true)).toBe('resolving');
+    expect(agentAccess(undefined, undefined, true)).toBe('resolving');
   });
 
   it('fails closed for a member and for a role that never resolved', () => {
-    expect(agentAccess('member', false)).toBe('view');
-    expect(agentAccess(undefined, false)).toBe('view');
+    expect(agentAccess(undefined, 'member', false)).toBe('view');
+    expect(agentAccess(undefined, undefined, false)).toBe('view');
+  });
+
+  it('lets a holder of agent_logins:update manage the sign-ins whatever their rank', () => {
+    expect(
+      agentAccess([Permission.OrganizationRead, Permission.AgentLoginsUpdate], 'member', false)
+    ).toBe('manage');
+  });
+
+  it('keeps an admin rank without agent_logins:update to the status', () => {
+    expect(agentAccess([Permission.OrganizationRead, Permission.RolesUpdate], 'admin', false)).toBe(
+      'view'
+    );
   });
 });
 

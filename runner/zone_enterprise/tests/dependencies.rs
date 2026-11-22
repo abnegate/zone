@@ -12,7 +12,19 @@ const FEATURES: [(&str, &[&str]); 2] = [
     ("audit", &["hex", "hmac", "md-5", "sha2", "url"]),
     (
         "sso",
-        &["dashmap", "jsonwebtoken", "rand", "reqwest", "sha2", "url"],
+        &[
+            "aws-lc-rs",
+            "dashmap",
+            "flate2",
+            "jsonwebtoken",
+            "quick-xml",
+            "rand",
+            "reqwest",
+            "rustls-pki-types",
+            "rustls-webpki",
+            "sha2",
+            "url",
+        ],
     ),
 ];
 

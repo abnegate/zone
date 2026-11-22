@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { render, screen, waitFor } from '@testing-library/react';
 import { AuthRequestError } from '../../../api/auth';
+import { memberCapMessage } from '../../enterprise/members';
 import { SsoCode } from '../SsoCode';
 import { SSO_ATTEMPT_KEY } from '../ssoAttempt';
 import { SSO_INCOMPLETE, SSO_MESSAGES } from '../ssoMessages';
@@ -166,6 +167,58 @@ describe('SsoCallbackPage', () => {
     expect(mockCompleteSso).not.toHaveBeenCalled();
   });
 
+  it.each([
+    SsoCode.AssertionInvalid,
+    SsoCode.SignInRefused,
+    SsoCode.SignInFailed,
+    SsoCode.StateInvalid,
+    SsoCode.DomainNotAllowed,
+  ])('shows the Zone message for the %s code the SAML endpoint sends', async (code) => {
+    arrive(`?error=${code}&state=state-1`, { state: 'state-1', next: '/' });
+    await settle();
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent(SSO_MESSAGES[code]);
+    expect(alert.textContent).not.toContain(code);
+    expect(mockCompleteSso).not.toHaveBeenCalled();
+  });
+
+  it('prefers the Zone message over any description sent with a Zone code', async () => {
+    arrive(
+      `?error=${SsoCode.SignInRefused}&error_description=Call+0800+to+fix+your+account&state=state-1`,
+      { state: 'state-1', next: '/' }
+    );
+    await settle();
+
+    expect(screen.getByRole('alert')).toHaveTextContent(SSO_MESSAGES[SsoCode.SignInRefused]);
+    expect(screen.queryByText(/0800/)).toBeNull();
+  });
+
+  it('still shows the identity provider text for an error that is not a Zone code', async () => {
+    arrive('?error=access_denied&state=state-1', { state: 'state-1', next: '/' });
+    await settle();
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      "Your identity provider didn't complete the sign-in (access_denied)."
+    );
+  });
+
+  it('shows only the generic message for a Zone code whose state does not match', async () => {
+    arrive(`?error=${SsoCode.AssertionInvalid}&state=forged`, { state: 'state-1', next: '/' });
+    await settle();
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent(SSO_INCOMPLETE);
+    expect(alert.textContent).not.toContain(SSO_MESSAGES[SsoCode.AssertionInvalid]);
+  });
+
+  it('shows only the generic message for a Zone code with no state, as sent without RelayState', async () => {
+    arrive(`?error=${SsoCode.StateInvalid}`, { state: 'state-1', next: '/' });
+    await settle();
+
+    expect(screen.getByRole('alert')).toHaveTextContent(SSO_INCOMPLETE);
+  });
+
   it('hides the description when nothing was saved', () => {
     arrive('?error=access_denied&error_description=Call+0800&state=state-1');
 
@@ -190,6 +243,16 @@ describe('SsoCallbackPage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'This device is waiting for an admin to allow it'
     );
+  });
+
+  it('explains the member cap when the sign-in would add a member past it', async () => {
+    mockCompleteSso.mockRejectedValue(new AuthRequestError('Server text', 'member_cap_reached'));
+    arrive('?code=code-1&state=state-1', { state: 'state-1', next: '/' });
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(memberCapMessage());
+    expect(alert).not.toHaveTextContent('Server text');
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 
   it('links back to sign in after a failure', async () => {

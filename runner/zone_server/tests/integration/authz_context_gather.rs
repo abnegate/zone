@@ -61,7 +61,22 @@ async fn workspace(client: &TestClient, token: &str, organization: &str) -> Stri
         .to_string()
 }
 
-async fn seat(client: &TestClient, token: &str, workspace: &str, user: &str, role: &str) {
+async fn seat(
+    client: &TestClient,
+    token: &str,
+    organization: &str,
+    workspace: &str,
+    user: &str,
+    role: &str,
+) {
+    client
+        .post_json_auth(
+            &format!("/api/organizations/{organization}/members"),
+            &json!({ "user_id": user, "role": "member" }),
+            token,
+        )
+        .await
+        .assert_status(StatusCode::CREATED);
     client
         .post_json_auth(
             &format!("/api/workspaces/{workspace}/members"),
@@ -77,14 +92,22 @@ async fn a_workspace_viewer_cannot_start_a_context_gathering() {
     let client = TestClient::with_db().await;
     let owner = account(&client).await;
     let viewer = account(&client).await;
-    let org = organization(&client, &owner.token).await;
-    let ws = workspace(&client, &owner.token, &org).await;
-    seat(&client, &owner.token, &ws, &viewer.user, "viewer").await;
+    let organization_id = organization(&client, &owner.token).await;
+    let workspace_id = workspace(&client, &owner.token, &organization_id).await;
+    seat(
+        &client,
+        &owner.token,
+        &organization_id,
+        &workspace_id,
+        &viewer.user,
+        "viewer",
+    )
+    .await;
 
     let refused_the_sibling = client
         .post_json_auth(
             &format!(
-                "/api/workspaces/{ws}/sources/{}/reindex",
+                "/api/workspaces/{workspace_id}/sources/{}/reindex",
                 uuid::Uuid::new_v4()
             ),
             &json!({}),
@@ -101,7 +124,7 @@ async fn a_workspace_viewer_cannot_start_a_context_gathering() {
     let gathered = client
         .post_json_auth(
             "/api/context/gather",
-            &json!({ "workspace_id": ws, "source_ids": [] }),
+            &json!({ "workspace_id": workspace_id, "source_ids": [] }),
             &viewer.token,
         )
         .await;
@@ -118,14 +141,22 @@ async fn a_workspace_member_can_still_start_a_context_gathering() {
     let client = TestClient::with_db().await;
     let owner = account(&client).await;
     let hand = account(&client).await;
-    let org = organization(&client, &owner.token).await;
-    let ws = workspace(&client, &owner.token, &org).await;
-    seat(&client, &owner.token, &ws, &hand.user, "member").await;
+    let organization_id = organization(&client, &owner.token).await;
+    let workspace_id = workspace(&client, &owner.token, &organization_id).await;
+    seat(
+        &client,
+        &owner.token,
+        &organization_id,
+        &workspace_id,
+        &hand.user,
+        "member",
+    )
+    .await;
 
     let gathered = client
         .post_json_auth(
             "/api/context/gather",
-            &json!({ "workspace_id": ws, "source_ids": [] }),
+            &json!({ "workspace_id": workspace_id, "source_ids": [] }),
             &hand.token,
         )
         .await;
@@ -142,13 +173,21 @@ async fn a_workspace_viewer_can_still_search_the_context() {
     let client = TestClient::with_db().await;
     let owner = account(&client).await;
     let viewer = account(&client).await;
-    let org = organization(&client, &owner.token).await;
-    let ws = workspace(&client, &owner.token, &org).await;
-    seat(&client, &owner.token, &ws, &viewer.user, "viewer").await;
+    let organization_id = organization(&client, &owner.token).await;
+    let workspace_id = workspace(&client, &owner.token, &organization_id).await;
+    seat(
+        &client,
+        &owner.token,
+        &organization_id,
+        &workspace_id,
+        &viewer.user,
+        "viewer",
+    )
+    .await;
 
     let searched = client
         .get_auth(
-            &format!("/api/context/search?q=anything&workspace_id={ws}"),
+            &format!("/api/context/search?q=anything&workspace_id={workspace_id}"),
             &viewer.token,
         )
         .await;

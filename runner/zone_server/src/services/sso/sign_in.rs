@@ -1,20 +1,29 @@
+use std::sync::Arc;
+
 use axum::http::HeaderMap;
+use chrono::Utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
-use zone_enterprise::sso::{Authorization, Error, Grant, Identity, Provider, Resolution, resolve};
+use zone_enterprise::sso::saml::{self, Refusal};
+use zone_enterprise::sso::{Error, Grant, Identity, Provider, Resolution, resolve};
 
 use super::callback::Callback;
-use super::console::redirect_uri;
+use super::configured::Configured;
+use super::console::{redirect_uri, service_provider};
+use super::handoff::{self, Handoff};
+use super::posted::Posted;
 use super::settlement::Settlement;
 use super::sign_in_failure::SignInFailure;
+use super::start::Start;
 use crate::auth::hash_password;
 use crate::auth::password::PasswordError;
 use crate::db::audit::{actions, resources};
-use crate::db::sso::{attempts, identities, providers};
+use crate::db::sso::{Attempt, assertions, attempts, identities, providers};
 use crate::db::users::{self, UserRow};
 use crate::db::{refresh_tokens, sessions};
 use crate::routes::common::{AuditEvent, audit};
 use crate::services::account::{AuthResponse, Credential, provision, session};
+use crate::services::members;
 use crate::state::AppState;
 use crate::utils::crypto::generate_token;
 
@@ -27,19 +36,106 @@ const RACED: [&str; 4] = [
     identities::USER_KEY,
 ];
 
-pub async fn authorize(
-    state: &AppState,
-    provider_id: Uuid,
-) -> Result<Authorization, SignInFailure> {
-    let provider = enabled(state, provider_id).await?;
-    let authorization = state
-        .oidc()
-        .authorize(&provider, &redirect_uri(&state.config().app_base_url))
-        .await?;
-    attempts::issue(state.db(), provider_id, &authorization)
+pub async fn authorize(state: &AppState, provider_id: Uuid) -> Result<Start, SignInFailure> {
+    let base = &state.config().app_base_url;
+    match enabled(state, provider_id).await? {
+        Configured::Oidc(provider) => {
+            let authorization = state
+                .oidc()
+                .authorize(&provider, &redirect_uri(base))
+                .await?;
+            attempts::issue(state.db(), provider_id, &authorization)
+                .await?
+                .ok_or(SignInFailure::Busy)?;
+            Ok(authorization.into())
+        }
+        Configured::Saml(provider) => {
+            let authorization =
+                saml::Authorization::new(&provider.sso_url, &service_provider(base), Utc::now());
+            attempts::issue_request(
+                state.db(),
+                provider_id,
+                &authorization.state,
+                &authorization.request_id,
+            )
+            .await?
+            .ok_or(SignInFailure::Busy)?;
+            Ok(authorization.into())
+        }
+    }
+}
+
+/// The post claims its attempt before anything else, so a request has one response checked however
+/// many posts carry its state. A refused response discards the attempt, so it can't be retried
+/// against the same request; a post dropped mid-check leaves it claimed until it expires.
+pub async fn assert(state: &AppState, posted: &Posted<'_>) -> Result<Handoff, SignInFailure> {
+    let attempt = attempts::claim(state.db(), posted.state)
         .await?
-        .ok_or(SignInFailure::Busy)?;
-    Ok(authorization)
+        .ok_or(Error::StateInvalid)?;
+    match hand_off(state, &attempt, posted.response).await {
+        Ok(code) => Ok(Handoff {
+            state: posted.state.to_owned(),
+            code,
+        }),
+        Err(failure) => {
+            if let Err(error) = attempts::discard(state.db(), attempt.id).await {
+                tracing::error!(
+                    attempt_id = %attempt.id,
+                    %error,
+                    "Failed to discard a refused SAML sign-in"
+                );
+            }
+            Err(failure)
+        }
+    }
+}
+
+async fn hand_off(
+    state: &AppState,
+    attempt: &Attempt,
+    response: &str,
+) -> Result<String, SignInFailure> {
+    let Configured::Saml(provider) = enabled(state, attempt.provider_id).await? else {
+        return Err(Error::ProviderNotFound.into());
+    };
+    let request_id = attempt.request_id.clone().ok_or(Error::StateInvalid)?;
+    let service = service_provider(&state.config().app_base_url);
+    let response = response.to_owned();
+    let permit = Arc::clone(state.saml_semaphore())
+        .try_acquire_owned()
+        .map_err(|_| SignInFailure::Overloaded)?;
+    let consumed = tokio::task::spawn_blocking(move || {
+        let consumed = saml::consume(&provider, &service, &request_id, &response, Utc::now());
+        drop(permit);
+        consumed
+    })
+    .await
+    .map_err(SignInFailure::Interrupted)??;
+    if !assertions::record(
+        state.db(),
+        attempt.provider_id,
+        &consumed.assertion_id,
+        consumed.expires_at,
+    )
+    .await?
+    {
+        return Err(Error::AssertionInvalid(Refusal::Replayed).into());
+    }
+    let code = generate_token();
+    let identity = &consumed.identity;
+    if !attempts::assert(
+        state.db(),
+        attempt.id,
+        &code,
+        &identity.subject,
+        &identity.email,
+        identity.name.as_deref(),
+    )
+    .await?
+    {
+        return Err(Error::StateInvalid.into());
+    }
+    Ok(code)
 }
 
 pub async fn complete(
@@ -50,22 +146,17 @@ pub async fn complete(
     let attempt = attempts::consume(state.db(), callback.state)
         .await?
         .ok_or(Error::StateInvalid)?;
-    let provider = enabled(state, attempt.provider_id).await?;
-    let redirect_uri = redirect_uri(&state.config().app_base_url);
-    let identity = state
-        .oidc()
-        .exchange(
-            &provider,
-            &Grant {
-                code: callback.code,
-                verifier: &attempt.verifier,
-                nonce: &attempt.nonce,
-                redirect_uri: &redirect_uri,
-            },
-        )
-        .await?;
+    let configured = enabled(state, attempt.provider_id).await?;
+    let identity = match &configured {
+        Configured::Oidc(provider) => exchange(state, provider, &attempt, callback.code).await?,
+        Configured::Saml(provider) => handoff::redeem(
+            attempt.asserted.as_ref().ok_or(Error::StateInvalid)?,
+            callback.code,
+            &provider.policy,
+        )?,
+    };
 
-    let settlement = settle(state, attempt.provider_id, &provider, &identity).await?;
+    let settlement = settle(state, attempt.provider_id, &configured, &identity).await?;
     if settlement.linked {
         record(
             state,
@@ -97,26 +188,46 @@ pub async fn complete(
     Ok(response)
 }
 
-async fn enabled(state: &AppState, provider_id: Uuid) -> Result<Provider, SignInFailure> {
+async fn exchange(
+    state: &AppState,
+    provider: &Provider,
+    attempt: &Attempt,
+    code: &str,
+) -> Result<Identity, SignInFailure> {
+    let redirect_uri = redirect_uri(&state.config().app_base_url);
+    Ok(state
+        .oidc()
+        .exchange(
+            provider,
+            &Grant {
+                code,
+                verifier: attempt.verifier.as_deref().ok_or(Error::StateInvalid)?,
+                nonce: attempt.nonce.as_deref().ok_or(Error::StateInvalid)?,
+                redirect_uri: &redirect_uri,
+            },
+        )
+        .await?)
+}
+
+async fn enabled(state: &AppState, provider_id: Uuid) -> Result<Configured, SignInFailure> {
     let record = providers::get(state.db(), provider_id)
         .await?
         .filter(|record| record.enabled)
         .ok_or(Error::ProviderNotFound)?;
-    let client_secret = record.client_secret(state.master_key())?;
-    Ok(Provider::parse(&record.fields(&client_secret))?)
+    Configured::parse(&record, state.master_key())
 }
 
 async fn settle(
     state: &AppState,
     provider_id: Uuid,
-    provider: &Provider,
+    configured: &Configured,
     identity: &Identity,
 ) -> Result<Settlement, SignInFailure> {
-    match land(state, provider_id, provider, identity).await {
+    match land(state, provider_id, configured, identity).await {
         Err(failure) if failure.raced(&RACED) => {}
         landed => return landed,
     }
-    match land(state, provider_id, provider, identity).await {
+    match land(state, provider_id, configured, identity).await {
         Err(failure) if failure.raced(&RACED) => Err(Error::EmailConflict.into()),
         landed => landed,
     }
@@ -125,7 +236,7 @@ async fn settle(
 async fn land(
     state: &AppState,
     provider_id: Uuid,
-    provider: &Provider,
+    configured: &Configured,
     identity: &Identity,
 ) -> Result<Settlement, SignInFailure> {
     let known = identities::find(state.db(), provider_id, &identity.subject).await?;
@@ -146,7 +257,7 @@ async fn land(
         by_subject,
         &accounts,
         linked,
-        provider.policy.require_verified_email,
+        configured.policy().require_verified_email,
     )? {
         Resolution::SignIn(user) => {
             if let Some(known) = &known {
@@ -159,7 +270,7 @@ async fn land(
             Ok(Settlement::linked(user, reclaim))
         }
         Resolution::Provision => {
-            let user = create(state, provider_id, identity).await?;
+            let user = create(state, provider_id, identity, configured.vouches_for_email()).await?;
             Ok(Settlement::provisioned(user))
         }
     }
@@ -203,7 +314,9 @@ async fn create(
     state: &AppState,
     provider_id: Uuid,
     identity: &Identity,
+    email_verified: bool,
 ) -> Result<Uuid, SignInFailure> {
+    members::admit(state, None).await?;
     let password_hash = unusable().await?;
     let mut transaction = state.db().begin().await?;
     let user = provision::insert(
@@ -212,7 +325,7 @@ async fn create(
         &password_hash,
         identity.name.as_deref(),
         false,
-        true,
+        email_verified,
     )
     .await?;
     identities::link(

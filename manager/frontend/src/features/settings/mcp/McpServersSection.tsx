@@ -14,7 +14,7 @@ import { COMMANDS_OFF_HINT } from './transport';
 import type { CreateMcpServerRequest, McpServer, UpdateMcpServerRequest } from './types';
 import './McpServersSection.css';
 
-export const READ_ONLY_HINT = 'Only organization admins can change MCP servers.';
+export const READ_ONLY_HINT = "Your role can't change MCP servers.";
 export const CHANGE_FAILED = 'Failed to update the MCP server';
 
 type RowActions = Pick<

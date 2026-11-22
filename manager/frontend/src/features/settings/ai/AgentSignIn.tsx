@@ -27,6 +27,8 @@ export const POLL_INTERVAL = 3000;
 export const POLL_INTERVAL_LIMIT = 30000;
 export const USAGE_POLL_INTERVAL = 60_000;
 
+const SIGN_IN_ELSEWHERE = "Your role can't sign agents in. Ask someone whose role can.";
+
 const ROUTING =
   "New chats start on the account with the most headroom and stay on it until it runs out; the other agent's accounts take over when this one is spent.";
 
@@ -378,7 +380,7 @@ export function AgentSignIn({
   } else if (status?.state === 'signed_in') {
     detail = signedInDetail(status, agent, lapsed);
   } else if (status && !manage) {
-    detail = access === 'view' ? 'Ask an organization admin to sign in.' : null;
+    detail = access === 'view' ? SIGN_IN_ELSEWHERE : null;
   } else if (status?.state === 'expired') {
     detail = `Sign in again to keep using ${name}.`;
   } else if (status) {

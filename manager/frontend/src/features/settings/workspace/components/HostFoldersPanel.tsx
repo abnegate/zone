@@ -4,6 +4,8 @@ import { client } from '../../../../api/client';
 import type { HostDirectories, HostMounts } from '../types';
 import './HostFoldersPanel.css';
 
+const READ_ONLY_HINT = "Your role can't change host folders.";
+
 type FolderRow = { id: string; path: string };
 
 function emptyMounts(): HostMounts {
@@ -134,7 +136,7 @@ export default function HostFoldersPanel({
         </p>
       )}
 
-      {readOnly && <p className="host-folders-hint">Viewers can't change host folders.</p>}
+      {readOnly && <p className="host-folders-hint">{READ_ONLY_HINT}</p>}
 
       {error && <div className="alert alert-error">{error}</div>}
       {success && variant === 'settings' && <div className="alert alert-success">{success}</div>}

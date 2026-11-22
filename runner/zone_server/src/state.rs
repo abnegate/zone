@@ -8,6 +8,9 @@ use abnegate_secret::MasterKey;
 use chrono::Utc;
 use dashmap::DashMap;
 use sqlx::PgPool;
+use std::num::NonZeroUsize;
+#[cfg(any(test, feature = "testing"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::OnceCell;
@@ -22,7 +25,7 @@ use zone_context::embeddings::EmbeddingService;
 use zone_core::llm::{LlmBackend, cli};
 #[cfg(any(test, feature = "testing"))]
 use zone_enterprise::Keyring;
-use zone_enterprise::sso::Oidc;
+use zone_enterprise::sso::{Oidc, saml};
 use zone_enterprise::{Edition, License, status};
 
 use crate::cache::Cache;
@@ -54,6 +57,10 @@ const MAX_CONCURRENT_TRAIN: usize = 1;
 const MAX_CONCURRENT_FRAME_EXTRACT: usize = 4;
 /// Without a sweep, every client the rate limiter has ever seen stays in it.
 const RATE_LIMITER_CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
+
+fn max_concurrent_saml() -> usize {
+    std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
+}
 
 /// The adapters a source can be verified and fetched with.
 ///
@@ -128,6 +135,9 @@ struct AppStateInner {
     /// Clip extracts queue here instead of 429ing, so a dump of hundreds of
     /// videos can run a few ffmpeg jobs at a time.
     pub frame_semaphore: Arc<Semaphore>,
+    /// SAML responses are parsed on the blocking pool, holding many times their size in memory
+    /// before any signature is checked, so one permit per core bounds that peak.
+    pub saml_semaphore: Arc<Semaphore>,
     /// The process's MCP hubs: the instance layer, connected once, and one
     /// per organization, each shared across chat turns.
     pub mcp: Hubs,
@@ -136,6 +146,7 @@ struct AppStateInner {
     pub licenses: Licenses,
     pub renewal: OnceLock<Option<renewal::Client>>,
     pub oidc: Oidc,
+    pub saml: saml::Client,
     /// Terminal frames for task runs, for sockets and waits to subscribe to.
     /// The process's one instance, which the writers that finish a run also
     /// publish to, so a state built per test observes the same runs.
@@ -145,6 +156,10 @@ struct AppStateInner {
     pub pull_request_statuses: StatusCache,
     pub github_snapshots: Snapshots,
     pub background: TaskTracker,
+    /// Whether the Community member cap applies, which a test build leaves off
+    /// until a test opts in with [`AppState::cap_members`].
+    #[cfg(any(test, feature = "testing"))]
+    capped: AtomicBool,
 }
 
 impl AppState {
@@ -263,17 +278,21 @@ impl AppState {
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
+                saml_semaphore: Arc::new(Semaphore::new(max_concurrent_saml())),
                 mcp,
                 github: OnceLock::new(),
                 network_denial: OnceCell::new(),
                 licenses: Licenses::new(),
                 renewal: OnceLock::new(),
                 oidc: Oidc::new(),
+                saml: saml::Client::new(),
                 task_progress: task_progress::progress(),
                 device_connections: DashMap::new(),
                 pull_request_statuses: StatusCache::default(),
                 github_snapshots,
                 background: TaskTracker::new(),
+                #[cfg(any(test, feature = "testing"))]
+                capped: AtomicBool::new(false),
             }),
         }
     }
@@ -352,6 +371,11 @@ impl AppState {
     /// Permits for clip extracts. Waiters queue rather than 429.
     pub fn frame_semaphore(&self) -> &Arc<Semaphore> {
         &self.inner.frame_semaphore
+    }
+
+    /// Permits for checking SAML responses. A post that finds none is refused, not queued.
+    pub fn saml_semaphore(&self) -> &Arc<Semaphore> {
+        &self.inner.saml_semaphore
     }
 
     /// Get the sync registry
@@ -497,6 +521,10 @@ impl AppState {
         &self.inner.oidc
     }
 
+    pub fn saml(&self) -> &saml::Client {
+        &self.inner.saml
+    }
+
     pub async fn license(&self) -> Option<License> {
         self.inner.licenses.current(&self.inner.db).await
     }
@@ -510,6 +538,16 @@ impl AppState {
     /// [`Self::settled_license`] as the key stored, verified or not.
     pub async fn stored_license(&self) -> DbResult<Stored> {
         self.inner.licenses.stored(&self.inner.db).await
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn cap_members(&self) {
+        self.inner.capped.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn members_capped(&self) -> bool {
+        self.inner.capped.load(Ordering::Relaxed)
     }
 
     pub async fn edition(&self) -> Edition {
@@ -604,6 +642,11 @@ fn lazy(database: &str) -> PgPool {
 #[cfg(test)]
 pub(crate) const UNREACHABLE_USAGE: &str = "http://127.0.0.1:1";
 
+/// A loopback port nothing listens on, the instance's LiteLLM in a test's config unless the test
+/// mocks it, so no test registers spend keys with a LiteLLM running on this machine.
+#[cfg(test)]
+pub(crate) const UNREACHABLE_LITELLM: &str = "http://127.0.0.1:9";
+
 #[cfg(test)]
 pub(crate) fn test_agents() -> AgentConfig {
     AgentConfig {
@@ -627,7 +670,7 @@ pub(crate) fn test_config() -> Config {
         session_lifetime: 2_592_000,
         model_backend: Default::default(),
         agents: test_agents(),
-        litellm_host: "http://localhost:4000".to_string(),
+        litellm_host: UNREACHABLE_LITELLM.to_string(),
         litellm_key: "test-key".to_string(),
         ollama_host: "http://localhost:11434".to_string(),
         gpt4all_models_url: crate::config::DEFAULT_GPT4ALL_MODELS_URL.to_string(),
@@ -722,6 +765,13 @@ mod tests {
         let state = AppState::for_tests();
         let clone = state.clone();
         assert!(std::ptr::eq(state.oidc(), clone.oidc()));
+    }
+
+    #[tokio::test]
+    async fn every_clone_shares_one_saml_client() {
+        let state = AppState::for_tests();
+        let clone = state.clone();
+        assert!(std::ptr::eq(state.saml(), clone.saml()));
     }
 
     #[tokio::test]
@@ -851,6 +901,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_test_config_sends_litellm_requests_only_to_loopback() {
+        let host = test_config().litellm_host;
+        let parsed = reqwest::Url::parse(&host).expect("a LiteLLM URL");
+        assert_eq!(
+            parsed.host_str(),
+            Some("127.0.0.1"),
+            "{host} would reach a real LiteLLM from a test"
+        );
+    }
+
     fn create_test_config() -> Config {
         Config {
             host: "localhost".to_string(),
@@ -863,7 +924,7 @@ mod tests {
             session_lifetime: 2_592_000,
             model_backend: Default::default(),
             agents: test_agents(),
-            litellm_host: "http://localhost:4000".to_string(),
+            litellm_host: UNREACHABLE_LITELLM.to_string(),
             litellm_key: "test-key".to_string(),
             ollama_host: "http://localhost:11434".to_string(),
             gpt4all_models_url: crate::config::DEFAULT_GPT4ALL_MODELS_URL.to_string(),
@@ -1032,6 +1093,10 @@ mod tests {
         assert_eq!(
             state.frame_semaphore().available_permits(),
             MAX_CONCURRENT_FRAME_EXTRACT
+        );
+        assert_eq!(
+            state.saml_semaphore().available_permits(),
+            max_concurrent_saml()
         );
         assert_eq!(
             state

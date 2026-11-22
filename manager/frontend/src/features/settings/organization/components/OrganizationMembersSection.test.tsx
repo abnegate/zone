@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { render, screen, waitFor } from '@testing-library/react';
 import { clientModule } from '../../../../test/client';
 import type { Workspace } from '../../workspace/types';
+import type { InvitationAccess } from '../types';
 
 const mockGetWorkspaces = mock();
 
@@ -22,12 +23,24 @@ mock.module('./OrgMembersSection', () => ({
 }));
 
 mock.module('./InvitationsSection', () => ({
-  InvitationsSection: ({ orgId, workspaces }: { orgId: string; workspaces: Workspace[] }) => (
-    <div data-testid="invitations-section">
+  InvitationsSection: ({
+    orgId,
+    workspaces,
+    access,
+  }: {
+    orgId: string;
+    workspaces: Workspace[];
+    access: Pick<InvitationAccess, 'create' | 'revoke'>;
+  }) => (
+    <div data-testid="invitations-section" data-access={JSON.stringify(access)}>
       {orgId}: {workspaces.map((workspace) => workspace.name).join(',')}
     </div>
   ),
 }));
+
+const HIDDEN: InvitationAccess = { read: false, create: false, revoke: false };
+
+const MANAGER: InvitationAccess = { read: true, create: true, revoke: true };
 
 let OrganizationMembersSection: typeof import('./OrganizationMembersSection').OrganizationMembersSection;
 
@@ -57,8 +70,8 @@ describe('OrganizationMembersSection', () => {
     workspaceContext.currentOrganization = { id: organizationId };
   });
 
-  it('renders members without invitations or a workspace fetch when invitations is false', async () => {
-    render(<OrganizationMembersSection invitations={false} />);
+  it('renders members without invitations or a workspace fetch without the invitations read permission', async () => {
+    render(<OrganizationMembersSection invitations={HIDDEN} />);
 
     expect(screen.getByTestId('org-members-section')).toHaveTextContent(organizationId);
     expect(screen.queryByTestId('invitations-section')).not.toBeInTheDocument();
@@ -66,8 +79,8 @@ describe('OrganizationMembersSection', () => {
     expect(mockGetWorkspaces).not.toHaveBeenCalled();
   });
 
-  it('renders members and invitations when invitations is true', async () => {
-    render(<OrganizationMembersSection invitations />);
+  it('renders members and invitations with the invitations read permission', async () => {
+    render(<OrganizationMembersSection invitations={MANAGER} />);
 
     expect(screen.getByTestId('org-members-section')).toHaveTextContent(organizationId);
     await waitFor(() => {
@@ -78,7 +91,7 @@ describe('OrganizationMembersSection', () => {
   });
 
   it('fetches workspaces with the organization id only, so inactive workspaces stay invitable', async () => {
-    render(<OrganizationMembersSection invitations />);
+    render(<OrganizationMembersSection invitations={MANAGER} />);
 
     await waitFor(() => {
       expect(mockGetWorkspaces).toHaveBeenCalledTimes(1);
@@ -89,16 +102,29 @@ describe('OrganizationMembersSection', () => {
   it('keeps invitations usable and explains when the workspace fetch fails', async () => {
     mockGetWorkspaces.mockRejectedValue(new Error('Failed to fetch workspaces: 500'));
 
-    render(<OrganizationMembersSection invitations />);
+    render(<OrganizationMembersSection invitations={MANAGER} />);
 
     expect(await screen.findByText('Couldn’t load workspaces')).toBeInTheDocument();
     expect(screen.getByTestId('invitations-section')).toHaveTextContent(`${organizationId}:`);
   });
 
+  it('hands the invitation controls the caller may use to the invitations', async () => {
+    render(
+      <OrganizationMembersSection invitations={{ read: true, create: false, revoke: true }} />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('invitations-section')).toHaveTextContent('Active');
+    });
+    expect(
+      JSON.parse(screen.getByTestId('invitations-section').getAttribute('data-access') ?? '')
+    ).toEqual({ read: true, create: false, revoke: true });
+  });
+
   it('renders nothing without a current organization', async () => {
     workspaceContext.currentOrganization = null;
 
-    const { container } = render(<OrganizationMembersSection invitations />);
+    const { container } = render(<OrganizationMembersSection invitations={MANAGER} />);
 
     expect(container.innerHTML).toBe('');
     await Promise.resolve();

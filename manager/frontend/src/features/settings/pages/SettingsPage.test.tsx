@@ -242,9 +242,11 @@ describe('SettingsPage', () => {
         'AI defaults',
         'Agent policy',
         'Members',
+        'Roles',
         'Devices',
         'Audit log',
         'Audit export',
+        'Spend',
         'GitHub',
         'MCP servers',
       ]);
@@ -271,7 +273,7 @@ describe('SettingsPage', () => {
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
     });
 
-    it('shows an organization owner and workspace admin all seventeen sections', () => {
+    it('shows an organization owner and workspace admin all nineteen sections', () => {
       signInAs('owner', 'admin');
 
       renderAt('/settings/workspace/general');
@@ -288,9 +290,11 @@ describe('SettingsPage', () => {
         'AI defaults',
         'Agent policy',
         'Members',
+        'Roles',
         'Devices',
         'Audit log',
         'Audit export',
+        'Spend',
         'GitHub',
         'MCP servers',
       ]);

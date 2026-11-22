@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { WorkspaceRoleSchema } from '../../auth/schemas';
+import { CustomRoleReferenceSchema } from '../../enterprise/roles/schemas';
+import { CustomRoleAssignmentSchema } from '../organization/schemas';
 
 export const WorkspaceSchema = z.object({
   id: z.string(),
@@ -44,6 +46,8 @@ export const WorkspaceMemberSchema = z
     user_id: z.string().min(1),
     workspace_id: z.string().min(1),
     role: WorkspaceRoleSchema,
+    custom_role: CustomRoleReferenceSchema.nullable().default(null),
+    permissions: z.array(z.string()).optional(),
     is_active: z.boolean().optional(),
     invited_by: z.string().nullable().optional(),
     email: z.string().nullable().optional(),
@@ -58,6 +62,8 @@ export const WorkspaceMemberSchema = z
     user_id: member.user_id,
     workspace_id: member.workspace_id,
     role: member.role,
+    custom_role: member.custom_role,
+    permissions: member.permissions,
     email: member.email || '',
     display_name: member.display_name ?? null,
     joined_at: member.joined_at || member.created_at || '',
@@ -68,9 +74,10 @@ export const AddWorkspaceMemberRequestSchema = z.object({
   role: WorkspaceRoleSchema,
 });
 
-export const UpdateWorkspaceMemberRequestSchema = z.object({
-  role: WorkspaceRoleSchema,
-});
+export const UpdateWorkspaceMemberRequestSchema = z.union([
+  z.strictObject({ role: WorkspaceRoleSchema }),
+  CustomRoleAssignmentSchema,
+]);
 
 export const WorkspaceMembersResponseSchema = z.object({
   members: z.array(WorkspaceMemberSchema),

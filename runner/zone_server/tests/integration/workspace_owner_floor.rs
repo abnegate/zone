@@ -1,7 +1,7 @@
 //! Only an owner deletes a workspace or seats another owner, so a workspace
 //! with no active owner cannot be repaired from inside -- an admin cannot
-//! promote anyone, and nobody can delete it. Migration 023 exists to undo that
-//! state, so the role routes must stop producing it.
+//! promote anyone, and nobody can delete it. The role routes must never
+//! produce that state.
 //!
 //! Counting admins and owners together does produce it: with one owner and one
 //! admin standing, the count says two are privileged and lets the owner go.
@@ -9,6 +9,7 @@
 use crate::common::create_test_pool;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
+use zone_server::db::custom_roles::Assignment;
 use zone_server::db::workspace_members::{
     Removal, RoleChange, WorkspaceRole, change_role, remove_guarded,
 };
@@ -79,8 +80,8 @@ async fn the_last_owner_cannot_be_demoted_to_member_while_an_admin_stands() {
         &pool,
         workspace,
         owner,
-        WorkspaceRole::Member,
-        WorkspaceRole::Owner,
+        Assignment::BuiltIn(WorkspaceRole::Member),
+        owner,
     )
     .await
     .expect("the demotion is answered");
@@ -104,8 +105,8 @@ async fn the_last_owner_cannot_step_down_to_admin() {
         &pool,
         workspace,
         owner,
-        WorkspaceRole::Admin,
-        WorkspaceRole::Owner,
+        Assignment::BuiltIn(WorkspaceRole::Admin),
+        owner,
     )
     .await
     .expect("the demotion is answered");
@@ -123,7 +124,7 @@ async fn the_last_owner_cannot_be_removed_while_an_admin_stands() {
     let pool = create_test_pool().await;
     let (workspace, owner, _admin) = workspace_with_owner_and_admin(&pool).await;
 
-    let outcome = remove_guarded(&pool, workspace, owner, WorkspaceRole::Owner)
+    let outcome = remove_guarded(&pool, workspace, owner, owner)
         .await
         .expect("the removal is answered");
 
@@ -145,8 +146,8 @@ async fn an_owner_still_steps_down_once_another_owner_stands() {
         &pool,
         workspace,
         admin,
-        WorkspaceRole::Owner,
-        WorkspaceRole::Owner,
+        Assignment::BuiltIn(WorkspaceRole::Owner),
+        owner,
     )
     .await
     .expect("the admin is promoted");
@@ -155,8 +156,8 @@ async fn an_owner_still_steps_down_once_another_owner_stands() {
         &pool,
         workspace,
         owner,
-        WorkspaceRole::Member,
-        WorkspaceRole::Owner,
+        Assignment::BuiltIn(WorkspaceRole::Member),
+        owner,
     )
     .await
     .expect("the demotion is answered");
@@ -175,7 +176,7 @@ async fn an_owner_still_steps_down_once_another_owner_stands() {
 #[tokio::test]
 async fn an_admin_cannot_grant_a_rank_only_an_owner_grants() {
     let pool = create_test_pool().await;
-    let (workspace, _owner, admin) = workspace_with_owner_and_admin(&pool).await;
+    let (workspace, owner, admin) = workspace_with_owner_and_admin(&pool).await;
     let member = user(&pool).await;
     sqlx::query(
         "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
@@ -187,9 +188,15 @@ async fn an_admin_cannot_grant_a_rank_only_an_owner_grants() {
     .expect("a member is seated");
 
     for granted in [WorkspaceRole::Admin, WorkspaceRole::Owner] {
-        let outcome = change_role(&pool, workspace, member, granted, WorkspaceRole::Admin)
-            .await
-            .expect("the grant is answered");
+        let outcome = change_role(
+            &pool,
+            workspace,
+            member,
+            Assignment::BuiltIn(granted),
+            admin,
+        )
+        .await
+        .expect("the grant is answered");
         assert!(
             matches!(outcome, RoleChange::Forbidden),
             "an admin granted {granted:?}, which only an owner grants: {outcome:?}"
@@ -202,8 +209,8 @@ async fn an_admin_cannot_grant_a_rank_only_an_owner_grants() {
         &pool,
         workspace,
         member,
-        WorkspaceRole::Admin,
-        WorkspaceRole::Owner,
+        Assignment::BuiltIn(WorkspaceRole::Admin),
+        owner,
     )
     .await
     .expect("the grant is answered");
@@ -216,8 +223,8 @@ async fn an_admin_cannot_grant_a_rank_only_an_owner_grants() {
         &pool,
         workspace,
         admin,
-        WorkspaceRole::Member,
-        WorkspaceRole::Owner,
+        Assignment::BuiltIn(WorkspaceRole::Member),
+        owner,
     )
     .await
     .expect("the demotion is answered");

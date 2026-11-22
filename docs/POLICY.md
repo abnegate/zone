@@ -15,15 +15,16 @@ Workspace → Agent policy**, but never widen it.
 
 ## Licensing
 
-Agent policy is part of Zone Enterprise. Editing a policy needs a Zone
-Enterprise license that verifies and is either active or in its 30-day grace
-period after expiry. You install the license under **Settings → This server →
-License**.
+Agent policy is part of Zone Enterprise; a Zone Team license doesn't include
+it. Editing a policy needs a Zone Enterprise license that verifies and is
+either active or in its 30-day grace period after expiry. You install the
+license under **Settings → This server → License**.
 
 | License state | Enforcement | Settings |
 |---|---|---|
 | Enterprise, active or in grace | Enforced | Editable by the people listed [below](#who-can-see-and-change-a-policy) |
-| Lapsed (past grace) | Still enforced | Read-only, with a renewal notice |
+| Enterprise, lapsed (past grace) | Still enforced | Read-only, with a renewal notice |
+| Team, in any state | Not enforced | Read-only, with an upgrade notice |
 | Removed, or never installed (Community) | Not enforced | Read-only, with an upgrade notice |
 
 A lapsed license never loosens a policy: everything it restricts stays
@@ -32,7 +33,8 @@ change is refused with `license_required` until then, including a change that
 would only loosen the policy.
 
 Removing the license is different: the server runs as Community, and
-Community enforces no policy. Zone keeps the saved policies, and enforces them
+Community enforces no policy. A Team license works the same way, since Team
+doesn't include agent policy. Zone keeps the saved policies, and enforces them
 again as soon as a Zone Enterprise license is installed.
 
 A stored license key that no longer verifies, for example after an upgrade
@@ -48,10 +50,12 @@ run retries it, and in a chat you can try again shortly.
 
 | Policy | Who can see it | Who can change it |
 |---|---|---|
-| Organization | Every active member of the organization | Organization owners and admins |
-| Workspace | Members of the workspace, and organization owners and admins | Workspace owners and admins, and organization owners and admins |
+| Organization | Every active member of the organization | Holders of `policies:update` |
+| Workspace | Members of the workspace, and holders of `policies:update` in the organization | Holders of `workspace_policies:update` in the workspace, and of `policies:update` in the organization |
 
-Someone who can see a policy but not change it sees it read-only. Someone who
+The built-in admin and owner roles hold both permissions; a custom role can
+hold either (see [ROLES.md](ROLES.md)). Someone who can see a policy but not
+change it sees it read-only. Someone who
 isn't a member gets 404, as if the organization or workspace didn't exist.
 
 ## How the organization and workspaces combine
@@ -548,7 +552,7 @@ Content-Type: application/json
 |---|---|
 | `entitled` | The license allows editing: Enterprise, active or in grace. |
 | `enforced` | The license enforces policies: Enterprise in any state, or a stored key that no longer verifies. |
-| `edition` | `community` or `enterprise`. |
+| `edition` | `community`, `team` or `enterprise`. |
 | `status` | `community`, `active`, `grace` or `lapsed`. |
 | `editable` | The license allows editing and you may change this policy. |
 | `policy` | The organization's rules. All six fields are always present; `null` means unset. |

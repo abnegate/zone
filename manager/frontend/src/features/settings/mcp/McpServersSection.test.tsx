@@ -43,7 +43,7 @@ afterAll(() => {
 
 const ORGANIZATION_ID = 'org-1';
 const COMMANDS_OFF = 'Command (stdio) servers are turned off on this instance.';
-const READ_ONLY = 'Only organization admins can change MCP servers.';
+const READ_ONLY = "Your role can't change MCP servers.";
 const UNREACHABLE = 'Zone could not reach the server';
 
 function server(name: string, overrides: Partial<McpServer> = {}): McpServer {

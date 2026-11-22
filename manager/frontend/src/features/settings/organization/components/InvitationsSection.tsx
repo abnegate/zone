@@ -1,23 +1,54 @@
 import { Button, EmptyState, Modal, Select } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
+import { isMemberCapRefusal, MemberCapRefusal, Permission } from '../../../enterprise';
+import { ORGANIZATION_ROLES, type RoleOption, WORKSPACE_ROLES } from '../../assignment';
+import { allowsOrganization, grantsOrganization } from '../../navigation/access';
 import type { Workspace, WorkspaceRole } from '../../workspace/types';
-import type { CreateInvitationRequest, Invitation, OrgRole } from '../types';
+import type { CreateInvitationRequest, Invitation, InvitationAccess, OrgRole } from '../types';
 import './InvitationsSection.css';
 
 interface InvitationsSectionProps {
   orgId: string;
   workspaces: Workspace[];
+  access: Omit<InvitationAccess, 'read'>;
 }
 
-export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProps) {
+const PRIVILEGED_WORKSPACE_ROLES: readonly WorkspaceRole[] = ['admin', 'owner'];
+
+function organizationRoles(access: Omit<InvitationAccess, 'read'>): RoleOption<OrgRole>[] {
+  const administers = grantsOrganization(
+    access.permissions,
+    access.role,
+    Permission.AdministratorsUpdate
+  );
+  const offered: Readonly<Record<OrgRole, boolean>> = {
+    member: true,
+    admin: allowsOrganization(access.role, 'admin'),
+    owner: administers,
+  };
+  return ORGANIZATION_ROLES.filter(({ value }) => offered[value]);
+}
+
+function workspaceRoles(access: Omit<InvitationAccess, 'read'>): RoleOption<WorkspaceRole>[] {
+  const administers = grantsOrganization(
+    access.permissions,
+    access.role,
+    Permission.AdministratorsUpdate
+  );
+  return WORKSPACE_ROLES.filter(
+    ({ value }) => administers || !PRIVILEGED_WORKSPACE_ROLES.includes(value)
+  );
+}
+
+export function InvitationsSection({ orgId, workspaces, access }: InvitationsSectionProps) {
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [capped, setCapped] = useState(false);
 
-  // Form state
   const [email, setEmail] = useState('');
   const [orgRole, setOrgRole] = useState<OrgRole>('member');
   const [workspaceId, setWorkspaceId] = useState('');
@@ -29,8 +60,8 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
     try {
       const response = await client.getInvitations(orgId);
       setInvitations(response.invitations);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load invitations';
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load invitations';
       setError(message.startsWith('Validation failed') ? 'Couldn’t load invitations' : message);
     } finally {
       setLoading(false);
@@ -41,10 +72,11 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
     loadInvitations();
   }, [loadInvitations]);
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault();
     setSubmitting(true);
     setError(null);
+    setCapped(false);
 
     try {
       const request: CreateInvitationRequest = {
@@ -64,11 +96,20 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
       setWorkspaceId('');
       setWorkspaceRole('member');
       loadInvitations();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create invitation');
+    } catch (error) {
+      if (isMemberCapRefusal(error)) {
+        setCapped(true);
+      } else {
+        setError(error instanceof Error ? error.message : 'Failed to create invitation');
+      }
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const closeModal = () => {
+    setShowModal(false);
+    setCapped(false);
   };
 
   const handleRevoke = async (invitationId: string) => {
@@ -79,8 +120,8 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
     try {
       await client.revokeInvitation(orgId, invitationId);
       loadInvitations();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to revoke invitation');
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Failed to revoke invitation');
     }
   };
 
@@ -107,13 +148,19 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
           <h2 className="section-title">Pending Invitations</h2>
           <p className="section-description">Invitations expire seven days after they are sent.</p>
         </div>
-        <div className="section-row-actions">
-          <Button size="sm" onClick={() => setShowModal(true)}>
-            Invite Member
-          </Button>
-        </div>
+        {access.create && (
+          <div className="section-row-actions">
+            <Button size="sm" onClick={() => setShowModal(true)}>
+              Invite Member
+            </Button>
+          </div>
+        )}
       </div>
-      {error && <div className="alert alert-error">{error}</div>}
+      {error && (
+        <div className="alert alert-error" role="alert">
+          {error}
+        </div>
+      )}
       {invitations.length === 0 ? (
         <EmptyState
           icon={
@@ -124,9 +171,11 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
           title="No pending invitations"
           description="Invite team members to join this organization"
           action={
-            <Button variant="secondary" onClick={() => setShowModal(true)}>
-              Send an invitation
-            </Button>
+            access.create ? (
+              <Button variant="secondary" onClick={() => setShowModal(true)}>
+                Send an invitation
+              </Button>
+            ) : undefined
           }
         />
       ) : (
@@ -140,7 +189,7 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
                 <th>WS Role</th>
                 <th>Invited By</th>
                 <th>Expires</th>
-                <th>Actions</th>
+                {access.revoke && <th>Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -175,16 +224,18 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
                     {formatDate(invitation.expires_at)}
                     {isExpired(invitation.expires_at) && ' (Expired)'}
                   </td>
-                  <td className="invitation-actions">
-                    <Button
-                      className="invitation-revoke"
-                      onClick={() => handleRevoke(invitation.id)}
-                      variant="ghost"
-                      size="sm"
-                    >
-                      Revoke
-                    </Button>
-                  </td>
+                  {access.revoke && (
+                    <td className="invitation-actions">
+                      <Button
+                        className="invitation-revoke"
+                        onClick={() => handleRevoke(invitation.id)}
+                        variant="ghost"
+                        size="sm"
+                      >
+                        Revoke
+                      </Button>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -192,15 +243,16 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
         </div>
       )}
 
-      <Modal isOpen={showModal} onClose={() => setShowModal(false)} title="Invite Member">
+      <Modal isOpen={showModal} onClose={closeModal} title="Invite Member">
         <form onSubmit={handleSubmit} className="invitation-form">
+          {capped && <MemberCapRefusal className="modal-error" />}
           <div className="form-group">
             <label htmlFor="email">Email Address</label>
             <input
               type="email"
               id="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(event) => setEmail(event.target.value)}
               required
               placeholder="member@example.com"
               className="form-input"
@@ -213,11 +265,7 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
             value={orgRole}
             onValueChange={(next) => setOrgRole(next as OrgRole)}
             wrapperClassName="form-group"
-            options={[
-              { value: 'member', label: 'Member' },
-              { value: 'admin', label: 'Admin' },
-              { value: 'owner', label: 'Owner' },
-            ]}
+            options={organizationRoles(access)}
           />
 
           <div className="form-group">
@@ -246,22 +294,12 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
               value={workspaceRole}
               onValueChange={(next) => setWorkspaceRole(next as WorkspaceRole)}
               wrapperClassName="form-group"
-              options={[
-                { value: 'viewer', label: 'Viewer' },
-                { value: 'member', label: 'Member' },
-                { value: 'admin', label: 'Admin' },
-                { value: 'owner', label: 'Owner' },
-              ]}
+              options={workspaceRoles(access)}
             />
           )}
 
           <div className="modal-actions">
-            <Button
-              type="button"
-              onClick={() => setShowModal(false)}
-              variant="secondary"
-              disabled={submitting}
-            >
+            <Button type="button" onClick={closeModal} variant="secondary" disabled={submitting}>
               Cancel
             </Button>
             <Button type="submit" variant="primary" loading={submitting}>

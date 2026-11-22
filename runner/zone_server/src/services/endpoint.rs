@@ -171,6 +171,21 @@ impl Endpoint {
         &self.key
     }
 
+    /// This endpoint sending under `key` instead, for a request whose spend is attributed. The
+    /// credential its deployment metadata is read with stays the instance's.
+    pub fn with_key(self, key: SecretValue) -> Self {
+        Self { key, ..self }
+    }
+
+    /// Whether a request here can be sent under a derived spend key: it goes to the instance's
+    /// LiteLLM under the instance's own key, not one a workspace saved for that host.
+    pub fn attributable(&self, config: &Config) -> bool {
+        self.origin == Origin::Instance
+            && !config.litellm_host.is_empty()
+            && !config.litellm_key.is_empty()
+            && self.key.expose() == config.litellm_key
+    }
+
     /// The key this endpoint's own deployment metadata is read with: on the instance's
     /// LiteLLM, which publishes the same routes to every tenant, the instance's key, whatever
     /// key a workspace saved beside its host; elsewhere, [`Self::key`].
@@ -1528,6 +1543,65 @@ mod tests {
             "API error (404): The model `gpt-9` does not exist ** or you do not have access.";
 
         assert_eq!(endpoint.scrub(failure), failure);
+    }
+
+    #[test]
+    fn only_the_instance_under_its_own_key_is_attributable() {
+        let config = config();
+
+        assert!(Endpoint::instance(&config).attributable(&config));
+        assert!(
+            !Endpoint::resolve(
+                &config,
+                &saved(
+                    PROVIDER_SELF_HOSTED,
+                    Saved {
+                        url: Some(INSTANCE_HOST),
+                        key: Some(SAVED_KEY),
+                    },
+                ),
+            )
+            .attributable(&config),
+            "a key a workspace saved for the instance host carries that workspace's own spend"
+        );
+        assert!(
+            !super::testing::saved(INSTANCE_HOST, INSTANCE_KEY, Layer::Workspace)
+                .attributable(&config),
+            "a settings endpoint is never the instance's, whatever key it carries"
+        );
+        for config in [
+            Config {
+                litellm_key: String::new(),
+                ..config.clone()
+            },
+            Config {
+                litellm_host: String::new(),
+                ..config.clone()
+            },
+        ] {
+            assert!(
+                !Endpoint::instance(&config).attributable(&config),
+                "an instance without a LiteLLM host and key has no spend to attribute"
+            );
+        }
+    }
+
+    #[test]
+    fn with_key_changes_only_the_key() {
+        let config = config();
+        let endpoint = Endpoint::instance(&config);
+
+        let attributed = endpoint
+            .clone()
+            .with_key(SecretValue::new("sk-zone-derived"));
+
+        assert_eq!(attributed.key().expose(), "sk-zone-derived");
+        assert_eq!(attributed.credential().expose(), INSTANCE_KEY);
+        assert_eq!(attributed.url(), endpoint.url());
+        assert_eq!(attributed.origin(), endpoint.origin());
+        assert_eq!(attributed.layer(), endpoint.layer());
+        assert_eq!(attributed.dialect(), endpoint.dialect());
+        assert!(!attributed.attributable(&config));
     }
 
     #[test]

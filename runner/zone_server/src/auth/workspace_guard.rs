@@ -1,6 +1,6 @@
 //! Workspace membership guards for authorization
 //!
-//! Provides extractors that verify workspace membership and roles.
+//! Provides extractors that verify workspace membership and permissions.
 
 use axum::{
     extract::{FromRef, FromRequestParts, Path},
@@ -8,16 +8,78 @@ use axum::{
 };
 use uuid::Uuid;
 
-use super::middleware::{AuthError, AuthUser};
-use crate::{db::workspace_members, state::AppState};
+use super::{
+    grant::Grant,
+    middleware::{AuthError, AuthUser},
+    permission::Permission,
+    scope::Scope,
+};
+use crate::{
+    db::{custom_roles::Summary, workspace_members},
+    state::AppState,
+};
 
-/// Guard that requires workspace membership (any role, viewer or higher)
+const INACTIVE: &str = "Workspace membership is inactive";
+
+fn database(error: sqlx::Error) -> AuthError {
+    AuthError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: format!("Database error: {error}"),
+    }
+}
+
+/// An active member of the workspace in the path, with what they hold.
+/// `role` is the stored built-in column.
 #[derive(Debug, Clone)]
 pub struct WorkspaceMember {
     pub workspace_id: Uuid,
     pub user_id: Uuid,
     pub email: String,
     pub role: workspace_members::WorkspaceRole,
+    pub custom_role: Option<Summary>,
+    pub grant: Grant,
+}
+
+impl WorkspaceMember {
+    pub fn allows(&self, permission: Permission) -> bool {
+        self.grant.allows(permission)
+    }
+}
+
+/// A workspace member who holds the permission at index `PERMISSION`:
+/// `WorkspacePermit<{ Permission::WorkspaceWrite.index() }>`.
+#[derive(Debug, Clone)]
+pub struct WorkspacePermit<const PERMISSION: u16>(pub WorkspaceMember);
+
+impl<const PERMISSION: u16> WorkspacePermit<PERMISSION> {
+    const PERMISSION: Permission = {
+        let permission = Permission::at(PERMISSION);
+        assert!(
+            matches!(permission.scope(), Scope::Workspace),
+            "a workspace permit needs a workspace permission"
+        );
+        permission
+    };
+}
+
+impl<S, const PERMISSION: u16> FromRequestParts<S> for WorkspacePermit<PERMISSION>
+where
+    S: Send + Sync,
+    AppState: FromRef<S>,
+{
+    type Rejection = AuthError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let member = WorkspaceMember::from_request_parts(parts, state).await?;
+        let permission = Self::PERMISSION;
+        if !member.allows(permission) {
+            return Err(AuthError {
+                status: StatusCode::FORBIDDEN,
+                message: permission.refusal(),
+            });
+        }
+        Ok(Self(member))
+    }
 }
 
 impl<S> FromRequestParts<S> for WorkspaceMember
@@ -28,18 +90,13 @@ where
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        // First require authentication
         let auth_user = AuthUser::from_request_parts(parts, state).await?;
 
-        // Get app state to access database pool
         let app_state = AppState::from_ref(state);
 
-        // Extract workspace_id from path using Axum's Path extractor
-        // Try to extract as a single UUID first (e.g., /api/workspaces/:workspace_id or /api/workspaces/:id)
         let workspace_id = match Path::<Uuid>::from_request_parts(parts, state).await {
             Ok(Path(id)) => id,
             Err(_) => {
-                // If that fails, try extracting as a named parameter map
                 #[derive(serde::Deserialize)]
                 struct WorkspacePath {
                     #[serde(alias = "id")]
@@ -63,138 +120,35 @@ where
             message: "Invalid user ID in token".to_string(),
         })?;
 
-        // Check membership
-        let member = workspace_members::get_member(app_state.db(), workspace_id, user_id)
+        let refusal = |message: String| AuthError {
+            status: StatusCode::FORBIDDEN,
+            message,
+        };
+        let membership = workspace_members::membership(app_state.db(), workspace_id, user_id)
             .await
-            .map_err(|e| AuthError {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                message: format!("Database error: {}", e),
-            })?
-            .ok_or(AuthError {
-                status: StatusCode::FORBIDDEN,
-                message: "Not a member of this workspace".to_string(),
-            })?;
-
-        // Check if member is active
-        if !member.is_active {
-            return Err(AuthError {
-                status: StatusCode::FORBIDDEN,
-                message: "Workspace membership is inactive".to_string(),
-            });
+            .map_err(database)?;
+        let Some(membership) = membership else {
+            let inactive = workspace_members::get_member(app_state.db(), workspace_id, user_id)
+                .await
+                .map_err(database)?
+                .is_some_and(|member| !member.is_active);
+            return Err(refusal(if inactive {
+                INACTIVE.to_string()
+            } else {
+                Permission::WorkspaceRead.refusal()
+            }));
+        };
+        if !membership.grant.allows(Permission::WorkspaceRead) {
+            return Err(refusal(Permission::WorkspaceRead.refusal()));
         }
 
         Ok(WorkspaceMember {
             workspace_id,
             user_id,
             email: auth_user.0.email,
-            role: member.role,
-        })
-    }
-}
-
-/// Guard that requires workspace writer role (member or higher)
-#[derive(Debug, Clone)]
-pub struct WorkspaceWriter {
-    pub workspace_id: Uuid,
-    pub user_id: Uuid,
-    pub email: String,
-    pub role: workspace_members::WorkspaceRole,
-}
-
-impl<S> FromRequestParts<S> for WorkspaceWriter
-where
-    S: Send + Sync,
-    AppState: FromRef<S>,
-{
-    type Rejection = AuthError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        // Get workspace member first
-        let member = WorkspaceMember::from_request_parts(parts, state).await?;
-
-        // Check if user can write (member or higher)
-        if member.role < workspace_members::WorkspaceRole::Member {
-            return Err(AuthError {
-                status: StatusCode::FORBIDDEN,
-                message: "Workspace write access required".to_string(),
-            });
-        }
-
-        Ok(WorkspaceWriter {
-            workspace_id: member.workspace_id,
-            user_id: member.user_id,
-            email: member.email,
-            role: member.role,
-        })
-    }
-}
-
-/// Guard that requires workspace admin role
-#[derive(Debug, Clone)]
-pub struct WorkspaceAdmin {
-    pub workspace_id: Uuid,
-    pub user_id: Uuid,
-    pub email: String,
-    pub role: workspace_members::WorkspaceRole,
-}
-
-impl<S> FromRequestParts<S> for WorkspaceAdmin
-where
-    S: Send + Sync,
-    AppState: FromRef<S>,
-{
-    type Rejection = AuthError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        // Get workspace member first
-        let member = WorkspaceMember::from_request_parts(parts, state).await?;
-
-        // Check if user is admin or owner
-        if member.role < workspace_members::WorkspaceRole::Admin {
-            return Err(AuthError {
-                status: StatusCode::FORBIDDEN,
-                message: "Workspace admin access required".to_string(),
-            });
-        }
-
-        Ok(WorkspaceAdmin {
-            workspace_id: member.workspace_id,
-            user_id: member.user_id,
-            email: member.email,
-            role: member.role,
-        })
-    }
-}
-
-/// Guard that requires workspace owner role
-#[derive(Debug, Clone)]
-pub struct WorkspaceOwner {
-    pub workspace_id: Uuid,
-    pub user_id: Uuid,
-    pub email: String,
-}
-
-impl<S> FromRequestParts<S> for WorkspaceOwner
-where
-    S: Send + Sync,
-    AppState: FromRef<S>,
-{
-    type Rejection = AuthError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let member = WorkspaceMember::from_request_parts(parts, state).await?;
-
-        if member.role != workspace_members::WorkspaceRole::Owner {
-            return Err(AuthError {
-                status: StatusCode::FORBIDDEN,
-                message: "Workspace owner access required".to_string(),
-            });
-        }
-
-        Ok(WorkspaceOwner {
-            workspace_id: member.workspace_id,
-            user_id: member.user_id,
-            email: member.email,
+            role: membership.role,
+            custom_role: membership.custom_role,
+            grant: membership.grant,
         })
     }
 }

@@ -39,6 +39,7 @@ pub(crate) fn payload() -> Payload {
         expires_at: Utc.with_ymd_and_hms(2027, 11, 1, 0, 0, 0).unwrap(),
         key_id: FIRST.into(),
         subscription: None,
+        plan: None,
     }
 }
 

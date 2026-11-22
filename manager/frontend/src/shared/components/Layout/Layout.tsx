@@ -1,5 +1,6 @@
 import { Suspense } from 'react';
 import { Outlet } from 'react-router-dom';
+import { MemberCapBanner } from '../../../features/enterprise/components/MemberCapBanner';
 import { DownloadDock, TrainDock } from '../../../features/models';
 import { NavDrawerProvider } from '../../context/NavDrawerContext';
 import Sidebar from '../Sidebar/Sidebar';
@@ -14,6 +15,7 @@ export default function Layout() {
       <div className="layout">
         <Sidebar dock={<TrainDock />} />
         <main className="main-content">
+          <MemberCapBanner />
           <Suspense
             fallback={
               <div className="loading-container">

@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::auth::{OrgAdmin, OrgMember};
+use crate::auth::{OrganizationMember, OrganizationPermit, Permission};
 use crate::db::audit::{actions, resources};
 use crate::db::github_apps::{self, AppRow, OwnerType};
 use crate::db::github_connection_states::{self, Purpose};
@@ -158,13 +158,13 @@ fn settings_url(app: &AppRow, github_web_url: &str) -> String {
 }
 
 pub async fn get(
-    member: OrgMember,
+    member: OrganizationMember,
     State(state): State<AppState>,
 ) -> Result<Json<Connection>, ServerError> {
     let db = state.db();
     let (apps, installations) = tokio::try_join!(
-        github_apps::list(db, member.org_id),
-        github_installations::list(db, member.org_id),
+        github_apps::list(db, member.organization_id),
+        github_installations::list(db, member.organization_id),
     )?;
     let github_web_url = &state.config().github_web_url;
 
@@ -178,7 +178,7 @@ pub async fn get(
 }
 
 pub async fn register(
-    admin: OrgAdmin,
+    OrganizationPermit(member): OrganizationPermit<{ Permission::GitHubUpdate.index() }>,
     State(state): State<AppState>,
     request: Result<Json<RegistrationRequest>, JsonRejection>,
 ) -> Result<Json<Registration>, ServerError> {
@@ -192,26 +192,26 @@ pub async fn register(
     let db = state.db();
 
     let connected = match &owner {
-        Some(login) => github_apps::for_owner(db, admin.org_id, login.as_str())
+        Some(login) => github_apps::for_owner(db, member.organization_id, login.as_str())
             .await?
             .map(|_| OWNER_CONNECTED),
-        None => github_apps::list(db, admin.org_id)
+        None => github_apps::list(db, member.organization_id)
             .await?
             .iter()
-            .any(|app| app.owner_type == OwnerType::User && app.created_by == Some(admin.user_id))
+            .any(|app| app.owner_type == OwnerType::User && app.created_by == Some(member.user_id))
             .then_some(PERSONAL_CONNECTED),
     };
     if let Some(conflict) = connected {
         return Err(ServerError::Conflict(conflict.to_string()));
     }
 
-    let organization = organizations::get_organization(db, admin.org_id)
+    let organization = organizations::get_organization(db, member.organization_id)
         .await?
         .ok_or_else(|| ServerError::NotFound(ORGANIZATION_NOT_FOUND.to_string()))?;
     let issued = github_connection_states::issue(
         db,
-        admin.org_id,
-        admin.user_id,
+        member.organization_id,
+        member.user_id,
         Purpose::Registration,
         None,
     )
@@ -230,18 +230,19 @@ pub async fn register(
 }
 
 pub async fn delete_app(
-    admin: OrgAdmin,
+    OrganizationPermit(member): OrganizationPermit<{ Permission::GitHubUpdate.index() }>,
     State(state): State<AppState>,
     path: Result<Path<(Uuid, Uuid)>, PathRejection>,
 ) -> Result<StatusCode, ServerError> {
     let Path((_, app_id)) = path.map_err(|_| app_not_found())?;
     let db = state.db();
-    let app = github_apps::get(db, admin.org_id, app_id)
+    let app = github_apps::get(db, member.organization_id, app_id)
         .await?
         .ok_or_else(app_not_found)?;
-    let installations = github_installations::list_for_app(db, admin.org_id, app.id).await?;
+    let installations =
+        github_installations::list_for_app(db, member.organization_id, app.id).await?;
 
-    if !github_apps::delete(db, admin.org_id, app.id).await? {
+    if !github_apps::delete(db, member.organization_id, app.id).await? {
         return Err(app_not_found());
     }
 
@@ -256,10 +257,10 @@ pub async fn delete_app(
     audit(
         db,
         AuditEvent {
-            organization_id: Some(admin.org_id),
+            organization_id: Some(member.organization_id),
             workspace_id: None,
-            actor_id: admin.user_id,
-            actor_email: &admin.email,
+            actor_id: member.user_id,
+            actor_email: &member.email,
             action: actions::GITHUB_APP_REMOVED,
             resource_type: resources::GITHUB_APP,
             resource_id: Some(app.id),

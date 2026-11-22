@@ -25,6 +25,7 @@ use crate::config::SourceIndexConfig;
 use crate::services::audit::retention;
 use crate::services::license::renewal::{self, Client};
 use crate::services::mcp_servers::load;
+use crate::services::spend;
 use crate::services::worktree;
 use crate::state::AppState;
 use crate::workers::analytics::AnalyticsPolicy;
@@ -53,11 +54,12 @@ pub enum Periodic {
     AuditRetention,
     WorktreeCleanup,
     LicenseRenewal,
+    SpendIngest,
 }
 
 impl Periodic {
     /// Every sweep, in the order the server used to spawn them, then those added since.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::KnowledgeRefresh,
         Self::SourceResync,
         Self::AnswerPromotion,
@@ -72,6 +74,7 @@ impl Periodic {
         Self::AuditRetention,
         Self::WorktreeCleanup,
         Self::LicenseRenewal,
+        Self::SpendIngest,
     ];
 
     pub fn name(self) -> &'static str {
@@ -90,6 +93,7 @@ impl Periodic {
             Self::AuditRetention => "audit-retention",
             Self::WorktreeCleanup => "worktree-cleanup",
             Self::LicenseRenewal => "license-renewal",
+            Self::SpendIngest => "spend-ingest",
         }
     }
 
@@ -111,6 +115,7 @@ impl Periodic {
             Self::AuditRetention => retention::SWEEP_INTERVAL_SECONDS,
             Self::WorktreeCleanup => worktree::SWEEP_INTERVAL_SECONDS,
             Self::LicenseRenewal => renewal::INTERVAL_SECONDS,
+            Self::SpendIngest => spend::sweep::INTERVAL_SECONDS,
         };
         Duration::from_secs(seconds)
     }
@@ -138,6 +143,8 @@ impl Periodic {
             Self::AuditRetention => Warmup::Period,
             // A worktree has to sit idle for a day before it can go, so an hour's wait costs nothing.
             Self::WorktreeCleanup => Warmup::Period,
+            // The ingest cursor survives a restart, so a pass a period in reads all the server missed.
+            Self::SpendIngest => Warmup::Period,
             // Long enough to be out of the way of start-up, short enough that a
             // server coming back up picks up files whose embeddings failed.
             Self::SourceResync => Warmup::After(source_resync::FIRST_POLL_DELAY),
@@ -182,7 +189,9 @@ impl Periodic {
             // The next pass reads the same worktrees and removes whatever this one would have.
             | Self::WorktreeCleanup
             // The next pass asks about the license as it is stored then.
-            | Self::LicenseRenewal => Catchup::Skip,
+            | Self::LicenseRenewal
+            // The next pass reads the logs from the cursor, whatever the turns it missed.
+            | Self::SpendIngest => Catchup::Skip,
             // These two never ticked on a grid at all. Both were `sleep` loops,
             // so the wait has always been measured from the end of the previous
             // pass rather than from a fixed alignment, and both queue work
@@ -243,6 +252,10 @@ pub fn periodic(state: AppState) -> Registry {
                 Some(client) => renew_license(schedule, state.clone(), client.clone()),
                 None => continue,
             },
+            Periodic::SpendIngest if !state.config().model_backend().requires_litellm() => {
+                continue;
+            }
+            Periodic::SpendIngest => ingest_spend(schedule, state.clone(), Arc::clone(&fanout)),
         };
         registry.register(Arc::new(sweep));
     }
@@ -472,6 +485,17 @@ fn renew_license(schedule: Schedule, state: AppState, client: Client) -> Sweep {
     })
 }
 
+fn ingest_spend(schedule: Schedule, state: AppState, fanout: Arc<Fanout>) -> Sweep {
+    let sweep = Arc::new(spend::sweep::Sweep::default());
+
+    Sweep::new(Periodic::SpendIngest.name(), schedule, move || {
+        let state = state.clone();
+        let fanout = Arc::clone(&fanout);
+        let sweep = Arc::clone(&sweep);
+        async move { sweep.run(&state, &fanout).await.map_err(Failure::new) }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -502,11 +526,12 @@ mod tests {
                 "audit-retention",
                 "worktree-cleanup",
                 "license-renewal",
+                "spend-ingest",
             ],
             "main.rs spawned nine workers; eight of them are periodic sweeps and the ninth, \
              reminders, is a dispatch loop that stayed where it was. MCP convergence, the pull \
              request watch, the audit retention sweep, the worktree cleanup and the license \
-             renewal joined them later. Dropping one here would silently stop that background work."
+             renewal and the spend ingest joined them later. Dropping one here would silently stop that background work."
         );
     }
 
@@ -535,6 +560,7 @@ mod tests {
             (Periodic::AuditRetention, 60 * 60),
             (Periodic::WorktreeCleanup, 60 * 60),
             (Periodic::LicenseRenewal, 24 * 60 * 60),
+            (Periodic::SpendIngest, 60),
         ] {
             assert_eq!(
                 periodic.period(&sources),
@@ -626,6 +652,37 @@ mod tests {
         let names = periodic(state).names();
 
         assert!(!names.contains(&"license-renewal"), "{names:?}");
+        assert!(names.contains(&"audit-retention"), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn the_spend_ingest_is_registered_on_an_instance_that_runs_litellm() {
+        let state = AppState::for_tests();
+
+        let registry = periodic(state);
+
+        assert!(registry.names().contains(&"spend-ingest"));
+        let schedule = registry
+            .schedule("spend-ingest")
+            .expect("the spend ingest's schedule");
+        assert_eq!(schedule.period(), Duration::from_secs(60));
+        assert_eq!(schedule.warmup(), Warmup::Period);
+        assert_eq!(schedule.catchup(), Catchup::Skip);
+    }
+
+    #[tokio::test]
+    async fn the_spend_ingest_is_left_out_on_an_instance_without_litellm() {
+        let mut config = test_config();
+        config.model_backend = crate::config::ModelBackend::Cli {
+            agent: abnegate_agent_cli::AgentKind::Claude,
+            executable: None,
+        };
+        let state = AppState::new(config, lazy_pool(), None);
+        state.disable_mcp();
+
+        let names = periodic(state).names();
+
+        assert!(!names.contains(&"spend-ingest"), "{names:?}");
         assert!(names.contains(&"audit-retention"), "{names:?}");
     }
 
