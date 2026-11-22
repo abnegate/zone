@@ -8,6 +8,11 @@ pub enum Problem {
     Missing(Variable),
     #[error("{} is invalid: {reason}", variable.name())]
     Invalid { variable: Variable, reason: String },
+    #[error("{} is not set: {reason}", variable.name())]
+    Required {
+        variable: Variable,
+        reason: &'static str,
+    },
     #[error(transparent)]
     PrivateKey(#[from] PrivateKeyError),
     #[error("{variable}: {0} Use a key this release trusts.", variable = Variable::KeyId.name())]
@@ -35,6 +40,18 @@ mod tests {
         assert_eq!(
             problem.to_string(),
             "SMTP_PORT is invalid: not a port number"
+        );
+    }
+
+    #[test]
+    fn a_required_variable_is_named_with_the_reason() {
+        let problem = Problem::Required {
+            variable: Variable::TrustedProxies,
+            reason: "set it",
+        };
+        assert_eq!(
+            problem.to_string(),
+            "ZONE_LICENSE_TRUSTED_PROXIES is not set: set it"
         );
     }
 

@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ApiError } from '../../../api/ApiError';
 import {
+  ACME_LICENSE,
   ACTIVE,
   COMMUNITY,
   COMMUNITY_AT_CAP,
@@ -27,10 +28,17 @@ import { PRICING_URL } from '../pricing';
 import { LICENSE_REFUSAL_CODES, UNVERIFIED_CODES } from '../schemas';
 import { refusalMessage, unverifiedReason } from '../status';
 import type { LicenseResponse } from '../types';
+import {
+  LICENSE_ID_COPIED,
+  LICENSE_ID_COPY_FAILED,
+  LICENSE_ID_HINT,
+  LICENSE_ID_LAPSED_HINT,
+} from './LicenseId';
 
 const get = mock();
 const set = mock();
 const remove = mock();
+const writeText = mock();
 
 mock.module('../api', () => ({ licenseApi: { get, set, remove } }));
 
@@ -111,6 +119,25 @@ function renewalOutcome(): HTMLElement {
   return row?.querySelector('.ui-badge') as HTMLElement;
 }
 
+const LICENSE_ID = 'License ID';
+
+const LICENSE_ID_ROW = `${ACME_LICENSE.id}Copy${LICENSE_ID_HINT}`;
+
+const LAPSED_LICENSE_ID_ROW = `${ACME_LICENSE.id}Copy${LICENSE_ID_LAPSED_HINT}`;
+
+function licenseIdAnnouncement(): HTMLElement {
+  const term = screen.getAllByRole('term').find((element) => element.textContent === LICENSE_ID);
+  const region = term?.nextElementSibling?.querySelector('[aria-live]');
+  if (!(region instanceof HTMLElement)) {
+    throw new Error('The license ID row has no live region');
+  }
+  return region;
+}
+
+function terms(): string[] {
+  return screen.getAllByRole('term', { hidden: true }).map((term) => term.textContent ?? '');
+}
+
 function details(): Record<string, string> {
   const entries: Record<string, string> = {};
   for (const term of screen.getAllByRole('term', { hidden: true })) {
@@ -124,6 +151,9 @@ describe('LicenseSection', () => {
     get.mockReset();
     set.mockReset();
     remove.mockReset();
+    writeText.mockReset();
+    writeText.mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
   });
 
   describe('states', () => {
@@ -184,6 +214,7 @@ describe('LicenseSection', () => {
       expect(screen.getByText('Enterprise', { selector: '.license-edition-name' })).toBeTruthy();
       expect(screen.getByText('Active')).toBeInTheDocument();
       expect(details()).toEqual({
+        [LICENSE_ID]: LICENSE_ID_ROW,
         Customer: 'Acme Ltd',
         Seats: '12 of 25 seats used this month',
         Expires: 'Nov 1, 2027',
@@ -320,6 +351,96 @@ describe('LicenseSection', () => {
 
       await screen.findByRole('textbox', { name: 'License key' });
       expect(get).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('license ID', () => {
+    it('leads the details with the license ID and a hint to quote it to support', async () => {
+      await loaded(ACTIVE);
+
+      expect(terms()[0]).toBe(LICENSE_ID);
+      expect(screen.getByText(ACME_LICENSE.id, { selector: 'code' })).toHaveClass(
+        'license-id-value'
+      );
+      const hint = screen.getByText(LICENSE_ID_HINT);
+      const copy = screen.getByRole('button', { name: 'Copy license ID' });
+      expect(copy).toHaveTextContent('Copy');
+      expect(copy.getAttribute('aria-describedby')).toBe(hint.id);
+      expect(licenseIdAnnouncement()).toHaveAttribute('aria-live', 'polite');
+      expect(licenseIdAnnouncement()).toHaveClass('sr-only');
+      expect(licenseIdAnnouncement()).toHaveTextContent(/^$/);
+    });
+
+    for (const [name, response] of [
+      ['a license in its grace period', GRACE],
+      ['a Team license', TEAM],
+    ] as const) {
+      it(`shows the license ID and the support hint for ${name}`, async () => {
+        await loaded(response);
+
+        expect(terms()[0]).toBe(LICENSE_ID);
+        expect(details()[LICENSE_ID]).toBe(LICENSE_ID_ROW);
+      });
+    }
+
+    for (const [name, response] of [
+      ['a lapsed license', LAPSED],
+      ['a lapsed Team license', TEAM_LAPSED],
+    ] as const) {
+      it(`shows the license ID for ${name} without sending the admin to paid support`, async () => {
+        await loaded(response);
+
+        expect(terms()[0]).toBe(LICENSE_ID);
+        expect(details()[LICENSE_ID]).toBe(LAPSED_LICENSE_ID_ROW);
+        expect(screen.queryByText(LICENSE_ID_HINT)).not.toBeInTheDocument();
+        const hint = screen.getByText(LICENSE_ID_LAPSED_HINT);
+        expect(
+          screen.getByRole('button', { name: 'Copy license ID' }).getAttribute('aria-describedby')
+        ).toBe(hint.id);
+      });
+    }
+
+    for (const [name, response] of [
+      ['Community', COMMUNITY],
+      ['a stored key that does not verify', UNVERIFIED],
+    ] as const) {
+      it(`shows no license ID for ${name}`, async () => {
+        await loaded(response);
+
+        expect(terms()).not.toContain(LICENSE_ID);
+        expect(screen.queryByRole('button', { name: 'Copy license ID' })).not.toBeInTheDocument();
+        expect(screen.queryByText(LICENSE_ID_HINT)).not.toBeInTheDocument();
+      });
+    }
+
+    it('copies the license ID and says it was copied', async () => {
+      await loaded(ACTIVE);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Copy license ID' }));
+
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith(ACME_LICENSE.id));
+      const copied = await screen.findByRole('button', { name: 'Copied license ID' });
+      expect(copied).toHaveTextContent('Copied');
+      expect(licenseIdAnnouncement()).toHaveTextContent(LICENSE_ID_COPIED);
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+
+    it('explains a copy the browser refused and leaves the ID to select by hand', async () => {
+      writeText.mockRejectedValue(new Error('denied'));
+      await loaded(ACTIVE);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Copy license ID' }));
+
+      await waitFor(() =>
+        expect(licenseIdAnnouncement()).toHaveTextContent(LICENSE_ID_COPY_FAILED)
+      );
+      expect(
+        screen.getByText(LICENSE_ID_COPY_FAILED, { selector: '.field-error' })
+      ).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Copy license ID' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Copied license ID' })).not.toBeInTheDocument();
+      expect(screen.getByText(ACME_LICENSE.id, { selector: 'code' })).toBeInTheDocument();
     });
   });
 

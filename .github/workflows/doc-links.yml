@@ -1,0 +1,39 @@
+name: Doc Links
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'scripts/test-doc-links.py'
+      - '.github/workflows/doc-links.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'scripts/test-doc-links.py'
+      - '.github/workflows/doc-links.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Relative links and anchors in docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Check every relative link and anchor in docs/*.md
+        run: python scripts/test-doc-links.py -v

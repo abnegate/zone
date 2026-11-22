@@ -20,10 +20,12 @@ pub enum Feature {
     /// Runner fleet policy: cordoning and revoking runners, a minimum runner version, and the
     /// labels unattended work needs. Without it every runner takes any work.
     FleetPolicy,
+    /// LTS images, the air-gapped bundle and support, all served against a license.
+    Distribution,
 }
 
 impl Feature {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Sso,
         Self::Policy,
         Self::AuditExport,
@@ -33,6 +35,7 @@ impl Feature {
         Self::Spend,
         Self::Members,
         Self::FleetPolicy,
+        Self::Distribution,
     ];
 
     pub fn plan(self) -> Plan {
@@ -44,7 +47,8 @@ impl Feature {
             | Self::AuditStreaming
             | Self::AuditRetention
             | Self::CustomRoles
-            | Self::FleetPolicy => Plan::Enterprise,
+            | Self::FleetPolicy
+            | Self::Distribution => Plan::Enterprise,
         }
     }
 
@@ -92,6 +96,14 @@ mod tests {
         assert_eq!(listed.len(), Feature::ALL.len());
         assert!(listed.contains(&Feature::CustomRoles));
         assert!(listed.contains(&Feature::FleetPolicy));
+        assert!(listed.contains(&Feature::Distribution));
+    }
+
+    #[test]
+    fn distribution_needs_enterprise() {
+        assert_eq!(Feature::Distribution.plan(), Plan::Enterprise);
+        assert!(Plan::Enterprise.includes(Feature::Distribution));
+        assert!(!Plan::Team.includes(Feature::Distribution));
     }
 
     #[test]

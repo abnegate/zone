@@ -46,6 +46,17 @@ describe('license section surfaces', () => {
     expect(attempt).toContain('gap: var(--ui-space-2)');
   });
 
+  it('spans the license ID across the details in the mono face and wraps its copy button under it', () => {
+    expect(rule(css, '.license-id')).toContain('grid-column: 1 / -1');
+    const value = rule(css, '.license-id-value');
+    expect(value).toContain('font-family: var(--ui-font-mono)');
+    expect(value).toContain('overflow-wrap: anywhere');
+    const row = rule(css, '.license-id-row');
+    expect(row).toContain('display: flex');
+    expect(row).toContain('flex-wrap: wrap');
+    expect(rule(css, '.license-id-hint')).toContain('margin: 0');
+  });
+
   it('lets every column shrink below its content', () => {
     for (const selector of [
       '.license-section',
@@ -53,6 +64,8 @@ describe('license section surfaces', () => {
       '.license-summary-header',
       '.license-edition',
       '.license-detail',
+      '.license-id-row',
+      '.license-id-value',
       '.license-key-form',
     ]) {
       expect(rule(css, selector), selector).toContain('min-width: 0');

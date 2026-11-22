@@ -6096,6 +6096,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "rusty-s3"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1af5b74b316ee483ae486bd3cb206c8caa5dbb3cf0eab7269a868ae43aeece03"
+dependencies = [
+ "hmac",
+ "jiff",
+ "percent-encoding",
+ "sha2 0.11.0",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9803,11 +9817,17 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "clap",
+ "ed25519-dalek",
+ "form_urlencoded",
  "getrandom 0.3.4",
+ "hkdf",
  "hmac",
  "http-body-util",
+ "ipnet",
+ "jsonwebtoken",
  "lettre",
  "reqwest 0.13.5",
+ "rusty-s3",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -9819,6 +9839,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wiremock",
+ "zeroize",
  "zone_enterprise",
 ]
 

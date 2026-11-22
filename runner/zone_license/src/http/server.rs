@@ -26,14 +26,21 @@ impl Server {
     }
 
     /// Serves until `shutdown` resolves, then lets requests in flight finish,
-    /// so an email being sent is not cut off half way.
+    /// so an email being sent is not cut off half way. Handlers can read the
+    /// peer address through `ConnectInfo<SocketAddr>`.
     pub async fn run(
         self,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> Result<(), ServeError> {
-        axum::serve(self.listener, self.router)
+        let service = self
+            .router
+            .into_make_service_with_connect_info::<SocketAddr>();
+        axum::serve(self.listener, service)
             .with_graceful_shutdown(shutdown)
             .await
             .map_err(ServeError::Serve)
     }
 }
+
+#[cfg(test)]
+mod tests;
