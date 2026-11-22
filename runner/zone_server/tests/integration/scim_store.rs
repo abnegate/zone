@@ -1,7 +1,3 @@
-//! The SCIM store: tokens, the users and groups an identity provider pushes, group membership,
-//! how mapped groups settle a member's organization role, and the recent failures. Every query is
-//! scoped by organization, so each case also checks another organization sees nothing.
-
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_server::auth::{Grant, Permission, Scope};
@@ -1187,7 +1183,17 @@ async fn deleting_a_mapped_custom_role_unmaps_its_groups() {
     )
     .await
     .unwrap();
-    assert!(matches!(deletion, Deletion::Deleted(_)), "{deletion:?}");
+    let Deletion::Deleted { unmapped, .. } = deletion else {
+        panic!("the role is deleted: {deletion:?}");
+    };
+    assert_eq!(
+        unmapped
+            .iter()
+            .map(|group| (group.id, group.mapping.clone()))
+            .collect::<Vec<_>>(),
+        [(auditors, Mapping::Unmapped)],
+        "the deletion names every group it unmapped"
+    );
     assert_eq!(
         groups::get(fixture.pool(), fixture.organization, auditors)
             .await
@@ -1591,7 +1597,7 @@ async fn removing_the_last_mapping_drops_its_members_to_member() {
     add(&fixture, admins, &[first, second, owner]).await;
 
     let outcomes = roles::apply_group(
-        fixture.pool(),
+        &mut fixture.pool().acquire().await.unwrap(),
         fixture.organization,
         admins,
         Trigger::Mapping,
@@ -1620,7 +1626,7 @@ async fn removing_the_last_mapping_drops_its_members_to_member() {
     .await
     .unwrap();
     let outcomes = roles::apply_group(
-        fixture.pool(),
+        &mut fixture.pool().acquire().await.unwrap(),
         fixture.organization,
         admins,
         Trigger::Mapping,
@@ -1647,7 +1653,7 @@ async fn deleting_a_mapped_group_drops_its_former_members_to_member() {
     let bystander = linked(&fixture, OrgRole::Admin).await;
     add(&fixture, admins, &[user]).await;
     roles::apply_users(
-        fixture.pool(),
+        &mut fixture.pool().acquire().await.unwrap(),
         fixture.organization,
         &[user],
         Trigger::Membership,
@@ -1661,7 +1667,7 @@ async fn deleting_a_mapped_group_drops_its_former_members_to_member() {
         .unwrap()
         .unwrap();
     let outcomes = roles::apply_users(
-        fixture.pool(),
+        &mut fixture.pool().acquire().await.unwrap(),
         fixture.organization,
         &[former.clone(), former].concat(),
         Trigger::Mapping,
@@ -1711,7 +1717,7 @@ async fn apply_never_reaches_into_another_organization() {
     .unwrap();
     assert_eq!(role, "member");
     assert_eq!(
-        roles::apply_group(fixture.pool(), other, admins, Trigger::Mapping)
+        roles::apply_group(&mut connection, other, admins, Trigger::Mapping)
             .await
             .unwrap(),
         vec![],

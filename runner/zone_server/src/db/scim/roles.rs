@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use super::applied::Applied;
 use super::candidate::Candidate;
+use super::group_members;
 use super::outcome::Outcome;
 use super::precedence;
 use super::trigger::Trigger;
@@ -12,15 +13,9 @@ use crate::auth::{Grant, Scope};
 use crate::db::DbResult;
 use crate::db::custom_roles::{self, Membership, Summary};
 use crate::db::organization_members::OrgRole;
+use crate::db::suspensions::Seat;
 
 const ROLE_COLUMN: &str = "role";
-
-#[derive(sqlx::FromRow)]
-struct Seat {
-    role: String,
-    custom_role_id: Option<Uuid>,
-    is_active: bool,
-}
 
 #[derive(sqlx::FromRow)]
 struct MappedGroup {
@@ -34,15 +29,7 @@ pub async fn apply(
     user_id: Uuid,
     trigger: Trigger,
 ) -> DbResult<Applied> {
-    let seat: Option<Seat> = sqlx::query_as(
-        "SELECT role, custom_role_id, is_active FROM organization_members \
-         WHERE organization_id = $1 AND user_id = $2 FOR UPDATE",
-    )
-    .bind(organization_id)
-    .bind(user_id)
-    .fetch_optional(&mut *connection)
-    .await?;
-    let Some(seat) = seat else {
+    let Some(seat) = Seat::organization(connection, organization_id, user_id).await? else {
         return Ok(Applied::Skipped);
     };
     let role = parse(&seat.role)?;
@@ -154,37 +141,53 @@ pub async fn apply(
 }
 
 pub async fn apply_group(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     organization_id: Uuid,
     group_id: Uuid,
     trigger: Trigger,
 ) -> DbResult<Vec<Outcome>> {
-    let users: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT m.user_id FROM scim_group_members m \
-         INNER JOIN scim_groups g ON g.id = m.group_id \
-         WHERE g.organization_id = $1 AND g.id = $2 ORDER BY m.user_id",
-    )
-    .bind(organization_id)
-    .bind(group_id)
-    .fetch_all(pool)
-    .await?;
-    apply_users(pool, organization_id, &users, trigger).await
+    let users = group_members::users(&mut *connection, organization_id, group_id).await?;
+    apply_users(connection, organization_id, &users, trigger).await
 }
 
 pub async fn apply_users(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     organization_id: Uuid,
     users: &[Uuid],
     trigger: Trigger,
 ) -> DbResult<Vec<Outcome>> {
+    let users = lock(connection, organization_id, users).await?;
     let mut outcomes = Vec::with_capacity(users.len());
-    for user_id in users.iter().copied().collect::<BTreeSet<Uuid>>() {
-        let mut transaction = pool.begin().await?;
-        let applied = apply(&mut transaction, organization_id, user_id, trigger).await?;
-        transaction.commit().await?;
+    for user_id in users {
+        let applied = apply(connection, organization_id, user_id, trigger).await?;
         outcomes.push(Outcome { user_id, applied });
     }
     Ok(outcomes)
+}
+
+/// Locks the member rows of `users` by ascending user, and must come before [`apply`] share-locks
+/// any custom role: a role edit share-locks its editor's row before the role, so the other order
+/// deadlocks with it.
+pub async fn lock(
+    connection: &mut PgConnection,
+    organization_id: Uuid,
+    users: &[Uuid],
+) -> DbResult<Vec<Uuid>> {
+    let users: Vec<Uuid> = users
+        .iter()
+        .copied()
+        .collect::<BTreeSet<Uuid>>()
+        .into_iter()
+        .collect();
+    sqlx::query(
+        "SELECT user_id FROM organization_members \
+         WHERE organization_id = $1 AND user_id = ANY($2) ORDER BY user_id FOR UPDATE",
+    )
+    .bind(organization_id)
+    .bind(&users)
+    .execute(&mut *connection)
+    .await?;
+    Ok(users)
 }
 
 fn parse(role: &str) -> DbResult<OrgRole> {
@@ -208,8 +211,6 @@ async fn linked(
     .await
 }
 
-/// Makes the role a suspended member would come back with the one SCIM now gives them, so
-/// reactivation never restores a role a mapping stopped granting while they were away.
 async fn suspend_as(
     connection: &mut PgConnection,
     organization_id: Uuid,

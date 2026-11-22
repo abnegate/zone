@@ -1,5 +1,4 @@
-//! What an owner does to SCIM provisioning from the console: issuing, rotating and revoking the
-//! tokens identity providers present, and mapping pushed groups to organization roles.
+use std::collections::BTreeSet;
 
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
@@ -10,9 +9,11 @@ use super::remapping::Remapping;
 use super::secret;
 use crate::auth::{Grant, OrganizationMember, Scope};
 use crate::db::DbResult;
-use crate::db::custom_roles::{self, Assignment};
-use crate::db::organization_members::OrgRole;
-use crate::db::scim::{Mapping, NewToken, TokenRecord, Trigger, groups, roles, tokens};
+use crate::db::custom_roles::{self, Assignment, Summary};
+use crate::db::organization_members::{self, OrgRole};
+use crate::db::scim::{
+    GroupRecord, Mapping, NewToken, TokenRecord, Trigger, group_members, groups, roles, tokens,
+};
 
 pub async fn issue(
     executor: impl PgExecutor<'_>,
@@ -35,7 +36,6 @@ pub async fn issue(
     Ok(Issued { token, secret })
 }
 
-/// Replaces the token's secret at once: the old one stops working when this commits.
 pub async fn rotate(
     executor: impl PgExecutor<'_>,
     organization_id: Uuid,
@@ -61,8 +61,6 @@ pub async fn revoke(
     tokens::revoke(executor, organization_id, token_id).await
 }
 
-/// Maps the group to a built-in or custom role the editor's grant covers, then recomputes the
-/// role of every member. Owner is never mappable.
 pub async fn map(
     pool: &PgPool,
     organization_id: Uuid,
@@ -73,8 +71,6 @@ pub async fn map(
     remap(pool, organization_id, group_id, Some(assignment), editor).await
 }
 
-/// Leaves the group mapped to nothing, then recomputes the role of every member: one in no other
-/// mapped group falls back to Member.
 pub async fn unmap(
     pool: &PgPool,
     organization_id: Uuid,
@@ -125,10 +121,59 @@ async fn remap(
         return Ok(Remapping::GroupMissing);
     };
     transaction.commit().await?;
-    let outcomes = roles::apply_group(pool, organization_id, group_id, Trigger::Mapping).await?;
+    let mut transaction = pool.begin().await?;
+    organization_members::lock_owners(&mut transaction, organization_id).await?;
+    let outcomes = roles::apply_group(
+        &mut transaction,
+        organization_id,
+        group_id,
+        Trigger::Mapping,
+    )
+    .await?;
+    transaction.commit().await?;
     Ok(Remapping::Remapped(Box::new(Remapped {
         previous: previous.mapping,
         group,
         outcomes,
     })))
+}
+
+pub async fn release(
+    pool: &PgPool,
+    organization_id: Uuid,
+    role: &Summary,
+    unmapped: Vec<GroupRecord>,
+) -> DbResult<Vec<Remapped>> {
+    if unmapped.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut transaction = pool.begin().await?;
+    organization_members::lock_owners(&mut transaction, organization_id).await?;
+    let mut rosters: Vec<BTreeSet<Uuid>> = Vec::with_capacity(unmapped.len());
+    for group in &unmapped {
+        let roster = group_members::users(&mut *transaction, organization_id, group.id).await?;
+        rosters.push(roster.into_iter().collect());
+    }
+    let everyone: Vec<Uuid> = rosters.iter().flatten().copied().collect();
+    let outcomes = roles::apply_users(
+        &mut transaction,
+        organization_id,
+        &everyone,
+        Trigger::Mapping,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(unmapped
+        .into_iter()
+        .zip(rosters)
+        .map(|(group, roster)| Remapped {
+            previous: Mapping::Custom(role.clone()),
+            group,
+            outcomes: outcomes
+                .iter()
+                .filter(|outcome| roster.contains(&outcome.user_id))
+                .cloned()
+                .collect(),
+        })
+        .collect())
 }

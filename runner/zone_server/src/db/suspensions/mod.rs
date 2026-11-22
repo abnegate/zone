@@ -25,10 +25,10 @@ use super::organization_members::{self, OrgRole};
 use super::workspace_members;
 use crate::auth::Scope;
 use record::Record;
-use seat::Seat;
 use workspace_record::WorkspaceRecord;
 
 pub use resumed::Resumed;
+pub use seat::Seat;
 pub use successor::Successor;
 pub use suspension::Suspension;
 

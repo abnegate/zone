@@ -21,10 +21,13 @@ use crate::auth::entitlement::Unentitled;
 use crate::auth::{AuthUser, Grant, Permission, Scope};
 use crate::db::audit::{actions, resources};
 use crate::db::custom_roles::{
-    self, Change, Creation, CustomRoleRow, Definition, Deletion, Update,
+    self, Change, Creation, CustomRoleRow, Definition, Deletion, Summary, Update,
 };
 use crate::db::organization_members;
+use crate::db::scim::{GroupRecord, Mapping};
 use crate::routes::common::{AuditEvent, audit};
+use crate::routes::scim::console::mappings;
+use crate::services::scim::{Remapped, console};
 use crate::state::AppState;
 use name::Name;
 use refusal::Refusal;
@@ -354,12 +357,13 @@ async fn remove(
     let target = Target::parse(path)?;
     let editor = editor(state, auth, target.organization).await?;
     let role = target.role()?;
-    let deleted = match custom_roles::delete(state.db(), target.organization, role, editor).await? {
-        Deletion::Deleted(deleted) => *deleted,
-        Deletion::Forbidden => return Err(forbidden()),
-        Deletion::InUse(members) => return Err(Refusal::InUse(members)),
-        Deletion::Missing => return Err(Refusal::Missing(ROLE_MISSING)),
-    };
+    let (deleted, unmapped) =
+        match custom_roles::delete(state.db(), target.organization, role, editor).await? {
+            Deletion::Deleted { role, unmapped } => (*role, unmapped),
+            Deletion::Forbidden => return Err(forbidden()),
+            Deletion::InUse(members) => return Err(Refusal::InUse(members)),
+            Deletion::Missing => return Err(Refusal::Missing(ROLE_MISSING)),
+        };
     record(
         state,
         auth,
@@ -370,7 +374,45 @@ async fn remove(
         None,
     )
     .await;
+    release(state, auth, editor, &deleted, unmapped).await;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn release(
+    state: &AppState,
+    auth: &AuthUser,
+    editor: Uuid,
+    deleted: &CustomRoleRow,
+    unmapped: Vec<GroupRecord>,
+) {
+    let role = Summary {
+        id: deleted.id,
+        name: deleted.name.clone(),
+    };
+    let released = match console::release(
+        state.db(),
+        deleted.organization_id,
+        &role,
+        unmapped.clone(),
+    )
+    .await
+    {
+        Ok(released) => released,
+        Err(error) => {
+            tracing::error!(%error, role_id = %deleted.id, "Failed to settle the roles of the SCIM groups a deleted role was mapped to");
+            unmapped
+                .into_iter()
+                .map(|group| Remapped {
+                    previous: Mapping::Custom(role.clone()),
+                    group,
+                    outcomes: Vec::new(),
+                })
+                .collect()
+        }
+    };
+    for remapped in &released {
+        mappings::record(state, editor, &auth.0.email, remapped).await;
+    }
 }
 
 async fn record(

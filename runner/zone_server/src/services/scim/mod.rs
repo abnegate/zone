@@ -14,6 +14,7 @@ pub mod remapped;
 pub mod remapping;
 pub mod resource;
 pub mod secret;
+mod settled;
 pub mod slot;
 pub mod users;
 pub mod writer;

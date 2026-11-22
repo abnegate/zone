@@ -10,8 +10,10 @@ use zone_enterprise::scim::{
 
 use super::client::ScimClient;
 use super::failure::Failure;
+use super::settled::Settled;
 use super::{record, resource};
 use crate::db::audit::{actions, resources};
+use crate::db::organization_members;
 use crate::db::scim::{
     Admission, Applied, Criterion, Outcome, Trigger, group_members, groups, roles, rosters,
 };
@@ -89,6 +91,7 @@ pub async fn create(
     let changes = GroupChanges::from_document(document);
     let organization_id = client.organization_id;
     let mut transaction = state.db().begin().await?;
+    organization_members::lock_owners(&mut transaction, organization_id).await?;
     let record = groups::create(
         &mut *transaction,
         organization_id,
@@ -97,7 +100,7 @@ pub async fn create(
     )
     .await
     .map_err(Failure::stored)?;
-    let affected = members(
+    let settled = settle(
         &mut transaction,
         organization_id,
         record.id,
@@ -111,7 +114,7 @@ pub async fn create(
         actions::SCIM_GROUP_CREATED,
         record.id,
         &changes,
-        affected,
+        &settled,
     )
     .await
 }
@@ -144,17 +147,20 @@ pub async fn patch(
 
 pub async fn delete(state: &AppState, client: &ScimClient, group_id: Uuid) -> Result<(), Failure> {
     let organization_id = client.organization_id;
-    let record = groups::get(state.db(), organization_id, group_id)
+    let mut transaction = state.db().begin().await?;
+    organization_members::lock_owners(&mut transaction, organization_id).await?;
+    let record = groups::lock(&mut transaction, organization_id, group_id)
         .await?
         .ok_or(Failure::Protocol(Error::NotFound))?;
-    let former = groups::delete(state.db(), organization_id, group_id)
+    let former = groups::delete(&mut *transaction, organization_id, group_id)
         .await?
         .ok_or(Failure::Protocol(Error::NotFound))?;
     let outcomes = if record.mapping.is_mapped() {
-        roles::apply_users(state.db(), organization_id, &former, Trigger::Mapping).await?
+        roles::apply_users(&mut transaction, organization_id, &former, Trigger::Mapping).await?
     } else {
         Vec::new()
     };
+    transaction.commit().await?;
 
     let mut attributes = Map::new();
     attributes.insert("display_name".to_owned(), json!(record.display_name));
@@ -180,6 +186,7 @@ async fn write(
 ) -> Result<GroupResource, Failure> {
     let organization_id = client.organization_id;
     let mut transaction = state.db().begin().await?;
+    organization_members::lock_owners(&mut transaction, organization_id).await?;
     groups::update(
         &mut *transaction,
         organization_id,
@@ -190,7 +197,7 @@ async fn write(
     .await
     .map_err(Failure::stored)?
     .ok_or(Failure::Protocol(Error::NotFound))?;
-    let affected = members(
+    let settled = settle(
         &mut transaction,
         organization_id,
         group_id,
@@ -204,9 +211,41 @@ async fn write(
         actions::SCIM_GROUP_UPDATED,
         group_id,
         &changes,
-        affected,
+        &settled,
     )
     .await
+}
+
+async fn settle(
+    connection: &mut PgConnection,
+    organization_id: Uuid,
+    group_id: Uuid,
+    changes: &MemberChanges,
+) -> Result<Settled, Failure> {
+    let mut settled = listed(changes);
+    if changes.clear || changes.replace.is_some() {
+        settled.extend(group_members::users(&mut *connection, organization_id, group_id).await?);
+    }
+    roles::lock(connection, organization_id, &settled).await?;
+    let affected = members(connection, organization_id, group_id, changes).await?;
+    settled.extend(affected.iter().copied());
+    let outcomes =
+        roles::apply_users(connection, organization_id, &settled, Trigger::Membership).await?;
+    Ok(Settled {
+        affected: affected.into_iter().collect(),
+        outcomes,
+    })
+}
+
+fn listed(changes: &MemberChanges) -> Vec<Uuid> {
+    changes
+        .replace
+        .iter()
+        .flatten()
+        .chain(&changes.add)
+        .chain(&changes.remove)
+        .filter_map(|value| identifier(value))
+        .collect()
 }
 
 async fn members(
@@ -252,17 +291,8 @@ async fn finish(
     action: &str,
     group_id: Uuid,
     changes: &GroupChanges,
-    affected: BTreeSet<Uuid>,
+    settled: &Settled,
 ) -> Result<GroupResource, Failure> {
-    let affected: Vec<Uuid> = affected.into_iter().collect();
-    let outcomes = roles::apply_users(
-        state.db(),
-        client.organization_id,
-        &affected,
-        Trigger::Membership,
-    )
-    .await?;
-
     let mut attributes = Map::new();
     if let Some(display_name) = &changes.display_name {
         attributes.insert("display_name".to_owned(), json!(display_name));
@@ -270,10 +300,10 @@ async fn finish(
     if let Some(external_id) = &changes.external_id {
         attributes.insert("external_id".to_owned(), json!(external_id));
     }
-    if !affected.is_empty() {
-        attributes.insert("members".to_owned(), json!(affected));
+    if !settled.affected.is_empty() {
+        attributes.insert("members".to_owned(), json!(settled.affected));
     }
-    describe_roles(&mut attributes, &outcomes);
+    describe_roles(&mut attributes, &settled.outcomes);
     record::audit(
         state,
         client,
@@ -318,20 +348,24 @@ fn criteria(filter: Option<&Filter>) -> Option<Vec<Criterion>> {
             Some(all)
         }
         Filter::Equals { attribute, value } => Some(vec![match attribute {
-            Attribute::Id => Criterion::Id(Uuid::parse_str(value.trim()).ok()?),
+            Attribute::Id => Criterion::Id(identifier(value)?),
             Attribute::DisplayName => Criterion::DisplayName(value.clone()),
             Attribute::ExternalId => Criterion::ExternalId(value.clone()),
             Attribute::UserName => return None,
         }]),
-        Filter::Member(value) => Some(vec![Criterion::Member(Uuid::parse_str(value.trim()).ok()?)]),
+        Filter::Member(value) => Some(vec![Criterion::Member(identifier(value)?)]),
     }
+}
+
+fn identifier(value: &str) -> Option<Uuid> {
+    Uuid::parse_str(value.trim()).ok()
 }
 
 fn identifiers(values: &[String]) -> Result<Vec<Uuid>, Failure> {
     values
         .iter()
         .map(|value| {
-            Uuid::parse_str(value.trim()).map_err(|_| {
+            identifier(value).ok_or_else(|| {
                 Failure::Protocol(Error::InvalidValue(format!(
                     "{value} isn't the id of a member of the organization."
                 )))
@@ -343,7 +377,7 @@ fn identifiers(values: &[String]) -> Result<Vec<Uuid>, Failure> {
 fn removable(values: &[String]) -> Vec<Uuid> {
     values
         .iter()
-        .filter_map(|value| Uuid::parse_str(value.trim()).ok())
+        .filter_map(|value| identifier(value))
         .collect()
 }
 

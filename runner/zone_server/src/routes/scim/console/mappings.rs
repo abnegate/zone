@@ -24,7 +24,6 @@ const CUSTOM_ROLE: &str = "custom_role";
 const USER_ID: &str = "user_id";
 const CHANGED: &str = "changed";
 
-/// PUT /api/organizations/{org_id}/scim/groups/{group_id}/mapping
 pub async fn put(
     State(state): State<AppState>,
     OrganizationPermit(member): OrganizationPermit<{ Permission::ScimUpdate.index() }>,
@@ -34,7 +33,6 @@ pub async fn put(
     respond(map(&state, &member, path, body).await)
 }
 
-/// DELETE /api/organizations/{org_id}/scim/groups/{group_id}/mapping
 pub async fn delete(
     State(state): State<AppState>,
     OrganizationPermit(member): OrganizationPermit<{ Permission::ScimUpdate.index() }>,
@@ -91,13 +89,11 @@ async fn settle(
         Remapping::OwnerUnmappable => return Err(Refusal::OwnerUnmappable),
         Remapping::Exceeds => return Err(Refusal::Exceeds),
     };
-    record(state, member, &remapped).await;
+    record(state, member.user_id, &member.email, &remapped).await;
     Ok(Json(GroupResponse::from(remapped.group)).into_response())
 }
 
-/// Audits the mapping with every member whose role it changed. Saving the mapping a group already
-/// had, and changing nobody's role, records nothing.
-async fn record(state: &AppState, member: &OrganizationMember, remapped: &Remapped) {
+pub async fn record(state: &AppState, actor_id: Uuid, actor_email: &str, remapped: &Remapped) {
     let mapping = &remapped.group.mapping;
     let changes: Vec<Value> = remapped.outcomes.iter().filter_map(changed).collect();
     if *mapping == remapped.previous && changes.is_empty() {
@@ -113,10 +109,10 @@ async fn record(state: &AppState, member: &OrganizationMember, remapped: &Remapp
     audit(
         state.db(),
         AuditEvent {
-            organization_id: Some(member.organization_id),
+            organization_id: Some(remapped.group.organization_id),
             workspace_id: None,
-            actor_id: member.user_id,
-            actor_email: &member.email,
+            actor_id,
+            actor_email,
             action,
             resource_type: resources::SCIM_GROUP,
             resource_id: Some(remapped.group.id),

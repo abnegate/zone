@@ -3,10 +3,8 @@ use uuid::Uuid;
 
 use crate::db::DbResult;
 
-/// A membership row, active or not, locked for update for the caller's
-/// transaction.
 #[derive(Debug, sqlx::FromRow)]
-pub(super) struct Seat {
+pub struct Seat {
     pub role: String,
     pub custom_role_id: Option<Uuid>,
     pub is_active: bool,
