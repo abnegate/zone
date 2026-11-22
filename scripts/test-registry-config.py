@@ -65,6 +65,7 @@ JWKS = {
         }
     ]
 }
+REGISTRY_DIRECTORY = '/etc/zone-registry'
 STORAGE_ENVIRONMENT = ('REGISTRY_STORAGE_S3_BUCKET=zone-distribution-check', 'REGISTRY_STORAGE_S3_REGION=ap-southeast-2')
 HUNK = re.compile(r'^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@')
 READABLE_FOLDER = 0o755
@@ -341,6 +342,18 @@ def staged(files: dict[str, str]) -> Iterator[Path]:
         yield staging
 
 
+def registry_files(config: Path) -> dict[str, str]:
+    return {config.name: config.read_text(), 'jwks.json': json.dumps(JWKS)}
+
+
+def registry_options() -> list[str]:
+    environment = [option for variable in STORAGE_ENVIRONMENT for option in ('-e', variable)]
+    return [
+        '--user', '65534:65534', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+        '--memory', '128m', '--memory-swap', '128m', *environment,
+    ]
+
+
 @contextmanager
 def container(*arguments: str) -> Iterator[str]:
     identifier = docker('run', '-d', '--rm', *arguments).stdout.strip()
@@ -525,19 +538,12 @@ class CaddyImageTests(unittest.TestCase):
 
 @unittest.skipUnless(docker_available(), 'docker is not available')
 class RegistryImageTests(unittest.TestCase):
-    def registry(self, config: Path, staging: Path, *arguments: str) -> AbstractContextManager[str]:
-        environment = [option for variable in STORAGE_ENVIRONMENT for option in ('-e', variable)]
-        return container(
-            '--user', '65534:65534', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
-            '--memory', '128m', *environment,
-            '-v', f'{config}:/etc/distribution/config.yml:ro',
-            '-v', f'{staging / "jwks.json"}:/etc/zone-registry/jwks.json:ro',
-            *arguments, REGISTRY_IMAGE,
-        )
+    def registry(self, config: Path, *arguments: str) -> AbstractContextManager[str]:
+        return container(*registry_options(), *arguments, REGISTRY_IMAGE, f'{REGISTRY_DIRECTORY}/{config.name}')
 
     def test_served_config_challenges_for_a_signer_token(self) -> None:
-        with staged({'jwks.json': json.dumps(JWKS)}) as staging, self.registry(
-            REGISTRY_CONFIG, staging, '-p', '127.0.0.1::5000'
+        with staged(registry_files(REGISTRY_CONFIG)) as staging, self.registry(
+            REGISTRY_CONFIG, '-v', f'{staging}:{REGISTRY_DIRECTORY}:ro', '-p', '127.0.0.1::5000'
         ) as identifier:
             wait_for_log(identifier, 'listening on')
             address = docker('port', identifier, '5000/tcp').stdout.splitlines()[0].strip()
@@ -549,7 +555,9 @@ class RegistryImageTests(unittest.TestCase):
             self.assertEqual(refusal.headers['WWW-Authenticate'], CHALLENGE)
 
     def test_publish_config_listens_on_loopback(self) -> None:
-        with staged({'jwks.json': json.dumps(JWKS)}) as staging, self.registry(PUBLISH_CONFIG, staging) as identifier:
+        with staged(registry_files(PUBLISH_CONFIG)) as staging, self.registry(
+            PUBLISH_CONFIG, '-v', f'{staging}:{REGISTRY_DIRECTORY}:ro'
+        ) as identifier:
             wait_for_log(identifier, 'listening on 127.0.0.1:5000')
 
 
