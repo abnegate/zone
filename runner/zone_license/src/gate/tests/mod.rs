@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -22,6 +23,7 @@ const OTHER_SEED: [u8; 32] = [10; 32];
 const CUSTOMER: &str = "Acme Gate Ltd";
 const LICENSE: Uuid = Uuid::from_u128(0x0193_a8e2_7c4b_7d10_8f00_4d2c_5a9b_1e01);
 const OTHER: Uuid = Uuid::from_u128(0x0193_a8e2_7c4b_7d10_8f00_4d2c_5a9b_1e02);
+const SUBSCRIPTION: Uuid = Uuid::from_u128(0xb7e4_c2a1_3d5f_4e6a_9b8c_0d1e_2f3a_4b5c);
 
 fn issued() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")
@@ -68,6 +70,23 @@ fn payload(plan: Option<Plan>) -> Payload {
         subscription: None,
         plan,
     }
+}
+
+fn revoking(licenses: &[Uuid], subscriptions: &[Uuid]) -> Gate {
+    let revoked = Revoked::new(
+        licenses.iter().copied().collect(),
+        subscriptions.iter().copied().collect(),
+    );
+    Gate::new(keyring(), revoked, TrustedProxies::default()).with_clock(active)
+}
+
+fn subscribed(id: Uuid, subscription: &str) -> String {
+    let payload = Payload {
+        id,
+        subscription: Some(subscription.to_owned()),
+        ..payload(Some(Plan::Enterprise))
+    };
+    signed(&payload, SEED)
 }
 
 fn signed(payload: &Payload, seed: [u8; 32]) -> String {
@@ -358,12 +377,7 @@ fn the_key_is_trimmed() {
 
 #[test]
 fn a_revoked_license_is_refused() {
-    let gate = Gate::new(
-        keyring(),
-        Revoked::parse(&format!("{OTHER},{LICENSE}")).unwrap(),
-        TrustedProxies::default(),
-    )
-    .with_clock(active);
+    let gate = revoking(&[OTHER, LICENSE], &[]);
     let denial = refused(&gate, &presented(&key(Plan::Enterprise)));
     assert_eq!(
         denial,
@@ -379,14 +393,44 @@ fn a_revoked_license_is_refused() {
 
 #[test]
 fn revocation_is_checked_before_the_user_name() {
-    let gate = Gate::new(
-        keyring(),
-        Revoked::parse(&LICENSE.to_string()).unwrap(),
-        TrustedProxies::default(),
-    )
-    .with_clock(active);
+    let gate = revoking(&[LICENSE], &[]);
     let denial = refused(&gate, &basic("admin", &key(Plan::Enterprise)));
     assert_eq!(denial.refusal, Refusal::Revoked);
+}
+
+#[test]
+fn a_revoked_subscription_refuses_every_key_on_it_whatever_its_id() {
+    let gate = revoking(&[], &[SUBSCRIPTION]);
+    let subscription = SUBSCRIPTION.to_string().to_uppercase();
+    for id in [LICENSE, OTHER] {
+        let headers = basic(&id.to_string(), &subscribed(id, &subscription));
+        let denial = refused(&gate, &headers);
+        assert_eq!(denial.refusal, Refusal::Revoked, "{id}");
+        assert_eq!(denial.license, Some(id), "{id}");
+    }
+}
+
+#[test]
+fn a_revoked_license_id_leaves_the_other_keys_on_its_subscription_admitted() {
+    let gate = revoking(&[LICENSE], &[]);
+    let subscription = SUBSCRIPTION.to_string();
+    let denial = refused(&gate, &presented(&subscribed(LICENSE, &subscription)));
+    assert_eq!(denial.refusal, Refusal::Revoked);
+    let renewed = basic(&OTHER.to_string(), &subscribed(OTHER, &subscription));
+    assert_eq!(gate.admit(&renewed).unwrap().id(), OTHER);
+}
+
+#[test]
+fn a_key_without_a_subscription_or_on_another_one_is_not_revoked_by_subscription() {
+    let gate = revoking(&[], &[SUBSCRIPTION]);
+    assert_eq!(
+        gate.admit(&presented(&key(Plan::Enterprise))).unwrap().id(),
+        LICENSE
+    );
+    let another = subscribed(LICENSE, "c8f5d3b2-4e6a-4f7b-8c9d-1e2f3a4b5c6d");
+    assert_eq!(gate.admit(&presented(&another)).unwrap().id(), LICENSE);
+    let unparsable = subscribed(LICENSE, "sub_01HZX0Q7M8");
+    assert_eq!(gate.admit(&presented(&unparsable)).unwrap().id(), LICENSE);
 }
 
 #[test]
@@ -585,26 +629,40 @@ fn a_bad_proxy_entry_is_named() {
 
 #[test]
 fn revoked_ids_are_read_in_any_case() {
-    let revoked = Revoked::parse(&format!(
+    let revoked = Revoked::parse_licenses(&format!(
         " {} ,,{OTHER}",
         LICENSE.to_string().to_uppercase()
     ))
     .unwrap();
-    assert_eq!(revoked.len(), 2);
-    assert!(revoked.contains(LICENSE));
-    assert!(revoked.contains(OTHER));
-    assert!(!revoked.contains(Uuid::nil()));
+    assert_eq!(revoked, HashSet::from([LICENSE, OTHER]));
+    let subscriptions =
+        Revoked::parse_subscriptions(&SUBSCRIPTION.to_string().to_uppercase()).unwrap();
+    assert_eq!(subscriptions, HashSet::from([SUBSCRIPTION]));
 }
 
 #[test]
 fn a_bad_revoked_entry_is_named() {
     assert_eq!(
-        Revoked::parse("not-a-uuid"),
+        Revoked::parse_licenses("not-a-uuid"),
         Err(Unparsable {
             entry: "not-a-uuid".to_owned(),
             expected: "a license ID, which is a UUID",
         })
     );
+    assert_eq!(
+        Revoked::parse_subscriptions("sub_01HZX0Q7M8"),
+        Err(Unparsable {
+            entry: "sub_01HZX0Q7M8".to_owned(),
+            expected: "a subscription ID, which is a UUID",
+        })
+    );
+}
+
+#[test]
+fn revoked_is_empty_only_without_licenses_and_subscriptions() {
+    assert!(Revoked::default().is_empty());
+    assert!(!revoking(&[], &[SUBSCRIPTION]).revoked.is_empty());
+    assert!(!revoking(&[LICENSE], &[]).revoked.is_empty());
 }
 
 #[test]

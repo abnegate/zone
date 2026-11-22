@@ -87,7 +87,8 @@ UUID in any case, and the password is the license key, trimmed. The signer
 admits a request only when, in this order:
 
 1. the key verifies against the release's keyring;
-2. its license ID isn't listed in `ZONE_LICENSE_REVOKED`;
+2. neither its license ID is listed in `ZONE_LICENSE_REVOKED` nor its
+   subscription in `ZONE_LICENSE_REVOKED_SUBSCRIPTIONS`;
 3. the user name is the key's own license ID;
 4. the key's plan includes distribution, which only Enterprise does;
 5. the license is active or in its grace period.
@@ -177,8 +178,8 @@ is acceptable here:
 - **It's bound to one audience**, `registry.bitecode.ltd`, so it opens nothing
   else.
 - **It expires 300 seconds after issue**, plus the registry's 60 seconds of
-  leeway. Revoking a license with `ZONE_LICENSE_REVOKED` therefore cuts it off
-  within six minutes.
+  leeway. Revoking a license or its subscription therefore cuts it off within
+  six minutes.
 
 Checking `jti` would need shared state in front of every pull for no gain.
 
@@ -293,7 +294,8 @@ none of them set, the signer runs exactly as before and both routes answer
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ZONE_LICENSE_REVOKED` | None | Comma-separated license IDs (UUIDs, any case) that `/token` and `/bundles` refuse as `revoked`. Zone servers verify keys offline and still accept them; see [Revocation](LICENSING.md#revocation). |
+| `ZONE_LICENSE_REVOKED` | None | Comma-separated license IDs (UUIDs, any case) that `/token` and `/bundles` refuse as `revoked`. It covers only the key with that ID: a renewal, seat change or plan change issues a new ID that it doesn't cover. Zone servers verify keys offline and still accept them; see [Revocation](LICENSING.md#revocation). |
+| `ZONE_LICENSE_REVOKED_SUBSCRIPTIONS` | None | Comma-separated Polar subscription IDs (UUIDs, any case). `/token` and `/bundles` refuse every key on them as `revoked`, including keys renewed after you listed them. A key signed by hand without a subscription is revoked only by its ID. |
 | `ZONE_LICENSE_TRUSTED_PROXIES` | None | Comma-separated CIDR ranges or single addresses, such as `172.18.0.0/16`. See [Rate limits and client addresses](#rate-limits-and-client-addresses). |
 | `ZONE_LICENSE_ADDRESS_LIMIT` | `120` | Requests a minute per client address, per route. A whole number from 1. |
 | `ZONE_LICENSE_KEY_LIMIT` | `240` | Requests a minute per license ID, per route. A whole number from 1. |

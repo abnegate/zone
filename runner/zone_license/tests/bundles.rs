@@ -35,6 +35,7 @@ const VERSION: &str = "1.4.3-lts";
 const BUNDLE: &str = "/bundles/1.4.3-lts/amd64";
 const LICENSE: Uuid = Uuid::from_u128(0x0193_a8e2_7c4b_7d10_8f00_4d2c_5a9b_3e01);
 const OTHER: Uuid = Uuid::from_u128(0x0193_a8e2_7c4b_7d10_8f00_4d2c_5a9b_3e02);
+const SUBSCRIPTION: &str = "b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c";
 const CLOSED: &str = "http://127.0.0.1:1";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -357,6 +358,49 @@ async fn every_shared_refusal_answers_its_contracted_status() {
     }
     let statuses = Refusal::ALL.map(|refusal| refusal.status().as_u16());
     assert_eq!(statuses, [401, 401, 401, 401, 401, 403, 403]);
+    assert_eq!(calls(&storage).await, 0);
+    service.stop().await;
+}
+
+#[tokio::test]
+async fn a_revoked_subscription_refuses_a_renewed_key_with_a_new_id() {
+    let keys = Keys::new();
+    let storage = untouched().await;
+    let service = Service::start(config(
+        &keys,
+        Some(&storage),
+        &[(Variable::RevokedSubscriptions, SUBSCRIPTION)],
+    ))
+    .await;
+    let renewed = keys
+        .signer()
+        .sign(&Terms {
+            id: OTHER,
+            customer: CUSTOMER.to_owned(),
+            seats: 10,
+            issued_at: Utc::now() - TimeDelta::days(1),
+            expires_at: Utc::now() + TimeDelta::days(364),
+            subscription: Some(SUBSCRIPTION.to_owned()),
+            plan: Plan::Enterprise,
+        })
+        .unwrap();
+
+    let logged = logged::capture(Level::INFO, async {
+        let response = service
+            .fetch(BUNDLE, Some(&basic(&OTHER.to_string(), &renewed)))
+            .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json(response).await,
+            json!({ "errors": [{ "code": "UNAUTHORIZED", "message": Refusal::Revoked.message() }] })
+        );
+    })
+    .await;
+
+    assert!(
+        line(&logged, "revoked").contains(&format!("license={OTHER}")),
+        "{logged}"
+    );
     assert_eq!(calls(&storage).await, 0);
     service.stop().await;
 }

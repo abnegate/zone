@@ -133,11 +133,17 @@ impl Config {
             |name| !name.contains(['\r', '\n']),
         );
 
-        let revoked = listed(
+        let revoked_licenses = listed(
             value(Variable::Revoked),
             Variable::Revoked,
             &mut problems,
-            Revoked::parse,
+            Revoked::parse_licenses,
+        );
+        let revoked_subscriptions = listed(
+            value(Variable::RevokedSubscriptions),
+            Variable::RevokedSubscriptions,
+            &mut problems,
+            Revoked::parse_subscriptions,
         );
         let proxies = listed(
             value(Variable::TrustedProxies),
@@ -175,7 +181,7 @@ impl Config {
                     password?,
                     Sender::new(from?).with_name(name?),
                 ),
-                revoked: revoked?,
+                revoked: Revoked::new(revoked_licenses?, revoked_subscriptions?),
                 proxies: proxies?,
                 limits: Limits {
                     address: address_limit?,
@@ -417,7 +423,7 @@ fn invalid(variable: Variable, reason: &str) -> Problem {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::io::Write;
 
     use zone_enterprise::{Plan, TrustedKey};
@@ -434,6 +440,7 @@ mod tests {
     const ACCESS_TOKEN: &str = "polar_oat_config-test-token";
     const REVOKED_UPPER: &str = "0193A8E2-7C4B-7D10-8F00-4D2C5A9B1E01";
     const REVOKED_OTHER: &str = "0193a8e2-7c4b-7d10-8f00-4d2c5a9b1e02";
+    const REVOKED_SUBSCRIPTION: &str = "b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c";
     const BUCKET: &str = "zone-distribution";
     const REGION: &str = "ap-southeast-2";
     const ACCESS_KEY_ID: &str = "AKIACONFIGBUNDLETEST";
@@ -795,11 +802,23 @@ mod tests {
             ),
             (Variable::AddressLimit, "30"),
             (Variable::KeyLimit, " 60 "),
+            (
+                Variable::RevokedSubscriptions,
+                &format!(" {} ,", REVOKED_SUBSCRIPTION.to_uppercase()),
+            ),
         ]))
         .unwrap();
-        assert_eq!(config.revoked.len(), 2);
-        assert!(config.revoked.contains(REVOKED_UPPER.parse().unwrap()));
-        assert!(config.revoked.contains(REVOKED_OTHER.parse().unwrap()));
+        assert_eq!(
+            config.revoked.licenses(),
+            &HashSet::from([
+                REVOKED_UPPER.parse().unwrap(),
+                REVOKED_OTHER.parse().unwrap()
+            ])
+        );
+        assert_eq!(
+            config.revoked.subscriptions(),
+            &HashSet::from([REVOKED_SUBSCRIPTION.parse().unwrap()])
+        );
         assert_eq!(
             config.proxies.to_string(),
             "172.18.0.0/16,10.0.0.5/32,fd00::/8"
@@ -815,6 +834,7 @@ mod tests {
         for blank in ["", "  "] {
             let config = load(&with(&[
                 (Variable::Revoked, blank),
+                (Variable::RevokedSubscriptions, blank),
                 (Variable::TrustedProxies, blank),
                 (Variable::AddressLimit, blank),
                 (Variable::KeyLimit, blank),
@@ -866,6 +886,19 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_revoked_subscription_that_is_not_a_uuid_naming_it() {
+        let problems = problems(&with(&[(
+            Variable::RevokedSubscriptions,
+            &format!("{REVOKED_SUBSCRIPTION},sub_01HZX0Q7M8"),
+        )]));
+        assert_eq!(invalid(&problems), [Variable::RevokedSubscriptions]);
+        assert_eq!(
+            problems[0].to_string(),
+            "ZONE_LICENSE_REVOKED_SUBSCRIPTIONS is invalid: the entry \"sub_01HZX0Q7M8\" is not a subscription ID, which is a UUID"
+        );
+    }
+
+    #[test]
     fn refuses_a_zero_or_unreadable_limit() {
         for variable in [Variable::AddressLimit, Variable::KeyLimit] {
             for limit in ["0", "-1", "ten", "1.5", "4294967296"] {
@@ -879,6 +912,7 @@ mod tests {
     fn reports_every_invalid_distribution_variable_together() {
         let problems = problems(&with(&[
             (Variable::Revoked, "nobody"),
+            (Variable::RevokedSubscriptions, "nothing"),
             (Variable::TrustedProxies, "everywhere"),
             (Variable::AddressLimit, "0"),
             (Variable::KeyLimit, "0"),
@@ -887,6 +921,7 @@ mod tests {
             invalid(&problems),
             [
                 Variable::Revoked,
+                Variable::RevokedSubscriptions,
                 Variable::TrustedProxies,
                 Variable::AddressLimit,
                 Variable::KeyLimit,

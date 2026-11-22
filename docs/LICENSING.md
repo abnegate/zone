@@ -472,7 +472,8 @@ Values are trimmed, and a blank value counts as unset, except
 | `SMTP_FROM` | Required | The address keys are sent from: a bare address, such as `licenses@example.com`, without a name. |
 | `SMTP_FROM_NAME` | `Zone` | The sender name, on one line. |
 | `POLAR_ACCESS_TOKEN` | None | An organization access token with `subscriptions:read`. See [The access token](#7-the-access-token). When it's unset, `POST /licenses/renew` answers `404` and Zone servers keep their key until one is pasted. |
-| `ZONE_LICENSE_REVOKED` | None | Comma-separated license IDs that `/token` and `/bundles` refuse. See [Revocation](#revocation). |
+| `ZONE_LICENSE_REVOKED` | None | Comma-separated license IDs that `/token` and `/bundles` refuse. Each covers only that one key. See [Revocation](#revocation). |
+| `ZONE_LICENSE_REVOKED_SUBSCRIPTIONS` | None | Comma-separated Polar subscription IDs whose every key `/token` and `/bundles` refuse, renewed keys included. See [Revocation](#revocation). |
 | `ZONE_LICENSE_TRUSTED_PROXIES` | None | Comma-separated CIDR ranges or addresses of the reverse proxy. When a request comes from one, `/token` and `/bundles` take the client address from the rightmost `X-Forwarded-For` entry. Set it whenever either route is on; see [DISTRIBUTION.md](DISTRIBUTION.md#rate-limits-and-client-addresses). |
 | `ZONE_LICENSE_ADDRESS_LIMIT` | `120` | Requests a minute per client address on each of `/token` and `/bundles`. |
 | `ZONE_LICENSE_KEY_LIMIT` | `240` | Requests a minute per license ID on each of `/token` and `/bundles`. |
@@ -803,7 +804,10 @@ subscribe again. Once the old subscription has ended the signer answers its
 keys with `410`, so the leaked key runs only to its expiry and grace period.
 The new subscription has a new id, which the new keys carry and the leaked key
 can never reach. The customer pastes the key the new subscription's order
-emails them, and their server renews it from then on.
+emails them, and their server renews it from then on. Add the old
+subscription's ID to `ZONE_LICENSE_REVOKED_SUBSCRIPTIONS` as well, so the
+leaked key and every key renewed from it stop pulling LTS images and bundles
+within minutes instead of at expiry.
 
 ### What Zone sends
 
@@ -985,10 +989,20 @@ single license:
   they run the old release, so a leaked key can sign licenses for them
   indefinitely.
 
-`ZONE_LICENSE_REVOKED` doesn't change this. It makes the signer refuse a
-license on `/token` and `/bundles`, so a leaked Enterprise key stops pulling
-LTS images and bundles within a few minutes, but Zone servers verify keys
-offline and keep accepting it, and `/licenses/renew` still renews it.
+`ZONE_LICENSE_REVOKED` and `ZONE_LICENSE_REVOKED_SUBSCRIPTIONS` don't change
+this. They make the signer refuse keys on `/token` and `/bundles`, so a leaked
+Enterprise key stops pulling LTS images and bundles within a few minutes, but
+Zone servers verify keys offline and keep accepting it, and `/licenses/renew`
+still renews it:
+
+- **Revoking a license ID** covers only that key. A renewal issues a key with a
+  new ID, so anyone holding the revoked key can renew it into one that pulls
+  again while the subscription is `active`.
+- **Revoking a subscription** covers every key on it, now and after any
+  renewal, so it is the one that holds for a leaked key. It also cuts off the
+  customer's own keys on that subscription: cancel or revoke the subscription
+  in Polar and move the customer to a new one, as in [A leaked key](#a-leaked-key).
+- **A key signed by hand** has no subscription, so only its ID revokes it.
 
 Guard the private key accordingly: leaking it is the one failure that can't be
 fully undone.

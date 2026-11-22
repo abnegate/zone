@@ -35,6 +35,7 @@ const SERVICE: &str = "registry.zone.test";
 const CUSTOMER: &str = "Acme Registry Customer Ltd";
 const LICENSE: Uuid = Uuid::from_u128(0x0193_a8e2_7c4b_7d10_8f00_4d2c_5a9b_3e01);
 const OTHER: Uuid = Uuid::from_u128(0x0193_a8e2_7c4b_7d10_8f00_4d2c_5a9b_3e02);
+const SUBSCRIPTION: &str = "b7e4c2a1-3d5f-4e6a-9b8c-0d1e2f3a4b5c";
 const PROXY: &str = "127.0.0.1/32";
 const FIRST_CLIENT: &str = "198.51.100.10";
 const SECOND_CLIENT: &str = "198.51.100.20";
@@ -368,6 +369,49 @@ async fn each_bad_credential_is_unauthorized_with_a_basic_challenge() {
 
     service.stop().await;
     unrevoked.stop().await;
+}
+
+#[tokio::test]
+async fn a_revoked_subscription_refuses_a_renewed_key_with_a_new_id() {
+    let service = Service::start(&[
+        (Variable::RegistryService, SERVICE),
+        (Variable::RevokedSubscriptions, SUBSCRIPTION),
+    ])
+    .await;
+    let renewed = signer()
+        .sign(&Terms {
+            id: OTHER,
+            customer: CUSTOMER.to_owned(),
+            seats: 10,
+            issued_at: now() - TimeDelta::days(1),
+            expires_at: now() + TimeDelta::days(364),
+            subscription: Some(SUBSCRIPTION.to_owned()),
+            plan: Plan::Enterprise,
+        })
+        .unwrap();
+
+    let logged = logged::capture(tracing::Level::INFO, async {
+        let response = service
+            .request(Method::GET, &query(&[SERVER_PULL]))
+            .basic_auth(OTHER, Some(&renewed))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json(response).await,
+            json!({ "errors": [{ "code": "UNAUTHORIZED", "message": "This license has been revoked." }] })
+        );
+    })
+    .await;
+
+    let revoked = logged
+        .lines()
+        .find(|line| line.contains("outcome=revoked"))
+        .unwrap_or_else(|| panic!("no revoked line in {logged}"));
+    assert!(revoked.contains(&format!("license={OTHER}")), "{revoked}");
+    assert!(!logged.contains("outcome=issued"), "{logged}");
+    service.stop().await;
 }
 
 #[tokio::test]

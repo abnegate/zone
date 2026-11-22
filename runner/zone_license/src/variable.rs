@@ -26,11 +26,12 @@ pub enum Variable {
     BundlePrefix,
     BundleAccessKeyId,
     BundleSecretAccessKey,
+    RevokedSubscriptions,
 }
 
 impl Variable {
     #[cfg(test)]
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::PrivateKeyFile,
         Self::PrivateKey,
         Self::KeyId,
@@ -57,6 +58,7 @@ impl Variable {
         Self::BundlePrefix,
         Self::BundleAccessKeyId,
         Self::BundleSecretAccessKey,
+        Self::RevokedSubscriptions,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -87,6 +89,7 @@ impl Variable {
             Self::BundlePrefix => "ZONE_BUNDLE_PREFIX",
             Self::BundleAccessKeyId => "ZONE_BUNDLE_ACCESS_KEY_ID",
             Self::BundleSecretAccessKey => "ZONE_BUNDLE_SECRET_ACCESS_KEY",
+            Self::RevokedSubscriptions => "ZONE_LICENSE_REVOKED_SUBSCRIPTIONS",
         }
     }
 
@@ -137,6 +140,7 @@ mod tests {
                 "ZONE_BUNDLE_PREFIX",
                 "ZONE_BUNDLE_ACCESS_KEY_ID",
                 "ZONE_BUNDLE_SECRET_ACCESS_KEY",
+                "ZONE_LICENSE_REVOKED_SUBSCRIPTIONS",
             ]
         );
     }

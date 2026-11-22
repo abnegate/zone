@@ -80,7 +80,7 @@ impl Gate {
             .map_err(|error| Denial::unverified(error.code()))?;
         let now = (self.clock)();
         let refuse = |refusal: Refusal| Err(Denial::verified(refusal, &license, now));
-        if self.revoked.contains(license.id()) {
+        if self.revoked.covers(&license) {
             return refuse(Refusal::Revoked);
         }
         if Uuid::try_parse(credentials.user()).ok() != Some(license.id()) {

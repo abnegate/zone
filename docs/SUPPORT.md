@@ -72,8 +72,10 @@ confirmed>`**. A business day is one such day.
 Support is tied to the license ID, a UUID such as
 `6f1c2a9e-3b4d-4e5f-8a7b-9c0d1e2f3a4b`. It is not secret. **Never send the
 license key**: it unlocks the server and is also the password for LTS images
-and bundle downloads. If you sent it by mistake, say so: we can stop it
-pulling LTS images and bundles, and help you move to a new key.
+and bundle downloads. If you sent it by mistake, say so: we can cut off every
+key on your subscription from LTS images and bundles and move you to a new
+subscription and key, though a server holding the leaked key keeps running on
+it until it expires.
 
 A renewal, a seat change or a plan change issues a new license with a new ID.
 Quote the ID of the license the server has installed now.
