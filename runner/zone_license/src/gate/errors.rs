@@ -3,7 +3,6 @@ use serde::Serialize;
 use crate::gate::code::Code;
 use crate::gate::detail::Detail;
 
-/// The `{"errors":[{"code","message"}]}` body of the Docker registry API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Errors {
     pub errors: [Detail; 1],

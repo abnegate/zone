@@ -10,8 +10,6 @@ pub const UNKNOWN: &str = "unknown";
 pub const LIMITED: &str = "limited";
 pub const UNAVAILABLE: &str = "unavailable";
 
-/// What a `/bundles` request came to, besides the gate's shared refusals,
-/// which log their own names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BundleOutcome {
     Issued,

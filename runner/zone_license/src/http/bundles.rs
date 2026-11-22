@@ -16,8 +16,6 @@ use crate::http::bundle_response::BundleResponse;
 use crate::http::context::Context;
 use crate::http::distributor::Distributor;
 
-/// The version and architecture are parsed only after the gate, and only
-/// parsed values reach S3 or the log, so a hostile path segment never does.
 pub async fn respond(
     State(context): State<Arc<Context>>,
     peer: Result<ConnectInfo<SocketAddr>, ExtensionRejection>,

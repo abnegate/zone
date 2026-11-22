@@ -90,7 +90,7 @@ impl Presigner {
             return Ok(Presence::Present);
         }
         let body = excerpt(response).await.map_err(unreachable)?;
-        match code(&body) {
+        match alphanumeric_code(&body) {
             Some(code) if code == NO_SUCH_KEY || code == ACCESS_DENIED => {
                 Ok(Presence::Absent { code: Some(code) })
             }
@@ -115,9 +115,7 @@ async fn excerpt(mut response: reqwest::Response) -> Result<Vec<u8>, reqwest::Er
     Ok(body)
 }
 
-/// Only an alphanumeric code is taken, so a hostile or garbled body cannot
-/// put arbitrary text into the request log.
-fn code(body: &[u8]) -> Option<String> {
+fn alphanumeric_code(body: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(body);
     let start = text.find(CODE_OPEN)? + CODE_OPEN.len();
     let length = text[start..].find(CODE_CLOSE)?;

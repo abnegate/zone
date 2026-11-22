@@ -39,9 +39,6 @@ pub use trusted_proxies::{NONE, TrustedProxies};
 pub use unaddressable::{UNADDRESSABLE, Unaddressable};
 pub use unparsable::Unparsable;
 
-/// Admits only a verified, unrevoked key presented under its own license ID,
-/// on a plan that includes distribution, while active or in grace. The plan is
-/// checked before the status, so a lapsed Team key is refused as ineligible.
 #[derive(Debug, Clone)]
 pub struct Gate {
     keyring: Keyring,

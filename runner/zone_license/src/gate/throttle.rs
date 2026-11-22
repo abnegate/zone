@@ -9,8 +9,6 @@ use crate::gate::limited::Limited;
 use crate::gate::limits::{Limits, WINDOW};
 use crate::gate::throttle_key::ThrottleKey;
 
-/// Each route owns one, so a client busy on one route keeps its allowance on
-/// the other. Clones share their counts.
 #[derive(Debug, Clone)]
 pub struct Throttle {
     addresses: RateLimiter<ThrottleKey>,

@@ -19,9 +19,6 @@ use crate::registry::{Scopes, grant, mint};
 pub const SERVICE_PARAMETER: &str = "service";
 pub const SCOPE_PARAMETER: &str = "scope";
 
-/// The Docker registry token endpoint. Parameters other than `service` and
-/// `scope`, such as the `account`, `client_id` and `offline_token` that
-/// Docker adds, are ignored.
 pub async fn respond(
     State(context): State<Arc<Context>>,
     peer: Result<ConnectInfo<SocketAddr>, ExtensionRejection>,

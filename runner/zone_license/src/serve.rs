@@ -39,9 +39,7 @@ pub async fn serve(
 }
 
 /// Builds the relay and the Polar client and binds the listener, without
-/// serving yet. Renewal is on only when `POLAR_ACCESS_TOKEN` is set, registry
-/// tokens only when `ZONE_REGISTRY_SERVICE` is, and bundles only when
-/// `ZONE_BUNDLE_BUCKET` is.
+/// serving yet. Renewal is on only when `POLAR_ACCESS_TOKEN` is set.
 pub async fn start(config: Config) -> Result<Server, ServeError> {
     let relay = Relay::new(&config.smtp)?;
     let gate = Gate::new(

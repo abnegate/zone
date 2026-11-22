@@ -5,9 +5,6 @@ use zone_enterprise::{License, Plan, Status};
 
 use crate::gate::refusal::Refusal;
 
-/// Why the gate refused, with the fields a route logs: `license`, `plan` and
-/// `status` once a key has verified, and the verify code as `error` before.
-/// It holds no key, customer or email, so logging every field is safe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Denial {
     pub refusal: Refusal,

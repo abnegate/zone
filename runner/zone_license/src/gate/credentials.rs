@@ -9,8 +9,6 @@ use crate::gate::refusal::Refusal;
 
 pub const SCHEME: &str = "Basic";
 
-/// HTTP Basic credentials. The password is split off at the first `:`, so it
-/// may itself hold one.
 pub struct Credentials {
     user: String,
     password: String,

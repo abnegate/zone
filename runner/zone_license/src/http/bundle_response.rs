@@ -3,7 +3,6 @@ use serde::Serialize;
 use crate::bundle::{Architecture, BundleVersion, DOWNLOAD_LIFETIME, Object, Presigner};
 use crate::http::bundle_link::BundleLink;
 
-/// Every URL in it lets anyone holding it download that file until it expires.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BundleResponse {
     pub version: String,

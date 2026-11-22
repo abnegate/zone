@@ -2,8 +2,6 @@ use std::net::{IpAddr, Ipv6Addr};
 
 pub const IPV6_PREFIX: u32 = 64;
 
-/// One customer site usually holds a whole IPv6 /64, so its addresses share a
-/// key; otherwise each address in it would get a fresh allowance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ThrottleKey(IpAddr);
 

@@ -23,8 +23,6 @@ impl Registrar {
         }
     }
 
-    /// The gate judges the license's status at the same clock the token is
-    /// issued by.
     pub fn with_clock(self, clock: fn() -> DateTime<Utc>) -> Self {
         Self {
             gate: self.gate.with_clock(clock),

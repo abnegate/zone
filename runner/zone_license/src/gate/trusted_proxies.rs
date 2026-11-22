@@ -10,8 +10,6 @@ pub const NONE: &str = "none";
 
 const EXPECTED: &str = "a CIDR range or an IP address, such as 172.18.0.0/16";
 
-/// A bare address is trusted as a single host. Host bits in a range are
-/// dropped, so `172.18.0.1/16` trusts all of `172.18.0.0/16`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrustedProxies(Vec<IpNet>);
 

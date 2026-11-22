@@ -17,12 +17,9 @@ pub struct Limited {
 }
 
 impl Limited {
-    /// Rounds up to whole seconds and never below one, so a client that honours
-    /// `Retry-After` never retries into the window that refused it.
     pub fn after(wait: Duration) -> Self {
-        let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
         Self {
-            retry_after: NonZeroU64::new(seconds).unwrap_or(NonZeroU64::MIN),
+            retry_after: whole_seconds_rounded_up(wait).unwrap_or(NonZeroU64::MIN),
         }
     }
 
@@ -42,4 +39,8 @@ impl Limited {
         )
             .into_response()
     }
+}
+
+fn whole_seconds_rounded_up(wait: Duration) -> Option<NonZeroU64> {
+    NonZeroU64::new(wait.as_secs() + u64::from(wait.subsec_nanos() > 0))
 }
