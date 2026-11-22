@@ -232,6 +232,9 @@ jobs:
     needs: [check, image]
     runs-on: ubuntu-24.04
     environment: distribution
+    concurrency:
+      group: lts-manifest-${{ needs.check.outputs.line }}
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
@@ -342,21 +345,21 @@ jobs:
               read -r -a digests <<< "${platforms[$name]}"
               docker buildx imagetools create --tag "$target:$VERSION" "${digests[@]/#/$target@}"
             fi
-            docker buildx imagetools create --tag "$target:$LINE-lts" "$target:$VERSION"
+            sh scripts/lts-tag.sh "$target" "$VERSION"
             digest=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$target:$VERSION" | jq -r .digest)
-            moved=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$target:$LINE-lts" | jq -r .digest)
-            if [ "$moved" != "$digest" ]; then
-              echo "::error::$repository:$LINE-lts points at $moved, not $digest"
-              exit 1
+            line=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$target:$LINE-lts" | jq -r .digest)
+            tags="\`$VERSION\`"
+            if [ "$line" = "$digest" ]; then
+              tags="$tags, \`$LINE-lts\`"
             fi
-            printf '%s\t%s\n' "$repository" "$digest" >> "$RUNNER_TEMP/published"
+            printf '%s\t%s\t%s\n' "$repository" "$digest" "$tags" >> "$RUNNER_TEMP/published"
           done
           cat "$RUNNER_TEMP/published"
 
       - name: Sign the indexes
         run: |
           set -euo pipefail
-          while IFS=$'\t' read -r repository digest; do
+          while IFS=$'\t' read -r repository digest _; do
             cosign sign --yes "$PUBLISH_REGISTRY/$repository@$digest"
           done < "$RUNNER_TEMP/published"
 
@@ -390,7 +393,7 @@ jobs:
         run: |
           set -euo pipefail
           identity="https://github.com/bitecodehq/zone/.github/workflows/lts.yml@refs/tags/$GITHUB_REF_NAME"
-          while IFS=$'\t' read -r repository digest; do
+          while IFS=$'\t' read -r repository digest _; do
             cosign verify \
               --certificate-identity "$identity" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -406,8 +409,8 @@ jobs:
             echo
             echo '| Image | Tags | Index digest |'
             echo '|---|---|---|'
-            while IFS=$'\t' read -r repository digest; do
-              echo "| \`$PUBLIC_REGISTRY/$repository\` | \`$VERSION\`, \`$LINE-lts\` | \`$digest\` |"
+            while IFS=$'\t' read -r repository digest tags; do
+              echo "| \`$PUBLIC_REGISTRY/$repository\` | $tags | \`$digest\` |"
             done < "$RUNNER_TEMP/published"
           } >> "$GITHUB_STEP_SUMMARY"
 
