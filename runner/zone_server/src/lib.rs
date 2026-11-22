@@ -8,6 +8,7 @@
 pub mod agent;
 pub mod auth;
 pub mod cache;
+pub mod cluster;
 pub mod config;
 pub mod db;
 pub mod error;

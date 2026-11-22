@@ -29,6 +29,7 @@ use zone_enterprise::sso::{Oidc, saml};
 use zone_enterprise::{Edition, License, status};
 
 use crate::cache::Cache;
+use crate::cluster::Bus;
 #[cfg(test)]
 use crate::config::AgentConfig;
 use crate::config::{Config, ModelBackend};
@@ -156,6 +157,9 @@ struct AppStateInner {
     pub pull_request_statuses: StatusCache,
     pub github_snapshots: Snapshots,
     pub background: TaskTracker,
+    /// Relays live state to the other replicas. A process starts on its own
+    /// loopback, which reaches nobody, until [`AppState::with_bus`] gives it Valkey.
+    pub bus: Bus,
     /// Whether the Community member cap applies, which a test build leaves off
     /// until a test opts in with [`AppState::cap_members`].
     #[cfg(any(test, feature = "testing"))]
@@ -252,6 +256,7 @@ impl AppState {
         });
 
         let github_snapshots = Snapshots::new(&config.github);
+        let bus = Bus::loopback(&master_key);
 
         let mcp = Hubs::new(
             zone_routing::proxy(),
@@ -291,10 +296,25 @@ impl AppState {
                 pull_request_statuses: StatusCache::default(),
                 github_snapshots,
                 background: TaskTracker::new(),
+                bus,
                 #[cfg(any(test, feature = "testing"))]
                 capped: AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Replaces the bus. It must be called before the state is cloned, while
+    /// nothing else can be holding the bus it replaces.
+    pub fn with_bus(mut self, bus: Bus) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("the bus is replaced before the state is shared")
+            .bus = bus;
+        self
+    }
+
+    /// The bus to the other replicas.
+    pub fn bus(&self) -> &Bus {
+        &self.inner.bus
     }
 
     /// Writes that finish off work already delivered, which the server waits
@@ -758,6 +778,19 @@ mod tests {
             state.licenses().keyring(),
             clone.licenses().keyring()
         ));
+    }
+
+    #[tokio::test]
+    async fn a_state_starts_on_a_loopback_bus_that_with_bus_replaces() {
+        let state = AppState::for_tests();
+        assert!(!state.bus().connected());
+        let bus = Bus::loopback(state.master_key());
+        let instance = bus.instance();
+
+        let state = state.with_bus(bus);
+
+        assert_eq!(state.bus().instance(), instance);
+        assert_eq!(state.clone().bus().instance(), instance);
     }
 
     #[tokio::test]

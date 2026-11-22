@@ -65,6 +65,7 @@ mod chat_vision_history;
 mod chat_ws;
 mod chat_ws_contract;
 mod chat_ws_media_contract;
+mod cluster_bus;
 mod common;
 mod connect;
 mod console_contract;
