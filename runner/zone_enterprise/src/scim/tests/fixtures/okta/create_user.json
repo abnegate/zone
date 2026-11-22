@@ -1,0 +1,19 @@
+{
+    "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+    "userName": "{{user_name}}",
+    "name": {
+        "givenName": "Test",
+        "familyName": "User"
+    },
+    "emails": [{
+        "primary": true,
+        "value": "{{user_name}}",
+        "type": "work"
+    }],
+    "displayName": "Test User",
+    "locale": "en-US",
+    "externalId": "{{external_id}}",
+    "groups": [],
+    "password": "1mz050nq",
+    "active": true
+}
