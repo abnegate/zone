@@ -819,18 +819,10 @@ async fn admission_reports_a_parked_run_as_the_active_one() {
     let run = tasks::create_task_run(&pool, task.id).await.unwrap();
     let owner = Uuid::new_v4();
     assert!(
-        tasks::claim_task_run(
-            &pool,
-            run.id,
-            owner,
-            Claimant {
-                runner: None,
-                enforced: false
-            }
-        )
-        .await
-        .unwrap()
-        .claimed()
+        tasks::claim_task_run(&pool, run.id, owner, Claimant::UNENFORCED)
+            .await
+            .unwrap()
+            .claimed()
     );
     assert!(
         tasks::park_task_run(

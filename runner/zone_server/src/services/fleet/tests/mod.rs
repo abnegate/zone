@@ -105,6 +105,7 @@ async fn an_enterprise_server_registers_on_its_first_claim() {
         crate::services::fleet::claimant(&server.state).await,
         Claimant {
             runner: Some(runner),
+            instance: server.state.instance(),
             enforced: true,
         }
     );
@@ -120,6 +121,7 @@ async fn a_server_without_enterprise_neither_enforces_nor_registers_to_claim() {
             claimant(&server.state).await,
             Claimant {
                 runner: None,
+                instance: server.state.instance(),
                 enforced: false,
             },
             "{plan:?}"
@@ -137,6 +139,7 @@ async fn an_unenforced_claimant_still_names_its_registered_runner() {
         claimant(&server.state).await,
         Claimant {
             runner: Some(runner),
+            instance: server.state.instance(),
             enforced: false,
         }
     );
@@ -184,6 +187,7 @@ async fn an_unreadable_license_enforces_and_an_unregistered_claimant_has_no_runn
         claimant(&state).await,
         Claimant {
             runner: None,
+            instance: state.instance(),
             enforced: true,
         }
     );

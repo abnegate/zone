@@ -1896,9 +1896,11 @@ CREATE TABLE workspace_runner_labels (
 );
 
 ALTER TABLE task_runs ADD COLUMN runner_id uuid REFERENCES fleet_runners(id) ON DELETE SET NULL;
-CREATE INDEX idx_task_runs_runner_active ON task_runs (runner_id) WHERE (status = ANY (ARRAY['running'::text, 'waiting'::text]));
+CREATE INDEX idx_task_runs_runner ON task_runs (runner_id);
 ALTER TABLE chat_leases ADD COLUMN runner_id uuid REFERENCES fleet_runners(id) ON DELETE SET NULL;
+CREATE INDEX idx_chat_leases_runner ON chat_leases (runner_id);
 ALTER TABLE projects ADD COLUMN auto_claim_runner_id uuid REFERENCES fleet_runners(id) ON DELETE SET NULL;
+CREATE INDEX idx_projects_auto_claim_runner ON projects (auto_claim_runner_id);
 
 INSERT INTO source_types (name, category, description, config_schema) VALUES
   ('github', 'file', 'GitHub repository', '{"type":"object","required":["owner","repo"],"properties":{"owner":{"type":"string"},"repo":{"type":"string"},"branch":{"type":"string","default":"main"},"base_path":{"type":"string","default":""}}}'),

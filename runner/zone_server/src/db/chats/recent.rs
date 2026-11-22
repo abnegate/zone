@@ -84,11 +84,6 @@ mod tests {
     use crate::db::fleet::claimant::Claimant;
     use crate::services::stages::AUTO;
 
-    const UNENFORCED: Claimant = Claimant {
-        runner: None,
-        enforced: false,
-    };
-
     struct Fixture {
         pool: PgPool,
         organization: Uuid,
@@ -166,7 +161,7 @@ mod tests {
         }
 
         fn store(&self, chat: Uuid) -> Store {
-            Store::new(self.pool.clone(), chat, Some(self.workspace)).claiming(UNENFORCED)
+            Store::new(self.pool.clone(), chat, Some(self.workspace)).claiming(Claimant::UNENFORCED)
         }
 
         async fn turn(&self, chat: Uuid, metadata: Option<Value>) {

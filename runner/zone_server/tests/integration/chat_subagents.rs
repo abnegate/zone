@@ -29,11 +29,6 @@ use zone_server::state::AppState;
 const TURN_RUNNING: &str = "running";
 const TURN_COMPLETED: &str = "completed";
 const TURN_INTERRUPTED: &str = "interrupted";
-const UNENFORCED: Claimant = Claimant {
-    runner: None,
-    enforced: false,
-};
-
 /// A workspace with one chat, served by a fresh router.
 struct Workspace {
     client: TestClient,
@@ -529,7 +524,7 @@ async fn deleting_a_message_through_its_chats_store_removes_a_subagent_written_w
         .expect("a chat")
         .id;
     let message = answered(&pool, chat).await;
-    let store = Store::new(pool.clone(), chat, None).claiming(UNENFORCED);
+    let store = Store::new(pool.clone(), chat, None).claiming(Claimant::UNENFORCED);
     let lease = store
         .acquire(Uuid::new_v4(), Duration::from_secs(30))
         .await
@@ -571,7 +566,7 @@ async fn deleting_a_running_turns_message_while_its_keeper_writes_does_not_deadl
     .await
     .expect("the turn's reply");
     started(&pool, chat, "toolu_01Agent", Some(message)).await;
-    let store = Store::new(pool.clone(), chat, None).claiming(UNENFORCED);
+    let store = Store::new(pool.clone(), chat, None).claiming(Claimant::UNENFORCED);
     let lease = store
         .acquire(Uuid::new_v4(), Duration::from_secs(30))
         .await
@@ -995,7 +990,7 @@ async fn recovering_a_crashed_turn_stops_its_subagents_and_fails_their_running_s
         .find(|row| row.id == orphan.id)
         .expect("the crashed turn's subagent");
 
-    let store = Store::new(pool.clone(), chat, None).claiming(UNENFORCED);
+    let store = Store::new(pool.clone(), chat, None).claiming(Claimant::UNENFORCED);
     let lease = store
         .acquire(Uuid::new_v4(), Duration::from_secs(30))
         .await

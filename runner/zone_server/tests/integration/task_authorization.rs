@@ -403,18 +403,10 @@ async fn pr_worker_rejects_legacy_foreign_project_associations() {
 async fn waiting(pool: &sqlx::PgPool, run: Uuid) -> zone_server::agent::question::Waiter {
     let owner = Uuid::new_v4();
     assert!(
-        tasks::claim_task_run(
-            pool,
-            run,
-            owner,
-            Claimant {
-                runner: None,
-                enforced: false
-            }
-        )
-        .await
-        .expect("the run is claimable")
-        .claimed()
+        tasks::claim_task_run(pool, run, owner, Claimant::UNENFORCED)
+            .await
+            .expect("the run is claimable")
+            .claimed()
     );
     let waiter = zone_server::agent::question::expect(run);
     assert!(

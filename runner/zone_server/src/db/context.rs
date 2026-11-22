@@ -100,17 +100,16 @@ impl Store {
     }
 
     /// Takes the chat's lease for `owner`, recording the claimant's runner on it. Under fleet
-    /// policy the runner is held `FOR SHARE` until the lease commits, so a revoke either refuses
-    /// this or, waiting behind it, expires the lease it wrote.
+    /// policy the runner must be the claimant's own and is [held](eligibility::hold) until the
+    /// lease commits, so a revoke either refuses this or, waiting behind it, expires the lease it
+    /// wrote.
     pub async fn acquire(&self, owner: Uuid, lifetime: Duration) -> Result<Lease, Error> {
         let claimant = self.claimant.ok_or(Error::Unclaimed)?;
         let milliseconds = milliseconds(lifetime)?;
         let mut transaction = self.pool.begin().await?;
-        if let (true, Some(runner)) = (claimant.enforced, claimant.runner) {
-            sqlx::query("SELECT 1 FROM fleet_runners WHERE id = $1 FOR SHARE")
-                .bind(runner)
-                .execute(&mut *transaction)
-                .await?;
+        if let Some(shortfall) = eligibility::hold(&mut transaction, claimant).await? {
+            self.scope(&mut transaction).await?;
+            return Err(Error::Refused(shortfall));
         }
         let row = sqlx::query(sqlx::AssertSqlSafe(format!("INSERT INTO chat_leases (chat_id, owner, fence, expires_at, runner_id)
             SELECT id, $3, 1, clock_timestamp() + $4 * interval '1 millisecond',

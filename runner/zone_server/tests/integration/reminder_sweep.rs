@@ -14,11 +14,6 @@ use zone_server::db::reminders::Sweep;
 
 const PREFIX: &str = "reminder_sweep";
 const LEASE: std::time::Duration = std::time::Duration::from_secs(3600);
-const UNENFORCED: Claimant = Claimant {
-    runner: None,
-    enforced: false,
-};
-
 struct Firings {
     chat: Uuid,
     watch: Uuid,
@@ -137,7 +132,7 @@ async fn the_fleet_sweep_takes_every_workspace_s_firings() {
     let mut claimed = Vec::new();
     for _ in 0..3 {
         claimed.push(
-            reminders::claim_turn(pool, Sweep::All, LEASE, UNENFORCED)
+            reminders::claim_turn(pool, Sweep::All, LEASE, Claimant::UNENFORCED)
                 .await
                 .unwrap()
                 .map(|turn| turn.reminder_id),

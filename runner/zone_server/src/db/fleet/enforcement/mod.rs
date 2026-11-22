@@ -15,15 +15,28 @@ use crate::db::fleet::state::State;
 use crate::db::fleet::{labels, policy, revocation, runners};
 use crate::db::testing::Database;
 
-const UNENFORCED: Claimant = Claimant {
+/// The process every runner of these tests is registered by, and claims as.
+const INSTANCE: Uuid = Uuid::from_u128(0x5eed);
+
+const UNREGISTERED: Claimant = Claimant {
     runner: None,
-    enforced: false,
+    instance: INSTANCE,
+    enforced: true,
 };
 
 fn enforced(runner: Uuid) -> Claimant {
     Claimant {
         runner: Some(runner),
+        instance: INSTANCE,
         enforced: true,
+    }
+}
+
+fn unenforced_on(runner: Uuid) -> Claimant {
+    Claimant {
+        runner: Some(runner),
+        instance: INSTANCE,
+        enforced: false,
     }
 }
 
@@ -77,7 +90,7 @@ impl Fleet {
         let runner = runners::upsert(
             self.pool(),
             &format!("runner-{}", Uuid::new_v4().simple()),
-            Uuid::new_v4(),
+            INSTANCE,
             &Version::parse(version).unwrap(),
             &Labels::parse_list(carried).unwrap(),
         )
@@ -92,6 +105,25 @@ impl Fleet {
             .await
             .expect("the runner's state");
         runner
+    }
+
+    /// Registers another process under `runner`'s name, on `version` and carrying `carried`, so
+    /// the runner's row holds that process's registration until this one's next.
+    async fn take_over(&self, runner: Uuid, version: &str, carried: &str) {
+        let name: String = sqlx::query_scalar("SELECT name FROM fleet_runners WHERE id = $1")
+            .bind(runner)
+            .fetch_one(self.pool())
+            .await
+            .expect("the runner's name");
+        runners::upsert(
+            self.pool(),
+            &name,
+            Uuid::new_v4(),
+            &Version::parse(version).unwrap(),
+            &Labels::parse_list(carried).unwrap(),
+        )
+        .await
+        .expect("the other process's registration");
     }
 
     /// One runner short of the work in each way: cordoned, revoked, below a `2.0.0` minimum,

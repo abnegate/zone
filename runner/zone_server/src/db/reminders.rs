@@ -2,7 +2,7 @@
 //! recurring automations they become when one carries a rule for its own next
 //! firing.
 use super::fleet::claimant::Claimant;
-use super::fleet::eligibility::UNATTENDED;
+use super::fleet::eligibility::{self, UNATTENDED};
 use super::fleet::state::State;
 use super::{DbResult, actions, users};
 use crate::services::schedule::{self, MAX_LIFETIME, Recurrence};
@@ -600,11 +600,12 @@ const MAX_TURN_ATTEMPTS: i32 = 3;
 /// the worker running it renews the claim with `renew_turn` for as long as it
 /// is alive, and the lease only has to outlast a missed renewal or two.
 ///
-/// Under fleet policy only a firing `claimant`'s runner may take as unattended
-/// work is offered, judged on the labels of the firing's own workspace, and
-/// the runner is held `FOR SHARE` until the claim commits. That lock is taken
-/// after the advisory lock, against the fleet lock order, which is sound only
-/// because a revoke never takes the advisory lock.
+/// Under fleet policy only a firing `claimant`'s own runner may take as
+/// unattended work is offered, judged on the labels of the firing's own
+/// workspace, and the runner is [held](eligibility::hold) until the claim
+/// commits. That hold comes before the advisory lock, so a claim waiting on a
+/// revoke of its runner waits holding nothing that every other runner's claim
+/// needs.
 pub async fn claim_turn(
     pool: &PgPool,
     sweep: Sweep,
@@ -613,6 +614,7 @@ pub async fn claim_turn(
 ) -> DbResult<Option<PendingTurn>> {
     let seconds = lease.as_secs_f64();
     let mut transaction = pool.begin().await?;
+    let held = eligibility::hold(&mut transaction, claimant).await?;
     // One claim at a time across the fleet, released when this transaction
     // ends. The claim below refuses a firing whose schedule already has one in
     // flight, and that refusal is only sound if no other worker is deciding the
@@ -624,12 +626,6 @@ pub async fn claim_turn(
         .bind(CLAIM_LOCK)
         .execute(&mut *transaction)
         .await?;
-    if let (true, Some(runner)) = (claimant.enforced, claimant.runner) {
-        sqlx::query("SELECT 1 FROM fleet_runners WHERE id = $1 FOR SHARE")
-            .bind(runner)
-            .execute(&mut *transaction)
-            .await?;
-    }
     // Dropped here rather than skipped, so the queue does not silt up with
     // firings nothing will ever run. Named in the log, because a firing nobody
     // receives is worth one line saying which schedule it belonged to.
@@ -653,6 +649,10 @@ pub async fn claim_turn(
             "Reminder turn abandoned after repeated attempts; its firing may never have reached \
              the chat"
         );
+    }
+    if held.is_some() {
+        transaction.commit().await?;
+        return Ok(None);
     }
     // The attempt bound is repeated here so the rows this can claim and the
     // rows the delete above takes are disjoint sets. Without it a worker could

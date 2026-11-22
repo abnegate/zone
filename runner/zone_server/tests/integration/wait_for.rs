@@ -439,18 +439,10 @@ async fn leased_run(pool: &PgPool) -> Leased {
     let prepared = prepared_run(pool, "Waits on something").await;
     let owner = Uuid::new_v4();
     assert!(
-        tasks::claim_task_run(
-            pool,
-            prepared.run,
-            owner,
-            Claimant {
-                runner: None,
-                enforced: false
-            }
-        )
-        .await
-        .expect("the claim is writable")
-        .claimed(),
+        tasks::claim_task_run(pool, prepared.run, owner, Claimant::UNENFORCED)
+            .await
+            .expect("the claim is writable")
+            .claimed(),
         "a fresh run is claimable"
     );
     Leased {

@@ -3,7 +3,7 @@ use std::time::Duration;
 use uuid::Uuid;
 use zone_enterprise::fleet::Version;
 
-use super::{Fleet, UNENFORCED, enforced};
+use super::{Fleet, UNREGISTERED, enforced, unenforced_on};
 use crate::db::context::{Error, Store};
 use crate::db::fleet::claimant::Claimant;
 use crate::db::fleet::shortfall::Shortfall;
@@ -75,20 +75,10 @@ async fn a_chat_runs_on_a_cordoned_runner_but_not_a_revoked_or_outdated_one() {
     let (on_cordoned, on_cordoned_result) = fleet.acquire(enforced(cordoned)).await;
     let (on_revoked, on_revoked_result) = fleet.acquire(enforced(revoked)).await;
     let (_, on_outdated) = fleet.acquire(enforced(outdated)).await;
-    let (_, unregistered) = fleet
-        .acquire(Claimant {
-            runner: None,
-            enforced: true,
-        })
-        .await;
-    let (unenforced, unenforced_result) = fleet
-        .acquire(Claimant {
-            runner: Some(revoked),
-            enforced: false,
-        })
-        .await;
+    let (_, unregistered) = fleet.acquire(UNREGISTERED).await;
+    let (unenforced, unenforced_result) = fleet.acquire(unenforced_on(revoked)).await;
     let (_, unknown) = fleet.acquire(enforced(Uuid::new_v4())).await;
-    let (unrecorded, unrecorded_result) = fleet.acquire(UNENFORCED).await;
+    let (unrecorded, unrecorded_result) = fleet.acquire(Claimant::UNENFORCED).await;
     let leases = (
         fleet.leased_to(on_cordoned).await,
         fleet.leased_to(on_revoked).await,
@@ -131,6 +121,24 @@ async fn a_chat_runs_on_a_cordoned_runner_but_not_a_revoked_or_outdated_one() {
         (Some(Some(cordoned)), None, Some(Some(revoked)), Some(None)),
         "a lease records the runner that took it, and a refusal writes none"
     );
+}
+
+#[tokio::test]
+async fn a_chat_is_refused_while_another_process_holds_the_runners_name() {
+    let fleet = Fleet::new().await;
+    let runner = fleet.runner(State::Active, "1.9.0", "").await;
+    fleet.minimum("2.0.0").await;
+    fleet.take_over(runner, "2.0.0", "").await;
+
+    let (chat, refused) = fleet.acquire(enforced(runner)).await;
+    let leased = fleet.leased_to(chat).await;
+    fleet.remove().await;
+
+    assert!(
+        matches!(refused, Err(Error::Refused(Shortfall::Unregistered))),
+        "an outdated process took a chat on another process's current registration: {refused:?}"
+    );
+    assert_eq!(leased, None);
 }
 
 #[tokio::test]

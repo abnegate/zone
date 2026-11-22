@@ -81,11 +81,6 @@ mod tests {
     use crate::db::fleet::claimant::Claimant;
     use crate::db::{organizations, workspaces};
 
-    const UNENFORCED: Claimant = Claimant {
-        runner: None,
-        enforced: false,
-    };
-
     async fn pool() -> PgPool {
         PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
             .await
@@ -148,14 +143,16 @@ mod tests {
         let live = chat(&pool, workspace_id).await;
         let lapsed = chat(&pool, workspace_id).await;
 
-        let held = Store::new(pool.clone(), live, Some(workspace_id)).claiming(UNENFORCED);
+        let held =
+            Store::new(pool.clone(), live, Some(workspace_id)).claiming(Claimant::UNENFORCED);
         let _lease = held
             .acquire(Uuid::new_v4(), Duration::from_secs(30))
             .await
             .expect("a lease");
         // Releasing a lease expires it where it stands, which is the row a
         // turn that has already ended leaves behind.
-        let dropped = Store::new(pool.clone(), lapsed, Some(workspace_id)).claiming(UNENFORCED);
+        let dropped =
+            Store::new(pool.clone(), lapsed, Some(workspace_id)).claiming(Claimant::UNENFORCED);
         let expired = dropped
             .acquire(Uuid::new_v4(), Duration::from_secs(30))
             .await

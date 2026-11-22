@@ -6823,18 +6823,10 @@ mod watchdog_tests {
         let run = tasks::create_task_run(&pool, task.id).await.unwrap();
         let owner = Uuid::new_v4();
         assert!(
-            tasks::claim_task_run(
-                &pool,
-                run.id,
-                owner,
-                Claimant {
-                    runner: None,
-                    enforced: false
-                }
-            )
-            .await
-            .unwrap()
-            .claimed()
+            tasks::claim_task_run(&pool, run.id, owner, Claimant::UNENFORCED)
+                .await
+                .unwrap()
+                .claimed()
         );
         let state = AppState::new(crate::state::test_config(), pool.clone(), None);
         (pool, observed, state, run.id, owner)
@@ -8911,18 +8903,10 @@ mod cli_tests {
         async fn claim(&self) -> Uuid {
             let owner = Uuid::new_v4();
             assert!(
-                tasks::claim_task_run(
-                    &self.pool,
-                    self.run,
-                    owner,
-                    Claimant {
-                        runner: None,
-                        enforced: false
-                    }
-                )
-                .await
-                .unwrap()
-                .claimed()
+                tasks::claim_task_run(&self.pool, self.run, owner, Claimant::UNENFORCED)
+                    .await
+                    .unwrap()
+                    .claimed()
             );
             owner
         }

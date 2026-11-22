@@ -12,6 +12,7 @@ use crate::db::fleet::claim::Claim;
 use crate::db::fleet::claimant::Claimant;
 use crate::db::fleet::eligibility::{self, PLACEMENT, UNATTENDED};
 use crate::db::fleet::mode::Mode;
+use crate::db::fleet::shortfall::Shortfall;
 use crate::services::chat::notice;
 use crate::services::github::pull_requests;
 use crate::services::task_progress;
@@ -1541,10 +1542,10 @@ pub(super) async fn create_task_run_in(
 /// Claim a newly admitted run exactly once, before waiting for capacity, and
 /// record the runner that claimed it.
 ///
-/// Under fleet policy the claimant's runner must be one that unattended work
-/// placed in the run's own workspace may run on, and the runner row is held
-/// `FOR SHARE` until the claim commits: a revoke either refuses this claim or
-/// waits for it and then stops the run it made.
+/// Under fleet policy the claimant's runner must be its own and one that
+/// unattended work placed in the run's own workspace may run on, and the
+/// runner row is [held](eligibility::hold) until the claim commits: a revoke
+/// either refuses this claim or waits for it and then stops the run it made.
 pub async fn claim_task_run(
     pool: &PgPool,
     run_id: Uuid,
@@ -1552,14 +1553,10 @@ pub async fn claim_task_run(
     claimant: Claimant,
 ) -> DbResult<Claim> {
     let mut transaction = pool.begin().await?;
-    if let (true, Some(runner)) = (claimant.enforced, claimant.runner) {
-        sqlx::query("SELECT 1 FROM fleet_runners WHERE id = $1 FOR SHARE")
-            .bind(runner)
-            .execute(&mut *transaction)
-            .await?;
-    }
-    let claimed = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE task_runs r \
+    let held = eligibility::hold(&mut transaction, claimant).await?;
+    let claimed = held.is_none()
+        && sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE task_runs r \
          SET owner = $2, runner_id = (SELECT id FROM fleet_runners WHERE id = $3), \
              heartbeat_at = NOW() \
          WHERE r.id = $1 AND {UNCLAIMED} \
@@ -1567,29 +1564,31 @@ pub async fn claim_task_run(
                SELECT 1 FROM {PLACEMENT} JOIN fleet_runners runner ON runner.id = $3 \
                WHERE t.id = r.task_id AND {UNATTENDED} \
            ))"
-    )))
-    .bind(run_id)
-    .bind(owner)
-    .bind(claimant.runner)
-    .bind(claimant.enforced)
-    .execute(&mut *transaction)
-    .await?
-    .rows_affected()
-        == 1;
+        )))
+        .bind(run_id)
+        .bind(owner)
+        .bind(claimant.runner)
+        .bind(claimant.enforced)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected()
+            == 1;
     let claim = match claimed {
         true => Claim::Claimed,
-        false => unclaimed(&mut transaction, run_id, claimant).await?,
+        false => unclaimed(&mut transaction, run_id, claimant, held).await?,
     };
     transaction.commit().await?;
     Ok(claim)
 }
 
 /// Why a claim changed nothing: the run is no one's to claim, or it is and
-/// the claimant's runner falls short of it.
+/// the claimant's runner falls short of it, as `held` already found or as the
+/// runner row says.
 async fn unclaimed(
     connection: &mut PgConnection,
     run_id: Uuid,
     claimant: Claimant,
+    held: Option<Shortfall>,
 ) -> DbResult<Claim> {
     if !claimant.enforced {
         return Ok(Claim::Unavailable);
@@ -1604,13 +1603,18 @@ async fn unclaimed(
     let Some(workspace) = workspace else {
         return Ok(Claim::Unavailable);
     };
-    let shortfall = eligibility::shortfall(
-        connection,
-        claimant.runner,
-        Some(workspace),
-        Mode::Unattended,
-    )
-    .await?;
+    let shortfall = match held {
+        Some(held) => Some(held),
+        None => {
+            eligibility::shortfall(
+                connection,
+                claimant.runner,
+                Some(workspace),
+                Mode::Unattended,
+            )
+            .await?
+        }
+    };
     Ok(shortfall.map_or(Claim::Unavailable, Claim::Refused))
 }
 
@@ -2396,18 +2400,10 @@ mod tests {
             .await
             .expect("a run");
         let owner = Uuid::new_v4();
-        let claimed = claim_task_run(
-            &tenant.pool,
-            run.id,
-            owner,
-            Claimant {
-                runner: None,
-                enforced: false,
-            },
-        )
-        .await
-        .expect("the claim")
-        .claimed();
+        let claimed = claim_task_run(&tenant.pool, run.id, owner, Claimant::UNENFORCED)
+            .await
+            .expect("the claim")
+            .claimed();
         let execution = Execution {
             task: task.id,
             run: run.id,

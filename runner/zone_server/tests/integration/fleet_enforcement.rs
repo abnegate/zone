@@ -385,6 +385,34 @@ async fn workspace_labels_place_runs_on_labelled_runners() {
 }
 
 #[tokio::test]
+async fn a_process_sharing_a_runners_name_is_judged_on_its_own_labels() {
+    let fleet = Fleet::new(PREFIX, &[Spec::CURRENT]).await;
+    fleet.license(&active()).await;
+    let unlabelled = fleet.runner(0).clone();
+    fleet
+        .require_workspace(fleet.organization, fleet.workspace, &["gpu"])
+        .await;
+    let labelled = fleet.twin(0, Spec::labelled("gpu")).await;
+
+    let run = fleet.admit_in(fleet.workspace).await;
+    fleet.execute(&unlabelled.state, &run).await;
+    let left = (fleet.run(run.id).await.status, fleet.claimed(run.id).await);
+    fleet.execute(&labelled, &run).await;
+    let ran = fleet.run(run.id).await.status;
+    let (_, ran_on) = fleet.claimed(run.id).await;
+    fleet.cleanup().await;
+
+    assert_eq!(labelled.runner(), Some(unlabelled.id), "both share the row");
+    assert_eq!(
+        left,
+        (RUNNING.to_string(), (None, None)),
+        "the unlabelled process claimed labelled work on the other process's registration"
+    );
+    assert_eq!(ran, COMPLETED, "the labelled process takes the run it left");
+    assert_eq!(ran_on, Some(unlabelled.id));
+}
+
+#[tokio::test]
 async fn organization_and_workspace_labels_combine() {
     let fleet = Fleet::new(
         PREFIX,
@@ -874,6 +902,17 @@ async fn revoking_ends_an_auto_project_drive_and_its_fenced_writes() {
         runs_of(&fleet, task).await,
     );
     Driver::of(&b.state).tick().await;
+    let reserved = runs_of(&fleet, task).await;
+    sqlx::query(
+        "UPDATE projects SET auto_claimed_at = auto_claimed_at - make_interval(secs => $2) \
+         WHERE id = $1",
+    )
+    .bind(project)
+    .bind(CLAIM_LEASE.as_secs_f64())
+    .execute(fleet.pool())
+    .await
+    .expect("the revoked drive's lease lapses");
+    Driver::of(&b.state).tick().await;
     let taken_over = runs_of(&fleet, task).await;
     let stage = auto_projects::task_stage(fleet.pool(), task)
         .await
@@ -896,7 +935,15 @@ async fn revoking_ends_an_auto_project_drive_and_its_fenced_writes() {
         (None, Vec::new()),
         "the revoke cleared the claim and nothing started"
     );
-    assert_eq!(taken_over.len(), 1, "an active runner drives it next");
+    assert!(
+        reserved.is_empty(),
+        "no runner drives the project while the revoked drive's lease runs"
+    );
+    assert_eq!(
+        taken_over.len(),
+        1,
+        "an active runner drives it once that lease lapses"
+    );
     assert_ne!(stage, Some(Stage::Paused));
 }
 

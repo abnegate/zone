@@ -175,18 +175,10 @@ impl Fixture {
             .id;
         let owner = Uuid::new_v4();
         assert!(
-            tasks::claim_task_run(
-                &self.pool,
-                run,
-                owner,
-                Claimant {
-                    runner: None,
-                    enforced: false
-                }
-            )
-            .await
-            .expect("the claim is writable")
-            .claimed(),
+            tasks::claim_task_run(&self.pool, run, owner, Claimant::UNENFORCED)
+                .await
+                .expect("the claim is writable")
+                .claimed(),
             "a fresh run is claimable"
         );
         (

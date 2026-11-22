@@ -217,6 +217,19 @@ impl Fleet {
         Self::start(&self.config, self.pool(), identity).await
     }
 
+    /// Another server process given runner `index`'s name, on `spec`'s version and labels. It
+    /// registers last, so the runner's row holds its registration until runner `index`
+    /// registers again.
+    pub async fn twin(&self, index: usize, spec: Spec) -> AppState {
+        let mut identity = spec.identity(index);
+        identity
+            .name
+            .clone_from(&self.runners[index].state.identity().name);
+        let state = Self::start(&self.config, self.pool(), identity).await;
+        registration::register(&state).await.unwrap();
+        state
+    }
+
     pub fn pool(&self) -> &PgPool {
         &self.database.pool
     }

@@ -142,32 +142,16 @@ async fn sweep_preserves_fresh_leases_and_newer_runs() {
     assert_eq!(run.triggered_by, Some(actor));
     let owner = uuid::Uuid::new_v4();
     assert!(
-        tasks::claim_task_run(
-            &pool,
-            run.id,
-            owner,
-            Claimant {
-                runner: None,
-                enforced: false
-            }
-        )
-        .await
-        .unwrap()
-        .claimed()
+        tasks::claim_task_run(&pool, run.id, owner, Claimant::UNENFORCED)
+            .await
+            .unwrap()
+            .claimed()
     );
     assert!(
-        !tasks::claim_task_run(
-            &pool,
-            run.id,
-            uuid::Uuid::new_v4(),
-            Claimant {
-                runner: None,
-                enforced: false
-            }
-        )
-        .await
-        .unwrap()
-        .claimed()
+        !tasks::claim_task_run(&pool, run.id, uuid::Uuid::new_v4(), Claimant::UNENFORCED)
+            .await
+            .unwrap()
+            .claimed()
     );
     assert!(
         !tasks::heartbeat_task_run(&pool, run.id, uuid::Uuid::new_v4())
@@ -386,18 +370,10 @@ async fn stale_owner_cannot_write_progress_logs_or_terminal_state() {
     let first = uuid::Uuid::new_v4();
     let second = uuid::Uuid::new_v4();
     assert!(
-        tasks::claim_task_run(
-            &pool,
-            run.id,
-            first,
-            Claimant {
-                runner: None,
-                enforced: false
-            }
-        )
-        .await
-        .unwrap()
-        .claimed()
+        tasks::claim_task_run(&pool, run.id, first, Claimant::UNENFORCED)
+            .await
+            .unwrap()
+            .claimed()
     );
     sqlx::query("UPDATE task_runs SET owner=$2 WHERE id=$1")
         .bind(run.id)

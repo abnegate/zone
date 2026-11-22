@@ -1601,18 +1601,10 @@ mod tests {
                 .unwrap();
             let owner = Uuid::new_v4();
             assert!(
-                tasks::claim_task_run(
-                    &pool,
-                    run.id,
-                    owner,
-                    Claimant {
-                        runner: None,
-                        enforced: false
-                    }
-                )
-                .await
-                .unwrap()
-                .claimed()
+                tasks::claim_task_run(&pool, run.id, owner, Claimant::UNENFORCED)
+                    .await
+                    .unwrap()
+                    .claimed()
             );
             let execution = tasks::Execution {
                 task: task.id,
@@ -2953,10 +2945,7 @@ mod publication_tests {
                 fixture.state.db(),
                 run.id,
                 fixture.execution.owner,
-                Claimant {
-                    runner: None,
-                    enforced: false
-                }
+                Claimant::UNENFORCED
             )
             .await
             .unwrap()
