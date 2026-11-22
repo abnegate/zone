@@ -11,11 +11,26 @@ pub struct Cli {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+    use std::path::Path;
+
     use clap::CommandFactory;
     use clap::error::ErrorKind;
     use zone_enterprise::Plan;
 
     use super::*;
+    use crate::registry_command::RegistryCommand;
+
+    fn subcommands(command: &clap::Command) -> Vec<clap::Command> {
+        command
+            .get_subcommands()
+            .flat_map(|subcommand| {
+                let mut found = vec![subcommand.clone()];
+                found.extend(subcommands(subcommand));
+                found
+            })
+            .collect()
+    }
 
     #[test]
     fn the_command_line_is_well_formed() {
@@ -24,8 +39,7 @@ mod tests {
 
     #[test]
     fn no_argument_takes_a_key_value() {
-        let cli = Cli::command();
-        for subcommand in cli.get_subcommands() {
+        for subcommand in subcommands(&Cli::command()) {
             for argument in subcommand.get_arguments() {
                 let name = argument.get_id().as_str();
                 assert!(
@@ -47,6 +61,9 @@ mod tests {
             "--private-key",
             "AAAA",
         ]);
+        assert!(refused.is_err());
+        let refused =
+            Cli::try_parse_from(["zone-license", "registry", "jwks", "--private-key", "AAAA"]);
         assert!(refused.is_err());
     }
 
@@ -179,8 +196,7 @@ mod tests {
 
     #[test]
     fn every_argument_help_renders_whole() {
-        let mut cli = Cli::command();
-        for subcommand in cli.get_subcommands_mut() {
+        for mut subcommand in subcommands(&Cli::command()) {
             let help = collapsed(&subcommand.render_help().to_string());
             for argument in subcommand.get_arguments() {
                 let Some(declared) = argument.get_help() else {
@@ -216,5 +232,68 @@ mod tests {
             Some(std::path::Path::new("signing.key"))
         );
         assert_eq!(arguments.key_id.as_deref(), Some("2026-2"));
+    }
+
+    fn registry_jwks(arguments: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(
+            ["zone-license", "registry", "jwks"]
+                .into_iter()
+                .chain(arguments.iter().copied()),
+        )
+    }
+
+    #[test]
+    fn parses_a_registry_jwks_command() {
+        let cli = registry_jwks(&[
+            "--generation",
+            "1",
+            "--generation",
+            "2",
+            "--key-id",
+            "2026-2",
+            "--private-key-file",
+            "/run/secrets/zone-license",
+        ])
+        .unwrap();
+        let Command::Registry(RegistryCommand::Jwks(arguments)) = cli.command else {
+            panic!("parsed {:?}", cli.command);
+        };
+        assert_eq!(
+            arguments.generations,
+            [NonZeroU32::new(1).unwrap(), NonZeroU32::new(2).unwrap()]
+        );
+        assert_eq!(arguments.key_id.as_deref(), Some("2026-2"));
+        assert_eq!(
+            arguments.private_key_file.as_deref(),
+            Some(Path::new("/run/secrets/zone-license"))
+        );
+    }
+
+    #[test]
+    fn a_registry_jwks_command_defaults_to_generation_one() {
+        let cli = registry_jwks(&[]).unwrap();
+        let Command::Registry(RegistryCommand::Jwks(arguments)) = cli.command else {
+            panic!("parsed {:?}", cli.command);
+        };
+        assert_eq!(arguments.generations, [NonZeroU32::MIN]);
+        assert_eq!(arguments.key_id, None);
+        assert_eq!(arguments.private_key_file, None);
+    }
+
+    #[test]
+    fn refuses_a_registry_key_generation_below_one() {
+        for generation in ["0", "-1", "one", ""] {
+            let error = registry_jwks(&[&format!("--generation={generation}")]).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                ErrorKind::ValueValidation,
+                "{generation:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_registry_command_needs_a_subcommand() {
+        assert!(Cli::try_parse_from(["zone-license", "registry"]).is_err());
     }
 }

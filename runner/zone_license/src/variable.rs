@@ -17,11 +17,14 @@ pub enum Variable {
     TrustedProxies,
     AddressLimit,
     KeyLimit,
+    RegistryService,
+    RegistryRepositories,
+    RegistryKeyGeneration,
 }
 
 impl Variable {
     #[cfg(test)]
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 20] = [
         Self::PrivateKeyFile,
         Self::PrivateKey,
         Self::KeyId,
@@ -39,6 +42,9 @@ impl Variable {
         Self::TrustedProxies,
         Self::AddressLimit,
         Self::KeyLimit,
+        Self::RegistryService,
+        Self::RegistryRepositories,
+        Self::RegistryKeyGeneration,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -60,6 +66,9 @@ impl Variable {
             Self::TrustedProxies => "ZONE_LICENSE_TRUSTED_PROXIES",
             Self::AddressLimit => "ZONE_LICENSE_ADDRESS_LIMIT",
             Self::KeyLimit => "ZONE_LICENSE_KEY_LIMIT",
+            Self::RegistryService => "ZONE_REGISTRY_SERVICE",
+            Self::RegistryRepositories => "ZONE_REGISTRY_REPOSITORIES",
+            Self::RegistryKeyGeneration => "ZONE_REGISTRY_KEY_GENERATION",
         }
     }
 
@@ -101,6 +110,9 @@ mod tests {
                 "ZONE_LICENSE_TRUSTED_PROXIES",
                 "ZONE_LICENSE_ADDRESS_LIMIT",
                 "ZONE_LICENSE_KEY_LIMIT",
+                "ZONE_REGISTRY_SERVICE",
+                "ZONE_REGISTRY_REPOSITORIES",
+                "ZONE_REGISTRY_KEY_GENERATION",
             ]
         );
     }

@@ -13,6 +13,7 @@ use crate::polar::{AccessToken, WebhookSecret};
 use crate::private_key::PrivateKey;
 use crate::problem::Problem;
 use crate::products::Products;
+use crate::registry::{RegistrySettings, Repositories};
 use crate::signer::Signer;
 use crate::variable::Variable;
 
@@ -20,12 +21,16 @@ pub const DEFAULT_LISTEN: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 8080));
 pub const DEFAULT_SMTP_PORT: u16 = 587;
 pub const DEFAULT_SENDER_NAME: &str = "Zone";
+pub const DEFAULT_REGISTRY_KEY_GENERATION: NonZeroU32 = NonZeroU32::MIN;
 
 const LISTEN_REASON: &str = "it must be an IP address and port, such as 0.0.0.0:8080";
 const PORT_REASON: &str = "it must be a port number from 1 to 65535";
 const FROM_REASON: &str = "it must be a bare email address, such as licenses@example.com";
 const FROM_NAME_REASON: &str = "it must be a single line";
 const LIMIT_REASON: &str = "it must be a whole number of requests a minute, at least 1";
+const SERVICE_REASON: &str =
+    "it must be the registry's name with no spaces, such as registry.bitecode.ltd";
+const GENERATION_REASON: &str = "it must be a whole number from 1";
 
 pub struct Config {
     pub signer: Signer,
@@ -38,6 +43,7 @@ pub struct Config {
     pub revoked: Revoked,
     pub proxies: TrustedProxies,
     pub limits: Limits,
+    pub registry: Option<RegistrySettings>,
 }
 
 impl Config {
@@ -107,6 +113,7 @@ impl Config {
             DEFAULT_LICENSE_LIMIT,
             &mut problems,
         );
+        let registry = registry(&value, &mut problems);
 
         let host = required(value(Variable::SmtpHost), Variable::SmtpHost, &mut problems);
         let port = parsed(
@@ -163,6 +170,7 @@ impl Config {
                     address: address_limit?,
                     license: license_limit?,
                 },
+                registry: registry?,
             })
         })();
         match assembled {
@@ -189,6 +197,7 @@ impl fmt::Debug for Config {
             .field("revoked", &self.revoked)
             .field("proxies", &self.proxies)
             .field("limits", &self.limits)
+            .field("registry", &self.registry)
             .finish_non_exhaustive()
     }
 }
@@ -212,6 +221,49 @@ fn signer(
         .map_err(|error| problems.push(error.into()))
         .ok()?;
     Some(signer)
+}
+
+fn registry(
+    value: &impl Fn(Variable) -> Option<String>,
+    problems: &mut Vec<Problem>,
+) -> Option<Option<RegistrySettings>> {
+    let service = value(Variable::RegistryService).map(|service| {
+        checked(
+            service,
+            Variable::RegistryService,
+            SERVICE_REASON,
+            problems,
+            |service| {
+                !service
+                    .chars()
+                    .any(|character| character.is_whitespace() || character.is_control())
+            },
+        )
+    });
+    let repositories = match value(Variable::RegistryRepositories) {
+        None => Some(Repositories::default()),
+        Some(list) => Repositories::parse(&list)
+            .map_err(|error| {
+                problems.push(invalid(Variable::RegistryRepositories, &error.to_string()));
+            })
+            .ok(),
+    };
+    let generation = parsed(
+        value(Variable::RegistryKeyGeneration),
+        Variable::RegistryKeyGeneration,
+        DEFAULT_REGISTRY_KEY_GENERATION,
+        GENERATION_REASON,
+        problems,
+        |text| text.parse().ok(),
+    );
+    match service {
+        None => Some(None),
+        Some(service) => Some(Some(RegistrySettings {
+            service: service?,
+            repositories: repositories?,
+            generation: generation?,
+        })),
+    }
 }
 
 fn required(
@@ -785,5 +837,175 @@ mod tests {
         assert!(!shown.contains(PASSWORD), "{shown}");
         assert!(shown.contains(KEY_ID), "{shown}");
         assert!(shown.contains("smtp.example.test"), "{shown}");
+    }
+
+    fn registry(changes: &[(Variable, &str)]) -> Option<RegistrySettings> {
+        load(&with(changes)).unwrap().registry
+    }
+
+    #[test]
+    fn the_registry_is_off_without_a_service() {
+        assert_eq!(load(&complete()).unwrap().registry, None);
+        assert_eq!(
+            registry(&[
+                (Variable::RegistryRepositories, "zone/server"),
+                (Variable::RegistryKeyGeneration, "2"),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_blank_registry_service_counts_as_unset() {
+        for blank in ["", "  "] {
+            assert_eq!(
+                registry(&[(Variable::RegistryService, blank)]),
+                None,
+                "{blank:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_registry_service_alone_configures_the_registry_defaults() {
+        let settings = registry(&[(Variable::RegistryService, " registry.bitecode.ltd ")]).unwrap();
+        assert_eq!(settings.service, "registry.bitecode.ltd");
+        assert_eq!(settings.generation, DEFAULT_REGISTRY_KEY_GENERATION);
+        assert_eq!(settings.generation.get(), 1);
+        assert_eq!(settings.repositories, Repositories::default());
+        assert_eq!(
+            settings.repositories.iter().collect::<Vec<_>>(),
+            ["zone/server", "zone/manager", "zone/litellm"]
+        );
+    }
+
+    #[test]
+    fn every_registry_variable_is_honoured() {
+        let settings = registry(&[
+            (Variable::RegistryService, "registry.example.test"),
+            (
+                Variable::RegistryRepositories,
+                " zone/server , ,zone/runner,",
+            ),
+            (Variable::RegistryKeyGeneration, "3"),
+        ])
+        .unwrap();
+        assert_eq!(settings.service, "registry.example.test");
+        assert_eq!(
+            settings.repositories.iter().collect::<Vec<_>>(),
+            ["zone/server", "zone/runner"]
+        );
+        assert_eq!(settings.generation.get(), 3);
+    }
+
+    #[test]
+    fn a_blank_repository_list_means_the_default() {
+        let settings = registry(&[
+            (Variable::RegistryService, "registry.example.test"),
+            (Variable::RegistryRepositories, "  "),
+        ])
+        .unwrap();
+        assert_eq!(settings.repositories, Repositories::default());
+    }
+
+    #[test]
+    fn refuses_a_registry_key_generation_below_one() {
+        for generation in ["0", "-1", "one", "1.5", "4294967296"] {
+            let problems = problems(&with(&[
+                (Variable::RegistryService, "registry.example.test"),
+                (Variable::RegistryKeyGeneration, generation),
+            ]));
+            assert_eq!(
+                invalid(&problems),
+                [Variable::RegistryKeyGeneration],
+                "{generation}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_repository_list_without_a_repository() {
+        for list in [",", " , ,"] {
+            let problems = problems(&with(&[
+                (Variable::RegistryService, "registry.example.test"),
+                (Variable::RegistryRepositories, list),
+            ]));
+            assert_eq!(
+                invalid(&problems),
+                [Variable::RegistryRepositories],
+                "{list:?}"
+            );
+            assert_eq!(
+                problems[0].to_string(),
+                "ZONE_REGISTRY_REPOSITORIES is invalid: it names no repository"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_bad_repository_entry_naming_it() {
+        for (list, entry) in [
+            ("zone/server,Zone/Manager", "Zone/Manager"),
+            ("zone/server,zone//manager", "zone//manager"),
+            (
+                "zone/server,registry.example.test:5000/zone/server",
+                "registry.example.test:5000/zone/server",
+            ),
+            ("zone/server,zone/server", "zone/server"),
+        ] {
+            let problems = problems(&with(&[
+                (Variable::RegistryService, "registry.example.test"),
+                (Variable::RegistryRepositories, list),
+            ]));
+            assert_eq!(
+                invalid(&problems),
+                [Variable::RegistryRepositories],
+                "{list}"
+            );
+            assert!(
+                problems[0].to_string().contains(&format!("{entry:?}")),
+                "{}",
+                problems[0]
+            );
+        }
+    }
+
+    #[test]
+    fn checks_the_registry_variables_even_while_the_registry_is_off() {
+        let problems = problems(&with(&[
+            (Variable::RegistryRepositories, ","),
+            (Variable::RegistryKeyGeneration, "0"),
+        ]));
+        assert_eq!(
+            invalid(&problems),
+            [
+                Variable::RegistryRepositories,
+                Variable::RegistryKeyGeneration
+            ]
+        );
+    }
+
+    #[test]
+    fn refuses_a_registry_service_with_a_space() {
+        for service in ["registry example", "registry.example.test\tx"] {
+            let problems = problems(&with(&[(Variable::RegistryService, service)]));
+            assert_eq!(
+                invalid(&problems),
+                [Variable::RegistryService],
+                "{service:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn debug_shows_the_registry_settings() {
+        let config = load(&with(&[(
+            Variable::RegistryService,
+            "registry.example.test",
+        )]))
+        .unwrap();
+        let shown = format!("{config:?}");
+        assert!(shown.contains("registry.example.test"), "{shown}");
+        assert!(shown.contains("zone/litellm"), "{shown}");
     }
 }
