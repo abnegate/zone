@@ -4,6 +4,7 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::db::DbResult;
+use crate::db::fleet::state::State;
 use crate::db::tasks::{self, ACTIVE_RUN_STATUSES, TaskRunRow};
 use crate::services::chat::notice::Notice;
 use crate::services::task_progress;
@@ -11,8 +12,6 @@ use crate::services::task_progress;
 /// Why a revoked runner's live run ended, in the row and in the frame
 /// published to whoever was waiting on that run.
 pub const RUN_REVOKED: &str = "The runner this task was running on was revoked from the fleet.";
-
-const REVOKED: &str = "revoked";
 
 /// What a revoke changed: the runner's state before it, and what to publish
 /// once the transaction that revoked it commits.
@@ -68,7 +67,7 @@ pub async fn revoke(
          WHERE id = $1 AND state <> $2",
     )
     .bind(runner)
-    .bind(REVOKED)
+    .bind(State::Revoked.as_str())
     .bind(actor)
     .execute(&mut *transaction)
     .await?;
@@ -363,7 +362,7 @@ mod tests {
             "a second run was admitted while the owner drains: {second:?}"
         );
         assert_eq!(runs, 1, "a second run exists");
-        assert_eq!(state, (REVOKED.to_string(), Some(actor)));
+        assert_eq!(state, (State::Revoked.as_str().to_string(), Some(actor)));
 
         assert!(
             kept_heartbeat.expect("the heartbeat"),
@@ -477,7 +476,7 @@ mod tests {
         tenant.cleanup().await;
 
         assert!(once.is_empty(), "a runner with no work stopped runs");
-        assert_eq!(previous, REVOKED);
+        assert_eq!(previous, State::Revoked.as_str());
         assert_eq!(changed_by, Some(first));
         assert!(unknown.is_none(), "an unknown runner was revoked");
     }
