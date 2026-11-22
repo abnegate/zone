@@ -384,7 +384,10 @@ class Client {
       body: JSON.stringify(request),
     });
     if (!response.ok) {
-      throw new Error(`Failed to create organization: ${response.status}`);
+      throw this.refusal(
+        await this.parseErrorResponse(response),
+        `Failed to create organization: ${response.status}`
+      );
     }
     const data = parse(OrganizationResponseSchema, await response.json());
     return data.organization;
@@ -397,7 +400,10 @@ class Client {
       body: JSON.stringify(request),
     });
     if (!response.ok) {
-      throw new Error(`Failed to update organization: ${response.status}`);
+      throw this.refusal(
+        await this.parseErrorResponse(response),
+        `Failed to update organization: ${response.status}`
+      );
     }
     const data = parse(OrganizationResponseSchema, await response.json());
     return data.organization;

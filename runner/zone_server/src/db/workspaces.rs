@@ -1,7 +1,7 @@
 //! Workspace database queries
 
 use chrono::NaiveDateTime;
-use sqlx::{PgConnection, PgPool};
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use uuid::Uuid;
 
 use super::DbResult;
@@ -87,7 +87,7 @@ pub async fn get_workspace(pool: &PgPool, id: Uuid) -> DbResult<Option<Workspace
 
 /// Create a new workspace
 pub async fn create_workspace(
-    pool: &PgPool,
+    executor: impl PgExecutor<'_>,
     organization_id: Uuid,
     name: &str,
     slug: &str,
@@ -104,7 +104,7 @@ pub async fn create_workspace(
         slug,
         description
     )
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     Ok(WorkspaceRow {

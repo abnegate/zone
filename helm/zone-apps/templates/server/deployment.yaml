@@ -106,8 +106,12 @@ spec:
             - name: APP_BASE_URL
               value: {{ . | quote }}
             {{- end }}
+            {{- with include "zone-apps.server.trustedProxies" . }}
+            - name: ZONE_TRUSTED_PROXIES
+              value: {{ . | quote }}
+            {{- end }}
             {{- range $key, $value := .Values.server.env }}
-            {{- if ne $key "APP_BASE_URL" }}
+            {{- if not (has $key (list "APP_BASE_URL" "ZONE_TRUSTED_PROXIES")) }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}

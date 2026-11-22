@@ -45,7 +45,9 @@ services:
       - "80:80"
       - "443:443"
     networks:
-      - edge
+      edge:
+        # The manager trusts X-Forwarded-For from this address alone.
+        ipv4_address: 172.31.0.250
     labels:
       - traefik.enable=true
       - traefik.docker.network=zone_edge
@@ -346,6 +348,9 @@ services:
       # Origins a phone types into the Zone app. Docker cannot see the host
       # LAN address, so set this to http://<lan-ip> (comma-separated).
       - ZONE_CONNECT_URL=${ZONE_CONNECT_URL:-}
+      # Peers whose X-Forwarded-For names the client: Traefik's pinned address
+      # alone, not zone_edge, whose gateway every published port arrives through.
+      - ZONE_TRUSTED_PROXIES=${ZONE_TRUSTED_PROXIES-172.31.0.250}
       - ZONE_AUTO_ENABLED=${ZONE_AUTO_ENABLED:-true}
       - ZONE_AUTO_TICK_SECS=${ZONE_AUTO_TICK_SECS:-15}
       - ZONE_AUTO_PARALLEL_TASKS=${ZONE_AUTO_PARALLEL_TASKS:-3}
@@ -825,6 +830,8 @@ networks:
       com.docker.network.bridge.name: zone_dmz
     ipam:
       config:
+        # .250 traefik, .251 the dev console. Docker hands out dynamic
+        # addresses from the bottom, so pins stay at the top.
         - subnet: 172.31.0.0/24
 
   internal:
@@ -835,7 +842,8 @@ networks:
       com.docker.network.bridge.name: zone_internal
     ipam:
       config:
-        # .20 postgres, .21 valkey, .22 prometheus — see extra_hosts in docker-compose.vpn.yml
+        # .20 postgres, .21 valkey, .22 prometheus — see extra_hosts in docker-compose.vpn.yml.
+        # .251 the dev console.
         - subnet: 172.30.0.0/24
 
 volumes:

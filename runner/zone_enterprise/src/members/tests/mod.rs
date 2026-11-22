@@ -31,6 +31,7 @@ fn community_allows_three_members() {
 #[test]
 fn code_is_the_wire_contract() {
     assert_eq!(MEMBER_CAP_REACHED, "member_cap_reached");
+    assert_eq!(MEMBER_ADMISSION_BUSY, "member_admission_busy");
 }
 
 #[test]

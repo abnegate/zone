@@ -131,6 +131,16 @@ server:
     ZONE_MCP_CONFIG: ""
     ZONE_MCP_SERVERS: ""
 
+  # Comma-separated CIDRs of the peers whose X-Forwarded-For zone-server
+  # believes, passed as ZONE_TRUSTED_PROXIES. Empty leaves it unset, so only
+  # loopback is trusted: every request arrives from the ingress controller's
+  # pod, and everyone shares one single sign-on throttle bucket. Set it to
+  # your ingress controller's pod CIDR, never a range your clients use: a
+  # client inside a trusted range is skipped as a proxy, so whatever it puts
+  # to the left of its own address in X-Forwarded-For becomes its address.
+  # env.ZONE_TRUSTED_PROXIES does the same and wins.
+  trustedProxies: ""
+
   # Origin a browser reaches Zone at, scheme://host[:port] with no path,
   # passed to zone-server as APP_BASE_URL. Empty derives it from the first
   # ingress host, https when ingress.tls covers that host and http otherwise;

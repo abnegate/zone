@@ -294,7 +294,7 @@ async fn test_get_invitation_by_token_returns_none_for_accepted() {
         .expect("Failed to create user")
         .id;
 
-    invitations::accept_invitation(&pool, &token, user_id)
+    invitations::accept_invitation(&mut pool.acquire().await.unwrap(), &token, user_id)
         .await
         .expect("Failed to accept invitation");
 
@@ -360,7 +360,7 @@ async fn test_accept_invitation_adds_user_to_org_and_workspaces() {
         .id;
 
     // Accept invitation
-    invitations::accept_invitation(&pool, &token, user_id)
+    invitations::accept_invitation(&mut pool.acquire().await.unwrap(), &token, user_id)
         .await
         .expect("Failed to accept invitation");
 
@@ -412,7 +412,7 @@ async fn test_accept_invitation_marks_accepted_timestamp() {
     let before_accept = Utc::now() - chrono::Duration::seconds(2); // Allow 2s tolerance for clock skew
 
     // Accept invitation
-    invitations::accept_invitation(&pool, &token, user_id)
+    invitations::accept_invitation(&mut pool.acquire().await.unwrap(), &token, user_id)
         .await
         .expect("Failed to accept invitation");
 
@@ -469,7 +469,8 @@ async fn test_accept_invitation_fails_for_expired_token() {
         .id;
 
     // Try to accept expired invitation
-    let result = invitations::accept_invitation(&pool, &token, user_id).await;
+    let result =
+        invitations::accept_invitation(&mut pool.acquire().await.unwrap(), &token, user_id).await;
 
     assert!(result.is_err(), "Should not accept expired invitation");
 }
@@ -499,12 +500,13 @@ async fn test_accept_invitation_fails_for_already_accepted() {
         .id;
 
     // Accept invitation first time
-    invitations::accept_invitation(&pool, &token, user_id)
+    invitations::accept_invitation(&mut pool.acquire().await.unwrap(), &token, user_id)
         .await
         .expect("Failed to accept invitation");
 
     // Try to accept again
-    let result = invitations::accept_invitation(&pool, &token, user_id).await;
+    let result =
+        invitations::accept_invitation(&mut pool.acquire().await.unwrap(), &token, user_id).await;
 
     assert!(
         result.is_err(),
@@ -556,7 +558,7 @@ async fn test_list_pending_invitations() {
         .expect("Failed to create user")
         .id;
 
-    invitations::accept_invitation(&pool, &token3, user_id)
+    invitations::accept_invitation(&mut pool.acquire().await.unwrap(), &token3, user_id)
         .await
         .expect("Failed to accept invitation");
 
@@ -676,7 +678,7 @@ async fn test_get_pending_invitation_for_email_returns_none_for_accepted() {
         .expect("Failed to create user")
         .id;
 
-    invitations::accept_invitation(&pool, &token, user_id)
+    invitations::accept_invitation(&mut pool.acquire().await.unwrap(), &token, user_id)
         .await
         .expect("Failed to accept invitation");
 

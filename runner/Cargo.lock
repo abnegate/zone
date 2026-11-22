@@ -9908,6 +9908,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "iana-time-zone",
+ "ipnet",
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",

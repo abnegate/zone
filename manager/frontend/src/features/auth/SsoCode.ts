@@ -13,6 +13,7 @@ export const SsoCode = {
   AssertionInvalid: 'sso_assertion_invalid',
   SignInRefused: 'sso_sign_in_refused',
   SignInFailed: 'sso_sign_in_failed',
+  RateLimited: 'sso_rate_limited',
 } as const;
 
 export type SsoCode = (typeof SsoCode)[keyof typeof SsoCode];

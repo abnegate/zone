@@ -3,8 +3,9 @@ import { Link, useNavigate } from 'react-router-dom';
 import AuthCard from '../components/AuthCard';
 import AuthStatus from '../components/AuthStatus';
 import { useAuth } from '../context';
+import { SsoCode } from '../SsoCode';
 import { clearAttempt, readAttempt, type SsoAttempt } from '../ssoAttempt';
-import { messageOf, SSO_INCOMPLETE, ssoMessage } from '../ssoMessages';
+import { messageOf, SSO_INCOMPLETE, SSO_MESSAGES, ssoMessage } from '../ssoMessages';
 import './AuthPage.css';
 
 interface Callback {
@@ -36,7 +37,14 @@ function refusalOf(callback: Callback, error: string): string {
   );
 }
 
+function throttled(callback: Callback, attempt: SsoAttempt | null): boolean {
+  return attempt !== null && callback.state === null && callback.error === SsoCode.RateLimited;
+}
+
 function outcomeOf(callback: Callback, attempt: SsoAttempt | null): Outcome {
+  if (throttled(callback, attempt)) {
+    return { kind: 'failed', message: SSO_MESSAGES[SsoCode.RateLimited] };
+  }
   if (attempt === null || !callback.state || callback.state !== attempt.state) {
     return { kind: 'failed', message: SSO_INCOMPLETE };
   }

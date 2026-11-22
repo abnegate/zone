@@ -166,13 +166,17 @@ async fn a_member_reads_both_layers_and_changes_neither() {
     workspace.assert_status(StatusCode::OK);
     assert_eq!(workspace.json_value()["editable"], false);
 
-    uncoded(
-        &fixture.update_organization(&member.token, &change).await,
-        StatusCode::FORBIDDEN,
+    let refused = fixture.update_organization(&member.token, &change).await;
+    uncoded(&refused, StatusCode::FORBIDDEN);
+    assert_eq!(
+        refused.json_value()["error"],
+        "This needs the policies:update permission in this organization."
     );
-    uncoded(
-        &fixture.update_workspace(&member.token, &change).await,
-        StatusCode::FORBIDDEN,
+    let refused = fixture.update_workspace(&member.token, &change).await;
+    uncoded(&refused, StatusCode::FORBIDDEN);
+    assert_eq!(
+        refused.json_value()["error"],
+        "This needs the workspace_policies:update permission in this workspace."
     );
     assert!(
         fixture

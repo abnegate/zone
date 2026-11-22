@@ -43,6 +43,20 @@ fn duplicate(error: &sqlx::Error) -> bool {
         .is_some_and(|error| error.is_unique_violation())
 }
 
+fn accepting(error: sqlx::Error) -> Refusal {
+    match error {
+        sqlx::Error::RowNotFound => refusal(
+            StatusCode::NOT_FOUND,
+            "Invitation not found or already accepted",
+        ),
+        error if duplicate(&error) => refusal(
+            StatusCode::CONFLICT,
+            "You are already a member of this organization",
+        ),
+        error => unavailable(error),
+    }
+}
+
 /// Invitation response
 #[derive(Debug, Serialize)]
 pub struct InvitationResponse {
@@ -228,7 +242,8 @@ pub async fn create_invitation(
         }
     }
 
-    members::admit(&state, existing_user.map(|user| user.id)).await?;
+    let cap = members::cap(&state).await?;
+    members::check(&state, cap, existing_user.map(|user| user.id)).await?;
 
     let existing_invitation =
         invitations::get_pending_invitation_for_email(state.db(), &request.email, organization_id)
@@ -416,21 +431,13 @@ pub async fn accept_invitation(
         ));
     }
 
-    members::admit(&state, Some(user_id)).await?;
-
-    invitations::accept_invitation(state.db(), &token, user_id)
+    let cap = members::cap(&state).await?;
+    let mut transaction = state.db().begin().await.map_err(unavailable)?;
+    members::admit(&mut transaction, cap, Some(user_id)).await?;
+    invitations::accept_invitation(&mut transaction, &token, user_id)
         .await
-        .map_err(|error| match error {
-            sqlx::Error::RowNotFound => refusal(
-                StatusCode::NOT_FOUND,
-                "Invitation not found or already accepted",
-            ),
-            error if duplicate(&error) => refusal(
-                StatusCode::CONFLICT,
-                "You are already a member of this organization",
-            ),
-            error => unavailable(error),
-        })?;
+        .map_err(accepting)?;
+    transaction.commit().await.map_err(accepting)?;
 
     audit(
         state.db(),

@@ -173,9 +173,10 @@ pub async fn create(
         return refusal(StatusCode::UNAUTHORIZED, "Invalid user ID in token");
     };
 
-    if let Err(refusal) = members::admit(&state, Some(user_id)).await {
-        return refusal.into_response();
-    }
+    let cap = match members::cap(&state).await {
+        Ok(cap) => cap,
+        Err(refusal) => return refusal.into_response(),
+    };
 
     let mut transaction = match state.db().begin().await {
         Ok(transaction) => transaction,
@@ -184,6 +185,10 @@ pub async fn create(
             return internal();
         }
     };
+
+    if let Err(refusal) = members::admit(&mut transaction, cap, Some(user_id)).await {
+        return refusal.into_response();
+    }
 
     let organization = match organizations::create_organization_tx(
         &mut transaction,
@@ -253,21 +258,7 @@ pub async fn update(
     OrganizationPermit(member): OrganizationPermit<{ Permission::OrganizationUpdate.index() }>,
     Json(request): Json<UpdateOrganizationRequest>,
 ) -> impl IntoResponse {
-    if request.is_active == Some(true)
-        && let Err(refusal) = members::reactivate(&state, member.organization_id).await
-    {
-        return refusal.into_response();
-    }
-
-    match organizations::update_organization(
-        state.db(),
-        member.organization_id,
-        request.name.as_deref(),
-        request.description.as_deref(),
-        request.is_active,
-    )
-    .await
-    {
+    match apply(&state, member.organization_id, &request).await {
         Ok(Some(organization)) => {
             let organization =
                 OrganizationResponse::from(organization).with_membership(held(&member));
@@ -293,11 +284,41 @@ pub async fn update(
             Json(SingleOrganizationResponse { organization }).into_response()
         }
         Ok(None) => refusal(StatusCode::NOT_FOUND, ORGANIZATION_NOT_FOUND),
-        Err(error) => {
-            tracing::error!("Database error: {}", error);
-            internal()
-        }
+        Err(refusal) => *refusal,
     }
+}
+
+/// Applies `request`, admitting everyone an activation would make a member again in the same
+/// transaction.
+async fn apply(
+    state: &AppState,
+    organization: Uuid,
+    request: &UpdateOrganizationRequest,
+) -> Result<Option<organizations::OrganizationRow>, Box<Response>> {
+    let cap = match request.is_active {
+        Some(true) => Some(members::cap(state).await?),
+        _ => None,
+    };
+    let mut transaction = state.db().begin().await.map_err(failed)?;
+    if let Some(cap) = cap {
+        members::reactivate(&mut transaction, cap, organization).await?;
+    }
+    let updated = organizations::update_organization(
+        &mut *transaction,
+        organization,
+        request.name.as_deref(),
+        request.description.as_deref(),
+        request.is_active,
+    )
+    .await
+    .map_err(failed)?;
+    transaction.commit().await.map_err(failed)?;
+    Ok(updated)
+}
+
+fn failed(error: sqlx::Error) -> Box<Response> {
+    tracing::error!("Database error: {}", error);
+    Box::new(internal())
 }
 
 /// DELETE /api/organizations/:org_id - Delete org (requires organization:delete)
@@ -592,66 +613,73 @@ pub async fn add_member(
         }
     };
 
-    if let Err(refusal) = members::admit(&state, Some(target)).await {
-        return refusal.into_response();
-    }
+    let (row, status) = match seat(&state, &member, target, role).await {
+        Ok(seated) => seated,
+        Err(refusal) => return *refusal,
+    };
+    let user_id = row.user_id;
+    let membership = MembershipResponse::organization(None, Grant::organization(row.role));
+    let response = describe(&state, row, membership).await;
+    audit_member(
+        &state,
+        &member,
+        actions::MEMBER_ADDED,
+        user_id,
+        Some(&response.membership),
+    )
+    .await;
+    (status, Json(response)).into_response()
+}
 
-    let (added, status) =
-        match organization_members::get_member(state.db(), member.organization_id, target).await {
-            Ok(Some(existing)) if existing.is_active => {
-                return refusal(
-                    StatusCode::CONFLICT,
-                    "User is already a member of this organization",
-                );
-            }
-            Ok(Some(_)) => (
-                organization_members::reactivate_member(
-                    state.db(),
-                    member.organization_id,
-                    target,
-                    role,
-                    Some(member.user_id),
-                )
-                .await,
-                StatusCode::OK,
-            ),
-            Ok(None) => (
-                organization_members::add_member(
-                    state.db(),
-                    member.organization_id,
-                    target,
-                    role,
-                    Some(member.user_id),
-                )
-                .await,
-                StatusCode::CREATED,
-            ),
-            Err(error) => {
-                tracing::error!("Database error checking existing member: {}", error);
-                return internal();
-            }
-        };
-
-    match added {
-        Ok(row) => {
-            let user_id = row.user_id;
-            let membership = MembershipResponse::organization(None, Grant::organization(row.role));
-            let response = describe(&state, row, membership).await;
-            audit_member(
-                &state,
-                &member,
-                actions::MEMBER_ADDED,
-                user_id,
-                Some(&response.membership),
+/// Admits `target` and adds them to `member`'s organization, or restores their removed
+/// membership, in one transaction.
+async fn seat(
+    state: &AppState,
+    member: &OrganizationMember,
+    target: Uuid,
+    role: OrgRole,
+) -> Result<(OrganizationMemberRow, StatusCode), Box<Response>> {
+    let organization = member.organization_id;
+    let invited_by = Some(member.user_id);
+    let cap = members::cap(state).await?;
+    let mut transaction = state.db().begin().await.map_err(failed)?;
+    members::admit(&mut transaction, cap, Some(target)).await?;
+    let existing = organization_members::get_member(&mut *transaction, organization, target)
+        .await
+        .map_err(failed)?;
+    let (row, status) = match existing {
+        Some(existing) if existing.is_active => {
+            return Err(Box::new(refusal(
+                StatusCode::CONFLICT,
+                "User is already a member of this organization",
+            )));
+        }
+        Some(_) => (
+            organization_members::reactivate_member(
+                &mut *transaction,
+                organization,
+                target,
+                role,
+                invited_by,
             )
-            .await;
-            (status, Json(response)).into_response()
-        }
-        Err(error) => {
-            tracing::error!("Database error adding member: {}", error);
-            internal()
-        }
-    }
+            .await,
+            StatusCode::OK,
+        ),
+        None => (
+            organization_members::add_member(
+                &mut *transaction,
+                organization,
+                target,
+                role,
+                invited_by,
+            )
+            .await,
+            StatusCode::CREATED,
+        ),
+    };
+    let row = row.map_err(failed)?;
+    transaction.commit().await.map_err(failed)?;
+    Ok((row, status))
 }
 
 #[derive(Debug, Deserialize)]

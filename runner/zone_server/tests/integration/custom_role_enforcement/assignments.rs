@@ -52,19 +52,11 @@ async fn organization_caller(
     pool: &PgPool,
     organization: Uuid,
     owner: Uuid,
-    creator: Uuid,
     permissions: &[Permission],
 ) -> Uuid {
     let caller = user(pool).await;
     seat_organization(pool, organization, caller, OrgRole::Member).await;
-    let held = role(
-        pool,
-        organization,
-        creator,
-        Scope::Organization,
-        permissions,
-    )
-    .await;
+    let held = role(pool, organization, Scope::Organization, permissions).await;
     assign_organization(pool, organization, owner, caller, held).await;
     caller
 }
@@ -74,12 +66,11 @@ async fn workspace_caller(
     pool: &PgPool,
     (organization, workspace): (Uuid, Uuid),
     owner: Uuid,
-    creator: Uuid,
     permissions: &[Permission],
 ) -> Uuid {
     let caller = user(pool).await;
     seat_workspace(pool, workspace, caller, WorkspaceRole::Viewer).await;
-    let held = role(pool, organization, creator, Scope::Workspace, permissions).await;
+    let held = role(pool, organization, Scope::Workspace, permissions).await;
     assign_workspace(pool, workspace, owner, caller, held).await;
     caller
 }
@@ -112,22 +103,13 @@ async fn change_workspace(
 async fn an_organization_assignment_never_exceeds_the_caller() {
     let fixture = fixture().await;
     let pool = fixture.pool();
-    let creator = fixture.owner.id;
     let (organization, owner) = owned_organization(pool).await;
     let member = user(pool).await;
     seat_organization(pool, organization, member, OrgRole::Member).await;
-    let caller = organization_caller(
-        pool,
-        organization,
-        owner,
-        creator,
-        &[Permission::MembersUpdate],
-    )
-    .await;
+    let caller = organization_caller(pool, organization, owner, &[Permission::MembersUpdate]).await;
     let auditors = role(
         pool,
         organization,
-        creator,
         Scope::Organization,
         &[Permission::AuditLogsRead],
     )
@@ -135,7 +117,6 @@ async fn an_organization_assignment_never_exceeds_the_caller() {
     let updaters = role(
         pool,
         organization,
-        creator,
         Scope::Organization,
         &[Permission::MembersUpdate],
     )
@@ -195,7 +176,6 @@ async fn an_organization_assignment_never_exceeds_the_caller() {
 async fn a_workspace_assignment_never_exceeds_the_caller() {
     let fixture = fixture().await;
     let pool = fixture.pool();
-    let creator = fixture.owner.id;
     let organization = organization(pool).await;
     let (workspace, owner) = owned_workspace(pool, organization).await;
     let member = user(pool).await;
@@ -204,19 +184,17 @@ async fn a_workspace_assignment_never_exceeds_the_caller() {
         pool,
         (organization, workspace),
         owner,
-        creator,
         &[Permission::WorkspaceMembersUpdate],
     )
     .await;
     let writers = role(
         pool,
         organization,
-        creator,
         Scope::Workspace,
         &[Permission::WorkspaceWrite],
     )
     .await;
-    let readers = role(pool, organization, creator, Scope::Workspace, &[]).await;
+    let readers = role(pool, organization, Scope::Workspace, &[]).await;
 
     let exceeding =
         change_workspace(pool, workspace, member, Assignment::Custom(writers), caller).await;
@@ -267,7 +245,6 @@ async fn a_workspace_assignment_never_exceeds_the_caller() {
 async fn a_role_of_another_organization_or_scope_is_missing() {
     let fixture = fixture().await;
     let pool = fixture.pool();
-    let creator = fixture.owner.id;
     let (organization, owner) = owned_organization(pool).await;
     let elsewhere = self::organization(pool).await;
     let (workspace, workspace_owner) = owned_workspace(pool, organization).await;
@@ -276,8 +253,8 @@ async fn a_role_of_another_organization_or_scope_is_missing() {
     seat_workspace(pool, workspace, member, WorkspaceRole::Viewer).await;
 
     for missing in [
-        role(pool, elsewhere, creator, Scope::Organization, &[]).await,
-        role(pool, organization, creator, Scope::Workspace, &[]).await,
+        role(pool, elsewhere, Scope::Organization, &[]).await,
+        role(pool, organization, Scope::Workspace, &[]).await,
         Uuid::new_v4(),
     ] {
         let outcome = change_organization(
@@ -291,8 +268,8 @@ async fn a_role_of_another_organization_or_scope_is_missing() {
         assert!(matches!(outcome, RoleChange::RoleMissing), "{outcome:?}");
     }
     for missing in [
-        role(pool, elsewhere, creator, Scope::Workspace, &[]).await,
-        role(pool, organization, creator, Scope::Organization, &[]).await,
+        role(pool, elsewhere, Scope::Workspace, &[]).await,
+        role(pool, organization, Scope::Organization, &[]).await,
         Uuid::new_v4(),
     ] {
         let outcome = change_workspace(
@@ -324,17 +301,10 @@ async fn a_role_of_another_organization_or_scope_is_missing() {
 async fn a_custom_holder_never_touches_an_organization_admin_or_owner() {
     let fixture = fixture().await;
     let pool = fixture.pool();
-    let creator = fixture.owner.id;
     let (organization, owner) = owned_organization(pool).await;
-    let caller = organization_caller(
-        pool,
-        organization,
-        owner,
-        creator,
-        &composable(Scope::Organization),
-    )
-    .await;
-    let fellow = role(pool, organization, creator, Scope::Organization, &[]).await;
+    let caller =
+        organization_caller(pool, organization, owner, &composable(Scope::Organization)).await;
+    let fellow = role(pool, organization, Scope::Organization, &[]).await;
 
     for held in [OrgRole::Admin, OrgRole::Owner] {
         let target = user(pool).await;
@@ -379,18 +349,16 @@ async fn a_custom_holder_never_touches_an_organization_admin_or_owner() {
 async fn a_custom_holder_never_touches_a_workspace_admin_or_owner() {
     let fixture = fixture().await;
     let pool = fixture.pool();
-    let creator = fixture.owner.id;
     let organization = organization(pool).await;
     let (workspace, owner) = owned_workspace(pool, organization).await;
     let caller = workspace_caller(
         pool,
         (organization, workspace),
         owner,
-        creator,
         &composable(Scope::Workspace),
     )
     .await;
-    let fellow = role(pool, organization, creator, Scope::Workspace, &[]).await;
+    let fellow = role(pool, organization, Scope::Workspace, &[]).await;
 
     for held in [WorkspaceRole::Admin, WorkspaceRole::Owner] {
         let target = user(pool).await;
@@ -434,30 +402,21 @@ async fn a_custom_holder_never_touches_a_workspace_admin_or_owner() {
 async fn a_custom_holder_who_does_not_cover_a_custom_target_is_refused_as_exceeding() {
     let fixture = fixture().await;
     let pool = fixture.pool();
-    let creator = fixture.owner.id;
     let (organization, owner) = owned_organization(pool).await;
     let (workspace, workspace_owner) = owned_workspace(pool, organization).await;
     let caller = organization_caller(
         pool,
         organization,
         owner,
-        creator,
         &[Permission::MembersUpdate, Permission::MembersDelete],
     )
     .await;
-    let target = organization_caller(
-        pool,
-        organization,
-        owner,
-        creator,
-        &[Permission::OrganizationUpdate],
-    )
-    .await;
+    let target =
+        organization_caller(pool, organization, owner, &[Permission::OrganizationUpdate]).await;
     let workspace_manager = workspace_caller(
         pool,
         (organization, workspace),
         workspace_owner,
-        creator,
         &[
             Permission::WorkspaceMembersUpdate,
             Permission::WorkspaceMembersDelete,
@@ -468,7 +427,6 @@ async fn a_custom_holder_who_does_not_cover_a_custom_target_is_refused_as_exceed
         pool,
         (organization, workspace),
         workspace_owner,
-        creator,
         &[Permission::WorkspaceUpdate],
     )
     .await;
@@ -518,12 +476,10 @@ async fn a_custom_holder_who_does_not_cover_a_custom_target_is_refused_as_exceed
 async fn the_last_organization_owner_is_never_given_a_custom_role() {
     let fixture = fixture().await;
     let pool = fixture.pool();
-    let creator = fixture.owner.id;
     let (organization, owner) = owned_organization(pool).await;
     let everything = role(
         pool,
         organization,
-        creator,
         Scope::Organization,
         &composable(Scope::Organization),
     )
@@ -577,12 +533,10 @@ async fn the_last_organization_owner_is_never_given_a_custom_role() {
 async fn the_last_workspace_owner_is_never_given_a_custom_role() {
     let fixture = fixture().await;
     let pool = fixture.pool();
-    let creator = fixture.owner.id;
     let organization = organization(pool).await;
     let everything = role(
         pool,
         organization,
-        creator,
         Scope::Workspace,
         &composable(Scope::Workspace),
     )
