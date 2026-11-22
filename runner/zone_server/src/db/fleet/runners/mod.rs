@@ -25,6 +25,9 @@ use crate::db::fleet::transition::Transition;
 /// How recently a runner must have been seen to count as connected.
 pub const CONNECTED: TimeDelta = TimeDelta::seconds(60);
 
+const RUNS: &str = "(SELECT COUNT(*) FROM task_runs run \
+     WHERE run.runner_id = runner.id AND run.status IN ('running', 'waiting')) AS runs";
+
 /// Registers the process `instance` under `name`, or refreshes the row that already holds the
 /// name, keeping its state. `started_at` restarts only when another process takes the name over.
 pub async fn upsert(
@@ -75,13 +78,19 @@ pub async fn get(executor: impl PgExecutor<'_>, id: Uuid) -> DbResult<Option<Run
 
 pub async fn list(executor: impl PgExecutor<'_>) -> DbResult<Vec<Listed>> {
     sqlx::query_as(AssertSqlSafe(format!(
-        "SELECT {COLUMNS}, ( \
-             SELECT COUNT(*) FROM task_runs run \
-             WHERE run.runner_id = runner.id AND run.status IN ('running', 'waiting') \
-         ) AS runs \
-         FROM fleet_runners runner ORDER BY runner.name"
+        "SELECT {COLUMNS}, {RUNS} FROM fleet_runners runner ORDER BY runner.name"
     )))
     .fetch_all(executor)
+    .await
+}
+
+/// Runner `id` as [`list`] gives it, with its live runs.
+pub async fn listed(executor: impl PgExecutor<'_>, id: Uuid) -> DbResult<Option<Listed>> {
+    sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT {COLUMNS}, {RUNS} FROM fleet_runners runner WHERE runner.id = $1"
+    )))
+    .bind(id)
+    .fetch_optional(executor)
     .await
 }
 
