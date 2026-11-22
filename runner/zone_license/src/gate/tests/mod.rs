@@ -11,7 +11,7 @@ use base64::engine::general_purpose::STANDARD;
 use chrono::TimeDelta;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use zone_enterprise::{GRACE_DAYS, Payload, Plan, TrustedKey};
+use zone_enterprise::{GRACE_DAYS, Payload, Plan, Status, TrustedKey};
 
 use super::*;
 use crate::logging;
@@ -474,6 +474,25 @@ fn an_enterprise_license_one_second_after_grace_is_lapsed() {
             error: None,
         }
     );
+}
+
+#[test]
+fn the_gate_admits_exactly_what_distribution_is_entitled_to() {
+    let clocks: [fn() -> DateTime<Utc>; 4] =
+        [active, in_grace, last_second_of_grace, second_after_grace];
+    for plan in Plan::ALL {
+        let key = key(plan);
+        for clock in clocks {
+            let license = keyring().verify(&key).unwrap();
+            let admitted = gate().with_clock(clock).admit(&presented(&key));
+            assert_eq!(
+                admitted.is_ok(),
+                Feature::Distribution.entitled(Some(&license), clock()),
+                "{plan:?} at {}",
+                clock()
+            );
+        }
+    }
 }
 
 #[test]

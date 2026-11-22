@@ -19,7 +19,7 @@ use std::net::{IpAddr, SocketAddr};
 use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
-use zone_enterprise::{Feature, Keyring, License, Status};
+use zone_enterprise::{Feature, Keyring, License};
 
 pub use client_address::{FORWARDED_FOR, client_address};
 pub use code::Code;
@@ -90,14 +90,14 @@ impl Gate {
         if Uuid::try_parse(credentials.user()).ok() != Some(license.id()) {
             return refuse(Refusal::Mismatched);
         }
-        if !license.plan().includes(Feature::Distribution) {
-            return refuse(Refusal::Ineligible);
+        if Feature::Distribution.entitled(Some(&license), now) {
+            return Ok(license);
         }
-        if !matches!(license.status(now), Status::Active | Status::Grace) {
-            return refuse(Refusal::Lapsed);
+        if Feature::Distribution.enforced(Some(&license)) {
+            refuse(Refusal::Lapsed)
+        } else {
+            refuse(Refusal::Ineligible)
         }
-        debug_assert!(Feature::Distribution.entitled(Some(&license), now));
-        Ok(license)
     }
 }
 
