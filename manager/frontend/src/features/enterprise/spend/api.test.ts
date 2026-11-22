@@ -106,14 +106,14 @@ describe('spendApi.report', () => {
   });
 
   it('keeps an uncoded refusal as an ApiError with the server message', async () => {
-    respond({ error: 'Only organization owners and admins can see spend or change budgets' }, 403);
+    respond({ error: 'This needs the spend:read permission in this organization.' }, 403);
 
     const error = await failure(spendApi.report(ORGANIZATION_ID, QUERY));
 
     expect(error).not.toBeInstanceOf(SpendRefusal);
     expect(error).toBeInstanceOf(ApiError);
     expect((error as ApiError).message).toBe(
-      'Failed to load spend: Only organization owners and admins can see spend or change budgets'
+      'Failed to load spend: This needs the spend:read permission in this organization.'
     );
   });
 

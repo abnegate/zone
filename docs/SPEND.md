@@ -67,7 +67,7 @@ unblocked.
 | Reports and the CSV export | Holders of `spend:read` |
 | Budgets, to see | Holders of `spend:read` |
 | Budgets, to change | Holders of `spend:read` and `spend:update`, with an entitled license |
-| Budget notices | Active organization owners and admins, and for a workspace budget, that workspace's owners and admins too |
+| Budget notices | Active organization members who hold `spend:read`, by a built-in or a custom role, and for a workspace budget, that workspace's built-in owners and admins too |
 
 Organization owners and admins hold both permissions. With Zone Enterprise an
 organization can also give them to a custom role (see [ROLES.md](ROLES.md)):
@@ -79,10 +79,12 @@ to a caller without `spend:update`. The spend license gate and the custom
 roles one are separate: a member who holds a custom role keeps its spend
 permissions on a Team license, and a Team license is all spend needs.
 
-Other members of the organization, workspace admins included, get `403` "Only
-organization owners and admins can see spend or change budgets". Someone who
-isn't a member, or whose custom role grants nothing in the organization, gets
-`404` "Organization not found", as if the organization didn't exist.
+Other members of the organization, workspace admins included, get `403` with
+the permission they lack: "This needs the spend:read permission in this
+organization." for reports, exports and the budget list, and "This needs the
+spend:update permission in this organization." for a budget change. Someone
+who isn't a member, or whose custom role grants nothing in the organization,
+gets `404` "Organization not found", as if the organization didn't exist.
 
 ## What's counted
 
@@ -387,13 +389,14 @@ Each budget gets one warning notice and one exhaustion notice a month. When
 spend passes both between two runs, only the exhaustion notice goes. A soft
 budget gets the same notices as a hard one.
 
-Notices go to built-in roles only: a custom role that holds `spend:read`
-sees the budgets but receives none of their notices.
+Notices go to whoever can see the budget: a member whose custom
+organization role holds `spend:read` gets them as a built-in owner or admin
+does, and a custom role without it gets none.
 
 A notice goes:
 
-- by email, when SMTP is configured, to the organization's built-in owners
-  and admins, and for a workspace budget to that workspace's built-in owners
+- by email, when SMTP is configured, to the organization's members who hold
+  `spend:read`, and for a workspace budget to that workspace's built-in owners
   and admins too, once per address and never to a deactivated account, one
   at a time, each waiting up to 60 seconds;
 - to the server's notification channels:
@@ -478,7 +481,8 @@ These responses carry no code:
 
 | Status | Message |
 |---|---|
-| 403 | Only organization owners and admins can see spend or change budgets |
+| 403 | This needs the spend:read permission in this organization. |
+| 403 | This needs the spend:update permission in this organization. |
 | 404 | Organization not found |
 | 404 | Budget not found |
 

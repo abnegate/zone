@@ -16,13 +16,13 @@ use uuid::Uuid;
 use zone_enterprise::spend::{Budget, Month, Scope, State, Target};
 
 use self::columns::Columns;
+use crate::auth::{self, Grant, Permission};
 use crate::db::DbResult;
 use crate::db::organization_members::OrgRole;
 use crate::db::workspace_members::WorkspaceRole;
 
 pub const TARGET_KEY: &str = "budgets_target_key";
 
-const NOTIFIED: [OrgRole; 2] = [OrgRole::Owner, OrgRole::Admin];
 const WORKSPACE_NOTIFIED: [WorkspaceRole; 2] = [WorkspaceRole::Owner, WorkspaceRole::Admin];
 
 /// The month's spend of each organization `$organizations` picks, once as a whole, once per
@@ -347,8 +347,14 @@ pub async fn recipients(
     sqlx::query_as(
         "SELECT email, name FROM (SELECT DISTINCT ON (lower(account.email)) account.email, \
          COALESCE(account.display_name, account.email) AS name, people.tier, people.joined \
-         FROM (SELECT user_id, 0 AS tier, created_at AS joined FROM organization_members \
-         WHERE organization_id = $1 AND is_active AND role = ANY($3) \
+         FROM (SELECT member.user_id, 0 AS tier, member.created_at AS joined \
+         FROM organization_members member \
+         WHERE member.organization_id = $1 AND member.is_active \
+         AND CASE WHEN member.custom_role_id IS NULL THEN member.role = ANY($3) \
+         ELSE EXISTS (SELECT 1 FROM custom_roles custom_role \
+         JOIN custom_role_permissions granted ON granted.role_id = custom_role.id \
+         WHERE custom_role.id = member.custom_role_id AND custom_role.organization_id = $1 \
+         AND custom_role.scope = $5 AND granted.permission = $6) END \
          UNION ALL SELECT user_id, 1, created_at FROM workspace_members \
          WHERE workspace_id = $2 AND is_active AND role = ANY($4)) people \
          JOIN users account ON account.id = people.user_id \
@@ -358,10 +364,22 @@ pub async fn recipients(
     )
     .bind(organization)
     .bind(workspace)
-    .bind(NOTIFIED.map(|role| role.as_str()).to_vec())
+    .bind(readers())
     .bind(WORKSPACE_NOTIFIED.map(|role| role.as_str()).to_vec())
+    .bind(auth::Scope::Organization.name())
+    .bind(Permission::SpendRead.name())
     .fetch_all(executor)
     .await
+}
+
+/// The built-in organization roles that hold `spend:read`. A custom role holds it when its stored
+/// permissions name it, as [`Grant::stored`] reads them: `spend:read` requires no other permission.
+fn readers() -> Vec<&'static str> {
+    [OrgRole::Owner, OrgRole::Admin, OrgRole::Member]
+        .into_iter()
+        .filter(|role| Grant::organization(*role).allows(Permission::SpendRead))
+        .map(|role| role.as_str())
+        .collect()
 }
 
 fn classify(error: sqlx::Error) -> CreateError {
