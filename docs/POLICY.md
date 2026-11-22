@@ -50,10 +50,12 @@ run retries it, and in a chat you can try again shortly.
 
 | Policy | Who can see it | Who can change it |
 |---|---|---|
-| Organization | Every active member of the organization | Organization owners and admins |
-| Workspace | Members of the workspace, and organization owners and admins | Workspace owners and admins, and organization owners and admins |
+| Organization | Every active member of the organization | Holders of `policies:update` |
+| Workspace | Members of the workspace, and holders of `policies:update` in the organization | Holders of `workspace_policies:update` in the workspace, and of `policies:update` in the organization |
 
-Someone who can see a policy but not change it sees it read-only. Someone who
+The built-in admin and owner roles hold both permissions; a custom role can
+hold either (see [ROLES.md](ROLES.md)). Someone who can see a policy but not
+change it sees it read-only. Someone who
 isn't a member gets 404, as if the organization or workspace didn't exist.
 
 ## How the organization and workspaces combine

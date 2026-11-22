@@ -4,6 +4,8 @@ use chrono::NaiveDateTime;
 use sqlx::{Executor, PgPool, Postgres};
 use uuid::Uuid;
 
+use crate::auth::Permission;
+
 use super::{DbResult, workspace_members};
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
@@ -58,9 +60,9 @@ where
     .await
 }
 
-/// The chat's tasks as `reader` may see them, or `None` when they are not an
-/// active member of `workspace`. Their membership stays locked until the read
-/// is done, so a revocation cannot commit between the check and the read.
+/// The chat's tasks as `reader` may see them, or `None` unless they may read
+/// `workspace`. Their membership stays locked until the read is done, so a
+/// revocation cannot commit between the check and the read.
 pub async fn read(
     pool: &PgPool,
     workspace: Uuid,
@@ -68,9 +70,9 @@ pub async fn read(
     reader: Uuid,
 ) -> DbResult<Option<Vec<ChatTaskRow>>> {
     let mut transaction = pool.begin().await?;
-    if workspace_members::lock_role(&mut transaction, workspace, reader)
+    if !workspace_members::lock_membership(&mut transaction, workspace, reader)
         .await?
-        .is_none()
+        .is_some_and(|membership| membership.grant.allows(Permission::WorkspaceRead))
     {
         return Ok(None);
     }
@@ -84,7 +86,11 @@ mod tests {
     use sqlx::PgPool;
 
     use super::*;
+    use crate::auth::Scope;
     use crate::db::actions::{self, StartTask, Task};
+    use crate::db::organization_members::OrgRole;
+    use crate::db::testing::Tenant;
+    use crate::db::workspace_members::WorkspaceRole;
 
     async fn pool() -> PgPool {
         PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
@@ -366,6 +372,46 @@ mod tests {
         assert_eq!(member.map(|rows| rows.len()), Some(1));
         assert_eq!(outsider, None);
         assert_eq!(revoked, None);
+    }
+
+    #[tokio::test]
+    async fn a_custom_role_reads_a_chats_tasks_while_it_grants_the_workspace() {
+        let tenant = Tenant::new().await;
+        let foreign = Tenant::new().await;
+        let chat = chat_in(&tenant.pool, tenant.workspace).await;
+        let writer = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;
+        let reader = tenant.workspace_holder(&[]).await;
+        let stray = tenant.organization_member(OrgRole::Member).await;
+        tenant.workspace_member(stray, WorkspaceRole::Viewer).await;
+        let elsewhere = foreign.custom_role(Scope::Workspace, &[]).await;
+        tenant.hold_workspace_role(stray, elsewhere).await;
+        let created = actions::create_task(
+            &tenant.pool,
+            tenant.workspace,
+            writer,
+            Some(chat),
+            crate::db::tasks::Origin::Member,
+            created("Held by a role"),
+        )
+        .await;
+
+        let mut listed = Vec::new();
+        for user in [writer, reader, stray] {
+            listed.push(
+                read(&tenant.pool, tenant.workspace, chat, user)
+                    .await
+                    .map(|rows| rows.map(|rows| rows.len())),
+            );
+        }
+        tenant.cleanup().await;
+        foreign.cleanup().await;
+
+        assert!(created.is_ok(), "{created:?}");
+        let listed: Vec<Option<usize>> = listed
+            .into_iter()
+            .map(|read| read.expect("the read"))
+            .collect();
+        assert_eq!(listed, [Some(1), Some(1), None]);
     }
 
     #[tokio::test]

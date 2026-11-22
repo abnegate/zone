@@ -1,6 +1,7 @@
 import { Button, Input, Modal } from '@zone/ui';
 import { type FormEvent, useId, useState } from 'react';
 import { Switch } from '../../components/Switch';
+import { UpgradeNotice } from '../../components/UpgradeNotice';
 import {
   changed,
   createRequest,
@@ -13,13 +14,18 @@ import {
   updateRequest,
 } from '../draft';
 import { useCreateSsoProvider, useUpdateSsoProvider } from '../hooks';
-import { ProviderField, protocolName, refusalField, refusalMessage } from '../messages';
+import {
+  ProviderField,
+  protocolName,
+  refusalField,
+  refusalMessage,
+  UPGRADE_NOTICE,
+} from '../messages';
 import { PROTOCOLS, Protocol, SsoAdminCode } from '../schemas';
 import type { ProviderResponse } from '../types';
 import { ProviderFacts } from './ProviderFacts';
 import { SamlFields } from './SamlFields';
 import { SsoChoice } from './SsoChoice';
-import { SsoUpgradeNotice } from './SsoUpgradeNotice';
 
 export const PROTOCOL_LABEL = 'Protocol';
 
@@ -217,7 +223,7 @@ export function SsoProviderForm({ provider, onClose }: SsoProviderFormProps) {
             onChange={(checked) => change('enabled', checked)}
           />
         </fieldset>
-        {licenseRequired && <SsoUpgradeNotice />}
+        {licenseRequired && <UpgradeNotice message={UPGRADE_NOTICE} className="sso-notice" />}
         {formError && (
           <div className="modal-error" role="alert">
             {formError}

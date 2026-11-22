@@ -13,18 +13,20 @@ pub enum Feature {
     AuditExport,
     AuditStreaming,
     AuditRetention,
+    CustomRoles,
     Spend,
     /// Uncapped membership: without it a server admits at most the Community member cap.
     Members,
 }
 
 impl Feature {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Sso,
         Self::Policy,
         Self::AuditExport,
         Self::AuditStreaming,
         Self::AuditRetention,
+        Self::CustomRoles,
         Self::Spend,
         Self::Members,
     ];
@@ -36,7 +38,8 @@ impl Feature {
             | Self::Policy
             | Self::AuditExport
             | Self::AuditStreaming
-            | Self::AuditRetention => Plan::Enterprise,
+            | Self::AuditRetention
+            | Self::CustomRoles => Plan::Enterprise,
         }
     }
 
@@ -51,6 +54,8 @@ impl Feature {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use chrono::TimeDelta;
 
     use super::*;
@@ -74,6 +79,13 @@ mod tests {
 
     fn team_feature(feature: Feature) -> bool {
         matches!(feature, Feature::Spend | Feature::Members)
+    }
+
+    #[test]
+    fn every_feature_is_listed_once() {
+        let listed: HashSet<Feature> = Feature::ALL.into_iter().collect();
+        assert_eq!(listed.len(), Feature::ALL.len());
+        assert!(listed.contains(&Feature::CustomRoles));
     }
 
     #[test]

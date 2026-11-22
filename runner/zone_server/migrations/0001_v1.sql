@@ -8,14 +8,6 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION check_workspace_membership(p_user_id uuid, p_workspace_id uuid) RETURNS boolean
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  RETURN EXISTS(SELECT 1 FROM workspace_members WHERE user_id = p_user_id AND workspace_id = p_workspace_id AND is_active = TRUE);
-END;
-$$;
-
 CREATE FUNCTION claim_next_task(p_worker_id text) RETURNS TABLE(task_id uuid, queue_id uuid)
     LANGUAGE plpgsql
     AS $$
@@ -60,16 +52,6 @@ BEGIN
       completed_at = CASE WHEN p_success THEN NOW() ELSE NULL END,
       updated_at = NOW()
   WHERE id = p_task_id;
-END;
-$$;
-
-CREATE FUNCTION get_organization_role(p_user_id uuid, p_organization_id uuid) RETURNS text
-    LANGUAGE plpgsql
-    AS $$
-DECLARE v_role TEXT;
-BEGIN
-  SELECT role INTO v_role FROM organization_members WHERE user_id = p_user_id AND organization_id = p_organization_id AND is_active = TRUE;
-  RETURN v_role;
 END;
 $$;
 
@@ -119,16 +101,6 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION get_workspace_role(p_user_id uuid, p_workspace_id uuid) RETURNS text
-    LANGUAGE plpgsql
-    AS $$
-DECLARE v_role TEXT;
-BEGIN
-  SELECT role INTO v_role FROM workspace_members WHERE user_id = p_user_id AND workspace_id = p_workspace_id AND is_active = TRUE;
-  RETURN v_role;
-END;
-$$;
-
 CREATE FUNCTION recover_orphaned_tasks() RETURNS integer
     LANGUAGE plpgsql
     AS $$
@@ -150,6 +122,18 @@ BEGIN
   WHERE id IN (SELECT task_id FROM task_queue WHERE worker_id IS NULL) AND status = 'in_progress';
 
   RETURN v_count;
+END;
+$$;
+
+CREATE FUNCTION release_custom_role() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NOT NEW.is_active
+     OR (NEW.role IS DISTINCT FROM OLD.role AND NEW.custom_role_id IS NOT DISTINCT FROM OLD.custom_role_id) THEN
+    NEW.custom_role_id := NULL;
+  END IF;
+  RETURN NEW;
 END;
 $$;
 
@@ -410,6 +394,13 @@ CREATE TABLE wiki_entries (
 );
 CREATE INDEX idx_wiki_entries_source_type ON wiki_entries (source_type);
 
+CREATE TABLE workspace_role_permissions (
+    role text NOT NULL,
+    permission text NOT NULL,
+    PRIMARY KEY (role, permission),
+    CONSTRAINT workspace_role_permissions_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text, 'viewer'::text])))
+);
+
 CREATE TABLE agent_logins (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -460,6 +451,27 @@ CREATE TABLE audit_retentions (
 );
 CREATE UNIQUE INDEX audit_retentions_scope_idx ON audit_retentions ((COALESCE(organization_id, '00000000-0000-0000-0000-000000000000'::uuid)));
 CREATE INDEX audit_retentions_organization_idx ON audit_retentions (organization_id);
+
+CREATE TABLE custom_roles (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    name text NOT NULL,
+    description text,
+    scope text NOT NULL,
+    created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT custom_roles_name_check CHECK ((length(btrim(name)) > 0)),
+    CONSTRAINT custom_roles_scope_check CHECK ((scope = ANY (ARRAY['organization'::text, 'workspace'::text])))
+);
+CREATE UNIQUE INDEX custom_roles_organization_name_key ON custom_roles (organization_id, lower(btrim(name)));
+
+CREATE TABLE custom_role_permissions (
+    role_id uuid NOT NULL REFERENCES custom_roles(id) ON DELETE CASCADE,
+    permission text NOT NULL,
+    PRIMARY KEY (role_id, permission),
+    CONSTRAINT custom_role_permissions_permission_check CHECK ((permission = ANY (ARRAY['organization:read'::text, 'organization:update'::text, 'members:create'::text, 'members:update'::text, 'members:delete'::text, 'invitations:create'::text, 'invitations:read'::text, 'invitations:delete'::text, 'workspaces:create'::text, 'devices:read'::text, 'devices:update'::text, 'github:update'::text, 'mcp_servers:update'::text, 'ai_settings:read'::text, 'ai_settings:update'::text, 'agent_logins:update'::text, 'policies:update'::text, 'audit_logs:read'::text, 'audit:update'::text, 'spend:read'::text, 'spend:update'::text, 'workspace:read'::text, 'workspace:write'::text, 'workspace:update'::text, 'workspace_members:create'::text, 'workspace_members:update'::text, 'workspace_members:delete'::text, 'workspace_ai_settings:update'::text, 'workspace_mcp_servers:update'::text, 'workspace_policies:update'::text, 'project_syncs:update'::text, 'pull_requests:override'::text])))
+);
 
 CREATE TABLE devices (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
@@ -549,12 +561,16 @@ CREATE TABLE organization_members (
     accepted_at timestamp without time zone,
     created_at timestamp without time zone DEFAULT now(),
     updated_at timestamp without time zone DEFAULT now(),
+    custom_role_id uuid REFERENCES custom_roles(id) DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT organization_members_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text]))),
+    CONSTRAINT organization_members_custom_role_check CHECK (((custom_role_id IS NULL) OR (role = 'member'::text))),
     UNIQUE (organization_id, user_id)
 );
+CREATE INDEX idx_org_members_custom_role ON organization_members (custom_role_id) WHERE (custom_role_id IS NOT NULL);
 CREATE INDEX idx_org_members_active ON organization_members (organization_id, is_active) WHERE (is_active = true);
 CREATE INDEX idx_org_members_org ON organization_members (organization_id);
 CREATE INDEX idx_org_members_user_active ON organization_members (user_id) WHERE (is_active = true);
+CREATE TRIGGER organization_members_release_custom_role BEFORE UPDATE ON organization_members FOR EACH ROW EXECUTE FUNCTION release_custom_role();
 
 CREATE TABLE organization_policies (
     organization_id uuid NOT NULL PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
@@ -934,12 +950,16 @@ CREATE TABLE workspace_members (
     accepted_at timestamp without time zone,
     created_at timestamp without time zone DEFAULT now(),
     updated_at timestamp without time zone DEFAULT now(),
+    custom_role_id uuid REFERENCES custom_roles(id) DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT workspace_members_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text, 'viewer'::text]))),
+    CONSTRAINT workspace_members_custom_role_check CHECK (((custom_role_id IS NULL) OR (role = 'viewer'::text))),
     UNIQUE (workspace_id, user_id)
 );
+CREATE INDEX idx_workspace_members_custom_role ON workspace_members (custom_role_id) WHERE (custom_role_id IS NOT NULL);
 CREATE INDEX idx_workspace_members_active ON workspace_members (workspace_id, is_active) WHERE (is_active = true);
 CREATE INDEX idx_workspace_members_user_active ON workspace_members (user_id) WHERE (is_active = true);
 CREATE INDEX idx_workspace_members_workspace ON workspace_members (workspace_id);
+CREATE TRIGGER workspace_members_release_custom_role BEFORE UPDATE ON workspace_members FOR EACH ROW EXECUTE FUNCTION release_custom_role();
 
 CREATE TABLE workspace_policies (
     workspace_id uuid NOT NULL PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -1795,6 +1815,43 @@ CREATE INDEX idx_sync_events_synced_item_id ON sync_events (synced_item_id);
 ALTER TABLE task_runs
     ADD CONSTRAINT task_runs_task_id_fkey FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE;
 
+CREATE FUNCTION workspace_permits(p_user_id uuid, p_workspace_id uuid, p_permission text) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM workspace_members m
+    JOIN workspaces w ON w.id = m.workspace_id
+    WHERE m.user_id = p_user_id
+      AND m.workspace_id = p_workspace_id
+      AND m.is_active
+      AND (
+        (m.custom_role_id IS NULL
+          AND EXISTS (SELECT 1 FROM workspace_role_permissions b WHERE b.role = m.role AND b.permission = p_permission))
+        OR EXISTS (
+          SELECT 1
+          FROM custom_roles r
+          WHERE r.id = m.custom_role_id
+            AND r.organization_id = w.organization_id
+            AND r.scope = 'workspace'
+            AND (
+              p_permission = 'workspace:read'
+              OR (
+                EXISTS (SELECT 1 FROM custom_role_permissions p WHERE p.role_id = r.id AND p.permission = p_permission)
+                AND EXISTS (SELECT 1 FROM workspace_role_permissions b WHERE b.role = 'admin' AND b.permission = p_permission)
+              )
+            )
+        )
+      )
+  );
+$$;
+
+CREATE FUNCTION check_workspace_membership(p_user_id uuid, p_workspace_id uuid) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT workspace_permits(p_user_id, p_workspace_id, 'workspace:read');
+$$;
+
 INSERT INTO source_types (name, category, description, config_schema) VALUES
   ('github', 'file', 'GitHub repository', '{"type":"object","required":["owner","repo"],"properties":{"owner":{"type":"string"},"repo":{"type":"string"},"branch":{"type":"string","default":"main"},"base_path":{"type":"string","default":""}}}'),
   ('gitlab', 'file', 'GitLab repository', '{"type":"object","required":["project_id"],"properties":{"project_id":{"type":"string"},"host":{"type":"string","default":"https://gitlab.com"},"branch":{"type":"string","default":"main"},"base_path":{"type":"string","default":""}}}'),
@@ -1805,6 +1862,35 @@ INSERT INTO source_types (name, category, description, config_schema) VALUES
   ('slack', 'chat', 'Slack workspace', '{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"},"channel_ids":{"type":"array","items":{"type":"string"}}}}'),
   ('web', 'web', 'Web URL content fetcher', '{"type":"object","required":["url"],"properties":{"url":{"type":"string"},"headers":{"type":"object"}}}'),
   ('text', 'text', 'Raw text/string content', '{"type":"object","required":["content"],"properties":{"content":{"type":"string"},"label":{"type":"string"}}}');
+
+INSERT INTO workspace_role_permissions (role, permission) VALUES
+  ('owner', 'workspace:read'),
+  ('owner', 'workspace:write'),
+  ('owner', 'workspace:update'),
+  ('owner', 'workspace_members:create'),
+  ('owner', 'workspace_members:update'),
+  ('owner', 'workspace_members:delete'),
+  ('owner', 'workspace_ai_settings:update'),
+  ('owner', 'workspace_mcp_servers:update'),
+  ('owner', 'workspace_policies:update'),
+  ('owner', 'project_syncs:update'),
+  ('owner', 'pull_requests:override'),
+  ('owner', 'workspace:delete'),
+  ('owner', 'workspace_administrators:update'),
+  ('admin', 'workspace:read'),
+  ('admin', 'workspace:write'),
+  ('admin', 'workspace:update'),
+  ('admin', 'workspace_members:create'),
+  ('admin', 'workspace_members:update'),
+  ('admin', 'workspace_members:delete'),
+  ('admin', 'workspace_ai_settings:update'),
+  ('admin', 'workspace_mcp_servers:update'),
+  ('admin', 'workspace_policies:update'),
+  ('admin', 'project_syncs:update'),
+  ('admin', 'pull_requests:override'),
+  ('member', 'workspace:read'),
+  ('member', 'workspace:write'),
+  ('viewer', 'workspace:read');
 
 INSERT INTO permissions (name, description, resource, action) VALUES
   ('projects:create', 'Create new projects', 'projects', 'create'),

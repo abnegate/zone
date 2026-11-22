@@ -3,8 +3,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../../../api/ApiError';
+import { AdministersServerProvider } from '../../components/AdministersServer';
 import { ENTITLED, ENTRA, KEYCLOAK, OKTA, PASTED_SAML } from '../fixtures';
-import { METADATA_REQUIRED, refusalField, refusalMessage } from '../messages';
+import { METADATA_REQUIRED, refusalField, refusalMessage, UPGRADE_NOTICE } from '../messages';
 import { SsoRefusal } from '../SsoRefusal';
 import { Protocol, SSO_ADMIN_CODES, SsoAdminCode } from '../schemas';
 import type { ProviderResponse, SsoAdminCode as SsoAdminCodeValue } from '../types';
@@ -27,7 +28,6 @@ import {
   VERIFIED_EMAIL_DESCRIPTION,
   VERIFIED_EMAIL_LABEL,
 } from './SsoProviderForm';
-import { UPGRADE_NOTICE } from './SsoUpgradeNotice';
 
 const get = mock();
 const createProvider = mock();
@@ -76,7 +76,9 @@ function renderForm(provider?: ProviderResponse) {
   render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
-        <SsoProviderForm provider={provider} onClose={onClose} />
+        <AdministersServerProvider value>
+          <SsoProviderForm provider={provider} onClose={onClose} />
+        </AdministersServerProvider>
       </MemoryRouter>
     </QueryClientProvider>
   );

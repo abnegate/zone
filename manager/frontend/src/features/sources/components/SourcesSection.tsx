@@ -26,7 +26,7 @@ function stopRowActivation(event: { stopPropagation: () => void }): void {
   event.stopPropagation();
 }
 
-const READ_ONLY_HINT = "Viewers can't change sources.";
+const READ_ONLY_HINT = "Your role can't change sources.";
 
 const EMPTY_DESCRIPTION =
   'Add code repositories, calendars, email inboxes, web URLs, or text content';

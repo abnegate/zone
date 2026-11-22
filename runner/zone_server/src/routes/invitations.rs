@@ -12,20 +12,29 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::auth::{AuthUser, OrgAdmin};
+use crate::auth::{AuthUser, Grant, OrganizationPermit, Permission};
 use crate::db::audit::{actions, resources};
+use crate::db::organization_members::OrgRole;
+use crate::db::workspace_members::WorkspaceRole;
 use crate::db::{invitations, organization_members, organizations, users, workspaces};
 use crate::services::members;
 use crate::state::AppState;
 
-use super::common::{AuditEvent, ErrorResponse, Timestamps, audit};
+use super::common::{AuditEvent, ErrorResponse, Timestamps, audit, exceeds};
 
-fn unavailable(error: sqlx::Error) -> (StatusCode, Json<ErrorResponse>) {
+const INVALID_ORGANIZATION_ROLE: &str = "Invalid org_role. Must be one of: member, admin, owner";
+const INVALID_WORKSPACE_ROLE: &str =
+    "Invalid workspace_role. Must be one of: viewer, member, admin, owner";
+
+type Refusal = (StatusCode, Json<ErrorResponse>);
+
+fn refusal(status: StatusCode, message: impl Into<String>) -> Refusal {
+    (status, Json(ErrorResponse::new(message)))
+}
+
+fn unavailable(error: sqlx::Error) -> Refusal {
     tracing::error!(%error, "Failed to read or write invitations");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse::new("Internal server error")),
-    )
+    refusal(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
 }
 
 fn duplicate(error: &sqlx::Error) -> bool {
@@ -58,21 +67,21 @@ pub struct InvitationResponse {
 }
 
 impl InvitationResponse {
-    fn from_invitation(inv: invitations::Invitation, token: Option<String>) -> Self {
+    fn from_invitation(invitation: invitations::Invitation, token: Option<String>) -> Self {
         Self {
-            id: inv.id,
-            email: inv.email,
-            organization_id: inv.organization_id,
-            workspace_ids: inv.workspace_ids,
-            org_role: inv.org_role,
-            workspace_role: inv.workspace_role,
-            invited_by: inv.invited_by,
-            expires_at: inv.expires_at,
+            id: invitation.id,
+            email: invitation.email,
+            organization_id: invitation.organization_id,
+            workspace_ids: invitation.workspace_ids,
+            org_role: invitation.org_role,
+            workspace_role: invitation.workspace_role,
+            invited_by: invitation.invited_by,
+            expires_at: invitation.expires_at,
             token,
             organization_name: None,
             workspace_name: None,
             invited_by_email: None,
-            timestamps: Timestamps::from_utc(inv.created_at, inv.created_at),
+            timestamps: Timestamps::from_utc(invitation.created_at, invitation.created_at),
         }
     }
 
@@ -118,10 +127,9 @@ pub struct CreateInvitationRequest {
 }
 
 fn default_workspace_role() -> String {
-    "member".to_string()
+    WorkspaceRole::Member.as_str().to_string()
 }
 
-/// Validates email format with proper checks
 fn is_valid_email(email: &str) -> bool {
     let parts: Vec<&str> = email.split('@').collect();
     if parts.len() != 2 {
@@ -141,70 +149,52 @@ fn is_valid_email(email: &str) -> bool {
 ///
 /// POST /api/organizations/:org_id/invitations
 ///
-/// Requires: Organization Admin or Owner
+/// Requires: invitations:create, plus administrators:update to invite an
+/// organization owner or a workspace admin or owner
 pub async fn create_invitation(
     State(state): State<AppState>,
-    OrgAdmin {
-        org_id,
-        user_id,
-        email: inviter_email,
-        role: inviter_role,
-    }: OrgAdmin,
-    Json(req): Json<CreateInvitationRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    if !is_valid_email(&req.email) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new("Invalid email address")),
-        ));
+    OrganizationPermit(inviter): OrganizationPermit<{ Permission::InvitationsCreate.index() }>,
+    Json(request): Json<CreateInvitationRequest>,
+) -> Result<impl IntoResponse, Refusal> {
+    let organization_id = inviter.organization_id;
+    if !is_valid_email(&request.email) {
+        return Err(refusal(StatusCode::BAD_REQUEST, "Invalid email address"));
     }
 
-    let workspace_ids = match (req.workspace_ids, req.workspace_id) {
+    let workspace_ids = match (request.workspace_ids, request.workspace_id) {
         (Some(ids), None) => ids,
         (None, Some(id)) => vec![id],
         (None, None) => Vec::new(),
         (Some(_), Some(_)) => {
-            return Err((
+            return Err(refusal(
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "Name the workspaces by either workspace_id or workspace_ids",
-                )),
+                "Name the workspaces by either workspace_id or workspace_ids",
             ));
         }
     };
 
-    let valid_org_roles = ["member", "admin", "owner"];
-    let valid_workspace_roles = ["viewer", "member", "admin", "owner"];
+    let organization_role: OrgRole = request
+        .org_role
+        .parse()
+        .map_err(|_| refusal(StatusCode::BAD_REQUEST, INVALID_ORGANIZATION_ROLE))?;
+    let workspace_role: WorkspaceRole = request
+        .workspace_role
+        .parse()
+        .map_err(|_| refusal(StatusCode::BAD_REQUEST, INVALID_WORKSPACE_ROLE))?;
 
-    if !valid_org_roles.contains(&req.org_role.as_str()) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(format!(
-                "Invalid org_role. Must be one of: {}",
-                valid_org_roles.join(", ")
-            ))),
-        ));
-    }
-
-    if !valid_workspace_roles.contains(&req.workspace_role.as_str()) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(format!(
-                "Invalid workspace_role. Must be one of: {}",
-                valid_workspace_roles.join(", ")
-            ))),
-        ));
-    }
-
-    if (req.org_role == "owner" || req.workspace_role == "owner" || req.workspace_role == "admin")
-        && inviter_role != organization_members::OrgRole::Owner
+    if (organization_role == OrgRole::Owner || workspace_role >= WorkspaceRole::Admin)
+        && !inviter.allows(Permission::AdministratorsUpdate)
     {
-        return Err((
+        return Err(refusal(
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "Only owners can invite owners or workspace admins",
-            )),
+            "Only owners can invite owners or workspace admins",
         ));
+    }
+    if !inviter
+        .grant
+        .covers(&Grant::organization(organization_role))
+    {
+        return Err(exceeds());
     }
 
     for workspace_id in &workspace_ids {
@@ -212,34 +202,28 @@ pub async fn create_invitation(
             .await
             .map_err(unavailable)?;
 
-        if workspace.is_none_or(|workspace| workspace.organization_id != org_id) {
-            return Err((
+        if workspace.is_none_or(|workspace| workspace.organization_id != organization_id) {
+            return Err(refusal(
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "Workspace does not belong to this organization",
-                )),
+                "Workspace does not belong to this organization",
             ));
         }
     }
 
-    let existing_user = users::get_user_by_email(state.db(), &req.email)
+    let existing_user = users::get_user_by_email(state.db(), &request.email)
         .await
         .map_err(unavailable)?;
 
     if let Some(existing_user) = &existing_user {
         let existing_member =
-            organization_members::get_member(state.db(), org_id, existing_user.id)
+            organization_members::get_member(state.db(), organization_id, existing_user.id)
                 .await
                 .map_err(unavailable)?;
 
-        if let Some(member) = existing_member
-            && member.is_active
-        {
-            return Err((
+        if existing_member.is_some_and(|member| member.is_active) {
+            return Err(refusal(
                 StatusCode::CONFLICT,
-                Json(ErrorResponse::new(
-                    "User is already a member of this organization",
-                )),
+                "User is already a member of this organization",
             ));
         }
     }
@@ -247,39 +231,34 @@ pub async fn create_invitation(
     members::admit(&state, existing_user.map(|user| user.id)).await?;
 
     let existing_invitation =
-        invitations::get_pending_invitation_for_email(state.db(), &req.email, org_id)
+        invitations::get_pending_invitation_for_email(state.db(), &request.email, organization_id)
             .await
             .map_err(unavailable)?;
 
     if existing_invitation.is_some() {
-        return Err((
+        return Err(refusal(
             StatusCode::CONFLICT,
-            Json(ErrorResponse::new(
-                "Pending invitation already exists for this email",
-            )),
+            "Pending invitation already exists for this email",
         ));
     }
 
-    invitations::delete_expired_invitations_for_email(state.db(), &req.email, org_id)
+    invitations::delete_expired_invitations_for_email(state.db(), &request.email, organization_id)
         .await
         .map_err(unavailable)?;
 
     let (invitation, token) = invitations::create_invitation(
         state.db(),
-        &req.email,
-        org_id,
+        &request.email,
+        organization_id,
         workspace_ids,
-        &req.org_role,
-        &req.workspace_role,
-        user_id,
+        organization_role.as_str(),
+        workspace_role.as_str(),
+        inviter.user_id,
     )
     .await
     .map_err(|error| {
         if duplicate(&error) {
-            (
-                StatusCode::CONFLICT,
-                Json(ErrorResponse::new("Invitation already exists")),
-            )
+            refusal(StatusCode::CONFLICT, "Invitation already exists")
         } else {
             unavailable(error)
         }
@@ -288,10 +267,10 @@ pub async fn create_invitation(
     audit(
         state.db(),
         AuditEvent {
-            organization_id: Some(org_id),
+            organization_id: Some(organization_id),
             workspace_id: None,
-            actor_id: user_id,
-            actor_email: &inviter_email,
+            actor_id: inviter.user_id,
+            actor_email: &inviter.email,
             action: actions::INVITATION_SENT,
             resource_type: resources::INVITATION,
             resource_id: Some(invitation.id),
@@ -315,18 +294,18 @@ pub async fn create_invitation(
 ///
 /// GET /api/organizations/:org_id/invitations
 ///
-/// Requires: Organization Admin or Owner
+/// Requires: invitations:read
 pub async fn list_invitations(
     State(state): State<AppState>,
-    OrgAdmin { org_id, .. }: OrgAdmin,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let invitations = invitations::list_pending_invitations(state.db(), org_id)
+    OrganizationPermit(reader): OrganizationPermit<{ Permission::InvitationsRead.index() }>,
+) -> Result<impl IntoResponse, Refusal> {
+    let invitations = invitations::list_pending_invitations(state.db(), reader.organization_id)
         .await
         .map_err(unavailable)?;
 
     let response: Vec<InvitationResponse> = invitations
         .into_iter()
-        .map(|inv| InvitationResponse::from_invitation(inv, None))
+        .map(|invitation| InvitationResponse::from_invitation(invitation, None))
         .collect();
 
     Ok(Json(response))
@@ -336,53 +315,38 @@ pub async fn list_invitations(
 ///
 /// DELETE /api/organizations/:org_id/invitations/:invitation_id
 ///
-/// Requires: Organization Admin or Owner
+/// Requires: invitations:delete
 pub async fn revoke_invitation(
     State(state): State<AppState>,
-    OrgAdmin {
-        org_id,
-        user_id,
-        email,
-        ..
-    }: OrgAdmin,
-    Path((_org_id, invitation_id)): Path<(Uuid, Uuid)>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    OrganizationPermit(revoker): OrganizationPermit<{ Permission::InvitationsDelete.index() }>,
+    Path((_organization_id, invitation_id)): Path<(Uuid, Uuid)>,
+) -> Result<impl IntoResponse, Refusal> {
     let invitation = invitations::get_invitation_by_id(state.db(), invitation_id)
         .await
         .map_err(unavailable)?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Invitation not found")),
-            )
-        })?;
+        .ok_or_else(|| refusal(StatusCode::NOT_FOUND, "Invitation not found"))?;
 
-    if invitation.organization_id != org_id {
-        return Err((
+    if invitation.organization_id != revoker.organization_id {
+        return Err(refusal(
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "Invitation does not belong to this organization",
-            )),
+            "Invitation does not belong to this organization",
         ));
     }
 
     invitations::revoke_invitation(state.db(), invitation_id)
         .await
         .map_err(|error| match error {
-            sqlx::Error::RowNotFound => (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Invitation not found")),
-            ),
+            sqlx::Error::RowNotFound => refusal(StatusCode::NOT_FOUND, "Invitation not found"),
             error => unavailable(error),
         })?;
 
     audit(
         state.db(),
         AuditEvent {
-            organization_id: Some(org_id),
+            organization_id: Some(revoker.organization_id),
             workspace_id: None,
-            actor_id: user_id,
-            actor_email: &email,
+            actor_id: revoker.user_id,
+            actor_email: &revoker.email,
             action: actions::INVITATION_REVOKED,
             resource_type: resources::INVITATION,
             resource_id: Some(invitation_id),
@@ -403,25 +367,19 @@ pub async fn revoke_invitation(
 pub async fn get_invitation(
     State(state): State<AppState>,
     Path(token): Path<String>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, Refusal> {
     let invitation = invitations::get_invitation_by_token(state.db(), &token)
         .await
         .map_err(unavailable)?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Invitation not found or expired")),
-        ))?;
+        .ok_or_else(|| refusal(StatusCode::NOT_FOUND, "Invitation not found or expired"))?;
 
-    let org = organizations::get_organization(state.db(), invitation.organization_id)
+    let organization = organizations::get_organization(state.db(), invitation.organization_id)
         .await
         .map_err(unavailable)?
-        .ok_or((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("Organization not found")),
-        ))?;
+        .ok_or_else(|| refusal(StatusCode::INTERNAL_SERVER_ERROR, "Organization not found"))?;
 
     let response = InvitationResponse::from_invitation(invitation, None)
-        .with_org_name(org.name)
+        .with_org_name(organization.name)
         .with_details(&state)
         .await;
 
@@ -437,36 +395,24 @@ pub async fn accept_invitation(
     State(state): State<AppState>,
     AuthUser(claims): AuthUser,
     Path(token): Path<String>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse::new("Invalid user ID in token")),
-        )
-    })?;
+) -> Result<impl IntoResponse, Refusal> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| refusal(StatusCode::UNAUTHORIZED, "Invalid user ID in token"))?;
 
     let invitation = invitations::get_invitation_by_token(state.db(), &token)
         .await
         .map_err(unavailable)?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Invitation not found or expired")),
-        ))?;
+        .ok_or_else(|| refusal(StatusCode::NOT_FOUND, "Invitation not found or expired"))?;
 
-    let user = crate::db::users::get_user_by_id(state.db(), user_id)
+    let user = users::get_user_by_id(state.db(), user_id)
         .await
         .map_err(unavailable)?
-        .ok_or((
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse::new("User not found")),
-        ))?;
+        .ok_or_else(|| refusal(StatusCode::UNAUTHORIZED, "User not found"))?;
 
     if user.email != invitation.email {
-        return Err((
+        return Err(refusal(
             StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "This invitation is for a different email address",
-            )),
+            "This invitation is for a different email address",
         ));
     }
 
@@ -475,17 +421,13 @@ pub async fn accept_invitation(
     invitations::accept_invitation(state.db(), &token, user_id)
         .await
         .map_err(|error| match error {
-            sqlx::Error::RowNotFound => (
+            sqlx::Error::RowNotFound => refusal(
                 StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new(
-                    "Invitation not found or already accepted",
-                )),
+                "Invitation not found or already accepted",
             ),
-            error if duplicate(&error) => (
+            error if duplicate(&error) => refusal(
                 StatusCode::CONFLICT,
-                Json(ErrorResponse::new(
-                    "You are already a member of this organization",
-                )),
+                "You are already a member of this organization",
             ),
             error => unavailable(error),
         })?;

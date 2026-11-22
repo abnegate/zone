@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../../../api/ApiError';
+import { AdministersServerProvider } from '../../components/AdministersServer';
 import { LicenseStatus } from '../../schemas';
 import {
   COMMUNITY_EMPTY,
@@ -19,7 +20,7 @@ import {
   TEAM_ACTIVE,
   TEAM_LAPSED,
 } from '../fixtures';
-import { refusalMessage } from '../messages';
+import { LAPSED_NOTICE, refusalMessage, UPGRADE_NOTICE } from '../messages';
 import { SsoRefusal } from '../SsoRefusal';
 import { SsoAdminCode } from '../schemas';
 import type { SettingsResponse } from '../types';
@@ -30,8 +31,6 @@ import {
   ENFORCEMENT_DESCRIPTION,
   ENFORCEMENT_LABEL,
 } from './SsoEnforcement';
-import { LAPSED_NOTICE } from './SsoLapsedNotice';
-import { UPGRADE_NOTICE } from './SsoUpgradeNotice';
 
 const get = mock();
 const createProvider = mock();
@@ -61,7 +60,9 @@ function renderSection() {
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
-        <SsoSection />
+        <AdministersServerProvider value>
+          <SsoSection />
+        </AdministersServerProvider>
       </MemoryRouter>
     </QueryClientProvider>
   );

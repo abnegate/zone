@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useCallback } from 'react';
-import { retryLoad } from '../../policy/hooks/retry';
+import { retryLoad } from '../../retry';
 import { spendApi } from '../api';
 import { spendQueryKeys } from '../queryKeys';
 import type { BudgetsResponse } from '../schemas';

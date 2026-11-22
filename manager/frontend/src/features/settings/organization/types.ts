@@ -1,4 +1,5 @@
 import type { WorkspaceRole } from '../../auth/types';
+import type { CustomRoleReference } from '../../enterprise/roles/types';
 
 export type {
   AiProvider,
@@ -7,7 +8,6 @@ export type {
   Workspace,
 } from '../workspace/types';
 
-// Organization Types
 export type OrgRole = 'owner' | 'admin' | 'member';
 
 export interface Organization {
@@ -17,6 +17,8 @@ export interface Organization {
   description: string | null;
   is_active: boolean;
   role?: OrgRole;
+  custom_role?: CustomRoleReference | null;
+  permissions?: readonly string[];
   created_at: string;
   updated_at: string;
 }
@@ -34,12 +36,13 @@ export interface UpdateOrganizationRequest {
   is_active?: boolean;
 }
 
-// Organization Member Types
 export interface OrganizationMember {
   id: string;
   user_id: string;
   organization_id: string;
   role: OrgRole;
+  custom_role: CustomRoleReference | null;
+  permissions?: readonly string[];
   email: string;
   display_name: string | null;
   joined_at: string;
@@ -50,9 +53,11 @@ export interface AddOrgMemberRequest {
   role: OrgRole;
 }
 
-export interface UpdateOrgMemberRequest {
-  role: OrgRole;
+export interface CustomRoleAssignment {
+  custom_role_id: string;
 }
+
+export type UpdateOrgMemberRequest = { role: OrgRole } | CustomRoleAssignment;
 
 export interface OrgMembersResponse {
   members: OrganizationMember[];
@@ -91,7 +96,6 @@ export interface UpdateDeviceRequest {
   name?: string;
 }
 
-// Invitation Types
 export interface Invitation {
   id: string;
   organization_id: string;
@@ -117,7 +121,14 @@ export interface InvitationsResponse {
   invitations: Invitation[];
 }
 
-// Audit Log Types
+export interface InvitationAccess {
+  read: boolean;
+  create: boolean;
+  revoke: boolean;
+  role?: OrgRole | undefined;
+  permissions?: readonly string[] | undefined;
+}
+
 // The server names actions and resources with dotted strings (member.added,
 // settings.reset); the console filters by the ones it knows and shows the rest.
 export type AuditAction = string;
@@ -153,7 +164,6 @@ export interface AuditLogsResponse {
   total: number;
 }
 
-// API Response wrappers
 export interface ApiResponse {
   success: boolean;
   error?: string;

@@ -1,3 +1,5 @@
+import { meetsOrganizationRole } from '../../../shared/roles';
+import { Permission } from '../../enterprise/roles/schemas';
 import type { InstalledModel } from '../../models/types';
 import { mergeStageOptions } from '../../models/utils/stageOptions';
 import type { OrgRole } from '../organization/types';
@@ -38,8 +40,16 @@ export function agentOf(provider: AiProvider): Agent | null {
   return isAgentProvider(provider) ? agents[provider] : null;
 }
 
-export function agentAccess(role: OrgRole | undefined, resolving: boolean): AgentAccess {
-  if (role === 'owner' || role === 'admin') return 'manage';
+export function agentAccess(
+  permissions: readonly string[] | undefined,
+  role: OrgRole | undefined,
+  resolving: boolean
+): AgentAccess {
+  const manages =
+    permissions === undefined
+      ? role !== undefined && meetsOrganizationRole(role, 'admin')
+      : permissions.includes(Permission.AgentLoginsUpdate);
+  if (manages) return 'manage';
   return resolving ? 'resolving' : 'view';
 }
 

@@ -2,7 +2,8 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 use super::refusal::Refusal;
-use crate::db::organization_members::{self, OrgRole};
+use crate::auth::Permission;
+use crate::db::organization_members;
 
 pub const ORGANIZATION_MISSING: &str = "Organization not found";
 pub const FORBIDDEN: &str =
@@ -14,9 +15,9 @@ pub async fn organization(
     organization: Uuid,
     user: Uuid,
 ) -> Result<(), Refusal> {
-    match organization_members::lock_role(connection, organization, user).await? {
-        Some(OrgRole::Owner | OrgRole::Admin) => Ok(()),
-        Some(OrgRole::Member) => Err(Refusal::Forbidden(FORBIDDEN)),
+    match organization_members::lock_membership(connection, organization, user).await? {
+        Some(membership) if membership.grant.allows(Permission::AuditUpdate) => Ok(()),
+        Some(_) => Err(Refusal::Forbidden(FORBIDDEN)),
         None => Err(Refusal::Missing(ORGANIZATION_MISSING)),
     }
 }

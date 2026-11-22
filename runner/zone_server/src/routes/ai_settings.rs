@@ -12,10 +12,9 @@ use uuid::Uuid;
 use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
 use zone_enterprise::policy::{Denial, Effective};
 
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, Permission};
 use crate::db::ai_settings;
 use crate::db::audit::{actions, resources};
-use crate::db::organization_members::OrgRole;
 use crate::routes::policy::asked::{self, Asked};
 use crate::routes::policy::refusal;
 use crate::services::policy::{self, Subject};
@@ -433,8 +432,13 @@ async fn authorize_save(
                 .await
         }
         None => {
-            ai_settings::authorize_organization(&mut connection, organization, user, OrgRole::Admin)
-                .await
+            ai_settings::authorize_organization(
+                &mut connection,
+                organization,
+                user,
+                Permission::AiSettingsUpdate,
+            )
+            .await
         }
     };
     authorized.map_err(access_error)

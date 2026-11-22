@@ -4,6 +4,8 @@ import type { GitHubApp, GitHubAppRegistration, GitHubInstallation } from '../..
 import { GitHubAccountRow } from './GitHubAccountRow';
 import { GitHubConnectForm } from './GitHubConnectForm';
 
+const READ_ONLY_HINT = "Your role can't change GitHub settings.";
+
 interface GitHubSectionBodyProps {
   loading: boolean;
   error: string | null;
@@ -62,9 +64,7 @@ export function GitHubSectionBody({
 
   return (
     <>
-      {!canManage && (
-        <p className="github-read-only">Only organization admins can change GitHub settings.</p>
-      )}
+      {!canManage && <p className="github-read-only">{READ_ONLY_HINT}</p>}
       {!canManage && !connected && <p className="github-empty">No GitHub account is connected.</p>}
       {connected && (
         <ul className="github-accounts" aria-label="Connected GitHub accounts">

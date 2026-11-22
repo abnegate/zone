@@ -809,9 +809,7 @@ describe('GitHubSection', () => {
 
       const row = await findRow('acme');
       const section = screen.getByRole('region', { name: 'GitHub' });
-      expect(
-        within(section).getByText('Only organization admins can change GitHub settings.')
-      ).toBeTruthy();
+      expect(within(section).getByText("Your role can't change GitHub settings.")).toBeTruthy();
       expect(within(row).getByText('Organization')).toBeTruthy();
       expect(within(section).queryAllByRole('button')).toHaveLength(0);
       expect(within(section).queryAllByRole('link')).toHaveLength(0);
@@ -823,9 +821,7 @@ describe('GitHubSection', () => {
 
       expect(await screen.findByText('No GitHub account is connected.')).toBeTruthy();
       const section = screen.getByRole('region', { name: 'GitHub' });
-      expect(
-        within(section).getByText('Only organization admins can change GitHub settings.')
-      ).toBeTruthy();
+      expect(within(section).getByText("Your role can't change GitHub settings.")).toBeTruthy();
       expect(within(section).queryByRole('radio')).toBeNull();
       expect(within(section).queryAllByRole('button')).toHaveLength(0);
       expect(within(section).queryAllByRole('link')).toHaveLength(0);

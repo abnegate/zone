@@ -5,16 +5,16 @@ import { createElement, type ReactNode } from 'react';
 import { ApiError } from '../../../api/ApiError';
 import { HttpStatus } from '../../../api/HttpStatus';
 import { ACTIVE, COMMUNITY, UNVERIFIED } from '../fixtures';
+import { RETRY_LIMIT } from '../retry';
 
 const get = mock();
 
 mock.module('../api', () => ({ licenseApi: { get, set: mock(), remove: mock() } }));
 
 let useLicense: typeof import('./useLicense').useLicense;
-let LICENSE_RETRY_LIMIT: number;
 
 beforeAll(async () => {
-  ({ useLicense, LICENSE_RETRY_LIMIT } = await import('./useLicense'));
+  ({ useLicense } = await import('./useLicense'));
 });
 
 afterAll(() => {
@@ -121,7 +121,7 @@ describe('useLicense', () => {
     const { result } = render();
 
     await waitFor(() => expect(result.current.error).toBe('Failed to load the license: 502'));
-    expect(get).toHaveBeenCalledTimes(LICENSE_RETRY_LIMIT + 1);
+    expect(get).toHaveBeenCalledTimes(RETRY_LIMIT + 1);
   });
 
   it('retries a network failure that never reached the server', async () => {
@@ -155,7 +155,7 @@ describe('useLicense', () => {
     const shared = client();
     const first = render(undefined, shared);
     await waitFor(() => expect(first.result.current.error).not.toBeNull());
-    expect(get).toHaveBeenCalledTimes(LICENSE_RETRY_LIMIT + 1);
+    expect(get).toHaveBeenCalledTimes(RETRY_LIMIT + 1);
 
     get.mockReset();
     get.mockResolvedValue(ACTIVE);

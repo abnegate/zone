@@ -1,5 +1,6 @@
 import { Button } from '@zone/ui';
 import { useId } from 'react';
+import { UpgradeNotice } from '../../components/UpgradeNotice';
 import { useAuditDestinations, useAuditRetention } from '../hooks';
 import {
   LOADING_LABEL,
@@ -12,7 +13,6 @@ import { NoticeTone, standingNotice } from '../messages';
 import { AuditScopeKind } from '../schemas';
 import type { AuditScope, Standing } from '../types';
 import { AuditLicenseWarning } from './AuditLicenseWarning';
-import { AuditUpgradeNotice } from './AuditUpgradeNotice';
 import { DestinationList } from './DestinationList';
 import { ExportPanel } from './ExportPanel';
 import { RetentionPanel } from './RetentionPanel';
@@ -29,9 +29,14 @@ function StandingNotice({ standing, days }: StandingNoticeProps) {
     return null;
   }
   return notice.tone === NoticeTone.Upgrade ? (
-    <AuditUpgradeNotice message={notice.message} action={notice.action} />
+    <UpgradeNotice
+      message={notice.message}
+      action={notice.action}
+      request={notice.request}
+      className="audit-notice"
+    />
   ) : (
-    <AuditLicenseWarning message={notice.message} action={notice.action} />
+    <AuditLicenseWarning message={notice.message} action={notice.action} request={notice.request} />
   );
 }
 

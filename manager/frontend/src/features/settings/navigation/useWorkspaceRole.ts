@@ -1,49 +1,62 @@
 import { useEffect, useState } from 'react';
 import { client } from '../../../api/client';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
-import type { WorkspaceRole } from '../../../types';
+import type { WorkspaceMember, WorkspaceRole } from '../../../types';
 import { useAuth } from '../../auth/context';
-
-interface ResolvedRole {
-  workspaceId: string;
-  role: WorkspaceRole | undefined;
-}
 
 export interface WorkspaceRoleState {
   role: WorkspaceRole | undefined;
+  permissions?: readonly string[] | undefined;
   resolving: boolean;
+}
+
+interface Standing {
+  role: WorkspaceRole | undefined;
+  permissions: readonly string[] | undefined;
+}
+
+interface ResolvedStanding extends Standing {
+  workspaceId: string;
+}
+
+const UNKNOWN: Standing = { role: undefined, permissions: undefined };
+
+function standingOf(member: WorkspaceMember | undefined): Standing {
+  return member === undefined ? UNKNOWN : { role: member.role, permissions: member.permissions };
 }
 
 export function useWorkspaceRole(): WorkspaceRoleState {
   const { currentWorkspace } = useWorkspace();
   const userId = useAuth().user?.id;
   const workspaceId = currentWorkspace?.id;
-  const [state, setState] = useState<ResolvedRole | null>(null);
+  const [state, setState] = useState<ResolvedStanding | null>(null);
 
   useEffect(() => {
     if (workspaceId === undefined || userId === undefined) {
       return;
     }
     let cancelled = false;
-    const settle = (role: WorkspaceRole | undefined) => {
+    const settle = (standing: Standing) => {
       if (!cancelled) {
-        setState({ workspaceId, role });
+        setState({ workspaceId, ...standing });
       }
     };
     client
       .getWorkspaceMembers(workspaceId)
-      .then(({ members }) => settle(members.find((member) => member.user_id === userId)?.role))
-      .catch(() => settle(undefined));
+      .then(({ members }) =>
+        settle(standingOf(members.find((member) => member.user_id === userId)))
+      )
+      .catch(() => settle(UNKNOWN));
     return () => {
       cancelled = true;
     };
   }, [workspaceId, userId]);
 
   if (workspaceId === undefined) {
-    return { role: undefined, resolving: false };
+    return { ...UNKNOWN, resolving: false };
   }
 
   const resolving = userId !== undefined && state?.workspaceId !== workspaceId;
-  const role = state?.workspaceId === workspaceId ? state.role : undefined;
-  return { role, resolving };
+  const standing = state?.workspaceId === workspaceId ? state : UNKNOWN;
+  return { role: standing.role, permissions: standing.permissions, resolving };
 }

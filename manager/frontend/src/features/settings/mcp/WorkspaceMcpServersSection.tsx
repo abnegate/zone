@@ -9,6 +9,8 @@ import './WorkspaceMcpServersSection.css';
 
 const UPDATE_FAILED = 'Could not update MCP servers.';
 
+const READ_ONLY_HINT = "Your role can't change workspace MCP servers.";
+
 const NOTHING_PENDING: ReadonlySet<string> = new Set();
 
 function without(pending: ReadonlySet<string>, id: string): ReadonlySet<string> {
@@ -110,7 +112,7 @@ export function WorkspaceMcpServersSection({
 
       {!editable && (
         <p className="form-hint" role="status">
-          Only workspace admins can change MCP servers.
+          {READ_ONLY_HINT}
         </p>
       )}
       {failure !== null && <Alert variant="destructive">{failure}</Alert>}

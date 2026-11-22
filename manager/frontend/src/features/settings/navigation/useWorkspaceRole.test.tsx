@@ -50,11 +50,18 @@ const workspace = (id: string): Workspace => ({
   updated_at: '2024-01-01T00:00:00Z',
 });
 
-const member = (userId: string, workspaceId: string, role: WorkspaceRole): WorkspaceMember => ({
+const member = (
+  userId: string,
+  workspaceId: string,
+  role: WorkspaceRole,
+  permissions?: readonly string[]
+): WorkspaceMember => ({
   id: `${workspaceId}-${userId}`,
   user_id: userId,
   workspace_id: workspaceId,
   role,
+  custom_role: null,
+  permissions,
   email: `${userId}@example.com`,
   display_name: null,
   joined_at: '2024-01-01T00:00:00Z',
@@ -95,6 +102,33 @@ describe('useWorkspaceRole', () => {
       expect(result.current).toEqual({ role: 'admin', resolving: false });
     });
     expect(mockGetWorkspaceMembers.mock.calls).toEqual([['workspace-a']]);
+  });
+
+  it('resolves the caller permissions alongside the role', async () => {
+    const permissions = ['workspace:read', 'workspace_ai_settings:update'];
+    mockGetWorkspaceMembers.mockResolvedValue({
+      members: [member(USER_ID, 'workspace-a', 'viewer', permissions)],
+    });
+
+    const { result } = renderHook(() => useWorkspaceRole());
+
+    await waitFor(() => {
+      expect(result.current).toEqual({ role: 'viewer', permissions, resolving: false });
+    });
+  });
+
+  it('leaves the permissions unknown when the members list carries none', async () => {
+    mockGetWorkspaceMembers.mockResolvedValue({
+      members: [member(USER_ID, 'workspace-a', 'member')],
+    });
+
+    const { result } = renderHook(() => useWorkspaceRole());
+
+    await waitFor(() => {
+      expect(result.current.resolving).toBe(false);
+    });
+    expect(result.current.role).toBe('member');
+    expect(result.current.permissions).toBeUndefined();
   });
 
   it('settles undefined when the caller is not among the members', async () => {

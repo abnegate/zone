@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 use wiremock::{MockServer, ResponseTemplate};
+use zone_server::db::custom_roles::Assignment;
 use zone_server::db::github_apps::{self, AppRow, OwnerType};
 use zone_server::db::github_connection_states::{self, Purpose};
 use zone_server::db::github_installations::{
@@ -920,14 +921,19 @@ async fn callback_manifest_demoted_user_fails() {
     let state = harness
         .issue(tenant.organization, admin.user, Purpose::Registration, None)
         .await;
-    organization_members::update_member_role(
+    let demotion = organization_members::change_role(
         harness.pool(),
         tenant.organization,
         admin.user,
-        OrgRole::Member,
+        Assignment::BuiltIn(OrgRole::Member),
+        tenant.user,
     )
     .await
-    .expect("the admin is demoted");
+    .expect("the demotion runs");
+    assert!(
+        matches!(demotion, organization_members::RoleChange::Applied(_)),
+        "the admin is demoted, got {demotion:?}"
+    );
     let code = github_app::opaque();
     let registration = Registration::new(&github_app::login("acme"), AccountType::Organization);
     github_app::converting(&harness.github, &code, registration.answer(), 0).await;

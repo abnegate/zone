@@ -500,7 +500,7 @@ describe('GeneralSection', () => {
   describe('read-only', () => {
     it('explains why the theme is locked and hides the actions', () => {
       renderSection(false);
-      expect(screen.getByText("Viewers can't change the workspace theme.")).toBeInTheDocument();
+      expect(screen.getByText("Your role can't change the workspace theme.")).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Save Changes' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Reset to Defaults' })).toBeNull();
     });
@@ -536,7 +536,7 @@ describe('GeneralSection', () => {
 
     it('omits the read-only note when editable', () => {
       renderSection();
-      expect(screen.queryByText("Viewers can't change the workspace theme.")).toBeNull();
+      expect(screen.queryByText("Your role can't change the workspace theme.")).toBeNull();
     });
   });
 });

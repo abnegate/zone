@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { ORGANIZATION_PERMISSIONS, Permission } from '../../enterprise/roles/schemas';
 import {
   COMPACT_QUERY,
   findSection,
@@ -34,6 +35,7 @@ const ALL_SECTIONS = [
     label: 'Agent policy',
   },
   { group: SettingsGroup.Organization, section: SettingsSection.Members, label: 'Members' },
+  { group: SettingsGroup.Organization, section: SettingsSection.Roles, label: 'Roles' },
   { group: SettingsGroup.Organization, section: SettingsSection.Devices, label: 'Devices' },
   { group: SettingsGroup.Organization, section: SettingsSection.Audit, label: 'Audit log' },
   {
@@ -77,6 +79,7 @@ const ORGANIZATION_AUDIT_EXPORT = settingsPath(
   SettingsGroup.Organization,
   SettingsSection.AuditExport
 );
+const ORGANIZATION_ROLES = settingsPath(SettingsGroup.Organization, SettingsSection.Roles);
 const ORGANIZATION_SPEND = settingsPath(SettingsGroup.Organization, SettingsSection.Spend);
 const SESSIONS = settingsPath(SettingsGroup.You, SettingsSection.Sessions);
 const SOURCES = settingsPath(SettingsGroup.Workspace, SettingsSection.Sources);
@@ -101,6 +104,7 @@ describe('settings constants', () => {
       Folders: 'folders',
       Sources: 'sources',
       Members: 'members',
+      Roles: 'roles',
       Devices: 'devices',
       Audit: 'audit',
       AuditExport: 'audit-export',
@@ -236,7 +240,7 @@ describe('visibleSections', () => {
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
 
-  it('shows all twenty-two sections to a server admin who owns the organization and administers the workspace', () => {
+  it('shows all twenty-three sections to a server admin who owns the organization and administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -247,7 +251,7 @@ describe('visibleSections', () => {
       administersServer: true,
     });
 
-    expect(visible).toHaveLength(22);
+    expect(visible).toHaveLength(23);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 
@@ -464,7 +468,53 @@ describe('visibleSections', () => {
     }
   });
 
-  it('shows Spend only to organization owners and admins, right after the organization Audit export', () => {
+  it('shows Roles only to organization owners and admins', () => {
+    for (const [organizationRole, shown] of [
+      ['owner', true],
+      ['admin', true],
+      ['member', false],
+      [undefined, true],
+    ] as const) {
+      expect(
+        paths({
+          organization: true,
+          organizationRole,
+          workspace: true,
+          workspaceRole: 'viewer',
+          installsModels: false,
+          readsSources: false,
+          administersServer: false,
+        }).includes(ORGANIZATION_ROLES),
+        String(organizationRole)
+      ).toBe(shown);
+    }
+  });
+
+  it('hides Roles outside an organization', () => {
+    expect(
+      paths({
+        organization: false,
+        organizationRole: undefined,
+        workspace: false,
+        workspaceRole: undefined,
+        installsModels: true,
+        readsSources: true,
+        administersServer: true,
+      })
+    ).not.toContain(ORGANIZATION_ROLES);
+  });
+
+  it('finds Roles in the organization group only', () => {
+    expect(findSection(SettingsGroup.Organization, 'roles')).toMatchObject({
+      group: SettingsGroup.Organization,
+      section: SettingsSection.Roles,
+      label: 'Roles',
+    });
+    expect(findSection(SettingsGroup.Workspace, 'roles')).toBeUndefined();
+    expect(ORGANIZATION_ROLES).toBe('/settings/organization/roles');
+  });
+
+  it('shows Spend only to built-in roles that hold spend:read, right after the organization Audit export', () => {
     for (const [organizationRole, shown] of [
       ['owner', true],
       ['admin', true],
@@ -626,5 +676,73 @@ describe('visibleSections', () => {
   it('puts the canonical Sources path under workspace settings', () => {
     expect(SOURCES_PATH).toBe(settingsPath(SettingsGroup.Workspace, SettingsSection.Sources));
     expect(SOURCES_PATH).toBe('/settings/workspace/sources');
+  });
+});
+
+describe('permission-gated organization sections', () => {
+  const ORGANIZATION_AI = settingsPath(SettingsGroup.Organization, SettingsSection.Ai);
+  const ORGANIZATION_DEVICES = settingsPath(SettingsGroup.Organization, SettingsSection.Devices);
+  const ORGANIZATION_AUDIT = settingsPath(SettingsGroup.Organization, SettingsSection.Audit);
+
+  const holding = (organizationPermissions: readonly string[]): SettingsAccess => ({
+    organization: true,
+    organizationRole: 'member',
+    organizationPermissions,
+    workspace: false,
+    workspaceRole: undefined,
+    installsModels: false,
+    readsSources: false,
+    administersServer: false,
+  });
+
+  const organizationPaths = (access: SettingsAccess): string[] =>
+    paths(access).filter((path) => path.startsWith(`${SETTINGS_ROOT}/organization/`));
+
+  it('shows a custom role each section its permissions read, whatever its rank', () => {
+    expect(
+      organizationPaths(
+        holding([Permission.OrganizationRead, Permission.AuditLogsRead, Permission.DevicesRead])
+      )
+    ).toEqual([
+      ORGANIZATION_AGENT_POLICY,
+      ORGANIZATION_MEMBERS,
+      ORGANIZATION_DEVICES,
+      ORGANIZATION_AUDIT,
+      ORGANIZATION_GITHUB,
+      ORGANIZATION_MCP,
+    ]);
+  });
+
+  it('gates AI defaults, Roles, Devices, Audit log, Audit export and Spend on their own permissions', () => {
+    const gates: [string, string][] = [
+      [ORGANIZATION_AI, Permission.AiSettingsRead],
+      [ORGANIZATION_ROLES, Permission.RolesUpdate],
+      [ORGANIZATION_DEVICES, Permission.DevicesRead],
+      [ORGANIZATION_AUDIT, Permission.AuditLogsRead],
+      [ORGANIZATION_AUDIT_EXPORT, Permission.AuditUpdate],
+      [ORGANIZATION_SPEND, Permission.SpendRead],
+    ];
+    for (const [path, name] of gates) {
+      expect(organizationPaths(holding([Permission.OrganizationRead, name])), name).toContain(path);
+      expect(organizationPaths(holding([Permission.OrganizationRead])), name).not.toContain(path);
+    }
+  });
+
+  it('trusts the permissions over the rank when the server sends both', () => {
+    expect(
+      organizationPaths({ ...holding([Permission.OrganizationRead]), organizationRole: 'owner' })
+    ).toEqual([
+      ORGANIZATION_AGENT_POLICY,
+      ORGANIZATION_MEMBERS,
+      ORGANIZATION_GITHUB,
+      ORGANIZATION_MCP,
+    ]);
+  });
+
+  it('shows every organization section to the built-in admin permission set', () => {
+    const admin = ORGANIZATION_PERMISSIONS.filter(
+      (name) => name !== Permission.OrganizationDelete && name !== Permission.AdministratorsUpdate
+    );
+    expect(organizationPaths(holding(admin))).toEqual(pathsOf(SettingsGroup.Organization));
   });
 });

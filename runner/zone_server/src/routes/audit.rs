@@ -19,6 +19,8 @@ use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::auth::Permission;
+use crate::auth::jwt::Claims;
 use crate::auth::middleware::AuthUser;
 use crate::db::{audit, organization_members};
 use crate::state::AppState;
@@ -70,6 +72,28 @@ fn default_limit() -> i64 {
     DEFAULT_LIMIT
 }
 
+async fn authorize(
+    state: &AppState,
+    organization: Uuid,
+    claims: &Claims,
+) -> Result<(), (StatusCode, &'static str)> {
+    let user =
+        Uuid::parse_str(&claims.sub).map_err(|_| (StatusCode::UNAUTHORIZED, UNAUTHENTICATED))?;
+
+    let permitted =
+        organization_members::permits(state.db(), organization, user, Permission::AuditLogsRead)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "Failed to check admin status");
+                (StatusCode::INTERNAL_SERVER_ERROR, ADMIN_CHECK_FAILED)
+            })?;
+
+    if !permitted {
+        return Err((StatusCode::FORBIDDEN, ADMIN_REQUIRED));
+    }
+    Ok(())
+}
+
 /// A bound given either as an RFC 3339 instant or as a calendar date; a date
 /// on its own means the start of that day.
 pub(crate) fn parse_start(value: &str) -> Option<DateTime<Utc>> {
@@ -111,35 +135,8 @@ pub async fn list_audit_logs(
     Query(query): Query<ListAuditLogsQuery>,
     AuthUser(claims): AuthUser,
 ) -> impl IntoResponse {
-    let user = match Uuid::parse_str(&claims.sub) {
-        Ok(user) => user,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new(UNAUTHENTICATED)),
-            )
-                .into_response();
-        }
-    };
-
-    let admin = match organization_members::is_admin(state.db(), organization, user).await {
-        Ok(admin) => admin,
-        Err(error) => {
-            tracing::error!(%error, "Failed to check admin status");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(ADMIN_CHECK_FAILED)),
-            )
-                .into_response();
-        }
-    };
-
-    if !admin {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(ADMIN_REQUIRED)),
-        )
-            .into_response();
+    if let Err((status, message)) = authorize(&state, organization, &claims).await {
+        return (status, Json(ErrorResponse::new(message))).into_response();
     }
 
     let start_date = match query.start_date.as_deref().map(parse_start) {
@@ -222,35 +219,8 @@ pub async fn get_audit_log(
     Path((organization, id)): Path<(Uuid, Uuid)>,
     AuthUser(claims): AuthUser,
 ) -> impl IntoResponse {
-    let user = match Uuid::parse_str(&claims.sub) {
-        Ok(user) => user,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new(UNAUTHENTICATED)),
-            )
-                .into_response();
-        }
-    };
-
-    let admin = match organization_members::is_admin(state.db(), organization, user).await {
-        Ok(admin) => admin,
-        Err(error) => {
-            tracing::error!(%error, "Failed to check admin status");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(ADMIN_CHECK_FAILED)),
-            )
-                .into_response();
-        }
-    };
-
-    if !admin {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(ADMIN_REQUIRED)),
-        )
-            .into_response();
+    if let Err((status, message)) = authorize(&state, organization, &claims).await {
+        return (status, Json(ErrorResponse::new(message))).into_response();
     }
 
     let log = match audit::get_audit_log(state.db(), id).await {
@@ -278,35 +248,8 @@ pub async fn export_audit_logs_csv(
     Query(query): Query<ExportAuditLogsQuery>,
     AuthUser(claims): AuthUser,
 ) -> impl IntoResponse {
-    let user = match Uuid::parse_str(&claims.sub) {
-        Ok(user) => user,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new(UNAUTHENTICATED)),
-            )
-                .into_response();
-        }
-    };
-
-    let admin = match organization_members::is_admin(state.db(), organization, user).await {
-        Ok(admin) => admin,
-        Err(error) => {
-            tracing::error!(%error, "Failed to check admin status");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(ADMIN_CHECK_FAILED)),
-            )
-                .into_response();
-        }
-    };
-
-    if !admin {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(ADMIN_REQUIRED)),
-        )
-            .into_response();
+    if let Err((status, message)) = authorize(&state, organization, &claims).await {
+        return (status, Json(ErrorResponse::new(message))).into_response();
     }
 
     let Some(start_date) = parse_start(&query.start_date) else {

@@ -373,22 +373,16 @@ async fn test_accept_invitation_adds_user_to_org_and_workspaces() {
     assert_eq!(org_member.role, organization_members::OrgRole::Admin);
 
     // Verify user is added to both workspaces
-    let ws_role_1 = zone_server::db::workspace_members::get_role(&pool, user_id, workspace_id_1)
-        .await
-        .expect("Failed to get workspace role");
-
-    let ws_role_2 = zone_server::db::workspace_members::get_role(&pool, user_id, workspace_id_2)
-        .await
-        .expect("Failed to get workspace role");
-
-    assert_eq!(
-        ws_role_1,
-        Some(zone_server::db::workspace_members::WorkspaceRole::Member)
-    );
-    assert_eq!(
-        ws_role_2,
-        Some(zone_server::db::workspace_members::WorkspaceRole::Member)
-    );
+    for workspace_id in [workspace_id_1, workspace_id_2] {
+        let role = zone_server::db::workspace_members::membership(&pool, workspace_id, user_id)
+            .await
+            .expect("Failed to read workspace membership")
+            .map(|membership| membership.role);
+        assert_eq!(
+            role,
+            Some(zone_server::db::workspace_members::WorkspaceRole::Member)
+        );
+    }
 }
 
 #[tokio::test]

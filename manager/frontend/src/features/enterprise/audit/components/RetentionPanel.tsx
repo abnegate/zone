@@ -1,6 +1,7 @@
 import { Button, Checkbox, Input } from '@zone/ui';
 import { type FormEvent, useId, useState } from 'react';
 import { absoluteTime, relativeTime } from '../../../../shared/utils/time';
+import { UpgradeNotice } from '../../components/UpgradeNotice';
 import { useSetAuditRetention } from '../hooks';
 import {
   CUTOFF_LABEL,
@@ -29,7 +30,6 @@ import {
 } from '../messages';
 import { AuditCode, RETENTION_DAYS_MAXIMUM, RETENTION_DAYS_MINIMUM } from '../schemas';
 import type { AuditScope, RetentionResponse } from '../types';
-import { AuditUpgradeNotice } from './AuditUpgradeNotice';
 
 const INTEGER = /^\d+$/;
 
@@ -107,7 +107,10 @@ function RetentionForm({ scope, days }: RetentionFormProps) {
         />
       </div>
       {licenseRequired && (
-        <AuditUpgradeNotice message={refusalMessage(AuditCode.LicenseRequired)} />
+        <UpgradeNotice
+          message={refusalMessage(AuditCode.LicenseRequired)}
+          className="audit-notice"
+        />
       )}
       {failure && (
         <div className="alert alert-error" role="alert">

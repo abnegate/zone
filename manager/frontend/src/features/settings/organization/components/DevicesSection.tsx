@@ -6,6 +6,7 @@ import './DevicesSection.css';
 
 interface DevicesSectionProps {
   orgId: string;
+  editable: boolean;
 }
 
 const PLATFORM_LABEL: Record<OrganizationDevice['platform'], string> = {
@@ -27,7 +28,7 @@ const deviceLabel = (device: OrganizationDevice): string =>
 const memberLabel = (device: OrganizationDevice): string =>
   device.display_name?.trim() || device.email;
 
-export default function DevicesSection({ orgId }: DevicesSectionProps) {
+export default function DevicesSection({ orgId, editable }: DevicesSectionProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | undefined>(undefined);
   const [success, setSuccess] = useState<string | undefined>(undefined);
@@ -147,7 +148,7 @@ export default function DevicesSection({ orgId }: DevicesSectionProps) {
           label="Only allowed devices may connect"
           helpText="Unknown clients wait for an admin. Blocking a device signs it out and keeps it out."
           checked={mode === 'allowed'}
-          disabled={savingPolicy}
+          disabled={savingPolicy || !editable}
           onCheckedChange={setPolicy}
         />
       </div>
@@ -162,7 +163,7 @@ export default function DevicesSection({ orgId }: DevicesSectionProps) {
                 <th>Member</th>
                 <th>Status</th>
                 <th>Last seen</th>
-                <th className="devices-actions-head">Actions</th>
+                {editable && <th className="devices-actions-head">Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -190,7 +191,7 @@ export default function DevicesSection({ orgId }: DevicesSectionProps) {
                               }
                             }}
                           />
-                        ) : (
+                        ) : editable ? (
                           <button
                             type="button"
                             className="device-name"
@@ -201,6 +202,8 @@ export default function DevicesSection({ orgId }: DevicesSectionProps) {
                           >
                             {deviceLabel(device)}
                           </button>
+                        ) : (
+                          <span className="device-name">{deviceLabel(device)}</span>
                         )}
                         <div className="device-meta">
                           {PLATFORM_LABEL[device.platform]}
@@ -221,33 +224,35 @@ export default function DevicesSection({ orgId }: DevicesSectionProps) {
                     <td className="device-seen">
                       {new Date(device.last_seen_at).toLocaleString()}
                     </td>
-                    <td>
-                      <div className="device-actions">
-                        {device.status !== 'allowed' && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            disabled={busy}
-                            aria-label={`Allow ${deviceLabel(device)}`}
-                            onClick={() => setStatus(device, 'allowed')}
-                          >
-                            Allow
-                          </Button>
-                        )}
-                        {device.status !== 'blocked' && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="device-block"
-                            disabled={busy}
-                            aria-label={`Block ${deviceLabel(device)}`}
-                            onClick={() => setBlockTarget(device)}
-                          >
-                            Block
-                          </Button>
-                        )}
-                      </div>
-                    </td>
+                    {editable && (
+                      <td>
+                        <div className="device-actions">
+                          {device.status !== 'allowed' && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={busy}
+                              aria-label={`Allow ${deviceLabel(device)}`}
+                              onClick={() => setStatus(device, 'allowed')}
+                            >
+                              Allow
+                            </Button>
+                          )}
+                          {device.status !== 'blocked' && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="device-block"
+                              disabled={busy}
+                              aria-label={`Block ${deviceLabel(device)}`}
+                              onClick={() => setBlockTarget(device)}
+                            >
+                              Block
+                            </Button>
+                          )}
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 );
               })}

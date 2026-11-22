@@ -1722,7 +1722,9 @@ describe('AgentSignIn', () => {
 
       expect(screen.getByText('Not signed in')).toBeInTheDocument();
       expect(screen.queryByText('Signing in')).toBeNull();
-      expect(screen.getByText('Ask an organization admin to sign in.')).toBeInTheDocument();
+      expect(
+        screen.getByText("Your role can't sign agents in. Ask someone whose role can.")
+      ).toBeInTheDocument();
       expect(screen.queryAllByRole('button')).toHaveLength(0);
       expect(screen.queryAllByRole('link')).toHaveLength(0);
       expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
@@ -1732,7 +1734,9 @@ describe('AgentSignIn', () => {
       renderPanel('claude', claudeSignedOut, 'view');
 
       expect(screen.getByText('Not signed in')).toBeInTheDocument();
-      expect(screen.getByText('Ask an organization admin to sign in.')).toBeInTheDocument();
+      expect(
+        screen.getByText("Your role can't sign agents in. Ask someone whose role can.")
+      ).toBeInTheDocument();
       expect(screen.queryAllByRole('button')).toHaveLength(0);
     });
 
@@ -1756,7 +1760,9 @@ describe('AgentSignIn', () => {
 
       expect(screen.getByText('Not signed in')).toBeInTheDocument();
       expect(screen.queryAllByRole('button')).toHaveLength(0);
-      expect(screen.queryByText('Ask an organization admin to sign in.')).toBeNull();
+      expect(
+        screen.queryByText("Your role can't sign agents in. Ask someone whose role can.")
+      ).toBeNull();
     });
 
     it('shows no device code, even to someone who may turn out to be an admin', () => {

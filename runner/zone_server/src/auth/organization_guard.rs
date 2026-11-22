@@ -1,6 +1,6 @@
 //! Organization membership guards for authorization
 //!
-//! Provides extractors that verify organization membership and roles.
+//! Provides extractors that verify organization membership and permissions.
 
 use axum::{
     extract::{FromRef, FromRequestParts, Path},
@@ -8,100 +8,147 @@ use axum::{
 };
 use uuid::Uuid;
 
-use super::middleware::{AuthError, AuthUser};
-use crate::{db::organization_members, state::AppState};
+use super::{
+    grant::Grant,
+    middleware::{AuthError, AuthUser},
+    permission::Permission,
+    scope::Scope,
+};
+use crate::{
+    db::{
+        custom_roles::Summary,
+        organization_members::{self, OrgRole},
+    },
+    state::AppState,
+};
 
-/// Guard that requires organization membership
-#[derive(Debug, Clone)]
-pub struct OrgMember {
-    pub org_id: Uuid,
-    pub user_id: Uuid,
-    pub email: String,
-    pub role: organization_members::OrgRole,
+const INACTIVE: &str = "Membership inactive";
+
+fn database(error: sqlx::Error) -> AuthError {
+    AuthError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: format!("Database error: {error}"),
+    }
 }
 
-impl<S> FromRequestParts<S> for OrgMember
+/// The organization in the path and the signed-in user asking about it.
+async fn identify<S>(
+    parts: &mut Parts,
+    state: &S,
+    auth_user: &AuthUser,
+) -> Result<(Uuid, Uuid), AuthError>
 where
     S: Send + Sync,
-    AppState: FromRef<S>,
 {
-    type Rejection = AuthError;
+    let organization_id = match Path::<Uuid>::from_request_parts(parts, state).await {
+        Ok(Path(id)) => id,
+        Err(_) => {
+            #[derive(serde::Deserialize)]
+            struct OrgPath {
+                #[serde(alias = "organization_id")]
+                org_id: Uuid,
+            }
 
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        // First require authentication
-        let auth_user = AuthUser::from_request_parts(parts, state).await?;
-
-        // Get app state to access database pool
-        let app_state = AppState::from_ref(state);
-
-        // Extract org_id from path using Axum's Path extractor
-        // Try to extract as a single UUID first (e.g., /api/organizations/:org_id)
-        let org_id = match Path::<Uuid>::from_request_parts(parts, state).await {
-            Ok(Path(id)) => id,
-            Err(_) => {
-                // If that fails, try extracting as a named parameter map
-                #[derive(serde::Deserialize)]
-                struct OrgPath {
-                    #[serde(alias = "organization_id")]
-                    org_id: Uuid,
-                }
-
-                match Path::<OrgPath>::from_request_parts(parts, state).await {
-                    Ok(Path(path)) => path.org_id,
-                    Err(_) => {
-                        return Err(AuthError {
-                            status: StatusCode::BAD_REQUEST,
-                            message: "Missing org_id in path".to_string(),
-                        });
-                    }
+            match Path::<OrgPath>::from_request_parts(parts, state).await {
+                Ok(Path(path)) => path.org_id,
+                Err(_) => {
+                    return Err(AuthError {
+                        status: StatusCode::BAD_REQUEST,
+                        message: "Missing org_id in path".to_string(),
+                    });
                 }
             }
+        }
+    };
+
+    let user_id = Uuid::parse_str(&auth_user.0.sub).map_err(|_| AuthError {
+        status: StatusCode::UNAUTHORIZED,
+        message: "Invalid user ID in token".to_string(),
+    })?;
+
+    Ok((organization_id, user_id))
+}
+
+/// An active member of the organization in the path, with what they hold.
+#[derive(Debug, Clone)]
+pub struct OrganizationMember {
+    pub organization_id: Uuid,
+    pub user_id: Uuid,
+    pub email: String,
+    pub role: OrgRole,
+    pub custom_role: Option<Summary>,
+    pub grant: Grant,
+}
+
+impl OrganizationMember {
+    pub fn allows(&self, permission: Permission) -> bool {
+        self.grant.allows(permission)
+    }
+}
+
+impl<S> FromRequestParts<S> for OrganizationMember
+where
+    S: Send + Sync,
+    AppState: FromRef<S>,
+{
+    type Rejection = AuthError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let auth_user = AuthUser::from_request_parts(parts, state).await?;
+        let app_state = AppState::from_ref(state);
+        let (organization_id, user_id) = identify(parts, state, &auth_user).await?;
+
+        let refusal = |message: String| AuthError {
+            status: StatusCode::FORBIDDEN,
+            message,
         };
-
-        let user_id = Uuid::parse_str(&auth_user.0.sub).map_err(|_| AuthError {
-            status: StatusCode::UNAUTHORIZED,
-            message: "Invalid user ID in token".to_string(),
-        })?;
-
-        // Check membership
-        let member = organization_members::get_member(app_state.db(), org_id, user_id)
+        let membership = organization_members::membership(app_state.db(), organization_id, user_id)
             .await
-            .map_err(|e| AuthError {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                message: format!("Database error: {}", e),
-            })?
-            .ok_or(AuthError {
-                status: StatusCode::FORBIDDEN,
-                message: "Not a member of this organization".to_string(),
-            })?;
-
-        // CRITICAL-5: Check if membership is active
-        if !member.is_active {
-            return Err(AuthError {
-                status: StatusCode::FORBIDDEN,
-                message: "Membership inactive".to_string(),
-            });
+            .map_err(database)?;
+        let Some(membership) = membership else {
+            let inactive =
+                organization_members::get_member(app_state.db(), organization_id, user_id)
+                    .await
+                    .map_err(database)?
+                    .is_some_and(|member| !member.is_active);
+            return Err(refusal(if inactive {
+                INACTIVE.to_string()
+            } else {
+                Permission::OrganizationRead.refusal()
+            }));
+        };
+        if !membership.grant.allows(Permission::OrganizationRead) {
+            return Err(refusal(Permission::OrganizationRead.refusal()));
         }
 
-        Ok(OrgMember {
-            org_id,
+        Ok(Self {
+            organization_id,
             user_id,
             email: auth_user.0.email,
-            role: member.role,
+            role: membership.role,
+            custom_role: membership.custom_role,
+            grant: membership.grant,
         })
     }
 }
 
-/// Guard that requires organization admin role
+/// An organization member who holds the permission at index `PERMISSION`:
+/// `OrganizationPermit<{ Permission::MembersCreate.index() }>`.
 #[derive(Debug, Clone)]
-pub struct OrgAdmin {
-    pub org_id: Uuid,
-    pub user_id: Uuid,
-    pub email: String,
-    pub role: organization_members::OrgRole,
+pub struct OrganizationPermit<const PERMISSION: u16>(pub OrganizationMember);
+
+impl<const PERMISSION: u16> OrganizationPermit<PERMISSION> {
+    const PERMISSION: Permission = {
+        let permission = Permission::at(PERMISSION);
+        assert!(
+            matches!(permission.scope(), Scope::Organization),
+            "an organization permit needs an organization permission"
+        );
+        permission
+    };
 }
 
-impl<S> FromRequestParts<S> for OrgAdmin
+impl<S, const PERMISSION: u16> FromRequestParts<S> for OrganizationPermit<PERMISSION>
 where
     S: Send + Sync,
     AppState: FromRef<S>,
@@ -109,57 +156,14 @@ where
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        // Get organization member first
-        let member = OrgMember::from_request_parts(parts, state).await?;
-
-        // Check if user is admin or owner
-        if member.role < organization_members::OrgRole::Admin {
+        let member = OrganizationMember::from_request_parts(parts, state).await?;
+        let permission = Self::PERMISSION;
+        if !member.allows(permission) {
             return Err(AuthError {
                 status: StatusCode::FORBIDDEN,
-                message: "Organization admin access required".to_string(),
+                message: permission.refusal(),
             });
         }
-
-        Ok(OrgAdmin {
-            org_id: member.org_id,
-            user_id: member.user_id,
-            email: member.email,
-            role: member.role,
-        })
-    }
-}
-
-/// Guard that requires organization owner role
-#[derive(Debug, Clone)]
-pub struct OrgOwner {
-    pub org_id: Uuid,
-    pub user_id: Uuid,
-    pub email: String,
-}
-
-impl<S> FromRequestParts<S> for OrgOwner
-where
-    S: Send + Sync,
-    AppState: FromRef<S>,
-{
-    type Rejection = AuthError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        // Get organization member first
-        let member = OrgMember::from_request_parts(parts, state).await?;
-
-        // Check if user is owner
-        if member.role != organization_members::OrgRole::Owner {
-            return Err(AuthError {
-                status: StatusCode::FORBIDDEN,
-                message: "Organization owner access required".to_string(),
-            });
-        }
-
-        Ok(OrgOwner {
-            org_id: member.org_id,
-            user_id: member.user_id,
-            email: member.email,
-        })
+        Ok(Self(member))
     }
 }

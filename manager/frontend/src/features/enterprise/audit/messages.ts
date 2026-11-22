@@ -1,6 +1,9 @@
 import { absoluteTime } from '../../../shared/utils/time';
 import { Tone } from '../status';
 import {
+  ASK_FOR_KEY_LABEL,
+  ASK_FOR_LICENSE_LABEL,
+  ASK_FOR_RENEWAL_LABEL,
   BACKLOG_WAITING,
   CAPPED_COUNT,
   DAY_PLURAL,
@@ -101,6 +104,7 @@ export interface Notice {
   tone: NoticeTone;
   message: string;
   action: string;
+  request: string;
 }
 
 const REFUSALS: Readonly<Record<AuditCodeValue, string>> = {
@@ -343,6 +347,13 @@ function noticeAction(upgrade: boolean, pause: StreamingPauseValue): string {
   return pause === StreamingPause.Unverified ? PASTE_KEY_LINK_LABEL : RENEW_LINK_LABEL;
 }
 
+function noticeRequest(upgrade: boolean, pause: StreamingPauseValue): string {
+  if (upgrade) {
+    return ASK_FOR_LICENSE_LABEL;
+  }
+  return pause === StreamingPause.Unverified ? ASK_FOR_KEY_LABEL : ASK_FOR_RENEWAL_LABEL;
+}
+
 function noticeMessage(
   standing: Standing,
   pause: StreamingPauseValue,
@@ -364,6 +375,7 @@ export function standingNotice(standing: Standing, days: number | null): Notice 
     tone: upgrade ? NoticeTone.Upgrade : NoticeTone.Warning,
     message: noticeMessage(standing, pause, upgrade, days),
     action: noticeAction(upgrade, pause),
+    request: noticeRequest(upgrade, pause),
   };
 }
 

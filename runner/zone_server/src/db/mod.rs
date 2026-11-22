@@ -18,6 +18,7 @@ pub mod chat_token_usage;
 pub mod chats;
 pub mod context;
 pub mod context_gatherings;
+pub mod custom_roles;
 pub mod devices;
 pub mod email_verification;
 pub mod gathering_events;

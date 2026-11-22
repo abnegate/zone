@@ -1,5 +1,6 @@
 import type { OrgRole, WorkspaceRole } from '../../../types';
-import { allowsOrganization, ORGANIZATION_ADMIN_ROLE } from './access';
+import { Permission } from '../../enterprise/roles/schemas';
+import { grantsOrganization, type OrganizationPermission } from './access';
 
 export const SETTINGS_ROOT = '/settings';
 
@@ -23,6 +24,7 @@ export const SettingsSection = {
   Folders: 'folders',
   Sources: 'sources',
   Members: 'members',
+  Roles: 'roles',
   Devices: 'devices',
   Audit: 'audit',
   AuditExport: 'audit-export',
@@ -41,8 +43,10 @@ export type SettingsSection = (typeof SettingsSection)[keyof typeof SettingsSect
 export interface SettingsAccess {
   organization: boolean;
   organizationRole: OrgRole | undefined;
+  organizationPermissions?: readonly string[] | undefined;
   workspace: boolean;
   workspaceRole: WorkspaceRole | undefined;
+  workspacePermissions?: readonly string[] | undefined;
   installsModels: boolean;
   readsSources: boolean;
   administersServer: boolean;
@@ -82,10 +86,16 @@ const inWorkspace = (access: SettingsAccess): boolean => access.workspace;
 
 const inOrganization = (access: SettingsAccess): boolean => access.organization;
 
-export const administersOrganization = (
-  access: Pick<SettingsAccess, 'organization' | 'organizationRole'>
-): boolean =>
-  access.organization && allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE);
+type OrganizationAccess = Pick<
+  SettingsAccess,
+  'organization' | 'organizationRole' | 'organizationPermissions'
+>;
+
+const grantedInOrganization =
+  (name: OrganizationPermission) =>
+  (access: OrganizationAccess): boolean =>
+    access.organization &&
+    grantsOrganization(access.organizationPermissions, access.organizationRole, name);
 
 const installsModels = (access: SettingsAccess): boolean => access.installsModels;
 
@@ -143,7 +153,7 @@ export const SECTIONS: readonly SectionDefinition[] = [
     group: SettingsGroup.Organization,
     section: SettingsSection.Ai,
     label: 'AI defaults',
-    visible: administersOrganization,
+    visible: grantedInOrganization(Permission.AiSettingsRead),
   },
   {
     group: SettingsGroup.Organization,
@@ -159,27 +169,33 @@ export const SECTIONS: readonly SectionDefinition[] = [
   },
   {
     group: SettingsGroup.Organization,
+    section: SettingsSection.Roles,
+    label: 'Roles',
+    visible: grantedInOrganization(Permission.RolesUpdate),
+  },
+  {
+    group: SettingsGroup.Organization,
     section: SettingsSection.Devices,
     label: 'Devices',
-    visible: administersOrganization,
+    visible: grantedInOrganization(Permission.DevicesRead),
   },
   {
     group: SettingsGroup.Organization,
     section: SettingsSection.Audit,
     label: 'Audit log',
-    visible: administersOrganization,
+    visible: grantedInOrganization(Permission.AuditLogsRead),
   },
   {
     group: SettingsGroup.Organization,
     section: SettingsSection.AuditExport,
     label: AUDIT_EXPORT_LABEL,
-    visible: administersOrganization,
+    visible: grantedInOrganization(Permission.AuditUpdate),
   },
   {
     group: SettingsGroup.Organization,
     section: SettingsSection.Spend,
     label: 'Spend',
-    visible: administersOrganization,
+    visible: grantedInOrganization(Permission.SpendRead),
   },
   {
     group: SettingsGroup.Organization,

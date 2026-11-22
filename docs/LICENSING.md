@@ -33,7 +33,7 @@ Zone has three editions:
 |---|---|---|
 | **Community** | Free | Every product feature, for up to 3 [active members](#the-community-member-cap) per server. |
 | **Team** | Paid | Everything in Community with no member cap, plus spend reports and budgets. |
-| **Enterprise** | Paid | Everything in Team, plus [single sign-on](SSO.md), [agent and model policy](POLICY.md), and [audit export, streaming and retention](AUDIT.md). |
+| **Enterprise** | Paid | Everything in Team, plus [single sign-on](SSO.md), [agent and model policy](POLICY.md), [custom roles](ROLES.md), and [audit export, streaming and retention](AUDIT.md). |
 
 A server with no license runs Community. A Team or Enterprise license unlocks
 its plan's features while it's active and through its grace period. Both paid
@@ -128,9 +128,11 @@ only the key and can be turned off.
   [member cap](#the-community-member-cap) refuses anyone.
 - **Expiry has a grace period.** For 30 days after `expires_at`, the license
   still unlocks everything its plan includes. After that it has lapsed: the
-  member cap applies again, single sign-on keeps working and existing policies
-  stay enforced, but changing Enterprise settings, audit streaming and export
-  stop until a new license is pasted. The signer never adds the grace period
+  member cap applies again, single sign-on keeps working, and existing
+  policies and custom roles stay enforced, but changing Enterprise settings,
+  audit streaming and export stop until a new license is pasted. Custom roles
+  can't be created, edited or deleted, or given to members, until then;
+  built-in roles can still be given. The signer never adds the grace period
   itself; Zone adds it when it reads `expires_at`.
 - **A license can't be recalled.** Once a key is issued, it verifies until it
   lapses. See [Revocation](#revocation).

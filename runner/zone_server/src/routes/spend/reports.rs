@@ -10,7 +10,7 @@ use super::refusal::Refusal;
 use super::report::Report;
 use super::report_response::ReportResponse;
 use super::{access, caller, organization};
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, Permission};
 use crate::db::spend::cursor;
 use crate::db::spend::report::{self, Filter};
 use crate::services::spend::{Standing, coverage};
@@ -37,7 +37,7 @@ async fn read(
 ) -> Result<ReportResponse, Refusal> {
     let user = caller(auth)?;
     let organization = organization(path)?;
-    access::admit(state.db(), organization, user).await?;
+    let grant = access::admit(state.db(), organization, user).await?;
     let query = Query::read(query, Utc::now().date_naive())?;
     let standing = Standing::read(state).await;
     let report = if standing.enforced {
@@ -50,7 +50,7 @@ async fn read(
         enforced: standing.enforced,
         edition: standing.edition,
         status: standing.status,
-        editable: standing.editable(true),
+        editable: standing.editable(grant.allows(Permission::SpendUpdate)),
         report,
     })
 }

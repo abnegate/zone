@@ -6,9 +6,11 @@ use sqlx::{PgConnection, PgPool};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::auth::Permission;
+
 use super::DbResult;
 use super::tasks::{self, Origin};
-use super::workspace_members::{self, WorkspaceRole};
+use super::workspace_members;
 
 /// The last thing a model reads before it decides what to do while a runner
 /// runs, which is why the waiting section pins this one too.
@@ -102,10 +104,13 @@ pub async fn authorize(
     user_id: Uuid,
     write: bool,
 ) -> DbResult<()> {
-    let role = workspace_members::lock_role(connection, workspace_id, user_id).await?;
-    if !role.is_some_and(|role| {
-        role >= WorkspaceRole::Member || (!write && role == WorkspaceRole::Viewer)
-    }) {
+    let required = if write {
+        Permission::WorkspaceWrite
+    } else {
+        Permission::WorkspaceRead
+    };
+    let membership = workspace_members::lock_membership(connection, workspace_id, user_id).await?;
+    if !membership.is_some_and(|membership| membership.grant.allows(required)) {
         return Err(invalid("Workspace access denied"));
     }
     Ok(())
@@ -479,6 +484,7 @@ pub async fn tail_task_log(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::custom_roles::testing;
     use crate::db::reminders;
     use crate::db::reminders::Delivered;
     use crate::db::reminders::Sweep;
@@ -908,6 +914,41 @@ mod tests {
             .unwrap();
         assert!(list_chats(&pool, workspace, user).await.is_err());
         cleanup(&pool, other_organization, other_user).await;
+        cleanup(&pool, organization, user).await;
+    }
+
+    #[tokio::test]
+    async fn a_custom_role_writes_only_when_it_holds_workspace_write() {
+        let (pool, organization, workspace, user, _) = fixture().await;
+        let task = || Task {
+            title: Some("Custom".into()),
+            description: String::new(),
+            assignee_id: None,
+        };
+
+        testing::hold(&pool, organization, workspace, user, &[]).await;
+        assert!(list_chats(&pool, workspace, user).await.is_ok());
+        assert!(
+            create_task(&pool, workspace, user, None, Origin::Member, task())
+                .await
+                .is_err(),
+            "a custom role holding only workspace:read created a task"
+        );
+
+        testing::hold(
+            &pool,
+            organization,
+            workspace,
+            user,
+            &[Permission::WorkspaceWrite],
+        )
+        .await;
+        assert!(
+            create_task(&pool, workspace, user, None, Origin::Member, task())
+                .await
+                .is_ok(),
+            "a viewer-pinned custom role holding workspace:write was refused"
+        );
         cleanup(&pool, organization, user).await;
     }
 

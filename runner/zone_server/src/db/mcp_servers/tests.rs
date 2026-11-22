@@ -9,6 +9,10 @@ use sqlx::Transaction;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
+use crate::auth::Scope;
+use crate::db::custom_roles::testing;
+use crate::db::organization_members::OrgRole;
+use crate::db::workspace_members::WorkspaceRole;
 use crate::services::mcp_servers::transport::Transport;
 
 use super::*;
@@ -652,12 +656,12 @@ async fn only_administrators_create() {
     fixture.create(stdio("admin")).await;
 
     assert!(
-        authorize_admin(&fixture.pool, fixture.organization, fixture.admin)
+        authorize_update(&fixture.pool, fixture.organization, fixture.admin)
             .await
             .is_ok()
     );
     assert!(matches!(
-        authorize_admin(&fixture.pool, fixture.organization, fixture.member).await,
+        authorize_update(&fixture.pool, fixture.organization, fixture.member).await,
         Err(McpServerError::Forbidden(_))
     ));
     assert_eq!(fixture.count("mcp_servers").await, 2);
@@ -1861,4 +1865,252 @@ async fn offered_leaves_out_what_the_organization_or_the_workspace_switched_off(
         Secrets::default(),
         "the secrets are left unopened"
     );
+}
+
+#[tokio::test]
+async fn a_custom_role_manages_servers_only_with_the_servers_permission() {
+    let fixture = tenant().await;
+    let managing = testing::role(
+        &fixture.pool,
+        fixture.organization,
+        fixture.owner,
+        Scope::Organization,
+        &[Permission::McpServersUpdate],
+    )
+    .await;
+    let reading = testing::role(
+        &fixture.pool,
+        fixture.organization,
+        fixture.owner,
+        Scope::Organization,
+        &[Permission::AiSettingsRead, Permission::PoliciesUpdate],
+    )
+    .await;
+    let manager = user(&fixture.pool).await;
+    join_organization(
+        &fixture.pool,
+        fixture.organization,
+        manager,
+        OrgRole::Member,
+    )
+    .await;
+    testing::assign_organization(&fixture.pool, fixture.organization, manager, managing).await;
+    testing::assign_organization(&fixture.pool, fixture.organization, fixture.member, reading)
+        .await;
+
+    let created = create_authorized(
+        &fixture.pool,
+        &fixture.key,
+        fixture.organization,
+        manager,
+        stdio("managed"),
+    )
+    .await
+    .expect("the servers permission creates a server");
+    assert!(
+        authorize_update(&fixture.pool, fixture.organization, manager)
+            .await
+            .is_ok()
+    );
+    let deleted = delete_authorized(&fixture.pool, fixture.organization, created.id, manager)
+        .await
+        .expect("the servers permission deletes a server");
+    assert_eq!(deleted.id, created.id);
+
+    let refused = create_authorized(
+        &fixture.pool,
+        &fixture.key,
+        fixture.organization,
+        fixture.member,
+        stdio("refused"),
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(McpServerError::Forbidden(ORGANIZATION_FORBIDDEN))
+        ),
+        "{refused:?}"
+    );
+    let listed = list_authorized(
+        &fixture.pool,
+        &fixture.key,
+        fixture.organization,
+        fixture.member,
+    )
+    .await
+    .expect("any custom role reads the servers");
+    assert!(listed.is_empty());
+}
+
+#[tokio::test]
+async fn a_workspace_custom_role_writes_overrides_only_with_the_servers_permission() {
+    let fixture = tenant().await;
+    let github = fixture.create(http("github")).await;
+    let overriding = testing::role(
+        &fixture.pool,
+        fixture.organization,
+        fixture.owner,
+        Scope::Workspace,
+        &[Permission::WorkspaceMcpServersUpdate],
+    )
+    .await;
+    let writing = testing::role(
+        &fixture.pool,
+        fixture.organization,
+        fixture.owner,
+        Scope::Workspace,
+        &[
+            Permission::WorkspaceWrite,
+            Permission::WorkspaceAiSettingsUpdate,
+        ],
+    )
+    .await;
+    join_workspace(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.member,
+        WorkspaceRole::Viewer,
+    )
+    .await;
+    join_workspace(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.admin,
+        WorkspaceRole::Viewer,
+    )
+    .await;
+    testing::assign_workspace(&fixture.pool, fixture.workspace, fixture.member, overriding).await;
+    testing::assign_workspace(&fixture.pool, fixture.workspace, fixture.admin, writing).await;
+
+    let set = set_workspace_overrides_authorized(
+        &fixture.pool,
+        fixture.organization,
+        fixture.workspace,
+        fixture.member,
+        BTreeMap::from([(github.id, Some(false))]),
+    )
+    .await
+    .expect("the workspace servers permission writes overrides");
+    assert_eq!(set, BTreeMap::from([(github.id, false)]));
+
+    let refused = set_workspace_overrides_authorized(
+        &fixture.pool,
+        fixture.organization,
+        fixture.workspace,
+        fixture.admin,
+        BTreeMap::from([(github.id, Some(true))]),
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(McpServerError::Forbidden(WORKSPACE_FORBIDDEN))),
+        "{refused:?}"
+    );
+    let (servers, overrides) = workspace_list_authorized(
+        &fixture.pool,
+        &fixture.key,
+        fixture.organization,
+        fixture.workspace,
+        fixture.admin,
+    )
+    .await
+    .expect("any workspace custom role reads the overrides");
+    assert_eq!(servers.len(), 1);
+    assert_eq!(overrides, set);
+}
+
+#[tokio::test]
+async fn a_custom_role_of_another_organization_grants_nothing() {
+    let fixture = tenant().await;
+    let other = tenant().await;
+    let foreign = testing::role(
+        &other.pool,
+        other.organization,
+        other.owner,
+        Scope::Organization,
+        &[Permission::McpServersUpdate],
+    )
+    .await;
+    testing::assign_organization(&fixture.pool, fixture.organization, fixture.member, foreign)
+        .await;
+
+    let created = create_authorized(
+        &fixture.pool,
+        &fixture.key,
+        fixture.organization,
+        fixture.member,
+        stdio("foreign"),
+    )
+    .await;
+    assert!(
+        matches!(
+            created,
+            Err(McpServerError::NotFound(ORGANIZATION_NOT_FOUND))
+        ),
+        "{created:?}"
+    );
+    assert_eq!(fixture.count("mcp_servers").await, 0);
+}
+
+/// Without the base permission of its scope a membership is no membership, so
+/// the holder of a role that grants nothing is answered as an outsider is.
+#[tokio::test]
+async fn a_role_that_grants_nothing_reads_no_workspace_servers() {
+    let fixture = tenant().await;
+    let other = tenant().await;
+    let foreign = testing::role(
+        &other.pool,
+        other.organization,
+        other.owner,
+        Scope::Organization,
+        &[Permission::McpServersUpdate],
+    )
+    .await;
+    let roaming = testing::role(
+        &other.pool,
+        other.organization,
+        other.owner,
+        Scope::Workspace,
+        &[Permission::WorkspaceMcpServersUpdate],
+    )
+    .await;
+    let wanderer = user(&fixture.pool).await;
+    join_organization(
+        &fixture.pool,
+        fixture.organization,
+        wanderer,
+        OrgRole::Member,
+    )
+    .await;
+    for member in [fixture.member, wanderer] {
+        join_workspace(
+            &fixture.pool,
+            fixture.workspace,
+            member,
+            WorkspaceRole::Viewer,
+        )
+        .await;
+    }
+    testing::assign_organization(&fixture.pool, fixture.organization, fixture.member, foreign)
+        .await;
+    testing::assign_workspace(&fixture.pool, fixture.workspace, wanderer, roaming).await;
+
+    let mut connection = fixture.pool.acquire().await.expect("a connection");
+    for (user, expected) in [
+        (fixture.member, ORGANIZATION_NOT_FOUND),
+        (wanderer, WORKSPACE_NOT_FOUND),
+    ] {
+        let answer = authorize_workspace(
+            &mut connection,
+            fixture.organization,
+            fixture.workspace,
+            user,
+            false,
+        )
+        .await;
+        assert!(
+            matches!(answer, Err(McpServerError::NotFound(missing)) if missing == expected),
+            "expected {expected}, got {answer:?}"
+        );
+    }
 }

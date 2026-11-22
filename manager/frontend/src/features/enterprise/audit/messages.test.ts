@@ -16,6 +16,9 @@ import {
   UNVERIFIED_STANDING,
 } from './fixtures';
 import {
+  ASK_FOR_KEY_LABEL,
+  ASK_FOR_LICENSE_LABEL,
+  ASK_FOR_RENEWAL_LABEL,
   DOWNLOAD_READ_ONLY,
   DOWNLOAD_UNVERIFIED,
   KEPT_FOREVER,
@@ -241,11 +244,13 @@ describe('standing copy', () => {
       tone: NoticeTone.Upgrade,
       message,
       action: LICENSE_LINK_LABEL,
+      request: ASK_FOR_LICENSE_LABEL,
     });
     const renew = (message: string) => ({
       tone: NoticeTone.Warning,
       message,
       action: RENEW_LINK_LABEL,
+      request: ASK_FOR_RENEWAL_LABEL,
     });
     expect(standingNotice(ENTERPRISE_STANDING, null)).toBeNull();
     expect(standingNotice(GRACE_STANDING, null)).toBeNull();
@@ -258,6 +263,7 @@ describe('standing copy', () => {
       tone: NoticeTone.Warning,
       message: UNVERIFIED_NOTICE,
       action: PASTE_KEY_LINK_LABEL,
+      request: ASK_FOR_KEY_LABEL,
     });
     expect(PASTE_KEY_LINK_LABEL).not.toContain('Renew');
   });

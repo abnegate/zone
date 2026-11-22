@@ -733,7 +733,7 @@ test.describe('Sources Section', () => {
 
       const table = page.getByRole('table', { name: 'Sources' });
       await expect(table.locator('.source-card')).toHaveCount(3);
-      await expect(page.getByText("Viewers can't change sources.")).toBeVisible();
+      await expect(page.getByText("Your role can't change sources.")).toBeVisible();
       await expect(table.getByRole('columnheader', { name: 'Actions' })).toHaveCount(0);
       for (const name of ['Add source', 'Verify', 'Disable', 'Enable', 'Delete']) {
         await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0);
@@ -755,7 +755,7 @@ test.describe('Sources Section', () => {
 
       const table = page.getByRole('table', { name: 'Sources' });
       await expect(table.getByRole('button', { name: 'Delete' })).toHaveCount(3);
-      await expect(page.getByText("Viewers can't change sources.")).toHaveCount(0);
+      await expect(page.getByText("Your role can't change sources.")).toHaveCount(0);
 
       await table.getByRole('button', { name: 'acme/frontend' }).focus();
       await page.keyboard.press('Space');

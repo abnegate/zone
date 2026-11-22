@@ -62,6 +62,10 @@
   cursor: pointer;
 }
 
+span.device-name {
+  cursor: auto;
+}
+
 .device-meta,
 .device-email,
 .device-seen {

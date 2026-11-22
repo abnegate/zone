@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use super::jwt::{AccessClaims, Claims, extract_bearer_token, validate_access_token};
 use super::permission::Permission;
+use super::scope::Scope;
 use crate::db::sessions;
 use crate::state::AppState;
 
@@ -220,9 +221,10 @@ pub async fn require_auth(
     Ok(next.run(request).await)
 }
 
-/// Check if the user has a required permission
+/// Claims carry only server permissions; membership permissions are read from
+/// the database, so asking claims for one is refused.
 pub fn require_permission(claims: &Claims, permission: Permission) -> Result<(), AuthError> {
-    if claims.has_permission(permission.name()) {
+    if matches!(permission.scope(), Scope::Server) && claims.has_permission(permission.name()) {
         Ok(())
     } else {
         Err(AuthError {

@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { client } from '../../../../api/client';
 import { memberLabel } from '../../../settings/memberLabel';
-import { retryLoad } from '../../policy/hooks/retry';
+import { retryLoad } from '../../retry';
 import { spendQueryKeys } from '../queryKeys';
 
 export interface SpendTarget {

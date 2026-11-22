@@ -6,10 +6,11 @@ export {
   SERVER_SCOPE,
 } from './audit';
 export {
+  AdministersServerProvider,
   LicenseSection,
   MemberCapBanner,
   MemberCapRefusal,
-  PlanUpgradeNotice,
+  UpgradeNotice,
 } from './components';
 export * from './hooks';
 export { LicenseRefusal } from './LicenseRefusal';
@@ -39,6 +40,24 @@ export {
   WorkspacePolicySection,
 } from './policy';
 export { licenseMutationKeys, licenseQueryKeys } from './queryKeys';
+export {
+  type CreateRoleRequest,
+  type CustomRole,
+  type CustomRoleReference,
+  PERMISSIONS,
+  Permission,
+  type PermissionDefinition,
+  type PermissionName,
+  ROLE_CODES,
+  RoleCode,
+  RoleRefusal,
+  RoleScope,
+  type RolesResponse,
+  RolesSection,
+  rolesApi,
+  type UpdateRoleRequest,
+  useRoles,
+} from './roles';
 export {
   EDITIONS,
   Edition,

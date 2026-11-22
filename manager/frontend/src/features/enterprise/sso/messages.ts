@@ -1,6 +1,12 @@
 import { Protocol, SsoAdminCode } from './schemas';
 import type { Protocol as ProtocolValue, SsoAdminCode as SsoAdminCodeValue } from './types';
 
+export const UPGRADE_NOTICE =
+  'Single sign-on is part of Zone Enterprise. Add a license to let people sign in with Okta, Microsoft Entra ID or Google Workspace.';
+
+export const LAPSED_NOTICE =
+  'Your Zone license has lapsed. Sign-in with these providers and the single sign-on requirement keep working, but changing them needs a renewed license.';
+
 export const ProviderField = {
   DisplayName: 'display_name',
   Issuer: 'issuer',
