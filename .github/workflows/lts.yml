@@ -1,0 +1,420 @@
+name: LTS
+
+on:
+  push:
+    tags:
+      - 'v*.*.*-lts'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lts-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PUBLISH_REGISTRY: 127.0.0.1:5000
+  VERIFY_REGISTRY: 127.0.0.1:5001
+  PUBLIC_REGISTRY: registry.bitecode.ltd
+  REGISTRY_IMAGE: registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0
+  PUBLISH_CONFIG: runner/zone_license/deploy/registry/publish.yml
+  BUILDKIT_CONFIG: |
+    [worker.oci]
+      gc = false
+    [registry."127.0.0.1:5000"]
+      http = true
+    [registry."127.0.0.1:5001"]
+      http = true
+
+jobs:
+  check:
+    name: Check the tag
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      line: ${{ steps.version.outputs.line }}
+      cargo: ${{ steps.version.outputs.cargo }}
+      branch: ${{ steps.version.outputs.branch }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the LTS branches
+        run: git fetch --no-tags origin '+refs/heads/release/*-lts:refs/remotes/origin/release/*-lts'
+
+      - name: Read the version from the tag and check it is on its LTS branch
+        id: version
+        run: |
+          sh scripts/lts-version.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/version"
+          cat "$RUNNER_TEMP/version"
+          cat "$RUNNER_TEMP/version" >> "$GITHUB_OUTPUT"
+
+  image:
+    name: Image (${{ matrix.image.name }}, ${{ matrix.architecture }})
+    needs: check
+    runs-on: ${{ matrix.architecture == 'arm64' && (vars.ZONE_LTS_RUNNER_ARM64 || 'ubuntu-24.04-arm') || (vars.ZONE_LTS_RUNNER_AMD64 || 'ubuntu-24.04') }}
+    environment: distribution
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      matrix:
+        image:
+          - name: server
+            repository: zone/server
+            context: .
+            dockerfile: manager/Dockerfile
+          - name: manager
+            repository: zone/manager
+            context: .
+            dockerfile: manager/frontend/Dockerfile
+          - name: litellm
+            repository: zone/litellm
+            context: litellm
+            dockerfile: litellm/Dockerfile
+        architecture: [amd64, arm64]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space and check at least 35 GB is left for the build
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune --all --force
+          df -h
+          root=$(docker info --format '{{.DockerRootDir}}')
+          available=$(df --output=avail --block-size=1G "$root" | tail -n 1 | tr -d ' ')
+          if [ "$available" -lt 35 ]; then
+            echo "::error::only ${available} GB is free under $root; the image build needs at least 35 GB"
+            exit 1
+          fi
+          echo "${available} GB free under $root"
+
+      - name: Install Rust toolchain
+        if: matrix.image.name == 'server'
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Set the Cargo version from the tag
+        if: matrix.image.name == 'server'
+        env:
+          CARGO_VERSION: ${{ needs.check.outputs.cargo }}
+        run: bash .github/scripts/set-release-version.sh "$CARGO_VERSION"
+
+      - name: Read the build arguments Compose passes
+        id: arguments
+        env:
+          IMAGE: ${{ matrix.image.name }}
+        run: |
+          set -eu
+          {
+            echo 'list<<ARGUMENTS'
+            if [ "$IMAGE" = litellm ]; then
+              . scripts/env-file.sh
+              version=$(read_env_value DOCKER_VERSION_LITELLM .env.example)
+              digest=$(read_env_value DOCKER_DIGEST_LITELLM .env.example)
+              if [ -z "$version" ] || [ -z "$digest" ]; then
+                echo "::error::.env.example must set DOCKER_VERSION_LITELLM and DOCKER_DIGEST_LITELLM" >&2
+                exit 1
+              fi
+              echo "LITELLM_VERSION=$version"
+              echo "LITELLM_DIGEST=$digest"
+            fi
+            echo 'ARGUMENTS'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: ${{ env.BUILDKIT_CONFIG }}
+
+      - name: Build the image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.dockerfile }}
+          platforms: linux/${{ matrix.architecture }}
+          build-args: ${{ steps.arguments.outputs.list }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.check.outputs.version }}
+          provenance: false
+          push: false
+
+      - name: Show disk space after the build
+        run: df -h
+
+      - name: Get publishing credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.ZONE_DISTRIBUTION_ROLE }}
+          aws-region: ${{ vars.ZONE_DISTRIBUTION_REGION }}
+
+      - name: Start the publish registry
+        env:
+          REGISTRY_STORAGE_S3_BUCKET: ${{ vars.ZONE_DISTRIBUTION_BUCKET }}
+          REGISTRY_STORAGE_S3_REGION: ${{ vars.ZONE_DISTRIBUTION_REGION }}
+        run: |
+          set -eu
+          if [ ! -f "$PUBLISH_CONFIG" ]; then
+            echo "::error file=$PUBLISH_CONFIG::$PUBLISH_CONFIG is missing; the publish registry cannot start without it"
+            exit 1
+          fi
+          if [ -z "$REGISTRY_STORAGE_S3_BUCKET" ] || [ -z "$REGISTRY_STORAGE_S3_REGION" ]; then
+            echo "::error::set the ZONE_DISTRIBUTION_BUCKET and ZONE_DISTRIBUTION_REGION repository variables"
+            exit 1
+          fi
+          docker run --detach --name zone-publish-registry --network host \
+            --volume "$PWD/$PUBLISH_CONFIG:/etc/distribution/config.yml:ro" \
+            --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY --env AWS_SESSION_TOKEN \
+            --env REGISTRY_STORAGE_S3_BUCKET --env REGISTRY_STORAGE_S3_REGION \
+            "$REGISTRY_IMAGE" >/dev/null
+          for _ in $(seq 30); do
+            if curl --silent --fail --output /dev/null "http://$PUBLISH_REGISTRY/v2/"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs zone-publish-registry
+          echo "::error::the publish registry did not answer on $PUBLISH_REGISTRY"
+          exit 1
+
+      - name: Push the image by digest
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.dockerfile }}
+          platforms: linux/${{ matrix.architecture }}
+          build-args: ${{ steps.arguments.outputs.list }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.check.outputs.version }}
+          provenance: false
+          outputs: type=image,name=${{ env.PUBLISH_REGISTRY }}/${{ matrix.image.repository }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -eu
+          case $DIGEST in
+            sha256:*) ;;
+            *)
+              echo "::error::the push returned no digest"
+              exit 1
+              ;;
+          esac
+          mkdir -p "$RUNNER_TEMP/digest"
+          touch "$RUNNER_TEMP/digest/${DIGEST#sha256:}"
+          df -h
+
+      - name: Upload the digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.image.name }}-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/digest/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    name: Manifest, tags and signatures
+    needs: [check, image]
+    runs-on: ubuntu-24.04
+    environment: distribution
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      LINE: ${{ needs.check.outputs.line }}
+      REGISTRY_STORAGE_S3_BUCKET: ${{ vars.ZONE_DISTRIBUTION_BUCKET }}
+      REGISTRY_STORAGE_S3_REGION: ${{ vars.ZONE_DISTRIBUTION_REGION }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: ${{ env.BUILDKIT_CONFIG }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+
+      - name: Download the digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digest-*
+          path: ${{ runner.temp }}/digests
+
+      - name: Get publishing credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.ZONE_DISTRIBUTION_ROLE }}
+          aws-region: ${{ vars.ZONE_DISTRIBUTION_REGION }}
+
+      - name: Start the publish registry
+        run: |
+          set -eu
+          if [ ! -f "$PUBLISH_CONFIG" ]; then
+            echo "::error file=$PUBLISH_CONFIG::$PUBLISH_CONFIG is missing; the publish registry cannot start without it"
+            exit 1
+          fi
+          if [ -z "$REGISTRY_STORAGE_S3_BUCKET" ] || [ -z "$REGISTRY_STORAGE_S3_REGION" ]; then
+            echo "::error::set the ZONE_DISTRIBUTION_BUCKET and ZONE_DISTRIBUTION_REGION repository variables"
+            exit 1
+          fi
+          docker run --detach --name zone-publish-registry --network host \
+            --volume "$PWD/$PUBLISH_CONFIG:/etc/distribution/config.yml:ro" \
+            --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY --env AWS_SESSION_TOKEN \
+            --env REGISTRY_STORAGE_S3_BUCKET --env REGISTRY_STORAGE_S3_REGION \
+            "$REGISTRY_IMAGE" >/dev/null
+          for _ in $(seq 30); do
+            if curl --silent --fail --output /dev/null "http://$PUBLISH_REGISTRY/v2/"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs zone-publish-registry
+          echo "::error::the publish registry did not answer on $PUBLISH_REGISTRY"
+          exit 1
+
+      - name: Refuse an existing release tag, then create and tag the indexes
+        run: |
+          set -euo pipefail
+          accept='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json'
+          names=(server manager litellm)
+          declare -A platforms
+          declare -A existing
+          for name in "${names[@]}"; do
+            repository=zone/$name
+            shopt -s nullglob
+            files=("$RUNNER_TEMP"/digests/digest-"$name"-*/*)
+            shopt -u nullglob
+            if [ "${#files[@]}" -ne 2 ]; then
+              echo "::error::expected an amd64 and an arm64 digest for $repository, found ${#files[@]}"
+              exit 1
+            fi
+            platforms[$name]=$(for file in "${files[@]}"; do echo "sha256:$(basename "$file")"; done | sort | tr '\n' ' ')
+            status=$(curl --silent --output /dev/null --write-out '%{http_code}' --head \
+              --header "Accept: $accept" "http://$PUBLISH_REGISTRY/v2/$repository/manifests/$VERSION")
+            case $status in
+              404)
+                existing[$name]=0
+                ;;
+              200)
+                held=$(docker buildx imagetools inspect --raw "$PUBLISH_REGISTRY/$repository:$VERSION" \
+                  | jq -r '.manifests[].digest' | sort | tr '\n' ' ')
+                if [ "$held" != "${platforms[$name]}" ]; then
+                  echo "::error::$repository:$VERSION is already published from other builds; release tags are immutable"
+                  exit 1
+                fi
+                echo "$repository:$VERSION already holds these builds, so a rerun keeps it"
+                existing[$name]=1
+                ;;
+              *)
+                echo "::error::the publish registry answered $status for $repository:$VERSION"
+                exit 1
+                ;;
+            esac
+          done
+          : > "$RUNNER_TEMP/published"
+          for name in "${names[@]}"; do
+            repository=zone/$name
+            target=$PUBLISH_REGISTRY/$repository
+            if [ "${existing[$name]}" -eq 0 ]; then
+              read -r -a digests <<< "${platforms[$name]}"
+              docker buildx imagetools create --tag "$target:$VERSION" "${digests[@]/#/$target@}"
+            fi
+            docker buildx imagetools create --tag "$target:$LINE-lts" "$target:$VERSION"
+            digest=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$target:$VERSION" | jq -r .digest)
+            moved=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$target:$LINE-lts" | jq -r .digest)
+            if [ "$moved" != "$digest" ]; then
+              echo "::error::$repository:$LINE-lts points at $moved, not $digest"
+              exit 1
+            fi
+            printf '%s\t%s\n' "$repository" "$digest" >> "$RUNNER_TEMP/published"
+          done
+          cat "$RUNNER_TEMP/published"
+
+      - name: Sign the indexes
+        run: |
+          set -euo pipefail
+          while IFS=$'\t' read -r repository digest; do
+            cosign sign --yes "$PUBLISH_REGISTRY/$repository@$digest"
+          done < "$RUNNER_TEMP/published"
+
+      - name: Start a read-only registry over the same storage
+        run: |
+          set -eu
+          yq '.storage.maintenance.readonly.enabled = true | .http.addr = "127.0.0.1:5001" | del(.http.debug)' \
+            "$PUBLISH_CONFIG" > "$RUNNER_TEMP/verify.yml"
+          docker run --detach --name zone-verify-registry --network host \
+            --volume "$RUNNER_TEMP/verify.yml:/etc/distribution/config.yml:ro" \
+            --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY --env AWS_SESSION_TOKEN \
+            --env REGISTRY_STORAGE_S3_BUCKET --env REGISTRY_STORAGE_S3_REGION \
+            "$REGISTRY_IMAGE" >/dev/null
+          for _ in $(seq 30); do
+            if curl --silent --fail --output /dev/null "http://$VERIFY_REGISTRY/v2/"; then
+              status=$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+                "http://$VERIFY_REGISTRY/v2/zone/server/blobs/uploads/")
+              if [ "$status" = 202 ]; then
+                echo "::error::the verify registry accepted an upload, so it is not read-only"
+                exit 1
+              fi
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs zone-verify-registry
+          echo "::error::the verify registry did not answer on $VERIFY_REGISTRY"
+          exit 1
+
+      - name: Verify the signatures through the second registry name
+        run: |
+          set -euo pipefail
+          identity="https://github.com/bitecodehq/zone/.github/workflows/lts.yml@refs/tags/$GITHUB_REF_NAME"
+          while IFS=$'\t' read -r repository digest; do
+            cosign verify \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$VERIFY_REGISTRY/$repository@$digest" > /dev/null
+            echo "verified $repository@$digest as $identity"
+          done < "$RUNNER_TEMP/published"
+
+      - name: Write the digests to the job summary
+        run: |
+          set -euo pipefail
+          {
+            echo "### Zone $VERSION"
+            echo
+            echo '| Image | Tags | Index digest |'
+            echo '|---|---|---|'
+            while IFS=$'\t' read -r repository digest; do
+              echo "| \`$PUBLIC_REGISTRY/$repository\` | \`$VERSION\`, \`$LINE-lts\` | \`$digest\` |"
+            done < "$RUNNER_TEMP/published"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  bundle:
+    name: Bundle
+    needs: manifest
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/bundle.yml
