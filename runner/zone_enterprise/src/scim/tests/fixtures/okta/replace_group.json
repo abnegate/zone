@@ -1,0 +1,10 @@
+{
+    "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+    "displayName": "Test SCIMv2",
+    "members": [
+            {
+            "value": "{{user}}",
+            "display": "{{user_name}}"
+            }
+    ]
+}

@@ -1,0 +1,7 @@
+Users?filter=userName eq "{{user_name}}"
+Users?filter=userName eq "non-existent user"
+Users?filter=externalId eq {{external_id}}
+Groups/{{group}}?excludedAttributes=members
+Groups?excludedAttributes=members&filter=displayName eq "displayName"
+Groups?filter=id eq {{group}} and members eq {{user}}&attributes=id
+Groups?filter=id eq "{{group}}" and members eq "{{user}}"&attributes=id
