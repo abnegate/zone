@@ -105,7 +105,8 @@ provider. All of them act on the same members and groups, and share one
 Zone answers 401 with `WWW-Authenticate: Bearer` when the `Authorization`
 header is missing or isn't a bearer token, when the token is wrong, revoked
 or rotated out, when it belongs to another organization, and when the
-organization no longer exists.
+organization no longer exists or is deactivated. An organization ID in the
+URL that isn't an ID at all answers 404.
 
 ## Okta
 
@@ -316,8 +317,9 @@ for an account with that email, ignoring case:
 
 - **A current member** of the organization: 409 `uniqueness`. Okta and
   Entra look users up by `userName` before creating them, so they match an
-  existing member instead, and Zone links the member to SCIM at their first
-  update.
+  existing member instead, and Zone links the member to SCIM at the first
+  update that changes one of their attributes. An update that only sets
+  `active` deactivates or reactivates the member without linking them.
 - **An account that isn't a member**, or a former member: Zone adds the
   account to the organization as a member and links it to SCIM. A former
   member starts afresh: their old workspace memberships and roles don't come
@@ -329,6 +331,10 @@ for an account with that email, ignoring case:
 
 `userName` and `externalId` are unique within the organization, `userName`
 ignoring case; a clash answers 409 `uniqueness`.
+
+A `POST` with `active: false` creates the member and then
+[deactivates](#deactivation) them, and answers 201 with the deactivated
+user.
 
 New members get the built-in member role, unless a
 [group mapping](#group-to-role-mapping) gives them another. Add them to
@@ -594,9 +600,11 @@ For group members:
   and `remove` with `path` `members` and a `value` list removes those;
 - `remove` with `path` `members` and no `value` removes everyone.
 
-Removing someone who isn't in the group does nothing. A member value must
-be the `id` of a member of this organization, active or not; anything else
-answers 400 `invalidValue`.
+A member value that `add`, `replace`, `POST` or `PUT` sets must be the `id`
+of a member of this organization, active or not; anything else, including a
+value that isn't an ID, answers 400 `invalidValue` and changes nothing.
+`remove` is lenient: removing someone who isn't in the group, or a value
+that isn't an ID, does nothing.
 
 Zone accepts and ignores paths for attributes it doesn't store, including
 the enterprise extension. It refuses with 400: a path it can't read
@@ -635,15 +643,17 @@ Errors use the SCIM error format:
 |---|---|---|
 | 400 | `invalidSyntax` | The body isn't valid JSON, or doesn't have the shape of the resource. |
 | 400 | `invalidFilter` | See [Filters](#filters). |
-| 400 | `invalidValue` | A required value is missing or blank, a user has no email address, a value has the wrong type, or a member value isn't a member of this organization. |
+| 400 | `invalidValue` | A required value is missing or blank, a user has no email address, a value has the wrong type, or a member value that `add`, `replace`, `POST` or `PUT` sets isn't a member of this organization. |
 | 400 | `invalidPath` | A `PATCH` path can't be read, or uses a members filter outside `remove`. |
 | 400 | `noTarget` | A `remove` operation has no path. |
 | 400 | `mutability` | A `remove` operation names a required attribute. |
-| 401 | | No token, a wrong, revoked or rotated-out token, or another organization's token. |
+| 401 | | No token, a wrong, revoked or rotated-out token, another organization's token, or an organization that no longer exists or is deactivated. |
 | 403 | | The [license](#licensing) doesn't allow the write. |
-| 404 | | The organization, user or group doesn't exist, or the user or group belongs to another organization. |
+| 404 | | The organization ID in the URL isn't an ID, the user or group doesn't exist or belongs to another organization, or the path isn't a SCIM route. |
+| 405 | | The route doesn't take that method. |
 | 409 | `uniqueness` | `userName`, `externalId` or a group's `displayName` is taken, the user is already a member, or the new email belongs to another account. |
 | 409 | | The request would deactivate or delete the organization's last active owner. |
+| 413 | | The request body is larger than Zone accepts. |
 | 429 | `tooMany` | The [rate limit](#rate-limit) is used up. |
 
 ## Troubleshooting
@@ -652,15 +662,16 @@ The SCIM provisioning section shows when the organization's tokens were
 last used, and the 20 most recent failed requests: each one's method, route
 (such as `/api/scim/v2/organizations/{org_id}/Users/{user_id}`), status,
 `scimType`, detail and time. Zone records every failed request whose token
-it accepted, and keeps them for 30 days. A request with a wrong or missing
-token isn't recorded, because Zone can't tell who sent it; look at the
+it accepted, requests refused by the [rate limit](#rate-limit) included, and
+keeps them for 30 days. A request with a wrong or missing token isn't
+recorded, because Zone can't tell who sent it; look at the
 identity provider's logs instead (Okta's **View Logs**, Entra's
 **Provisioning logs**).
 
 | Symptom | What to check |
 |---|---|
 | The provider's connection test fails with 401 | The token was pasted whole, including `zscim_`, and hasn't been revoked or rotated. The URL is this organization's base URL. For Entra, **Secret Token** isn't blank. |
-| The connection test fails with 404 | The base URL has the right organization ID, and no extra path after it other than Entra's `?aadOptscim062020`. |
+| The connection test fails with 404 | The base URL ends in a whole organization ID, with no extra path after it other than Entra's `?aadOptscim062020`. An ID of another organization answers 401 instead. |
 | Users aren't created, with 403 | The [license](#licensing): Enterprise, active or in grace. |
 | Users aren't created, with 400 `invalidValue` | The user has a primary email, or a `userName` that's an email address. |
 | Users aren't created, with 409 `uniqueness` | Another member already has that `userName` or `externalId`. |
@@ -673,9 +684,21 @@ identity provider's logs instead (Okta's **View Logs**, Entra's
 ## Audit log
 
 SCIM requests write these entries to the organization's audit log, with no
-actor, and with the token's `scim_token_id` and `scim_token_name`, the
-changed attributes and, when it changed, the member's `role` in
-`new_values`. No entry ever contains a token's secret.
+actor. Every entry has the token's `scim_token_id` and `scim_token_name` in
+`new_values`, and no entry ever contains a token's secret. Beyond those:
+
+- user entries hold the attributes the request set (`user_name`,
+  `external_id`, `display_name`, `given_name`, `family_name`, `email`) and,
+  when the member's role changed, `role` and `custom_role`.
+  `scim_user.created` adds `created_account`, true when Zone created the
+  account; `scim_user.deactivated` and `scim_user.reactivated` hold
+  `active`;
+- group entries hold the `display_name` and `external_id` the request set,
+  `members` with the IDs of the members added or removed, and `roles`, a
+  list of `{"user_id", "role", "custom_role"}` for each member whose role
+  changed. `scim_group.deleted` holds the group's `display_name`, every
+  former member in `members`, and `roles` when the group was mapped;
+- `workspace.owner_seated` holds the `user_id` of the member made owner.
 
 | Action | When | Resource |
 |---|---|---|
