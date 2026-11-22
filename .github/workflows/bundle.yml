@@ -69,7 +69,7 @@ jobs:
       REGION: ${{ vars.ZONE_DISTRIBUTION_REGION }}
       CRANE_VERSION: v0.22.1
       HELM_VERSION: v4.3.1
-      MINIMUM_AWS_CLI: 2.17.34
+      MINIMUM_AWS_CLI: 2.33.0
       REGISTRY_IMAGE: registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0
       REGISTRY_CONTAINER: zone-publish-registry
 
@@ -96,7 +96,7 @@ jobs:
           cli=$(aws --version 2>&1 | sed -n 's|^aws-cli/\([0-9][0-9.]*\).*|\1|p')
           lowest=$(printf '%s\n%s\n' "$MINIMUM_AWS_CLI" "$cli" | sort -V | head -n 1)
           if [ -z "$cli" ] || [ "$lowest" != "$MINIMUM_AWS_CLI" ]; then
-            echo "::error::AWS CLI $MINIMUM_AWS_CLI or later is needed for put-object --if-none-match; found '${cli:-none}'"
+            echo "::error::AWS CLI $MINIMUM_AWS_CLI or later is needed for s3 cp --no-overwrite; found '${cli:-none}'"
             exit 1
           fi
           echo "AWS CLI $cli on $actual"
@@ -248,49 +248,7 @@ jobs:
         run: |
           set -eu
           df -h
-          name=$(basename -- "$ARCHIVE")
-          prefix=bundles/$VERSION
-          checksum=$prefix/$name.sha256
-          marker=$checksum.sigstore.json
-
-          absent() {
-            if probe=$(aws s3api head-object --bucket "$BUCKET" --key "$1" 2>&1); then
-              return 1
-            fi
-            case $probe in
-              *'(404)'* | *'Not Found'*) return 0 ;;
-            esac
-            printf '%s\n' "$probe" >&2
-            echo "::error::Could not check whether s3://$BUCKET/$1 exists"
-            exit 1
-          }
-
-          put() {
-            if ! aws s3api put-object \
-              --bucket "$BUCKET" \
-              --key "$1" \
-              --body "$2" \
-              --content-type "$3" \
-              --if-none-match '*' \
-              --server-side-encryption AES256 > /dev/null; then
-              echo "::error::Could not create s3://$BUCKET/$1; it may already exist"
-              exit 1
-            fi
-          }
-
-          if ! absent "$marker"; then
-            echo "::error::Bundle $VERSION for $ARCHITECTURE is already published: s3://$BUCKET/$marker exists"
-            exit 1
-          fi
-          if ! absent "$checksum"; then
-            echo "::error::s3://$BUCKET/$checksum is left from an upload that never committed; nothing was published, so delete it and rerun"
-            exit 1
-          fi
-
-          aws s3 cp --only-show-errors --sse AES256 "$ARCHIVE" "s3://$BUCKET/$prefix/$name"
-          put "$checksum" "$ARCHIVE.sha256" text/plain
-          put "$marker" "$ARCHIVE.sha256.sigstore.json" application/json
-          echo "Published s3://$BUCKET/$prefix/$name"
+          sh scripts/bundle-upload.sh "$BUCKET" "$VERSION" "$ARCHIVE"
           df -h
 
       - name: Stop the publish registry
