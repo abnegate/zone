@@ -130,44 +130,6 @@ jobs:
           printf 'ARCHIVE=%s\n' "$work/zone-bundle-$VERSION-$ARCHITECTURE.tar" >> "$GITHUB_ENV"
           df -h
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.ZONE_DISTRIBUTION_ROLE }}
-          aws-region: ${{ vars.ZONE_DISTRIBUTION_REGION }}
-          role-session-name: zone-bundle-${{ matrix.architecture }}
-
-      - name: Start the publish registry
-        env:
-          REGISTRY_STORAGE_S3_BUCKET: ${{ vars.ZONE_DISTRIBUTION_BUCKET }}
-          REGISTRY_STORAGE_S3_REGION: ${{ vars.ZONE_DISTRIBUTION_REGION }}
-        run: |
-          set -eu
-          config=$GITHUB_WORKSPACE/runner/zone_license/deploy/registry/publish.yml
-          if [ ! -f "$config" ]; then
-            echo '::error::runner/zone_license/deploy/registry/publish.yml is missing'
-            exit 1
-          fi
-          docker run --detach --name "$REGISTRY_CONTAINER" --network host \
-            --volume "$config:/etc/distribution/config.yml:ro" \
-            --env AWS_ACCESS_KEY_ID \
-            --env AWS_SECRET_ACCESS_KEY \
-            --env AWS_SESSION_TOKEN \
-            --env AWS_REGION \
-            --env REGISTRY_STORAGE_S3_BUCKET \
-            --env REGISTRY_STORAGE_S3_REGION \
-            "$REGISTRY_IMAGE" > /dev/null
-          for _ in $(seq 1 30); do
-            if curl -fsS -o /dev/null http://127.0.0.1:5000/v2/; then
-              echo 'The publish registry is listening on 127.0.0.1:5000'
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs --tail 50 "$REGISTRY_CONTAINER" >&2
-          echo '::error::The publish registry did not answer on 127.0.0.1:5000'
-          exit 1
-
       - name: Install crane
         env:
           CRANE: ${{ matrix.crane }}
@@ -206,6 +168,45 @@ jobs:
             fi
           done
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.ZONE_DISTRIBUTION_ROLE }}
+          aws-region: ${{ vars.ZONE_DISTRIBUTION_REGION }}
+          role-session-name: zone-bundle-${{ matrix.architecture }}
+          role-duration-seconds: 7200
+
+      - name: Start the publish registry
+        env:
+          REGISTRY_STORAGE_S3_BUCKET: ${{ vars.ZONE_DISTRIBUTION_BUCKET }}
+          REGISTRY_STORAGE_S3_REGION: ${{ vars.ZONE_DISTRIBUTION_REGION }}
+        run: |
+          set -eu
+          config=$GITHUB_WORKSPACE/runner/zone_license/deploy/registry/publish.yml
+          if [ ! -f "$config" ]; then
+            echo '::error::runner/zone_license/deploy/registry/publish.yml is missing'
+            exit 1
+          fi
+          docker run --detach --name "$REGISTRY_CONTAINER" --network host \
+            --volume "$config:/etc/distribution/config.yml:ro" \
+            --env AWS_ACCESS_KEY_ID \
+            --env AWS_SECRET_ACCESS_KEY \
+            --env AWS_SESSION_TOKEN \
+            --env AWS_REGION \
+            --env REGISTRY_STORAGE_S3_BUCKET \
+            --env REGISTRY_STORAGE_S3_REGION \
+            "$REGISTRY_IMAGE" > /dev/null
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:5000/v2/; then
+              echo 'The publish registry is listening on 127.0.0.1:5000'
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs --tail 50 "$REGISTRY_CONTAINER" >&2
+          echo '::error::The publish registry did not answer on 127.0.0.1:5000'
+          exit 1
+
       - name: Assemble the bundle
         run: |
           set -eu
@@ -218,6 +219,10 @@ jobs:
             --output "$WORK"
           cat "$ARCHIVE.sha256"
           df -h
+
+      - name: Stop the publish registry
+        if: always()
+        run: docker rm --force "$REGISTRY_CONTAINER" > /dev/null 2>&1 || true
 
       - name: Install cosign
         uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
@@ -281,7 +286,3 @@ jobs:
           df -h
           sh scripts/bundle-upload.sh "$BUCKET" "$VERSION" "$ARCHIVE"
           df -h
-
-      - name: Stop the publish registry
-        if: always()
-        run: docker rm --force "$REGISTRY_CONTAINER" > /dev/null 2>&1 || true

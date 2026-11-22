@@ -752,6 +752,17 @@ deleting the original; bundles are only ever added:
 `s3:PutObjectAcl` covers the `bucket-owner-full-control` header the registry
 sends on every write.
 
+The bundle job starts its registry with a two-hour session, because assembling
+about 11 GB through it can outlast the default hour. STS refuses a session
+longer than the role's maximum, which is one hour unless you raise it:
+
+```sh
+aws iam update-role --role-name zone-distribution-publisher --max-session-duration 7200
+```
+
+The registry runs only while the bundle is assembled, and the upload takes a
+fresh one-hour session.
+
 ## Network access
 
 - **The host** needs outbound HTTPS to `s3.ap-southeast-2.amazonaws.com` and
