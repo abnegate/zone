@@ -619,7 +619,7 @@ lets through the paths it knows, allow these and nothing else:
 | `/webhooks/polar` | Any | Polar |
 | `/licenses/renew` | Any | Customers' Zone servers |
 | `/health` | Any | Your health check or uptime monitor |
-| `/token` | `GET`, `POST` and `HEAD` | Customers' Docker, containerd and Kubernetes hosts. Pass `POST` through rather than refusing it: containerd posts first and falls back to `GET` only on the signer's `405`. |
+| `/token` | `GET`, `POST` and `HEAD` | Customers' Docker, containerd and Kubernetes hosts. Pass `POST` through rather than refusing it: containerd posts first and falls back to `GET` on `405`, `404`, `401` or `400`, and the signer answers `405`. A proxy that refuses `POST` with another status, such as `403`, breaks containerd pulls. |
 | `/bundles/*` | `GET` and `HEAD` | Customers downloading an air-gapped bundle |
 
 The last two matter only once [distribution](DISTRIBUTION.md) is on. The
