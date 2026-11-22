@@ -475,8 +475,8 @@ Saving a policy without changing it writes no entry.
 
 ## Runner placement
 
-The **Agent policy** pages also hold the runner labels an organization or
-workspace requires of the runners that take its unattended work: task runs,
+The **Agent policy** pages also have a **Runner placement** card for the
+runner labels an organization or workspace requires of the runners that take its unattended work: task runs,
 reminder turns and auto-project drives. The same people edit them, with
 `policies:update` and `workspace_policies:update`, but they are part of
 [runner fleet policy](FLEET.md), not of the agent policy. They have their own

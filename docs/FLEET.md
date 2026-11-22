@@ -9,8 +9,9 @@ reminder turn or an auto-project drive is claimed. The console only shows
 what the server already enforces.
 
 Server admins see the fleet under **Settings → This server → Runners**.
-Runner labels are set on the **Agent policy** pages, under **Settings →
-Organization → Agent policy** and **Settings → Workspace → Agent policy**.
+Runner labels are set in the **Runner placement** card on the **Agent
+policy** pages, under **Settings → Organization → Agent policy** and
+**Settings → Workspace → Agent policy**.
 
 ## What a runner is
 
@@ -163,7 +164,15 @@ Its reminder claims stop renewing, so each firing it held lapses and is
 offered to another runner.
 
 Activating a runner returns it to `active`. A revoked runner can also be
-moved to `cordoned`.
+moved to `cordoned` through the [API](#api).
+
+On the **Runners** page, each runner's row offers **Cordon** and **Revoke**
+while it is active, **Activate** and **Revoke** while it is cordoned, and
+**Activate** while it is revoked. Each opens a dialog that names the runner
+and what the change does, confirmed with **Cordon runner**, **Revoke
+runner** or **Activate runner**. Revoke's dialog says that the runner's live
+task runs stop and its chats end. Without a Zone Enterprise license that is
+active or in grace, the page is read-only and offers none of these.
 
 ## Minimum version
 
@@ -215,10 +224,14 @@ and Zone gives the `=` no meaning. A runner carries exactly the labels its
 own `ZONE_RUNNER_LABELS` lists, and they change only when it restarts with
 new ones.
 
-The **Agent policy** pages show the labels the fleet's runners carry, with
-how many connected runners that aren't revoked carry each, and how many
-connected, active and current runners carry every required label. When that
-count is 0, the page warns that no runner can take the work.
+The **Runner placement** card lists, under **Labels runners carry**, the
+labels the fleet's runners carry, with how many connected runners that
+aren't revoked carry each. In a workspace it shows the organization's labels
+as **Required by the organization**, locked, beside **Required by this
+workspace**, and the union as **In effect**. It also says how many connected,
+active and current runners carry every required label. When that count is 0,
+the card warns that no connected runner carries the labels, so the work
+waits until one does.
 
 ### Placement, not isolation
 
@@ -272,8 +285,8 @@ A runner doesn't claim a reminder turn or an auto-project drive it may
 not take, and another runner that may takes it on its next pass. Work that
 **no** runner can take stays owed: a reminder firing waits, and an auto
 project isn't driven. Zone sends no notice and writes no audit entry for
-this. The warning on the **Agent policy** pages when no runner matches is the
-hint. Only task runs fail with `fleet_no_runner`.
+this. The warning in the **Runner placement** card when no runner matches is
+the hint. Only task runs fail with `fleet_no_runner`.
 
 A reminder turn whose chat refuses it, for example on a revoked runner, gives
 its claim back without counting an attempt, so refusals can't use up the
@@ -291,9 +304,10 @@ changes are:
 - setting a minimum version where there was none, or raising it.
 
 Activating a runner, moving a revoked runner to `cordoned`, and clearing or
-lowering the minimum never need confirming. The console asks the admin to
-confirm, then sends the same request again with `confirm: true`, which skips
-the guard.
+lowering the minimum never need confirming. When the server refuses a change
+this way, the **Runners** page opens a **Leave no runner able to take
+work?** dialog. **Do it anyway** sends the same request again with
+`confirm: true`, which skips the guard.
 
 Each guarded change holds the fleet policy row locked while it counts, so
 two admins can't each leave the other's runner as the last one.
@@ -319,9 +333,9 @@ and messages are refused.
 
 ## Removing runners and retention
 
-With the license, a server admin can remove a runner that isn't connected.
-A connected runner
-is refused with 409 `fleet_runner_online`, since its next heartbeat would
+With the license, a server admin can remove a runner that isn't connected:
+the **Runners** page offers **Remove** only on offline runners, confirmed
+with **Remove runner**. A connected runner is refused with 409 `fleet_runner_online`, since its next heartbeat would
 only register it again; stop its server first, or cordon or revoke it
 instead.
 
@@ -365,7 +379,8 @@ as `active`.** To keep a revoked name out, leave its row in place.
 | Chat | On a revoked, outdated or unregistered runner the turn doesn't start, and the chat shows the refusal's message. Over the WebSocket this is `{"type": "error", "message": "…"}`; a REST request that writes a chat message gets 409 with the message. Reloading the page reaches another server. |
 | Task runs | A run no runner can take fails with the `fleet_no_runner` message. A revoked runner's run is cancelled with "The runner this task was running on was revoked from the fleet." |
 | Reminders and auto projects | Work no runner can take waits, with no message. |
-| Runners page | Each runner's name, version with an outdated marker, labels, state, whether it is serving and why not, whether it is connected and when it was last seen, its live runs, and which runner served the page. |
+| Runners page | The minimum version, and each runner's name, version with an **Outdated** badge, labels, state, **Serving** or why it isn't, **Connected** or when it was last seen, its live runs, and a **This server** badge on the runner that served the page. |
+| Agent policy pages | The **Runner placement** card: the required labels, the labels runners carry, how many runners can take the work, and a warning when none can. |
 | Server log | A warning when a name is contested, when a runner starts in a state or version that takes no unattended work, and when a run fails for lack of a runner. A run left for another runner is logged too. |
 
 ## Audit log
