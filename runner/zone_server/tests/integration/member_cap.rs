@@ -18,6 +18,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 use zone_enterprise::sso::{Claims, testing};
 use zone_enterprise::{COMMUNITY_MEMBERS, MEMBER_ADMISSION_BUSY, MEMBER_CAP_REACHED, period_start};
+use zone_server::config::Config;
 use zone_server::db::seats;
 use zone_server::routes::workspaces::OUTSIDE_ORGANIZATION;
 use zone_server::services::members::SEATS_LOCK;
@@ -47,6 +48,7 @@ const WAITING: &str = "SELECT COUNT(*) FROM pg_locks
        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())";
 const WAITING_POLL: Duration = Duration::from_millis(20);
 const WAITING_LIMIT: Duration = Duration::from_secs(30);
+const PATIENT_ADMISSION_WAIT: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
 struct Member {
@@ -82,6 +84,20 @@ impl Server {
     async fn uncapped() -> Self {
         Self {
             fixture: Fixture::new(PREFIX).await,
+        }
+    }
+
+    /// An uncapped server whose admissions wait for [`SEATS_LOCK`] longer than any test does.
+    async fn patient() -> Self {
+        Self {
+            fixture: Fixture::configured(
+                PREFIX,
+                Config {
+                    admission_wait: PATIENT_ADMISSION_WAIT,
+                    ..test_config()
+                },
+            )
+            .await,
         }
     }
 
@@ -495,7 +511,7 @@ async fn the_first_sign_up_on_an_empty_server_is_admitted_as_the_admin() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_first_sign_ups_on_an_uncapped_server_make_exactly_one_admin() {
-    let server = Arc::new(Server::uncapped().await);
+    let server = Arc::new(Server::patient().await);
     let holder = server.hold_users().await;
     let attempts: Vec<_> = (0..FOUNDERS)
         .map(|_| {
