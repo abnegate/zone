@@ -138,6 +138,7 @@ mod reminder_turn;
 mod role_demotion;
 mod role_demotion_race;
 mod role_grants;
+mod scim_store;
 mod seal_secrets;
 mod seats;
 mod sessions;
