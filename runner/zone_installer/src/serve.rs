@@ -1,5 +1,6 @@
 //! HTTP routers for console and desktop modes.
 
+use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -205,7 +206,11 @@ pub async fn bind(addr: &str) -> std::io::Result<(TcpListener, String)> {
 }
 
 pub async fn serve(listener: TcpListener, app: Router) -> std::io::Result<()> {
-    axum::serve(listener, app).await
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
 }
 
 #[cfg(test)]
