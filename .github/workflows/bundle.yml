@@ -237,6 +237,37 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "$ARCHIVE.sha256"
 
+      - name: Verify the signature and checksum offline, as docs/AIRGAP.md does
+        env:
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/bundle.yml@${{ github.ref }}
+        run: |
+          set -eu
+          name=$(basename -- "$ARCHIVE")
+          offline=$WORK/offline
+          rm -rf -- "$offline"
+          mkdir -- "$offline"
+          ln -- "$ARCHIVE" "$offline/$name"
+          cp -- "$ARCHIVE.sha256" "$ARCHIVE.sha256.sigstore.json" "$offline/"
+          cd "$offline"
+          cosign initialize
+          cp ~/.sigstore/root/tuf-repo-cdn.sigstore.dev/targets/trusted_root.json .
+          isolated() {
+            sudo unshare --net -- "$@"
+          }
+          if isolated curl --silent --max-time 10 --output /dev/null https://tuf-repo-cdn.sigstore.dev; then
+            echo '::error::The isolated network namespace still reaches the internet, so it proves nothing'
+            exit 1
+          fi
+          isolated "$(command -v cosign)" verify-blob \
+            --bundle "$name.sha256.sigstore.json" \
+            --trusted-root trusted_root.json \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$name.sha256"
+          isolated sha256sum -c "$name.sha256"
+          cd "$WORK"
+          rm -rf -- "$offline"
+
       - name: Refresh AWS credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
