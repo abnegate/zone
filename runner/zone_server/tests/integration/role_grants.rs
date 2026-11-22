@@ -9,6 +9,7 @@ use crate::common::create_test_pool;
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_server::auth::{Grant, Permission, Scope};
+use zone_server::db::custom_roles::testing::composed;
 use zone_server::db::custom_roles::{
     self, Assignment, Change, Creation, Definition, Deletion, Invalid, Summary, Update,
 };
@@ -113,31 +114,6 @@ async fn editor(pool: &PgPool, organization: Uuid, role: OrgRole) -> Uuid {
     let editor = user(pool).await;
     seat_organization(pool, organization, editor, role, None).await;
     editor
-}
-
-async fn composed(pool: &PgPool, organization: Uuid, scope: Scope, granted: &[Permission]) -> Uuid {
-    let grant = Grant::compose(scope, &names(granted)).expect("the role composes");
-    let creator = editor(pool, organization, OrgRole::Owner).await;
-    let definition = Definition {
-        name: &format!("Role {}", Uuid::new_v4()),
-        description: None,
-        scope,
-        grant: &grant,
-    };
-    let created = match custom_roles::create(pool, organization, &definition, creator)
-        .await
-        .expect("the role is created")
-    {
-        Creation::Created(role) => role.id,
-        Creation::Forbidden => panic!("an owner holds roles:update"),
-        Creation::NameTaken => panic!("a fresh name is never taken"),
-    };
-    sqlx::query("DELETE FROM users WHERE id = $1")
-        .bind(creator)
-        .execute(pool)
-        .await
-        .expect("the owner seated to create the role leaves");
-    created
 }
 
 /// A role written straight into the tables, past `Grant::compose`, so the
