@@ -1,13 +1,16 @@
-use sqlx::PgExecutor;
+use chrono::TimeDelta;
+use sqlx::{AssertSqlSafe, PgExecutor};
 use uuid::Uuid;
 use zone_enterprise::fleet::{Labels, Version};
 
 use crate::db::DbResult;
+use crate::db::fleet::candidate::Candidate;
 use crate::db::fleet::minimum::Minimum;
 use crate::db::fleet::mode::Mode;
-use crate::db::fleet::runners::undecodable;
+use crate::db::fleet::runners::{CONNECTED, undecodable};
 use crate::db::fleet::shortfall::Shortfall;
 use crate::db::fleet::state::State;
+use crate::db::tasks::UNCLAIMED;
 
 /// Whether `runner` meets the minimum version of `policy` (`fleet_policy`).
 pub const CURRENT: &str =
@@ -30,6 +33,19 @@ pub const UNATTENDED: &str = "runner.state = 'active' \
 /// [`UNATTENDED`].
 pub const INTERACTIVE: &str = "runner.state <> 'revoked' \
      AND (policy.minimum_version_key IS NULL OR runner.version_key >= policy.minimum_version_key)";
+
+/// The task `t` with the labels its own workspace `w` and that workspace's organization require,
+/// as `ol` and `wl`, beside `policy` (`fleet_policy`): what [`UNATTENDED`] needs for a task's
+/// runs. Constrain `t.id` to the run's own `task_id`, never to a parameter.
+pub const PLACEMENT: &str = "tasks t \
+     JOIN workspaces w ON w.id = t.workspace_id \
+     LEFT JOIN organization_runner_labels ol ON ol.organization_id = w.organization_id \
+     LEFT JOIN workspace_runner_labels wl ON wl.workspace_id = w.id \
+     CROSS JOIN fleet_policy policy";
+
+/// How long an admitted run stays unclaimed before another runner may pick it up, so the runner
+/// that admitted it claims it first.
+pub const PICKUP_AFTER: TimeDelta = TimeDelta::seconds(2);
 
 #[derive(sqlx::FromRow)]
 struct Judged {
@@ -94,6 +110,52 @@ pub async fn shortfall(
     ))
 }
 
+/// Up to `limit` task runs `runner` may pick up, oldest first: admitted at least
+/// [`PICKUP_AFTER`] ago, still unclaimed and fresh, and placed where [`UNATTENDED`] lets
+/// `runner` take them.
+pub async fn candidates(
+    executor: impl PgExecutor<'_>,
+    runner: Uuid,
+    limit: i64,
+) -> DbResult<Vec<Candidate>> {
+    sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT r.id AS run, r.task_id AS task \
+         FROM {PLACEMENT} \
+         JOIN task_runs r ON r.task_id = t.id \
+         JOIN fleet_runners runner ON runner.id = $1 \
+         WHERE {UNCLAIMED} AND r.heartbeat_at <= now() - $3 AND {UNATTENDED} \
+         ORDER BY r.heartbeat_at, r.id \
+         LIMIT $2"
+    )))
+    .bind(runner)
+    .bind(limit)
+    .bind(PICKUP_AFTER)
+    .fetch_all(executor)
+    .await
+}
+
+/// Whether a connected runner other than `except` may take task run `run`.
+pub async fn exists(
+    executor: impl PgExecutor<'_>,
+    run: Uuid,
+    except: Option<Uuid>,
+) -> DbResult<bool> {
+    sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM {PLACEMENT} \
+             JOIN task_runs r ON r.task_id = t.id \
+             JOIN fleet_runners runner \
+               ON runner.id IS DISTINCT FROM $2 AND runner.last_seen_at > now() - $3 \
+             WHERE r.id = $1 AND {UNATTENDED} \
+         )"
+    )))
+    .bind(run)
+    .bind(except)
+    .bind(CONNECTED)
+    .fetch_one(executor)
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +170,14 @@ mod tests {
     fn the_predicates_name_the_stored_states() {
         assert!(UNATTENDED.contains(&format!("runner.state = '{}'", State::Active.as_str())));
         assert!(INTERACTIVE.contains(&format!("runner.state <> '{}'", State::Revoked.as_str())));
+    }
+
+    #[test]
+    fn placement_takes_the_labels_from_the_tasks_own_workspace_and_organization() {
+        assert!(PLACEMENT.contains("w.id = t.workspace_id"));
+        assert!(PLACEMENT.contains("ol.organization_id = w.organization_id"));
+        assert!(PLACEMENT.contains("wl.workspace_id = w.id"));
+        assert!(!PLACEMENT.contains('$'));
     }
 
     #[test]

@@ -1,3 +1,5 @@
+pub mod candidate;
+pub mod claim;
 pub mod claimant;
 pub mod eligibility;
 pub mod labels;

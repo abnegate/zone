@@ -1097,6 +1097,7 @@ fn head(worktree: &GitCheckout) -> CommitSha {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::fleet::claimant::Claimant;
 
     #[test]
     fn test_pr_creation_result_debug() {
@@ -1599,7 +1600,20 @@ mod tests {
                 .await
                 .unwrap();
             let owner = Uuid::new_v4();
-            assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
+            assert!(
+                tasks::claim_task_run(
+                    &pool,
+                    run.id,
+                    owner,
+                    Claimant {
+                        runner: None,
+                        enforced: false
+                    }
+                )
+                .await
+                .unwrap()
+                .claimed()
+            );
             let execution = tasks::Execution {
                 task: task.id,
                 run: run.id,
@@ -1870,6 +1884,7 @@ mod tests {
 mod publication_tests {
     use super::tests::{Fixture, fixture_git as git};
     use super::*;
+    use crate::db::fleet::claimant::Claimant;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2934,9 +2949,18 @@ mod publication_tests {
         fixture.execution.run = run.id;
         fixture.execution.owner = uuid::Uuid::new_v4();
         assert!(
-            tasks::claim_task_run(fixture.state.db(), run.id, fixture.execution.owner)
-                .await
-                .unwrap()
+            tasks::claim_task_run(
+                fixture.state.db(),
+                run.id,
+                fixture.execution.owner,
+                Claimant {
+                    runner: None,
+                    enforced: false
+                }
+            )
+            .await
+            .unwrap()
+            .claimed()
         );
         std::fs::remove_dir_all(&fixture.path).unwrap();
         git(

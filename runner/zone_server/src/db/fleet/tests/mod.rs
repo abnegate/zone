@@ -13,6 +13,8 @@ use crate::db::fleet::state::State;
 use crate::db::fleet::transition::Transition;
 use crate::db::testing::Database;
 
+mod claim;
+
 struct Fleet {
     database: Database,
 }

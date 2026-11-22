@@ -57,6 +57,7 @@ use crate::agent::wait::Waited;
 use crate::agent::wait::Waiting;
 use crate::config::ModelBackend;
 use crate::db::audit::actions;
+use crate::db::fleet::claim::Claim;
 use crate::db::task_tool_calls;
 use crate::db::tasks;
 use crate::db::workspace_members;
@@ -66,6 +67,7 @@ use crate::services::chat::session;
 use crate::services::chat::session::RunContext;
 use crate::services::endpoint::Endpoint;
 use crate::services::failure::unreachable;
+use crate::services::fleet;
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router;
 use crate::services::policy;
@@ -89,6 +91,7 @@ use crate::workers::pr::create_pr_for_task;
 use zone_context::context::SearchResultWithAnalysis;
 
 mod halt;
+mod handoff;
 mod handover;
 mod meter;
 mod seat;
@@ -96,6 +99,7 @@ pub(crate) mod stop;
 mod unprepared;
 
 use halt::Halt;
+use handoff::Handoff;
 use handover::Handover;
 use meter::Meter;
 use seat::Seat;
@@ -171,6 +175,11 @@ static TASK_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 fn get_semaphore() -> &'static Arc<Semaphore> {
     TASK_SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_TASKS)))
+}
+
+/// How many more task runs this process could execute right now.
+pub(crate) fn available() -> usize {
+    get_semaphore().available_permits()
 }
 
 /// Serializes every test that takes execution permits out of the shared
@@ -973,11 +982,21 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         }
     }
     let signal = stop::register(run_id);
-    if !matches!(
-        tasks::claim_task_run(state.db(), run.id, owner).await,
-        Ok(true)
-    ) {
-        return;
+    let claimant = fleet::claimant(state).await;
+    match tasks::claim_task_run(state.db(), run.id, owner, claimant).await {
+        Ok(Claim::Claimed) => {}
+        Ok(Claim::Unavailable) => return,
+        Ok(Claim::Refused(shortfall)) => {
+            drop(signal);
+            if let Handoff::Failed(_) = handoff::hand_off(state, &run, claimant, shortfall).await {
+                crate::workers::auto_project::poke_task(state, task_id);
+            }
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%run_id, %error, "Could not claim the task run");
+            return;
+        }
     }
     let execution = tasks::Execution {
         task: task_id,
@@ -6517,6 +6536,7 @@ mod retry_tests {
 #[cfg(test)]
 mod watchdog_tests {
     use super::*;
+    use crate::db::fleet::claimant::Claimant;
     use abnegate_agent::chat::NewEntry;
     use abnegate_llm::Role as LlmRole;
     use std::sync::Mutex;
@@ -6802,7 +6822,20 @@ mod watchdog_tests {
         .unwrap();
         let run = tasks::create_task_run(&pool, task.id).await.unwrap();
         let owner = Uuid::new_v4();
-        assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
+        assert!(
+            tasks::claim_task_run(
+                &pool,
+                run.id,
+                owner,
+                Claimant {
+                    runner: None,
+                    enforced: false
+                }
+            )
+            .await
+            .unwrap()
+            .claimed()
+        );
         let state = AppState::new(crate::state::test_config(), pool.clone(), None);
         (pool, observed, state, run.id, owner)
     }
@@ -8364,6 +8397,7 @@ mod cli_tests {
     use crate::config::{AgentConfig, Config, ModelBackend};
     use crate::db::agent_logins::{self, Insert};
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
+    use crate::db::fleet::claimant::Claimant;
     use crate::db::{organizations, users, workspace_members, workspaces};
     use crate::services::agent::home::CLAUDE_CODE_OAUTH_TOKEN;
     use crate::services::login::claude::Sealed;
@@ -8877,9 +8911,18 @@ mod cli_tests {
         async fn claim(&self) -> Uuid {
             let owner = Uuid::new_v4();
             assert!(
-                tasks::claim_task_run(&self.pool, self.run, owner)
-                    .await
-                    .unwrap()
+                tasks::claim_task_run(
+                    &self.pool,
+                    self.run,
+                    owner,
+                    Claimant {
+                        runner: None,
+                        enforced: false
+                    }
+                )
+                .await
+                .unwrap()
+                .claimed()
             );
             owner
         }

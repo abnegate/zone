@@ -13,6 +13,7 @@ use zone_server::agent::discovery::RECORD_DISCOVERY;
 use zone_server::auth::jwt::create_session_access_token;
 use zone_server::auth::{Grant, Permission, Scope};
 use zone_server::db::custom_roles::{self, Creation, Definition};
+use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::knowledge::discovery::CATEGORY;
 use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::db::{sessions, task_access, tasks, workspace_members};
@@ -816,7 +817,20 @@ async fn admission_reports_a_parked_run_as_the_active_one() {
     .unwrap();
     let run = tasks::create_task_run(&pool, task.id).await.unwrap();
     let owner = Uuid::new_v4();
-    assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
+    assert!(
+        tasks::claim_task_run(
+            &pool,
+            run.id,
+            owner,
+            Claimant {
+                runner: None,
+                enforced: false
+            }
+        )
+        .await
+        .unwrap()
+        .claimed()
+    );
     assert!(
         tasks::park_task_run(
             &pool,
