@@ -8,6 +8,10 @@
 #   ./scripts/compose.sh --profile dev --profile vpn --profile monitoring up
 #   make up PROFILES=dev,vpn,monitoring
 #
+# Release overlays follow the profile overlays, before docker-compose.override.yml:
+#   docker-compose.lts.yml     when ZONE_LTS_VERSION is set (docs/LTS.md)
+#   docker-compose.airgap.yml  when the offline installer has written it
+#
 # Profiles:
 #   dev                     docker-compose.dev.yml (hot reload)
 #   vpn                     docker-compose.vpn.yml (full tunnel)
@@ -102,6 +106,23 @@ persisted_profiles() {
     normalize_profiles "$value"
 }
 
+lts_selected() {
+    lts_version=${ZONE_LTS_VERSION:-}
+    if [ -z "$lts_version" ]; then
+        lts_version=$(read_env_value ZONE_LTS_VERSION "$ZONE_ENV_FILE")
+    fi
+    [ -n "$lts_version" ]
+}
+
+distribution_files() {
+    if [ -f docker-compose.lts.yml ] && lts_selected; then
+        printf '%s\n' docker-compose.lts.yml
+    fi
+    if [ -f docker-compose.airgap.yml ]; then
+        printf '%s\n' docker-compose.airgap.yml
+    fi
+}
+
 compose_files() {
     profiles=$1
     printf '%s\n' docker-compose.yml
@@ -111,6 +132,7 @@ compose_files() {
     if has_profile vpn "$profiles"; then
         printf '%s\n' docker-compose.vpn.yml
     fi
+    distribution_files
     if [ -f docker-compose.override.yml ]; then
         printf '%s\n' docker-compose.override.yml
     fi
@@ -190,7 +212,7 @@ persist_profiles() {
         sh "$root/scripts/configure-model-proxy.sh" "$ZONE_ENV_FILE" direct
     fi
     upsert_env "$ZONE_ENV_FILE" COMPOSE_PROFILES "$profiles"
-    if [ -n "$profiles" ]; then
+    if [ -n "$profiles" ] || [ -n "$(distribution_files)" ]; then
         upsert_env "$ZONE_ENV_FILE" COMPOSE_FILE "$(compose_file_env "$profiles")"
     else
         delete_env "$ZONE_ENV_FILE" COMPOSE_FILE
