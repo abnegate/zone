@@ -248,9 +248,7 @@ async fn covered(
         return Err(Error::ScopeInvalid.into());
     }
     if let Some(member) = target.user
-        && organization_members::lock_membership(connection, organization, member)
-            .await?
-            .is_none()
+        && !organization_members::lock_seat(connection, organization, member).await?
     {
         return Err(Error::ScopeInvalid.into());
     }

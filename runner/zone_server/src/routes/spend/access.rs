@@ -7,7 +7,6 @@ use crate::auth::{Grant, Permission};
 use crate::db::organization_members;
 
 pub const ORGANIZATION_MISSING: &str = "Organization not found";
-pub const FORBIDDEN: &str = SPEND_REFUSED;
 
 /// Reading spend and budgets takes `spend:read`. A read changes nothing, so the membership is
 /// not locked. The caller's grant is returned so the answer can say whether they may also edit.
@@ -40,7 +39,7 @@ fn allowed(grant: Option<Grant>, permission: Permission) -> Result<Grant, Refusa
     match grant {
         Some(grant) if grant.allows(permission) => Ok(grant),
         Some(grant) if grant.allows(Permission::OrganizationRead) => {
-            Err(Refusal::Forbidden(FORBIDDEN))
+            Err(Refusal::Forbidden(SPEND_REFUSED))
         }
         _ => Err(Refusal::Missing(ORGANIZATION_MISSING)),
     }

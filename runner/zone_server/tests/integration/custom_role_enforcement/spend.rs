@@ -2,6 +2,8 @@
 //! sees them, `spend:update` alongside it changes budgets, and the spend
 //! license gate is independent of the custom roles one.
 
+use std::time::Duration;
+
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -16,6 +18,7 @@ use crate::common::sso::{self, Account};
 const FORBIDDEN: &str = "Only organization owners and admins can see spend or change budgets";
 const ORGANIZATION_MISSING: &str = "Organization not found";
 const LIMIT: i64 = 50_000_000;
+const PROMPTLY: Duration = Duration::from_secs(10);
 const STEWARD: [Permission; 2] = [Permission::SpendRead, Permission::SpendUpdate];
 
 fn organization_wide(limit: i64) -> Value {
@@ -175,6 +178,43 @@ async fn a_stored_budget_editor_without_spend_changes_and_reads_nothing() {
         let response = call.send(&fixture, &editor.token).await;
         refused(&call, &response, StatusCode::FORBIDDEN, FORBIDDEN);
     }
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_budget_for_a_member_does_not_wait_for_an_edit_of_their_role() {
+    let fixture = licensed().await;
+    let held = role(
+        fixture.pool(),
+        fixture.organization,
+        fixture.owner.id,
+        Scope::Organization,
+        &[Permission::AuditLogsRead],
+    )
+    .await;
+    let member = holding_organization(&fixture, held).await;
+    let mut edit = fixture.pool().begin().await.expect("a transaction");
+    sqlx::query("SELECT 1 FROM custom_roles WHERE id = $1 FOR UPDATE")
+        .bind(held)
+        .execute(&mut *edit)
+        .await
+        .expect("the member's role is held for an edit");
+
+    let creation = Call::post(
+        budgets_path(fixture.organization),
+        json!({ "scope": "user", "limit_microdollars": LIMIT, "user_id": member.id }),
+    );
+    let created = tokio::time::timeout(PROMPTLY, creation.send(&fixture, &fixture.owner.token))
+        .await
+        .expect("the budget is answered while the member's role is being edited");
+    edit.rollback().await.expect("the edit is let go");
+    assert_eq!(
+        created.status,
+        StatusCode::CREATED,
+        "{}",
+        describe(&creation, &created)
+    );
 
     fixture.cleanup().await;
 }

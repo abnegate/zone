@@ -769,6 +769,21 @@ pub async fn lock_membership(
     Ok(Some(seat.membership(connection, organization_id).await?))
 }
 
+/// Whether a user is an active member, with only their member row
+/// share-locked for the caller's transaction, for a caller that needs them
+/// seated but not what they hold: it never waits on an edit of their role.
+pub async fn lock_seat(
+    connection: &mut PgConnection,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<bool> {
+    Ok(
+        Seat::lock(connection, organization_id, user_id, Lock::Share)
+            .await?
+            .is_some(),
+    )
+}
+
 /// Whether an active member holds `permission` in their organization.
 pub async fn permits(
     pool: &PgPool,
