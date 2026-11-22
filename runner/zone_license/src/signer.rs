@@ -32,9 +32,9 @@ impl Signer {
         self.key.verifying_key().to_bytes()
     }
 
-    pub(crate) fn derive(&self, salt: &[u8], info: &[u8]) -> Zeroizing<[u8; 32]> {
+    pub(crate) fn derive(&self, info: &[u8]) -> Zeroizing<[u8; 32]> {
         let mut derived = Zeroizing::new([0; 32]);
-        Hkdf::<Sha256>::new(Some(salt), self.key.as_bytes())
+        Hkdf::<Sha256>::new(None, self.key.as_bytes())
             .expand(info, &mut *derived)
             .expect("32 bytes is within HKDF-SHA256's output limit");
         derived
@@ -295,15 +295,14 @@ mod tests {
     }
 
     #[test]
-    fn derivation_is_deterministic_and_bound_to_salt_info_and_seed() {
+    fn derivation_is_deterministic_and_bound_to_info_and_seed() {
         let signer = signer();
-        let derived = signer.derive(b"salt", b"info");
-        assert_eq!(*derived, *signer.derive(b"salt", b"info"));
-        assert_ne!(*derived, *signer.derive(b"other", b"info"));
-        assert_ne!(*derived, *signer.derive(b"salt", b"other"));
+        let derived = signer.derive(b"info");
+        assert_eq!(*derived, *signer.derive(b"info"));
+        assert_ne!(*derived, *signer.derive(b"other"));
         assert_ne!(
             *derived,
-            *Signer::new(PrivateKey::new([4; 32]), KEY_ID).derive(b"salt", b"info")
+            *Signer::new(PrivateKey::new([4; 32]), KEY_ID).derive(b"info")
         );
         assert_ne!(*derived, SEED);
     }

@@ -444,9 +444,13 @@ The registry verifies tokens with an Ed25519 key derived from the license
 signing key, so there's no new secret to keep:
 
 ```text
-seed = HKDF-SHA256(salt = "zone-license registry token", ikm = license seed, info = "<key id>:<generation>")
+seed = HKDF-SHA256(ikm = license seed, info = "zone-license registry token:<key id>:<generation>")
 kid  = registry-<key id>-<generation>        e.g. registry-2026-2-1
 ```
+
+The license seed is already 32 uniformly random bytes, so HKDF runs without a
+salt (RFC 5869 §3.1: a zero-filled salt of hash length) and the `info` string
+alone separates the token key from anything else derived from that seed.
 
 HKDF is one-way, so a leaked token key can't sign licenses, and the cold
 backup of the license key recovers every token key.

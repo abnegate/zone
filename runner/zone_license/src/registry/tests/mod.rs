@@ -16,8 +16,8 @@ const KEY_ID: &str = "test-1";
 const SEED: [u8; 32] = [11; 32];
 const SERVICE: &str = "registry.example.test";
 const KNOWN_KEY_ID: &str = "registry-test-1-1";
-const KNOWN_X: &str = "g1kcsJcjDfdiHO-H5SdA0bsEfEgsEA-7VBBJc1LBHlE";
-const KNOWN_SECOND_X: &str = "Fq5Iaj668aHaqj-0YFMQJ0fGRqDm5DOhDkKSMjqtxxY";
+const KNOWN_X: &str = "xgq-BItpF_uHabuC9NGP-ni4R4v-wMlKb-GjR5d74w0";
+const KNOWN_SECOND_X: &str = "0MCMQa7-jC4-ZbZDrRioxURqefP_Jpr8U2ASQb2OU54";
 
 fn signer() -> Signer {
     Signer::new(PrivateKey::new(SEED), KEY_ID)
@@ -91,8 +91,8 @@ fn derives_the_known_token_key() {
 }
 
 #[test]
-fn derives_with_the_documented_salt_and_key_id_prefix() {
-    assert_eq!(SALT, b"zone-license registry token");
+fn derives_with_the_documented_domain_and_key_id_prefix() {
+    assert_eq!(DOMAIN, "zone-license registry token");
     assert_eq!(KEY_ID_PREFIX, "registry");
     assert_eq!(
         TokenKey::derive(&Signer::new(PrivateKey::new(SEED), "2026-2"), generation(7)).key_id(),

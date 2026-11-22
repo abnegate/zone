@@ -9,7 +9,7 @@ use ed25519_dalek::{SIGNATURE_LENGTH, SigningKey};
 use crate::registry::jwk::Jwk;
 use crate::signer::Signer;
 
-pub const SALT: &[u8] = b"zone-license registry token";
+pub const DOMAIN: &str = "zone-license registry token";
 pub const KEY_ID_PREFIX: &str = "registry";
 
 pub struct TokenKey {
@@ -20,7 +20,7 @@ pub struct TokenKey {
 impl TokenKey {
     pub fn derive(signer: &Signer, generation: NonZeroU32) -> Self {
         let key_id = signer.key_id();
-        let seed = signer.derive(SALT, format!("{key_id}:{generation}").as_bytes());
+        let seed = signer.derive(format!("{DOMAIN}:{key_id}:{generation}").as_bytes());
         Self {
             key: SigningKey::from_bytes(&seed),
             key_id: format!("{KEY_ID_PREFIX}-{key_id}-{generation}"),
