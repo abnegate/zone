@@ -107,11 +107,18 @@ For production, regenerate secrets for security.
 
 ### `ZONE_TRUSTED_PROXIES`
 - **Default**: unset, which trusts loopback only: `127.0.0.0/8` and `::1`.
-  The compose file sets `172.31.0.0/24`, the `zone_edge` network where
-  Traefik and the dev Vite proxy reach the manager; a value in `.env`
-  replaces it. The `zone-apps` Helm chart sets
-  `10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7`, because the manager is
-  a ClusterIP service that only peers inside the cluster can reach.
+  The compose file sets `172.31.0.250`, the address it pins Traefik to on
+  `zone_edge`. The dev overlay adds the dev console's Vite proxy, pinned to
+  `172.31.0.251` on `zone_edge` and `172.30.0.251` on `zone_internal`, which
+  sets `X-Forwarded-For` to the browser's address instead of appending to
+  whatever the browser sent. Both
+  trust single addresses rather than the networks, because every published
+  port, such as the dev overlay's `8000` and `3001` or the VPN overlay's
+  `127.0.0.1:8000`, reaches the manager from the network's gateway, and
+  trusting it would let anyone who can reach that port name any address. A
+  value in `.env` replaces either one. The `zone-apps` Helm chart leaves it
+  unset unless you set `server.trustedProxies`, and warns after an install
+  that leaves it empty.
 - **Description**: The reverse proxies whose `X-Forwarded-For` header Zone
   believes, as a comma-separated list of IP addresses and networks. Zone uses
   the client address it resolves for the single sign-on rate limit and for
@@ -119,17 +126,23 @@ For production, regenerate secrets for security.
   listed proxy, Zone reads `X-Forwarded-For` from the right, skips every
   listed hop, and takes the first one that isn't listed. When the peer isn't
   listed, Zone ignores the header and uses the peer. It never reads
-  `X-Real-IP`.
-- **Example**: `172.31.0.0/24`, the compose `zone_edge` subnet, or your
-  ingress controller's pod CIDR, such as `10.244.0.0/16`. List every proxy
-  between the internet and Zone that appends to `X-Forwarded-For`.
-- **Note**: Only loopback is trusted by default, so a peer on your LAN, such
-  as `192.168.1.5`, is the client, whatever it forwards. An empty value
-  trusts nothing, not even loopback. An entry that isn't an IP address or
-  network stops the server at startup with an error naming it. Never list a
-  network that clients can send from directly, or they can name any address
-  they like. Behind a proxy that isn't listed, every client shares the
-  proxy's address and so its single sign-on limit. See
+  `X-Real-IP`. An entry may carry a port, as Azure Application Gateway and
+  IIS ARR send it (`198.51.100.7:4711`, `[2001:db8::1]:443`); Zone drops the
+  port.
+- **Example**: `172.31.0.250`, Traefik in the compose stack, or your ingress
+  controller's pod CIDR, such as `10.244.0.0/16`. List every proxy between
+  the internet and Zone that appends to `X-Forwarded-For`.
+- **Note**: Set it to your proxies' own addresses, such as your ingress
+  controller's pod CIDR, never a range your clients use. Zone skips every
+  hop in a trusted range as if it were a proxy, so a client whose own
+  address is in one, say `10.5.5.5` inside a trusted `10.0.0.0/8`, can put
+  any address to the left of its own in `X-Forwarded-For` and be counted
+  under that address instead. Only loopback is trusted by default, so a peer
+  on your LAN, such as `192.168.1.5`, is the client, whatever it forwards.
+  An empty value trusts nothing, not even loopback. An entry that isn't an
+  IP address or network stops the server at startup with an error naming
+  it. Behind a proxy that isn't listed, every client shares the proxy's
+  address and so its single sign-on limit. See
   [SSO.md](SSO.md#rate-limits-and-client-addresses).
 
 ### `ZONE_SSO_REQUESTS_PER_MINUTE`
@@ -138,9 +151,12 @@ For production, regenerate secrets for security.
   client address may send in a minute, counted together. Over the limit, a
   start gets `429` with `Retry-After` and the code `sso_rate_limited`, and a
   SAML post is sent back to the console with that code. IPv6 clients are
-  counted by their /64 network.
-- **Note**: It must be a whole number of at least 1; `0` or anything else
-  stops the server at startup. See
+  counted by their /64 network. The first refusal of an address in each
+  minute is logged as a warning, the rest at debug.
+- **Note**: The count is kept in each server process's memory, so the limit
+  is per replica: with three replicas behind a load balancer, one address
+  can make up to three times as many requests. It must be a whole number of
+  at least 1; `0` or anything else stops the server at startup. See
   [SSO.md](SSO.md#rate-limits-and-client-addresses).
 
 ---

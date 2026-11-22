@@ -3,6 +3,7 @@
 
 use std::time::Instant;
 
+use abnegate_http::Decision;
 use axum::Json;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -15,11 +16,15 @@ use super::saml::{redirect, refused};
 use crate::auth::client_address::ClientAddress;
 use crate::routes::common::ErrorResponse;
 use crate::services::sso::console::redirect_uri;
-use crate::services::sso::throttle::WINDOW;
+use crate::services::sso::throttle::{Throttle, WINDOW};
 use crate::state::AppState;
 
 pub const RATE_LIMITED_MESSAGE: &str =
     "Too many sign-in attempts from your network. Wait a minute, then try again.";
+
+const START: &str = "a single sign-on start";
+
+const RESPONSE: &str = "a SAML response";
 
 pub async fn authorizations(
     State(state): State<AppState>,
@@ -27,11 +32,12 @@ pub async fn authorizations(
     request: Request,
     next: Next,
 ) -> Response {
-    let decision = state.sso_throttle().check(address.0);
+    let throttle = state.sso_throttle();
+    let decision = throttle.check(address.0);
     if decision.allowed {
         return next.run(request).await;
     }
-    tracing::debug!(address = ?address.0, "Refused a single sign-on start over the limit");
+    report(throttle, address, &decision, START);
     (
         StatusCode::TOO_MANY_REQUESTS,
         [(RETRY_AFTER, retry_after(decision.reset_at, Instant::now()))],
@@ -47,15 +53,26 @@ pub async fn acs(
     request: Request,
     next: Next,
 ) -> Response {
-    if state.sso_throttle().check(address.0).allowed {
+    let throttle = state.sso_throttle();
+    let decision = throttle.check(address.0);
+    if decision.allowed {
         return next.run(request).await;
     }
-    tracing::debug!(address = ?address.0, "Refused a SAML response over the limit");
+    report(throttle, address, &decision, RESPONSE);
     redirect(&refused(
         &redirect_uri(&state.config().app_base_url),
         None,
         RATE_LIMITED,
     ))
+}
+
+fn report(throttle: &Throttle, address: ClientAddress, decision: &Decision, refusal: &str) {
+    let ClientAddress(address) = address;
+    if throttle.announces(address, decision) {
+        tracing::warn!(?address, "Refused {refusal} over the limit");
+    } else {
+        tracing::debug!(?address, "Refused {refusal} over the limit");
+    }
 }
 
 fn retry_after(reset_at: Option<Instant>, now: Instant) -> u64 {

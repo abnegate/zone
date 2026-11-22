@@ -882,6 +882,9 @@ browser that started it.
 Starting a sign-in and posting a SAML response need no account, so Zone
 limits both per client address: `ZONE_SSO_REQUESTS_PER_MINUTE` (120 by
 default) starts and posts together, per address, in each one-minute window.
+The count is kept in each server process's memory, so the limit applies per
+replica: behind a load balancer spreading requests over three replicas, one
+address can make up to three times as many.
 Without the limit, one client could start sign-ins in a loop and post large
 responses until every SAML response check was taken, and everyone else's
 sign-ins would fail with `sso_sign_in_failed`. The limit applies to
@@ -898,21 +901,29 @@ provider issued.
   `{APP_BASE_URL}/sso/callback?error=sso_rate_limited`, with no `state`,
   because its `RelayState` is never read. The console explains this code
   without a `state` only to a browser that has a sign-in in progress.
+- The server logs the first refusal of an address in each window as a
+  warning, naming the address, and the rest at debug, so a flood leaves one
+  line per address per minute.
 
 The client address is the TCP peer, unless that peer is a trusted proxy
 listed in `ZONE_TRUSTED_PROXIES`. Then Zone reads `X-Forwarded-For` from the
 right, skips every trusted hop, and takes the first hop that isn't trusted.
-If every hop is trusted, the leftmost one is the client. An entry that isn't
-a bare IP address, including one with a port, stops the walk at the last
-trusted hop. Zone never reads `X-Real-IP`. A request with no peer address
+If every hop is trusted, the leftmost one is the client. An entry may carry a
+port, as Azure Application Gateway and IIS ARR send it (`198.51.100.7:4711`
+or `[2001:db8::1]:443`), and Zone drops it. Any other entry that isn't an IP
+address, such as `unknown` or an obfuscated `_hidden`, stops the walk at the
+last trusted hop. Zone never reads `X-Real-IP`. A request with no peer address
 counts against one shared bucket. IPv6 clients are counted by their /64
 network, because one subscriber is usually given a whole /64.
 
 Only loopback is trusted by default, so without a trusted proxy every client
 behind one reverse proxy shares that proxy's limit. List your proxy in
 `ZONE_TRUSTED_PROXIES` to give each client its own; see
-[CONFIGURATION.md](CONFIGURATION.md#zone_trusted_proxies). The same address
-is what Zone records for a session and a device.
+[CONFIGURATION.md](CONFIGURATION.md#zone_trusted_proxies). List only your
+proxies, never a range your clients use: a client whose own address is
+trusted is skipped as a proxy, so it can name any address it likes to the
+left of its own. The same address is what Zone records for a session and a
+device.
 
 ### Claims from userinfo
 
