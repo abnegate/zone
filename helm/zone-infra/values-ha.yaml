@@ -1,0 +1,41 @@
+# The supported high-availability topology for zone-infra. Layer it over your
+# own values:
+#
+#   helm upgrade --install zone-infra helm/zone-infra -f helm/zone-infra/values-ha.yaml \
+#     --set postgres.backup.objectStore=<barmancloud.cnpg.io ObjectStore name>
+#
+# It needs CloudNativePG 1.30 or later and at least 3 schedulable nodes: each
+# Postgres instance requires a node of its own. Backups need the Barman Cloud
+# plugin and an ObjectStore pointing at S3, GCS or Azure Blob Storage.
+#
+# Valkey is not deployed: the HA profile of zone-apps needs an external,
+# managed Redis or Valkey with failover.
+
+postgres:
+  instances: 3
+
+  # A commit waits for one standby, so a failover never loses one.
+  synchronous:
+    method: any
+    number: 1
+    dataDurability: required
+
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: required
+    topologyKey: kubernetes.io/hostname
+
+  # Each zone-server replica pools 20 connections and holds 1 for leadership,
+  # so the server's HPA maximum of 10, plus a surge pod, takes 231. LiteLLM
+  # pools 10 per worker: 4 workers on each of 2 replicas, plus a surge pod,
+  # take 120. The rest is headroom for the operator and administrators.
+  parameters:
+    max_connections: "400"
+
+  backup:
+    objectStore: ""
+    schedule: "0 0 0 * * *"
+    target: prefer-standby
+
+valkey:
+  enabled: false

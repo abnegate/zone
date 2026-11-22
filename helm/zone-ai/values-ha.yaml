@@ -1,0 +1,25 @@
+# The supported high-availability topology for zone-ai. Layer it over your
+# own values:
+#
+#   helm upgrade --install zone-ai helm/zone-ai -f helm/zone-ai/values-ha.yaml
+#
+# Zone issues LiteLLM keys with no budget, rpm or tpm limits, so replicas share
+# nothing but the database and need no LiteLLM Redis. A killed replica loses
+# the spend logs it had not flushed yet. Ollama is outside the supported
+# topology and keeps a single replica.
+
+litellm:
+  replicas: 2
+
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: litellm
+          topologyKey: kubernetes.io/hostname

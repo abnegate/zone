@@ -1,4 +1,8 @@
 {{- if .Values.postgres.enabled }}
+{{- $postgres := .Values.postgres }}
+{{- if and $postgres.synchronous (ge (int $postgres.synchronous.number) (int $postgres.instances)) }}
+{{- fail (printf "postgres.synchronous.number (%v) must be below postgres.instances (%v): CNPG waits on that many standbys" $postgres.synchronous.number $postgres.instances) }}
+{{- end }}
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -8,41 +12,66 @@ metadata:
     {{- include "zone-infra.labels" . | nindent 4 }}
     app.kubernetes.io/component: database
 spec:
-  instances: {{ .Values.postgres.instances }}
+  instances: {{ $postgres.instances }}
 
-  imageName: {{ .Values.postgres.image }}
+  imageName: {{ $postgres.image }}
 
-  {{- if .Values.postgres.sharedPreloadLibraries }}
+  {{- if or $postgres.sharedPreloadLibraries $postgres.parameters $postgres.synchronous }}
   postgresql:
+    {{- if $postgres.sharedPreloadLibraries }}
     shared_preload_libraries:
-      {{- toYaml .Values.postgres.sharedPreloadLibraries | nindent 6 }}
+      {{- toYaml $postgres.sharedPreloadLibraries | nindent 6 }}
+    {{- end }}
+    {{- with $postgres.parameters }}
+    parameters:
+      {{- range $name, $value := . }}
+      {{ $name }}: {{ $value | toString | quote }}
+      {{- end }}
+    {{- end }}
+    {{- with $postgres.synchronous }}
+    synchronous:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- end }}
+
+  {{- with $postgres.affinity }}
+  affinity:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with $postgres.backup.objectStore }}
+  plugins:
+    - name: {{ include "zone-infra.barmanCloudPlugin" $ }}
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: {{ . | quote }}
   {{- end }}
 
   bootstrap:
     initdb:
-      database: {{ .Values.postgres.database }}
-      owner: {{ .Values.postgres.owner }}
+      database: {{ $postgres.database }}
+      owner: {{ $postgres.owner }}
       secret:
         name: {{ include "zone-infra.secretsName" . }}
-      {{- if .Values.postgres.postInitTemplateSQL }}
+      {{- if $postgres.postInitTemplateSQL }}
       postInitTemplateSQL:
-        {{- toYaml .Values.postgres.postInitTemplateSQL | nindent 8 }}
+        {{- toYaml $postgres.postInitTemplateSQL | nindent 8 }}
       {{- end }}
 
   superuserSecret:
-    name: {{ .Values.postgres.superuser.secretName }}
+    name: {{ $postgres.superuser.secretName }}
 
   storage:
-    size: {{ .Values.postgres.storage.size }}
-    {{- if .Values.postgres.storage.storageClass }}
-    storageClass: {{ .Values.postgres.storage.storageClass }}
+    size: {{ $postgres.storage.size }}
+    {{- if $postgres.storage.storageClass }}
+    storageClass: {{ $postgres.storage.storageClass }}
     {{- end }}
 
-  {{- if .Values.postgres.resources }}
+  {{- if $postgres.resources }}
   resources:
-    {{- toYaml .Values.postgres.resources | nindent 4 }}
+    {{- toYaml $postgres.resources | nindent 4 }}
   {{- end }}
 
   monitoring:
-    enablePodMonitor: {{ .Values.postgres.monitoring.enabled }}
+    enablePodMonitor: {{ $postgres.monitoring.enabled }}
 {{- end }}

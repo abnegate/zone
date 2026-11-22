@@ -270,6 +270,7 @@ tilt-down: ## Stop Tilt and clean up
 	@echo "$(YELLOW)Run 'make kind-delete' to remove the cluster entirely.$(NC)"
 
 HELM_HA_APPS := --set highAvailability.externalValkey=true --set server.agentState.persistence.storageClass=test-rwx
+HELM_HA_INFRA := --set postgres.backup.objectStore=zone-backups
 
 helm-lint: ## Lint and render Helm charts
 	@helm lint helm/zone-infra helm/zone-ai helm/zone-apps
@@ -279,6 +280,10 @@ helm-lint: ## Lint and render Helm charts
 	@helm template zone-apps helm/zone-apps --namespace zone -f helm/zone-apps/examples/minimal.yaml >/dev/null
 	@helm lint helm/zone-apps -f helm/zone-apps/values-ha.yaml $(HELM_HA_APPS)
 	@helm template zone-apps helm/zone-apps --namespace zone -f helm/zone-apps/values-ha.yaml $(HELM_HA_APPS) >/dev/null
+	@helm lint helm/zone-infra -f helm/zone-infra/values-ha.yaml $(HELM_HA_INFRA)
+	@helm template zone-infra helm/zone-infra --namespace zone -f helm/zone-infra/values-ha.yaml $(HELM_HA_INFRA) >/dev/null
+	@helm lint helm/zone-ai -f helm/zone-ai/values-ha.yaml
+	@helm template zone-ai helm/zone-ai --namespace zone -f helm/zone-ai/values-ha.yaml >/dev/null
 	@echo "$(GREEN)Helm charts linted and rendered.$(NC)"
 
 ##@ Health & Monitoring

@@ -8,7 +8,7 @@ metadata:
     {{- include "zone-ai.labels" . | nindent 4 }}
     app.kubernetes.io/component: llm-proxy
 spec:
-  replicas: 1
+  replicas: {{ .Values.litellm.replicas }}
   selector:
     matchLabels:
       app.kubernetes.io/name: litellm
@@ -19,6 +19,11 @@ spec:
         app.kubernetes.io/component: llm-proxy
     spec:
       terminationGracePeriodSeconds: 60
+      {{- with .Values.litellm.podAntiAffinity }}
+      affinity:
+        podAntiAffinity:
+          {{- toYaml . | nindent 10 }}
+      {{- end }}
       initContainers:
         - name: wait-for-ollama
           image: "curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777"

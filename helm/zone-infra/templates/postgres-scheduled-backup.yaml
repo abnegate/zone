@@ -1,0 +1,21 @@
+{{- if and .Values.postgres.enabled .Values.postgres.backup.objectStore }}
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: zone-postgres
+  namespace: {{ include "zone-infra.namespace" . }}
+  labels:
+    {{- include "zone-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  cluster:
+    name: zone-postgres
+  schedule: {{ .Values.postgres.backup.schedule | quote }}
+  backupOwnerReference: self
+  method: plugin
+  pluginConfiguration:
+    name: {{ include "zone-infra.barmanCloudPlugin" . }}
+  {{- with .Values.postgres.backup.target }}
+  target: {{ . }}
+  {{- end }}
+{{- end }}
