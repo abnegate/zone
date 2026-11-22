@@ -1,7 +1,3 @@
-//! The SCIM `/Users` endpoints as an identity provider calls them: provisioning, reading, filtering
-//! and paging, updating, deactivating and reactivating, and deleting organization members, with
-//! the SCIM content type and error format on every answer.
-
 use std::time::Duration;
 
 use axum::http::{Method, StatusCode};

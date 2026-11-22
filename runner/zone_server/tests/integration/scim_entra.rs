@@ -1,8 +1,3 @@
-//! Microsoft Entra ID's provisioning requests, replayed as Entra records them: its lookups, user
-//! creation, the attribute updates it sends with and without paths, deactivation with `"False"`
-//! and with the compliant boolean, permanent deletion, and a pushed group whose members change in
-//! both of Entra's styles.
-
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;

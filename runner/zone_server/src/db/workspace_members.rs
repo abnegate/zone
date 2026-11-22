@@ -788,13 +788,6 @@ pub(crate) async fn lock_privileged(
     })
 }
 
-/// Seats an owner in an active workspace left without one, and returns who.
-///
-/// The candidate is the active member who is also an active member of the
-/// organization, preferring whoever created the workspace (nobody invited
-/// them), then admins over members over viewers, then the earliest to join.
-/// With nobody to seat the workspace stays without an owner. A custom role
-/// gives way to the owner role.
 pub async fn seat_successor(
     connection: &mut PgConnection,
     workspace_id: Uuid,

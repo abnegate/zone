@@ -311,8 +311,6 @@ pub async fn find_by_email_ignoring_case(
     .await
 }
 
-/// Locks the account `FOR UPDATE` until the caller's transaction ends, so its password and last
-/// sign-in hold still meanwhile. `false` when the account is gone.
 pub async fn lock(connection: &mut PgConnection, user_id: Uuid) -> DbResult<bool> {
     let locked: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE id = $1 FOR UPDATE")
         .bind(user_id)

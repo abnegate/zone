@@ -1,8 +1,3 @@
-//! Okta's provisioning requests, replayed as Okta records them: a user looked up, created,
-//! updated, deactivated and reactivated, and a pushed group whose mapping sets its members' roles.
-//! Also the order a member's role is chosen in when several mapped groups hold them, and the
-//! owners SCIM never touches.
-
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;

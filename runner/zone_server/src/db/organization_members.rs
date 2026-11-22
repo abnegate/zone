@@ -151,8 +151,6 @@ where
     })
 }
 
-/// Remove a member from an organization, suspending their workspace
-/// memberships in it. Returns whether they had a membership to remove.
 pub async fn remove_member(pool: &PgPool, organization_id: Uuid, user_id: Uuid) -> DbResult<bool> {
     let mut transaction = pool.begin().await?;
     lock_owners(&mut transaction, organization_id).await?;

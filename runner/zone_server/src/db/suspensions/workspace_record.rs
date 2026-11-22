@@ -3,8 +3,6 @@ use uuid::Uuid;
 
 use crate::db::DbResult;
 
-/// The role and custom role a suspended workspace membership held, read and
-/// locked for the caller's transaction.
 #[derive(Debug, sqlx::FromRow)]
 pub(super) struct WorkspaceRecord {
     pub workspace_id: Uuid,
@@ -13,7 +11,6 @@ pub(super) struct WorkspaceRecord {
 }
 
 impl WorkspaceRecord {
-    /// Every record of the member in the organization, by ascending workspace.
     pub async fn lock_all(
         connection: &mut PgConnection,
         organization_id: Uuid,

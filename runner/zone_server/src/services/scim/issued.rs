@@ -4,7 +4,6 @@ use abnegate_secret::REDACTED;
 
 use crate::db::scim::TokenRecord;
 
-/// A token as it was just created or rotated, with the secret only this answer ever carries.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Issued {
     pub token: TokenRecord,

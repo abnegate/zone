@@ -3,8 +3,6 @@ use uuid::Uuid;
 
 use crate::db::DbResult;
 
-/// The role and custom role a suspended organization membership held, read
-/// and locked for the caller's transaction.
 #[derive(Debug, sqlx::FromRow)]
 pub(super) struct Record {
     pub role: String,

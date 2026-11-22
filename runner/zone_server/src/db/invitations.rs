@@ -246,8 +246,6 @@ pub async fn revoke_invitation(pool: &PgPool, invitation_id: Uuid) -> DbResult<(
     Ok(())
 }
 
-/// Deletes every invitation to an organization still waiting on `email`,
-/// expired or not, whatever case the email was invited in.
 pub async fn revoke_pending<'a, E>(executor: E, organization_id: Uuid, email: &str) -> DbResult<u64>
 where
     E: Executor<'a, Database = Postgres>,

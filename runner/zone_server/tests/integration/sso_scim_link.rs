@@ -1,8 +1,3 @@
-//! Single sign-on reaching an account SCIM provisioned. An identity provider that doesn't vouch
-//! for email, as SAML never does, links by email only to a pristine SCIM account: one that still
-//! has SCIM's unusable password, has never signed in and has no single sign-on identity. Anything
-//! else with the same email stays an email conflict.
-
 use std::collections::HashMap;
 use std::io::Read;
 use std::time::Duration;
@@ -51,13 +46,11 @@ const LOCK_WAIT: Duration = Duration::from_secs(30);
 const LOCK_POLL: Duration = Duration::from_millis(20);
 const TOKEN_NAME: &str = "Identity provider";
 
-/// Where starting a sign-in sends the browser, and the state the console keeps.
 struct Authorization {
     url: Url,
     state: String,
 }
 
-/// A started SAML sign-in: the state the console keeps and the ID of the AuthnRequest.
 struct Started {
     state: String,
     request_id: String,
@@ -72,8 +65,6 @@ struct Server {
 }
 
 impl Server {
-    /// An Enterprise server with one OIDC and one SAML provider, and an organization SCIM
-    /// provisions into.
     async fn new() -> Self {
         let fixture = Fixture::new(PREFIX).await;
         let admin = fixture.register().await;
@@ -120,8 +111,6 @@ impl Server {
         }
     }
 
-    /// An account as SCIM creates one: SCIM's own unusable password, an unverified email, no
-    /// organization of its own, a membership and the link that records the password SCIM set.
     async fn provisioned(&self, email: &str) -> Uuid {
         let password_hash = hash_password(&generate_token()).unwrap();
         let mut transaction = self.fixture.pool().begin().await.unwrap();
@@ -144,7 +133,6 @@ impl Server {
         user.id
     }
 
-    /// An account an identity provider created through `POST /Users`, with a token of its own.
     async fn pushed(&self, email: &str) -> Uuid {
         let secret = secret::generate();
         tokens::create(
@@ -247,8 +235,6 @@ impl Server {
         }
     }
 
-    /// Posts the identity provider's signed answer for `subject` and `email` to the ACS and
-    /// returns the code it hands the console.
     async fn saml_assert(&self, started: &Started, subject: &str, email: &str) -> String {
         let response = testing::response(&Options {
             response_id: format!("_response-{}", Uuid::new_v4().simple()),
@@ -329,7 +315,6 @@ impl Server {
             .unwrap()
     }
 
-    /// Waits until some statement in this server's database is queued behind a row lock.
     async fn queued_behind_a_lock(&self) {
         tokio::time::timeout(LOCK_WAIT, async {
             loop {

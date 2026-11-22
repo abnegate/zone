@@ -1,10 +1,3 @@
-//! What SCIM accepts under each license. Enterprise, active or in grace, takes every request.
-//! Without it, whether lapsed past grace, Team, or removed, only deprovisioning writes go through:
-//! a user DELETE, and a user PUT or PATCH that sets `active` to false, which applies nothing else.
-//! Every other write is refused in the SCIM error format, reads keep working, tokens can still be
-//! revoked, and nobody loses a membership, a role or their access to the lapse itself. The
-//! Community member cap is checked here too.
-
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use futures::future::join_all;
@@ -504,8 +497,6 @@ async fn enterprise_provisions_past_the_community_cap_and_community_provisions_n
     fixture.cleanup().await;
 }
 
-/// The writer a request authenticated while the license was still Enterprise: its license then
-/// lapses before the request is admitted, so the Community cap applies to the admission.
 fn lapsing(fixture: &Fixture, token: &IssuedToken) -> ScimClient {
     ScimClient {
         organization_id: fixture.organization,
@@ -519,7 +510,6 @@ fn document(user_name: &str) -> UserDocument {
     serde_json::from_value(user(user_name)).unwrap()
 }
 
-/// Holds the seat lock on a session of its own until [`release_seats`].
 async fn hold_seats(fixture: &Fixture) -> PoolConnection<Postgres> {
     let mut holder = fixture.pool().acquire().await.unwrap();
     sqlx::query(HOLD_SEATS)
@@ -546,7 +536,6 @@ async fn accounts(fixture: &Fixture, email: &str) -> i64 {
         .unwrap()
 }
 
-/// A failure as the SCIM routes answer it.
 async fn answered(failure: Failure) -> (StatusCode, Option<String>, Value) {
     let response = failure.into_response();
     let status = response.status();

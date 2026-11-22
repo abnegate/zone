@@ -21,7 +21,6 @@ use crate::state::AppState;
 const NAME: &str = "name";
 const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
 
-/// POST /api/organizations/{org_id}/scim/tokens
 pub async fn create(
     State(state): State<AppState>,
     OrganizationPermit(member): OrganizationPermit<{ Permission::ScimUpdate.index() }>,
@@ -30,7 +29,6 @@ pub async fn create(
     respond(issue(&state, &member, body).await)
 }
 
-/// POST /api/organizations/{org_id}/scim/tokens/{token_id}/rotations
 pub async fn rotate(
     State(state): State<AppState>,
     OrganizationPermit(member): OrganizationPermit<{ Permission::ScimUpdate.index() }>,
@@ -39,9 +37,6 @@ pub async fn rotate(
     respond(replace(&state, &member, path).await)
 }
 
-/// DELETE /api/organizations/{org_id}/scim/tokens/{token_id}
-///
-/// Needs no license, so a lapsed one never keeps a leaked token working.
 pub async fn revoke(
     State(state): State<AppState>,
     OrganizationPermit(member): OrganizationPermit<{ Permission::ScimUpdate.index() }>,

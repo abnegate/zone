@@ -650,9 +650,6 @@ pub async fn add_member(
     (status, Json(response)).into_response()
 }
 
-/// Admits `target` and adds them to `member`'s organization, or restores their removed
-/// membership as a newcomer, in one transaction: the workspace access and roles they held before
-/// they were removed stay with the removal.
 async fn seat(
     state: &AppState,
     member: &OrganizationMember,
