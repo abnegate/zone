@@ -10,6 +10,7 @@ pub mod comfy;
 pub mod context;
 pub mod database;
 pub mod eventually;
+pub mod fleet;
 pub mod github_app;
 pub mod identity_provider;
 pub mod logs;
