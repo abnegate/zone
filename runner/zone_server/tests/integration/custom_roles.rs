@@ -119,6 +119,7 @@ async fn stored(fixture: &Fixture, name: &str, scope: Scope, permissions: &[Perm
     .unwrap()
     {
         Creation::Created(role) => role.id,
+        Creation::Forbidden => panic!("the owner holds roles:update"),
         Creation::NameTaken => panic!("{name} is already taken"),
     }
 }
@@ -352,7 +353,7 @@ async fn a_creator_without_roles_update_creates_nothing() {
                 .await
                 .unwrap();
         assert!(
-            !matches!(outcome, Creation::Created(_)),
+            matches!(outcome, Creation::Forbidden),
             "{who} without roles:update created a role: {outcome:?}"
         );
     }

@@ -181,7 +181,6 @@ async fn a_stored_budget_editor_without_spend_changes_and_reads_nothing() {
     let held = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Organization,
         &[],
     )
@@ -208,7 +207,6 @@ async fn a_budget_for_a_member_does_not_wait_for_an_edit_of_their_role() {
     let held = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Organization,
         &[Permission::AuditLogsRead],
     )
@@ -271,22 +269,8 @@ async fn a_membership_whose_role_grants_nothing_is_told_the_organization_does_no
     let fixture = licensed().await;
     let budget = budget(&fixture).await;
     let (elsewhere, _) = fixture.another_organization(&fixture.owner).await;
-    let foreign = role(
-        fixture.pool(),
-        elsewhere,
-        fixture.owner.id,
-        Scope::Organization,
-        &STEWARD,
-    )
-    .await;
-    let mis_scoped = role(
-        fixture.pool(),
-        fixture.organization,
-        fixture.owner.id,
-        Scope::Workspace,
-        &[],
-    )
-    .await;
+    let foreign = role(fixture.pool(), elsewhere, Scope::Organization, &STEWARD).await;
+    let mis_scoped = role(fixture.pool(), fixture.organization, Scope::Workspace, &[]).await;
 
     for pointed in [foreign, mis_scoped] {
         let member = organization_holder(&fixture, &[Permission::SpendRead]).await;

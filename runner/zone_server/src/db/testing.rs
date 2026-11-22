@@ -104,7 +104,7 @@ impl Tenant {
     /// A custom role of this tenant's organization holding `permissions` and
     /// the base of `scope`.
     pub async fn custom_role(&self, scope: Scope, permissions: &[Permission]) -> Uuid {
-        let creator = self.user().await;
+        let creator = self.organization_member(OrgRole::Owner).await;
         custom_roles::testing::role(&self.pool, self.organization, creator, scope, permissions)
             .await
     }

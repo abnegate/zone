@@ -125,7 +125,7 @@ struct Arranged {
 
 /// An organization with a member, a wide role nobody holds yet, and a caller
 /// holding only the narrow permissions.
-async fn arranged(pool: &PgPool, creator: Uuid) -> Arranged {
+async fn arranged(pool: &PgPool) -> Arranged {
     let organization = organization(pool).await;
     let owner = user(pool).await;
     seat_organization(pool, organization, owner, OrgRole::Owner).await;
@@ -133,9 +133,9 @@ async fn arranged(pool: &PgPool, creator: Uuid) -> Arranged {
     seat_organization(pool, organization, member, OrgRole::Member).await;
     let caller = user(pool).await;
     seat_organization(pool, organization, caller, OrgRole::Member).await;
-    let narrow = role(pool, organization, creator, Scope::Organization, &NARROW).await;
+    let narrow = role(pool, organization, Scope::Organization, &NARROW).await;
     assign_organization(pool, organization, owner, caller, narrow).await;
-    let role = role(pool, organization, creator, Scope::Organization, &WIDE).await;
+    let role = role(pool, organization, Scope::Organization, &WIDE).await;
     Arranged {
         organization,
         member,
@@ -148,7 +148,7 @@ async fn arranged(pool: &PgPool, creator: Uuid) -> Arranged {
 async fn an_assignment_held_at_the_member_lock_is_checked_against_the_narrowed_role() {
     let fixture = fixture().await;
     let pool = fixture.pool();
-    let arranged = arranged(pool, fixture.owner.id).await;
+    let arranged = arranged(pool).await;
     let narrowed = composed(Scope::Organization, &NARROW);
 
     let mut blocker = pool.begin().await.expect("a transaction");
@@ -194,7 +194,7 @@ async fn an_assignment_held_at_the_member_lock_is_checked_against_the_narrowed_r
 async fn an_assignment_behind_an_edit_in_flight_reads_what_the_edit_saved() {
     let fixture = fixture().await;
     let pool = fixture.pool();
-    let arranged = arranged(pool, fixture.owner.id).await;
+    let arranged = arranged(pool).await;
     let narrowed = composed(Scope::Organization, &NARROW);
 
     let mut blocker = pool.begin().await.expect("a transaction");
@@ -244,7 +244,7 @@ async fn an_assignment_racing_a_narrowing_is_checked_against_what_the_holder_get
     let narrowed = composed(Scope::Organization, &NARROW);
 
     for iteration in 0..ITERATIONS {
-        let arranged = arranged(pool, fixture.owner.id).await;
+        let arranged = arranged(pool).await;
         let editor = editor(pool, arranged.organization, OrgRole::Admin).await;
         let start = Arc::new(Barrier::new(2));
 
@@ -324,17 +324,10 @@ async fn an_assignment_racing_a_widening_never_leaves_a_holder_beyond_its_assign
         seat_workspace(pool, workspace, owner, WorkspaceRole::Owner).await;
         let caller = user(pool).await;
         seat_workspace(pool, workspace, caller, WorkspaceRole::Viewer).await;
-        let granted = role(
-            pool,
-            organization,
-            fixture.owner.id,
-            Scope::Workspace,
-            &assigning,
-        )
-        .await;
+        let granted = role(pool, organization, Scope::Workspace, &assigning).await;
         assign_workspace(pool, workspace, owner, caller, granted).await;
         let editor = editor(pool, organization, OrgRole::Admin).await;
-        let role = role(pool, organization, fixture.owner.id, Scope::Workspace, &[]).await;
+        let role = role(pool, organization, Scope::Workspace, &[]).await;
         let start = Arc::new(Barrier::new(2));
 
         let assignment = {
@@ -401,7 +394,7 @@ async fn a_widening_behind_its_editors_demotion_is_judged_by_the_demoted_grant()
     seat_workspace(pool, workspace, assigner, WorkspaceRole::Owner).await;
     let holder = user(pool).await;
     seat_workspace(pool, workspace, holder, WorkspaceRole::Viewer).await;
-    let role = role(pool, organization, fixture.owner.id, Scope::Workspace, &[]).await;
+    let role = role(pool, organization, Scope::Workspace, &[]).await;
     assign_workspace(pool, workspace, assigner, holder, role).await;
     let owner = editor(pool, organization, OrgRole::Owner).await;
 
@@ -757,7 +750,7 @@ async fn a_custom_caller_changing_an_editor_of_its_role_never_deadlocks_with_the
     let admin = editor(pool, organization, OrgRole::Admin).await;
     let caller = user(pool).await;
     seat_organization(pool, organization, caller, OrgRole::Member).await;
-    let held = role(pool, organization, owner, Scope::Organization, &WIDE).await;
+    let held = role(pool, organization, Scope::Organization, &WIDE).await;
     assign_organization(pool, organization, owner, caller, held).await;
 
     let mut blocker = pool.begin().await.expect("a transaction");
@@ -835,7 +828,7 @@ async fn an_edit_behind_its_editors_demotion_to_member_is_refused() {
     let pool = fixture.pool();
     let organization = organization(pool).await;
     let admin = editor(pool, organization, OrgRole::Admin).await;
-    let role = role(pool, organization, admin, Scope::Organization, &NARROW).await;
+    let role = role(pool, organization, Scope::Organization, &NARROW).await;
 
     let demotion = demotion(pool, organization, admin).await;
     let edit = {
@@ -876,7 +869,7 @@ async fn a_delete_behind_its_editors_demotion_to_member_is_refused() {
     let pool = fixture.pool();
     let organization = organization(pool).await;
     let admin = editor(pool, organization, OrgRole::Admin).await;
-    let role = role(pool, organization, admin, Scope::Organization, &NARROW).await;
+    let role = role(pool, organization, Scope::Organization, &NARROW).await;
 
     let demotion = demotion(pool, organization, admin).await;
     let deletion = {

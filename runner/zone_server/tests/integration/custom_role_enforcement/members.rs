@@ -225,7 +225,6 @@ async fn member_lists_rank_a_custom_role_by_the_built_in_role_it_covers() {
     let organization_role = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Organization,
         &organization_permissions,
     )
@@ -248,19 +247,11 @@ async fn member_lists_rank_a_custom_role_by_the_built_in_role_it_covers() {
         names_of(Scope::Organization, &organization_permissions)
     );
 
-    let reading = role(
-        fixture.pool(),
-        fixture.organization,
-        fixture.owner.id,
-        Scope::Workspace,
-        &[],
-    )
-    .await;
+    let reading = role(fixture.pool(), fixture.organization, Scope::Workspace, &[]).await;
     let writing_permissions = [Permission::WorkspaceWrite, Permission::ProjectSyncsUpdate];
     let writing = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Workspace,
         &writing_permissions,
     )
@@ -301,7 +292,6 @@ async fn escalation_through_the_member_routes_is_refused_with_role_exceeds() {
     let auditors = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Organization,
         &[Permission::AuditLogsRead],
     )
@@ -310,7 +300,6 @@ async fn escalation_through_the_member_routes_is_refused_with_role_exceeds() {
     let writers = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Workspace,
         &[Permission::WorkspaceWrite],
     )
@@ -442,19 +431,11 @@ async fn a_lapsed_license_refuses_custom_assignments_but_not_built_in_ones() {
     let organization_role = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Organization,
         &[],
     )
     .await;
-    let workspace_role = role(
-        fixture.pool(),
-        fixture.organization,
-        fixture.owner.id,
-        Scope::Workspace,
-        &[],
-    )
-    .await;
+    let workspace_role = role(fixture.pool(), fixture.organization, Scope::Workspace, &[]).await;
     let member = organization_member(&fixture).await;
     let viewer = workspace_viewer(&fixture).await;
     fixture.store_license(&lapsed()).await;
@@ -634,7 +615,6 @@ async fn a_custom_assignment_answers_and_audits_the_role_it_assigned() {
     let organization_role = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Organization,
         &[Permission::AuditLogsRead],
     )
@@ -642,7 +622,6 @@ async fn a_custom_assignment_answers_and_audits_the_role_it_assigned() {
     let workspace_role = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Workspace,
         &[Permission::WorkspaceWrite],
     )
