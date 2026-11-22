@@ -5,9 +5,11 @@ use std::sync::Arc;
 use zone_enterprise::Keyring;
 
 use crate::config::Config;
-use crate::http::{Context, Renewer, Server, router};
+use crate::gate::{self, Gate, Throttle, TrustedProxies};
+use crate::http::{Context, Registrar, Renewer, Server, router};
 use crate::mail::Relay;
 use crate::polar::{self, Proxy};
+use crate::registry::TokenKey;
 use crate::serve_error::ServeError;
 
 /// Checks the whole configuration before listening, so a bad setting stops the
@@ -35,9 +37,28 @@ pub async fn serve(
 }
 
 /// Builds the relay and the Polar client and binds the listener, without
-/// serving yet. Renewal is on only when `POLAR_ACCESS_TOKEN` is set.
+/// serving yet. Renewal is on only when `POLAR_ACCESS_TOKEN` is set, and
+/// registry tokens only when `ZONE_REGISTRY_SERVICE` is.
 pub async fn start(config: Config) -> Result<Server, ServeError> {
     let relay = Relay::new(&config.smtp)?;
+    let gate = Gate::new(
+        config.keyring.clone(),
+        config.revoked.clone(),
+        config.proxies.clone(),
+    );
+    let registrar = config.registry.map(|settings| {
+        let key = TokenKey::derive(&config.signer, settings.generation);
+        Registrar::new(gate.clone(), key, settings, Throttle::new(config.limits))
+    });
+    announce(&config.proxies, registrar.is_some());
+    if let Some(registrar) = &registrar {
+        registrar.throttle().spawn_cleanup();
+        tracing::info!(
+            service = registrar.service(),
+            kid = registrar.kid(),
+            "Issuing registry tokens"
+        );
+    }
     let renewer = match config.access_token {
         Some(token) => Some(Renewer::new(
             config.keyring,
@@ -65,6 +86,10 @@ pub async fn start(config: Config) -> Result<Server, ServeError> {
         Some(renewer) => context.with_renewer(renewer),
         None => context,
     };
+    let context = match registrar {
+        Some(registrar) => context.with_registrar(registrar),
+        None => context,
+    };
     let server = Server::bind(config.listen, router(context)).await?;
     tracing::info!(
         address = %config.listen,
@@ -75,6 +100,13 @@ pub async fn start(config: Config) -> Result<Server, ServeError> {
         "Listening for Polar webhooks"
     );
     Ok(server)
+}
+
+/// Logs the trusted proxies once, however many gated routes are on.
+fn announce(proxies: &TrustedProxies, gated: bool) {
+    if gated {
+        gate::announce(proxies);
+    }
 }
 
 /// The container runs the signer as PID 1, which the kernel gives no default
