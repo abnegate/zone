@@ -6,6 +6,7 @@ use ipnet::IpNet;
 use crate::gate::unparsable::Unparsable;
 
 pub const SEPARATOR: char = ',';
+pub const NONE: &str = "none";
 
 const EXPECTED: &str = "a CIDR range or an IP address, such as 172.18.0.0/16";
 
@@ -16,6 +17,9 @@ pub struct TrustedProxies(Vec<IpNet>);
 
 impl TrustedProxies {
     pub fn parse(list: &str) -> Result<Self, Unparsable> {
+        if list.trim().eq_ignore_ascii_case(NONE) {
+            return Ok(Self::default());
+        }
         list.split(SEPARATOR)
             .map(str::trim)
             .filter(|entry| !entry.is_empty())
@@ -53,6 +57,9 @@ impl TrustedProxies {
 
 impl fmt::Display for TrustedProxies {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_empty() {
+            return formatter.write_str(NONE);
+        }
         for (index, range) in self.0.iter().enumerate() {
             if index > 0 {
                 formatter.write_str(",")?;

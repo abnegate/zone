@@ -30,6 +30,7 @@ const PORT_REASON: &str = "it must be a port number from 1 to 65535";
 const FROM_REASON: &str = "it must be a bare email address, such as licenses@example.com";
 const FROM_NAME_REASON: &str = "it must be a single line";
 const LIMIT_REASON: &str = "it must be a whole number of requests a minute, at least 1";
+const PROXIES_REASON: &str = "registry tokens and bundles need it. Set it to the reverse proxy's network, such as 172.18.0.0/16, or to none when no proxy is in front of the signer";
 const SERVICE_REASON: &str =
     "it must be the registry's name with no spaces, such as registry.bitecode.ltd";
 const GENERATION_REASON: &str = "it must be a whole number from 1";
@@ -165,6 +166,14 @@ impl Config {
         );
         let registry = registry(&value, &mut problems);
         let bundles = bundles(&value, &mut problems);
+        let gated =
+            value(Variable::RegistryService).is_some() || value(Variable::BundleBucket).is_some();
+        if gated && value(Variable::TrustedProxies).is_none() {
+            problems.push(Problem::Required {
+                variable: Variable::TrustedProxies,
+                reason: PROXIES_REASON,
+            });
+        }
 
         let assembled = (|| {
             Some(Self {
@@ -429,6 +438,7 @@ mod tests {
     use zone_enterprise::{Plan, TrustedKey};
 
     use super::*;
+    use crate::gate::NONE;
     use crate::private_key_error::PrivateKeyError;
     use crate::untrusted::Untrusted;
 
@@ -929,6 +939,77 @@ mod tests {
         );
     }
 
+    fn required(problems: &[Problem]) -> Vec<Variable> {
+        problems
+            .iter()
+            .filter_map(|problem| match problem {
+                Problem::Required { variable, .. } => Some(*variable),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_gated_route_without_trusted_proxies_refuses_to_start_naming_the_variable() {
+        let registry = with(&[(Variable::RegistryService, "registry.example.test")]);
+        let mut bundles = bundled(&[]);
+        bundles.remove(&Variable::TrustedProxies);
+        let mut both = bundles.clone();
+        both.insert(
+            Variable::RegistryService,
+            "registry.example.test".to_owned(),
+        );
+        let mut blank = both.clone();
+        blank.insert(Variable::TrustedProxies, "  ".to_owned());
+        for variables in [registry, bundles, both, blank] {
+            let problems = problems(&variables);
+            assert_eq!(
+                required(&problems),
+                [Variable::TrustedProxies],
+                "{problems:?}"
+            );
+            assert_eq!(problems.len(), 1, "{problems:?}");
+            let shown = problems[0].to_string();
+            assert!(
+                shown.starts_with("ZONE_LICENSE_TRUSTED_PROXIES is not set: "),
+                "{shown}"
+            );
+            assert!(shown.contains("or to none"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn none_trusts_no_proxy_for_a_gated_route() {
+        for none in ["none", " NONE ", "None"] {
+            let config = load(&with(&[
+                (Variable::RegistryService, "registry.example.test"),
+                (Variable::TrustedProxies, none),
+            ]))
+            .unwrap();
+            assert!(config.proxies.is_empty(), "{none:?}");
+            assert!(config.registry.is_some(), "{none:?}");
+            assert_eq!(config.proxies.to_string(), "none");
+        }
+        let config = load(&bundled(&[])).unwrap();
+        assert!(config.proxies.is_empty());
+        assert!(config.bundles.is_some());
+    }
+
+    #[test]
+    fn none_is_refused_beside_a_range() {
+        let problems = problems(&with(&[(Variable::TrustedProxies, "none,172.18.0.0/16")]));
+        assert_eq!(invalid(&problems), [Variable::TrustedProxies]);
+        assert!(problems[0].to_string().contains("\"none\""), "{problems:?}");
+    }
+
+    #[test]
+    fn without_a_gated_route_trusted_proxies_stay_optional() {
+        let config = load(&complete()).unwrap();
+        assert!(config.registry.is_none());
+        assert!(config.bundles.is_none());
+        assert!(config.proxies.is_empty());
+    }
+
     #[test]
     fn debug_redacts_the_access_token() {
         let config = load(&with(&[(Variable::AccessToken, ACCESS_TOKEN)])).unwrap();
@@ -945,6 +1026,7 @@ mod tests {
             (Variable::BundleRegion, REGION),
             (Variable::BundleAccessKeyId, ACCESS_KEY_ID),
             (Variable::BundleSecretAccessKey, SECRET_ACCESS_KEY),
+            (Variable::TrustedProxies, NONE),
         ]);
         for (variable, value) in changes {
             variables.insert(*variable, (*value).to_owned());
@@ -1005,7 +1087,10 @@ mod tests {
 
     #[test]
     fn a_bucket_alone_names_each_missing_bundle_variable() {
-        let problems = problems(&with(&[(Variable::BundleBucket, BUCKET)]));
+        let problems = problems(&with(&[
+            (Variable::BundleBucket, BUCKET),
+            (Variable::TrustedProxies, NONE),
+        ]));
         let missing: Vec<Variable> = problems
             .iter()
             .filter_map(|problem| match problem {
@@ -1123,7 +1208,11 @@ mod tests {
     }
 
     fn registry(changes: &[(Variable, &str)]) -> Option<RegistrySettings> {
-        load(&with(changes)).unwrap().registry
+        let mut variables = with(changes);
+        variables
+            .entry(Variable::TrustedProxies)
+            .or_insert_with(|| NONE.to_owned());
+        load(&variables).unwrap().registry
     }
 
     #[test]
@@ -1282,10 +1371,10 @@ mod tests {
 
     #[test]
     fn debug_shows_the_registry_settings() {
-        let config = load(&with(&[(
-            Variable::RegistryService,
-            "registry.example.test",
-        )]))
+        let config = load(&with(&[
+            (Variable::RegistryService, "registry.example.test"),
+            (Variable::TrustedProxies, NONE),
+        ]))
         .unwrap();
         let shown = format!("{config:?}");
         assert!(shown.contains("registry.example.test"), "{shown}");

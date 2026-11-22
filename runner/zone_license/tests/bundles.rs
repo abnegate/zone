@@ -17,7 +17,7 @@ use uuid::Uuid;
 use wiremock::matchers::{any, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_enterprise::{GRACE_DAYS, Keyring, Plan, TrustedKey};
-use zone_license::gate::{CHALLENGE, FORWARDED_FOR, Refusal};
+use zone_license::gate::{CHALLENGE, FORWARDED_FOR, NONE, Refusal};
 use zone_license::{Config, PrivateKey, ServeError, Signer, Terms, Variable, serve};
 
 use crate::support::logged;
@@ -132,6 +132,7 @@ fn config(keys: &Keys, storage: Option<&MockServer>, changes: &[(Variable, &str)
             (Variable::BundleEndpoint, storage.uri()),
             (Variable::BundleAccessKeyId, ACCESS_KEY.to_owned()),
             (Variable::BundleSecretAccessKey, SECRET_KEY.to_owned()),
+            (Variable::TrustedProxies, NONE.to_owned()),
         ]);
     }
     for (variable, value) in changes {

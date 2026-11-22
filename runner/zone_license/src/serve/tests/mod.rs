@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use zone_enterprise::{Keyring, Plan, TrustedKey};
 
 use super::*;
+use crate::gate::NONE;
 use crate::logging;
 use crate::private_key::PrivateKey;
 use crate::variable::Variable;
@@ -98,13 +99,6 @@ fn announcements(logged: &str) -> usize {
         .count()
 }
 
-fn warnings(logged: &str) -> usize {
-    logged
-        .lines()
-        .filter(|line| line.contains("WARN") && line.contains(Variable::TrustedProxies.name()))
-        .count()
-}
-
 #[tokio::test]
 async fn start_announces_registry_tokens_with_their_service_and_kid() {
     let config = configured(
@@ -181,37 +175,33 @@ async fn start_announces_proxies_once_with_both_gated_routes_on() {
 }
 
 #[tokio::test]
-async fn start_warns_once_when_registry_tokens_have_no_trusted_proxies() {
-    let config = configured(ENTERPRISE, &[(Variable::RegistryService, REGISTRY)]);
+async fn start_says_once_that_no_proxy_is_trusted_when_set_to_none() {
+    for gated in [
+        configured(
+            ENTERPRISE,
+            &[
+                (Variable::RegistryService, REGISTRY),
+                (Variable::TrustedProxies, NONE),
+            ],
+        ),
+        bundled(&[(Variable::TrustedProxies, NONE)]),
+        bundled(&[
+            (Variable::RegistryService, REGISTRY),
+            (Variable::TrustedProxies, NONE),
+        ]),
+    ] {
+        let logged = logging::capture(tracing::Level::INFO, async {
+            start(gated).await.unwrap();
+        })
+        .await;
 
-    let logged = logging::capture(tracing::Level::INFO, async {
-        start(config).await.unwrap();
-    })
-    .await;
-
-    assert_eq!(warnings(&logged), 1, "{logged}");
-}
-
-#[tokio::test]
-async fn start_warns_once_when_bundles_are_on_without_trusted_proxies() {
-    let logged = logging::capture(tracing::Level::INFO, async {
-        start(bundled(&[])).await.unwrap();
-    })
-    .await;
-
-    assert_eq!(warnings(&logged), 1, "{logged}");
-}
-
-#[tokio::test]
-async fn start_warns_once_when_both_gated_routes_have_no_trusted_proxies() {
-    let config = bundled(&[(Variable::RegistryService, REGISTRY)]);
-
-    let logged = logging::capture(tracing::Level::INFO, async {
-        start(config).await.unwrap();
-    })
-    .await;
-
-    assert_eq!(warnings(&logged), 1, "{logged}");
+        let untrusting = logged
+            .lines()
+            .filter(|line| line.contains("proxies=none"))
+            .count();
+        assert_eq!(untrusting, 1, "{logged}");
+        assert!(!logged.contains("WARN"), "{logged}");
+    }
 }
 
 #[tokio::test]
@@ -230,5 +220,5 @@ async fn start_with_neither_gated_route_on_announces_nothing_about_them() {
         "{logged}"
     );
     assert!(!logged.contains("X-Forwarded-For"), "{logged}");
-    assert!(!logged.contains("No trusted proxies"), "{logged}");
+    assert!(!logged.contains("proxies="), "{logged}");
 }

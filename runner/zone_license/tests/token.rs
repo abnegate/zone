@@ -15,7 +15,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 use zone_enterprise::{Keyring, Plan, TrustedKey};
-use zone_license::gate::{CHALLENGE, FORWARDED_FOR};
+use zone_license::gate::{CHALLENGE, FORWARDED_FOR, NONE};
 use zone_license::http::{ALLOWED, HEALTH_PATH, RENEW_PATH, TOKEN_PATH, WEBHOOK_PATH};
 use zone_license::registry::ISSUER;
 use zone_license::{
@@ -92,7 +92,11 @@ impl Service {
     }
 
     async fn enabled() -> Self {
-        Self::start(&[(Variable::RegistryService, SERVICE)]).await
+        Self::start(&[
+            (Variable::RegistryService, SERVICE),
+            (Variable::TrustedProxies, NONE),
+        ])
+        .await
     }
 
     fn request(&self, method: Method, query: &str) -> RequestBuilder {
@@ -314,6 +318,7 @@ async fn each_bad_credential_is_unauthorized_with_a_basic_challenge() {
     let revoked = LICENSE.to_string();
     let service = Service::start(&[
         (Variable::RegistryService, SERVICE),
+        (Variable::TrustedProxies, NONE),
         (Variable::Revoked, revoked.as_str()),
     ])
     .await;
@@ -375,6 +380,7 @@ async fn each_bad_credential_is_unauthorized_with_a_basic_challenge() {
 async fn a_revoked_subscription_refuses_a_renewed_key_with_a_new_id() {
     let service = Service::start(&[
         (Variable::RegistryService, SERVICE),
+        (Variable::TrustedProxies, NONE),
         (Variable::RevokedSubscriptions, SUBSCRIPTION),
     ])
     .await;
@@ -510,6 +516,7 @@ async fn a_missing_or_wrong_service_is_unreadable() {
 async fn the_address_limit_answers_too_many_requests() {
     let service = Service::start(&[
         (Variable::RegistryService, SERVICE),
+        (Variable::TrustedProxies, NONE),
         (Variable::AddressLimit, "2"),
     ])
     .await;
@@ -598,6 +605,7 @@ async fn clients_behind_a_trusted_proxy_are_limited_separately() {
 async fn without_a_trusted_proxy_forwarded_clients_share_the_peer_limit() {
     let service = Service::start(&[
         (Variable::RegistryService, SERVICE),
+        (Variable::TrustedProxies, NONE),
         (Variable::AddressLimit, "2"),
     ])
     .await;

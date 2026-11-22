@@ -21,8 +21,6 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use zone_enterprise::{Feature, Keyring, License, Status};
 
-use crate::variable::Variable;
-
 pub use client_address::{FORWARDED_FOR, client_address};
 pub use code::Code;
 pub use credentials::{Credentials, SCHEME};
@@ -37,7 +35,7 @@ pub use refusal::{
 pub use revoked::Revoked;
 pub use throttle::Throttle;
 pub use throttle_key::{IPV6_PREFIX, ThrottleKey};
-pub use trusted_proxies::TrustedProxies;
+pub use trusted_proxies::{NONE, TrustedProxies};
 pub use unaddressable::{UNADDRESSABLE, Unaddressable};
 pub use unparsable::Unparsable;
 
@@ -103,13 +101,11 @@ impl Gate {
     }
 }
 
-/// Call once at startup when a gated route is on. Without trusted proxies
-/// every client behind Caddy shares Caddy's address, and so its limit.
 pub fn announce(proxies: &TrustedProxies) {
     if proxies.is_empty() {
-        tracing::warn!(
-            variable = Variable::TrustedProxies.name(),
-            "No trusted proxies are set, so every client behind a proxy shares one address limit"
+        tracing::info!(
+            proxies = %proxies,
+            "Taking the client address from the peer, because no proxy is trusted"
         );
     } else {
         tracing::info!(

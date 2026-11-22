@@ -270,21 +270,23 @@ Set it to the `signer` network's subnet:
 sudo docker network inspect signer --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}'
 ```
 
-At startup, when `/token` or `/bundles` is on, the signer logs the trusted
-list:
+When `/token` or `/bundles` is on and `ZONE_LICENSE_TRUSTED_PROXIES` is unset,
+the signer refuses to start and names the variable. Behind Caddy with no
+trusted proxies, every customer would share Caddy's address, so one busy
+client would throttle everyone. Only when nothing proxies the signer, so each
+peer is the real client, set it to `none`, which trusts no proxy.
+
+At startup, when either route is on, the signer logs the trusted list:
 
 ```text
 Taking the client address from X-Forwarded-For when the peer is a trusted proxy   proxies=172.18.0.0/16
 ```
 
-or, with none set, a warning naming the variable:
+or, set to `none`:
 
 ```text
-WARN No trusted proxies are set, so every client behind a proxy shares one address limit   variable=ZONE_LICENSE_TRUSTED_PROXIES
+Taking the client address from the peer, because no proxy is trusted   proxies=none
 ```
-
-Behind Caddy with no trusted proxies, every customer shares Caddy's address,
-so one busy client throttles everyone. Treat that warning as a misconfiguration.
 
 ## Environment
 
@@ -292,13 +294,15 @@ These variables are all optional and add to the ones in
 [LICENSING.md](LICENSING.md#environment). Values are trimmed, a blank value
 counts as unset, and every invalid one is named in the startup error. With
 none of them set, the signer runs exactly as before and both routes answer
-`GET` with `404`. Both still answer every other method with `405`.
+`GET` with `404`. Both still answer every other method with `405`. Once
+`ZONE_REGISTRY_SERVICE` or `ZONE_BUNDLE_BUCKET` is set,
+`ZONE_LICENSE_TRUSTED_PROXIES` is required.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `ZONE_LICENSE_REVOKED` | None | Comma-separated license IDs (UUIDs, any case) that `/token` and `/bundles` refuse as `revoked`. It covers only the key with that ID: a renewal, seat change or plan change issues a new ID that it doesn't cover. Zone servers verify keys offline and still accept them; see [Revocation](LICENSING.md#revocation). |
 | `ZONE_LICENSE_REVOKED_SUBSCRIPTIONS` | None | Comma-separated Polar subscription IDs (UUIDs, any case). `/token` and `/bundles` refuse every key on them as `revoked`, including keys renewed after you listed them. A key signed by hand without a subscription is revoked only by its ID. |
-| `ZONE_LICENSE_TRUSTED_PROXIES` | None | Comma-separated CIDR ranges or single addresses, such as `172.18.0.0/16`. See [Rate limits and client addresses](#rate-limits-and-client-addresses). |
+| `ZONE_LICENSE_TRUSTED_PROXIES` | Required with either route | Comma-separated CIDR ranges or single addresses, such as `172.18.0.0/16`, or `none` (any case, on its own) when no proxy is in front of the signer. Unset, the signer refuses to start while `/token` or `/bundles` is on. See [Rate limits and client addresses](#rate-limits-and-client-addresses). |
 | `ZONE_LICENSE_ADDRESS_LIMIT` | `120` | Requests a minute per client address, per route. A whole number from 1. |
 | `ZONE_LICENSE_KEY_LIMIT` | `240` | Requests a minute per license ID, per route. A whole number from 1. |
 | `ZONE_REGISTRY_SERVICE` | None | The registry's name, such as `registry.bitecode.ltd`: the `service` clients must send and the token's `aud`. Unset, `/token` is off and answers `404`. It may not contain spaces. |
@@ -753,8 +757,8 @@ None of this is live yet. In order, after the code merges:
       same flags as before: `--network signer --restart unless-stopped
       --user 10001:10001 --env-file /etc/zone-license/signer.env` and the key
       mounted read-only at `/run/secrets/zone-license-key`.
-   8. Check the startup log lists the trusted proxies once with no warning,
-      says `Issuing registry tokens` with `kid` `registry-2026-2-1`, and says
+   8. Check the startup log lists the trusted proxies once, says
+      `Issuing registry tokens` with `key_id` `registry-2026-2-1`, and says
       `Serving air-gapped bundles` with your bucket.
    9. To roll back: `sudo docker rm -f zone-license`, restore the env backup,
       `sudo docker rename zone-license-previous zone-license && sudo docker start zone-license`.

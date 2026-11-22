@@ -821,14 +821,35 @@ async fn announce_logs_the_trusted_proxies() {
 }
 
 #[tokio::test]
-async fn announce_warns_without_trusted_proxies() {
+async fn announce_says_when_no_proxy_is_trusted() {
     let logged = logging::capture(tracing::Level::INFO, async {
-        announce(&TrustedProxies::default());
+        announce(&proxies("none"));
     })
     .await;
-    assert!(logged.contains(" WARN "), "{logged}");
-    assert!(
-        logged.contains("variable=\"ZONE_LICENSE_TRUSTED_PROXIES\""),
-        "{logged}"
+    assert!(logged.contains(" INFO "), "{logged}");
+    assert!(logged.contains("proxies=none"), "{logged}");
+    assert!(logged.contains("no proxy is trusted"), "{logged}");
+    assert!(!logged.contains("WARN"), "{logged}");
+}
+
+#[test]
+fn none_parses_to_no_proxies_and_displays_as_none() {
+    for none in ["none", " NONE ", "None"] {
+        let parsed = proxies(none);
+        assert!(parsed.is_empty(), "{none:?}");
+        assert!(!parsed.trusts(address("172.18.0.2")), "{none:?}");
+    }
+    assert_eq!(TrustedProxies::default().to_string(), NONE);
+    assert_eq!(NONE, "none");
+}
+
+#[test]
+fn none_beside_a_range_is_a_bad_entry() {
+    assert_eq!(
+        TrustedProxies::parse("none,172.18.0.0/16"),
+        Err(Unparsable {
+            entry: "none".to_owned(),
+            expected: "a CIDR range or an IP address, such as 172.18.0.0/16",
+        })
     );
 }
