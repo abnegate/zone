@@ -521,7 +521,8 @@ one line with an `outcome` of `sent`, `ignored`, `unsigned`, `malformed`,
 `unaddressed`, `misconfigured`, `unsignable`, `unsendable` or `undelivered`,
 matching the [responses](#responses). Once the signature checks out, the line
 carries the Polar `webhook` id and, once the order is read, its `order`,
-`subscription` and `license` ids, or the `product` id for `misconfigured`. A
+`subscription` and `license` ids, or the `product` id for `misconfigured`, and
+`sent` adds the key's `seats` and `plan`. A
 refused signature is logged at `info`, since anyone can post to the endpoint;
 an order a paying customer is left waiting on is logged as an error. An ignored
 delivery also logs the event type and the `reason`. A failed send logs what
@@ -561,13 +562,13 @@ Besides the `outcome`, each line carries these fields:
 | `ended` | `info` | `license`, `subscription`, `status` and `reason` |
 | `misconfigured` | `error` | `license`, `subscription`, `status` and the subscription's `product` id |
 | `unsignable` | `error` | `license`, `subscription`, `status`, `renewed` and `error`, the signing failure's code |
-| `renewed` | `info` | `license`, `subscription`, `status`, `renewed` and `seats` |
+| `renewed` | `info` | `license`, `subscription`, `status`, `renewed`, `seats` and `plan` |
 
 `license` is the posted key's id and `subscription` its subscription id.
 `status` is the subscription's Polar status; a subscription Polar has no
 record of (`404`) has none. `renewed` is the id of the key that was, or would
-have been, signed, and `seats` its seat count. `reason` says why an `ended`
-subscription is not renewing: `missing` (Polar has no such subscription),
+have been, signed, and `seats` and `plan` its seat count and plan. `reason`
+says why an `ended` subscription is not renewing: `missing` (Polar has no such subscription),
 `ended` (it has ended), `product` (its product isn't in `POLAR_PRODUCT_IDS`)
 or `status` (it isn't `active` or `trialing`, such as `past_due` after a failed
 charge). The errors are the outcomes every renewal keeps failing with until
@@ -602,9 +603,11 @@ terminate TLS in front of it:
   managed certificate.
 
 Polar's deliveries come from the internet, so the proxy must accept them
-without a challenge. If the name is behind Cloudflare, turn off Bot Fight Mode
-for it: Polar documents that it blocks webhook deliveries with `403`, and
-allow-listing Polar's addresses doesn't help.
+without a challenge. If the name's DNS is in Cloudflare, keep its record DNS
+only (not proxied). Cloudflare's proxy brings Bot Fight Mode, which Polar
+documents blocks webhook deliveries with `403` whatever addresses you
+allow-list, and once [distribution](DISTRIBUTION.md#deploying) is on, the
+proxy would also hide each customer's address from the signer's rate limits.
 
 The proxy must pass the request body through unchanged. The signature covers
 the exact bytes Polar sent, so anything that re-encodes the body makes every
@@ -1280,7 +1283,7 @@ redeliver the order once it's fixed.
 | Deliveries get `422` with an `unsendable` log line | The relay refused the message for good, such as an unknown recipient or a refused sender, or the order's address can't be parsed | If the sender or the relay account is at fault, fix it and redeliver. If the recipient is, [hand-sign](#hand-signing-a-stuck-order) the key and send it to a corrected address. |
 | Deliveries get `422` | The order can't be issued, usually because it has no customer email (an `unaddressed` error in the log, naming the order) | [Hand-sign](#hand-signing-a-stuck-order) it and send the key yourself. |
 | A `misconfigured` error in the log | An order for a product in `POLAR_PRODUCT_IDS` had no subscription, or one without seats | Make the product seat-based, then [hand-sign](#hand-signing-a-stuck-order) the order the log names. |
-| Deliveries get `403` | Cloudflare Bot Fight Mode or another bot filter | Turn it off for the signer's name. |
+| Deliveries get `403` | Cloudflare's proxy with Bot Fight Mode, or another bot filter | Make the signer's name DNS only in Cloudflare, or turn the filter off for it. |
 | The endpoint is disabled | 10 consecutive events failed | Fix the cause, [re-enable it](#re-enabling-the-endpoint), then redeliver. |
 | A customer says no email arrived | Spam filtering, or a mistyped address | Check SPF and DKIM, redeliver the order, or hand-sign it to a corrected address. |
 
