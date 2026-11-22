@@ -44,5 +44,6 @@ pub mod spend;
 pub mod sso;
 pub mod stages;
 pub mod task_progress;
+pub mod task_relay;
 pub mod time_zone;
 pub mod worktree;
