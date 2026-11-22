@@ -1008,7 +1008,7 @@ tbody tr:last-child > td {
 }
 
 .site-footer {
-  padding-block: 3rem;
+  padding-block: 1.75rem;
   border-top: 1px solid var(--border);
   background: var(--sunken);
   color: var(--text-secondary);
@@ -1017,7 +1017,7 @@ tbody tr:last-child > td {
 
 .site-footer-inner {
   display: grid;
-  gap: 2rem;
+  gap: 1.25rem;
 }
 
 @media (min-width: 900px) {
@@ -1025,14 +1025,24 @@ tbody tr:last-child > td {
     grid-template-columns: 1fr auto;
     align-items: start;
   }
+
+  .site-footer-links ul {
+    min-height: 2.2rem;
+    align-items: center;
+  }
 }
 
-.site-footer-about {
-  max-width: 44ch;
+.site-footer-about > * {
+  margin: 0;
 }
 
 .site-footer-about .brand {
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.site-footer-about .quiet {
+  margin-top: 0.25rem;
+  font-size: 0.8125rem;
 }
 
 .site-footer-links ul {
@@ -1040,6 +1050,12 @@ tbody tr:last-child > td {
 }
 
 .site-footer-links a {
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+
+.site-footer-links a:hover,
+.site-footer-links a:focus-visible {
   color: var(--text);
-  font-weight: 700;
+  text-decoration: underline;
 }
