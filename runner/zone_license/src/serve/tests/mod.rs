@@ -66,3 +66,81 @@ async fn start_never_logs_the_webhook_secret_or_the_private_key() {
         assert!(!logged.contains(secret), "{secret} logged in {logged}");
     }
 }
+
+fn bundled(proxies: Option<&str>) -> Config {
+    let key = PrivateKey::new(SEED);
+    let keyring = Keyring::new([TrustedKey::new(KEY_ID, key.public()).unwrap()]).unwrap();
+    let mut variables = HashMap::from([
+        (Variable::WebhookSecret, SECRET.to_owned()),
+        (Variable::Products, ENTERPRISE.to_owned()),
+        (Variable::PrivateKey, key.encode()),
+        (Variable::KeyId, KEY_ID.to_owned()),
+        (Variable::Listen, "127.0.0.1:0".to_owned()),
+        (Variable::SmtpHost, "127.0.0.1".to_owned()),
+        (Variable::SmtpUser, "unused".to_owned()),
+        (Variable::SmtpPassword, String::new()),
+        (Variable::SmtpFrom, "licenses@zone.test".to_owned()),
+        (Variable::BundleBucket, BUNDLE_BUCKET.to_owned()),
+        (Variable::BundleRegion, "ap-southeast-2".to_owned()),
+        (Variable::BundlePrefix, "zone/bundles".to_owned()),
+        (Variable::BundleAccessKeyId, BUNDLE_ACCESS_KEY.to_owned()),
+        (Variable::BundleSecretAccessKey, BUNDLE_SECRET.to_owned()),
+    ]);
+    if let Some(proxies) = proxies {
+        variables.insert(Variable::TrustedProxies, proxies.to_owned());
+    }
+    Config::from_variables(|variable| variables.get(&variable).cloned(), &keyring).unwrap()
+}
+
+const BUNDLE_BUCKET: &str = "zone-distribution";
+const BUNDLE_ACCESS_KEY: &str = "AKIAZONESERVESTART01";
+const BUNDLE_SECRET: &str = "serve-start-bundle-secret";
+
+#[tokio::test]
+async fn start_logs_the_bundle_bucket_and_prefix_but_no_credential() {
+    let logged = logging::capture(tracing::Level::TRACE, async {
+        start(bundled(Some("172.18.0.0/16"))).await.unwrap();
+    })
+    .await;
+
+    let line = logged
+        .lines()
+        .find(|line| line.contains("Serving air-gapped bundles"))
+        .unwrap_or_else(|| panic!("no bundle line in {logged}"));
+    assert!(
+        line.contains(&format!("bucket=\"{BUNDLE_BUCKET}\"")),
+        "{line}"
+    );
+    assert!(line.contains("prefix=\"zone/bundles\""), "{line}");
+    for secret in [BUNDLE_ACCESS_KEY, BUNDLE_SECRET] {
+        assert!(!logged.contains(secret), "{secret} logged in {logged}");
+    }
+    assert!(logged.contains("proxies=172.18.0.0/16"), "{logged}");
+    assert!(logged.contains("Listening for Polar webhooks"), "{logged}");
+}
+
+#[tokio::test]
+async fn start_warns_once_when_bundles_are_on_without_trusted_proxies() {
+    let logged = logging::capture(tracing::Level::INFO, async {
+        start(bundled(None)).await.unwrap();
+    })
+    .await;
+
+    let warnings = logged
+        .lines()
+        .filter(|line| line.contains("No trusted proxies are set"))
+        .count();
+    assert_eq!(warnings, 1, "{logged}");
+}
+
+#[tokio::test]
+async fn start_announces_nothing_about_proxies_while_bundles_are_off() {
+    let logged = logging::capture(tracing::Level::INFO, async {
+        start(config(ENTERPRISE)).await.unwrap();
+    })
+    .await;
+
+    assert!(!logged.contains("trusted proxy"), "{logged}");
+    assert!(!logged.contains("No trusted proxies"), "{logged}");
+    assert!(!logged.contains("Serving air-gapped bundles"), "{logged}");
+}

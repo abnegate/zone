@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use crate::http::distributor::Distributor;
 use crate::http::renewer::Renewer;
 use crate::mail::Outbox;
 use crate::polar::WebhookSecret;
@@ -13,6 +14,7 @@ pub struct Context {
     pub(crate) products: Products,
     pub(crate) outbox: Arc<dyn Outbox>,
     pub(crate) renewer: Option<Renewer>,
+    pub(crate) distributor: Option<Distributor>,
 }
 
 impl Context {
@@ -28,12 +30,20 @@ impl Context {
             products,
             outbox,
             renewer: None,
+            distributor: None,
         }
     }
 
     pub fn with_renewer(self, renewer: Renewer) -> Self {
         Self {
             renewer: Some(renewer),
+            ..self
+        }
+    }
+
+    pub fn with_distributor(self, distributor: Distributor) -> Self {
+        Self {
+            distributor: Some(distributor),
             ..self
         }
     }
@@ -47,6 +57,7 @@ impl fmt::Debug for Context {
             .field("secret", &self.secret)
             .field("products", &self.products)
             .field("renewer", &self.renewer)
+            .field("distributor", &self.distributor)
             .finish_non_exhaustive()
     }
 }

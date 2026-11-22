@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use zone_enterprise::Keyring;
 
+use crate::bundle::{BundleSettings, Presigner};
 use crate::config::Config;
-use crate::http::{Context, Renewer, Server, router};
+use crate::gate::{self, Gate, Throttle};
+use crate::http::{Context, Distributor, Renewer, Server, router};
 use crate::mail::Relay;
 use crate::polar::{self, Proxy};
 use crate::serve_error::ServeError;
@@ -35,9 +37,16 @@ pub async fn serve(
 }
 
 /// Builds the relay and the Polar client and binds the listener, without
-/// serving yet. Renewal is on only when `POLAR_ACCESS_TOKEN` is set.
+/// serving yet. Renewal is on only when `POLAR_ACCESS_TOKEN` is set, and
+/// bundles only when `ZONE_BUNDLE_BUCKET` is.
 pub async fn start(config: Config) -> Result<Server, ServeError> {
     let relay = Relay::new(&config.smtp)?;
+    announce(&config);
+    let distributor = config
+        .bundles
+        .clone()
+        .map(|settings| distributor(settings, &config))
+        .transpose()?;
     let renewer = match config.access_token {
         Some(token) => Some(Renewer::new(
             config.keyring,
@@ -65,6 +74,10 @@ pub async fn start(config: Config) -> Result<Server, ServeError> {
         Some(renewer) => context.with_renewer(renewer),
         None => context,
     };
+    let context = match distributor {
+        Some(distributor) => context.with_distributor(distributor),
+        None => context,
+    };
     let server = Server::bind(config.listen, router(context)).await?;
     tracing::info!(
         address = %config.listen,
@@ -75,6 +88,29 @@ pub async fn start(config: Config) -> Result<Server, ServeError> {
         "Listening for Polar webhooks"
     );
     Ok(server)
+}
+
+fn announce(config: &Config) {
+    if config.bundles.is_some() {
+        gate::announce(&config.proxies);
+    }
+}
+
+fn distributor(settings: BundleSettings, config: &Config) -> Result<Distributor, ServeError> {
+    tracing::info!(
+        bucket = settings.bucket.name(),
+        prefix = settings.prefix.as_str(),
+        "Serving air-gapped bundles"
+    );
+    let presigner = Presigner::new(settings, Proxy::System).map_err(ServeError::Storage)?;
+    let gate = Gate::new(
+        config.keyring.clone(),
+        config.revoked.clone(),
+        config.proxies.clone(),
+    );
+    let throttle = Throttle::new(config.limits);
+    drop(throttle.spawn_cleanup());
+    Ok(Distributor::new(gate, presigner, throttle))
 }
 
 /// The container runs the signer as PID 1, which the kernel gives no default
