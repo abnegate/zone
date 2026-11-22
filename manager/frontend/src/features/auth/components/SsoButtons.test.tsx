@@ -144,6 +144,16 @@ describe('SsoButtons', () => {
     expect(screen.getByRole('button', { name: 'Sign in with Okta' })).toBeEnabled();
   });
 
+  it('explains a start refused because the network started too many', async () => {
+    mockAuthorize.mockRejectedValue(new AuthRequestError('Server text', 'sso_rate_limited'));
+    render(<SsoButtons sso={SSO_OFFERED} next="/" />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in with Okta' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(SSO_MESSAGES.sso_rate_limited);
+    expect(assign).not.toHaveBeenCalled();
+  });
+
   it('disables every button while one sign-in is starting', async () => {
     mockAuthorize.mockReturnValue(new Promise(() => {}));
     render(<SsoButtons sso={SSO_OFFERED} next="/" />);

@@ -105,6 +105,44 @@ For production, regenerate secrets for security.
 - **Generate**: `openssl rand -base64 32`
 - **Usage**: Required if using VPN profile (web search)
 
+### `ZONE_TRUSTED_PROXIES`
+- **Default**: unset, which trusts loopback only: `127.0.0.0/8` and `::1`.
+  The compose file sets `172.31.0.0/24`, the `zone_edge` network where
+  Traefik and the dev Vite proxy reach the manager; a value in `.env`
+  replaces it. The `zone-apps` Helm chart sets
+  `10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7`, because the manager is
+  a ClusterIP service that only peers inside the cluster can reach.
+- **Description**: The reverse proxies whose `X-Forwarded-For` header Zone
+  believes, as a comma-separated list of IP addresses and networks. Zone uses
+  the client address it resolves for the single sign-on rate limit and for
+  the address it records on sessions and devices. When the TCP peer is a
+  listed proxy, Zone reads `X-Forwarded-For` from the right, skips every
+  listed hop, and takes the first one that isn't listed. When the peer isn't
+  listed, Zone ignores the header and uses the peer. It never reads
+  `X-Real-IP`.
+- **Example**: `172.31.0.0/24`, the compose `zone_edge` subnet, or your
+  ingress controller's pod CIDR, such as `10.244.0.0/16`. List every proxy
+  between the internet and Zone that appends to `X-Forwarded-For`.
+- **Note**: Only loopback is trusted by default, so a peer on your LAN, such
+  as `192.168.1.5`, is the client, whatever it forwards. An empty value
+  trusts nothing, not even loopback. An entry that isn't an IP address or
+  network stops the server at startup with an error naming it. Never list a
+  network that clients can send from directly, or they can name any address
+  they like. Behind a proxy that isn't listed, every client shares the
+  proxy's address and so its single sign-on limit. See
+  [SSO.md](SSO.md#rate-limits-and-client-addresses).
+
+### `ZONE_SSO_REQUESTS_PER_MINUTE`
+- **Default**: `120`
+- **Description**: How many single sign-on starts and SAML responses one
+  client address may send in a minute, counted together. Over the limit, a
+  start gets `429` with `Retry-After` and the code `sso_rate_limited`, and a
+  SAML post is sent back to the console with that code. IPv6 clients are
+  counted by their /64 network.
+- **Note**: It must be a whole number of at least 1; `0` or anything else
+  stops the server at startup. See
+  [SSO.md](SSO.md#rate-limits-and-client-addresses).
+
 ---
 
 ## 🤖 Ollama Model Configuration

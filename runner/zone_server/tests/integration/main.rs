@@ -149,6 +149,7 @@ mod sso_providers;
 mod sso_saml;
 mod sso_sign_in;
 mod sso_store;
+mod sso_throttle;
 mod sync;
 mod task_authorization;
 mod task_bulk_edit;

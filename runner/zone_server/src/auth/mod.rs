@@ -10,6 +10,7 @@
 
 pub mod account;
 pub mod admin_guard;
+pub mod client_address;
 pub mod composition;
 pub mod device;
 pub mod entitlement;
