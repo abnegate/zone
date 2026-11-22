@@ -394,15 +394,16 @@ jobs:
           exit 1
 
       - name: Verify the signatures through the second registry name
+        env:
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/lts.yml@${{ github.ref }}
         run: |
           set -euo pipefail
-          identity="https://github.com/bitecodehq/zone/.github/workflows/lts.yml@refs/tags/$GITHUB_REF_NAME"
           while IFS=$'\t' read -r repository digest _; do
             cosign verify \
-              --certificate-identity "$identity" \
+              --certificate-identity "$IDENTITY" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               "$VERIFY_REGISTRY/$repository@$digest" > /dev/null
-            echo "verified $repository@$digest as $identity"
+            echo "verified $repository@$digest as $IDENTITY"
           done < "$RUNNER_TEMP/published"
 
       - name: Write the digests to the job summary

@@ -211,7 +211,6 @@ run_installer_with() {
     status=0
     (
         cd "$work"
-        # environment_words holds NAME=value words for env.
         # shellcheck disable=SC2086
         env PATH="$sandbox/bin:$PATH" DOCKER_LOG="$sandbox/docker.log" CRANE_LOG="$sandbox/crane.log" \
             $environment_words "$shell" "$bundle/install.sh" "$@"
@@ -282,7 +281,6 @@ assert_output 'does not match SHA256SUMS'
 [ ! -s "$sandbox/crane.log" ] || fail 'Expected a checksum mismatch to abort before any crane call'
 [ ! -d "$target" ] || fail 'Expected a checksum mismatch to abort before the directory is created'
 for command in verify 'push --registry registry.example.internal' 'helm-values --registry registry.example.internal --output values'; do
-    # Intentional split: each entry is a command and its options.
     # shellcheck disable=SC2086
     if run_installer $command; then
         fail "Expected a tampered layout to abort $command"

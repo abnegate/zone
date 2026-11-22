@@ -72,6 +72,7 @@ jobs:
       MINIMUM_AWS_CLI: 2.33.0
       REGISTRY_IMAGE: registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0
       REGISTRY_CONTAINER: zone-publish-registry
+      IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/bundle.yml@${{ github.ref }}
 
     steps:
       - name: Checkout repository
@@ -233,8 +234,6 @@ jobs:
         run: cosign sign-blob --yes --bundle "$ARCHIVE.sha256.sigstore.json" "$ARCHIVE.sha256"
 
       - name: Verify the signature
-        env:
-          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/bundle.yml@${{ github.ref }}
         run: |
           cosign verify-blob \
             --bundle "$ARCHIVE.sha256.sigstore.json" \
@@ -243,8 +242,6 @@ jobs:
             "$ARCHIVE.sha256"
 
       - name: Verify the signature and checksum offline, as docs/AIRGAP.md does
-        env:
-          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/bundle.yml@${{ github.ref }}
         run: |
           set -eu
           name=$(basename -- "$ARCHIVE")
