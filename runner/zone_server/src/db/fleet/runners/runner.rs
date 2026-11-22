@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use serde_json::{Value, json};
 use sqlx::error::BoxDynError;
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
@@ -32,6 +33,16 @@ pub struct Runner {
 impl Runner {
     pub fn connected(&self, now: DateTime<Utc>) -> bool {
         now - self.last_seen_at < CONNECTED
+    }
+
+    /// What an audit entry records of the runner.
+    pub fn audited(&self) -> Value {
+        json!({
+            "name": self.name,
+            "version": self.version.to_string(),
+            "labels": self.labels.to_vec(),
+            "state": self.state.as_str(),
+        })
     }
 }
 

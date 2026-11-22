@@ -2,10 +2,13 @@
 
 pub mod claimant;
 pub mod identity;
+pub mod misconfigured;
 pub mod refusal;
 pub mod registration;
+pub mod retention;
 #[cfg(test)]
 pub(crate) mod tests;
 
 pub use claimant::claimant;
 pub use identity::Identity;
+pub use misconfigured::Misconfigured;
