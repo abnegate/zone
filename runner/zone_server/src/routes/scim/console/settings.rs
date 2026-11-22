@@ -13,10 +13,8 @@ use super::respond;
 use super::token_response::TokenResponse;
 use crate::auth::{OrganizationPermit, Permission};
 use crate::db::scim::{errors, groups, tokens};
-use crate::services::sso::console::callback_origin;
+use crate::routes::scim::base_url;
 use crate::state::AppState;
-
-const SCIM_PATH: &str = "/api/scim/v2/organizations";
 
 #[derive(Debug, Serialize)]
 pub struct SettingsResponse {
@@ -56,32 +54,4 @@ async fn read(state: &AppState, organization_id: Uuid) -> Result<Response, Refus
         errors: failures.into_iter().map(FailureResponse::from).collect(),
     })
     .into_response())
-}
-
-fn base_url(app_base_url: &str, organization_id: Uuid) -> String {
-    format!(
-        "{}{SCIM_PATH}/{organization_id}",
-        callback_origin(app_base_url)
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_base_url_is_the_organizations_scim_path_on_the_console_origin() {
-        let organization = Uuid::from_u128(7);
-        for base in [
-            "https://zone.example.com",
-            "https://zone.example.com/",
-            "https://zone.example.com/console/",
-        ] {
-            assert_eq!(
-                base_url(base, organization),
-                format!("https://zone.example.com/api/scim/v2/organizations/{organization}"),
-                "{base}"
-            );
-        }
-    }
 }

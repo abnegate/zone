@@ -106,9 +106,16 @@ mod tests {
     #[test]
     fn the_base_url_is_the_console_origin_and_the_organization() {
         let organization = Uuid::new_v4();
-        assert_eq!(
-            base_url("https://zone.example/app/", organization),
-            format!("https://zone.example/api/scim/v2/organizations/{organization}")
-        );
+        for base in [
+            "https://zone.example.com",
+            "https://zone.example.com/",
+            "https://zone.example.com/console/",
+        ] {
+            assert_eq!(
+                base_url(base, organization),
+                format!("https://zone.example.com/api/scim/v2/organizations/{organization}"),
+                "{base}"
+            );
+        }
     }
 }
