@@ -9,6 +9,7 @@ import { LAPSED_NOTICE, UPGRADE_NOTICE } from '../messages';
 import type { ProviderResponse, SettingsResponse } from '../types';
 import { DeleteSsoProviderDialog } from './DeleteSsoProviderDialog';
 import { RedirectUri } from './RedirectUri';
+import { ServiceProviderDetails } from './ServiceProviderDetails';
 import { SsoEnforcement } from './SsoEnforcement';
 import { SsoProviderForm } from './SsoProviderForm';
 import { SsoProviderList } from './SsoProviderList';
@@ -36,7 +37,12 @@ function SsoSettings({ settings }: { settings: SettingsResponse }) {
         ) : (
           <UpgradeNotice message={UPGRADE_NOTICE} className="sso-notice" />
         ))}
-      {entitled && <RedirectUri uri={settings.redirect_uri} />}
+      {entitled && (
+        <>
+          <RedirectUri uri={settings.redirect_uri} />
+          <ServiceProviderDetails serviceProvider={settings.service_provider} />
+        </>
+      )}
       <SsoEnforcement settings={settings} editable={entitled} />
       {(entitled || providers.length > 0) && (
         <SsoProviderList

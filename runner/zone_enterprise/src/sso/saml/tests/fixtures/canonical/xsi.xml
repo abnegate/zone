@@ -1,0 +1,5 @@
+<saml:AttributeStatement xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <saml:Attribute Name="email">
+    <saml:AttributeValue xsi:type="xs:string">jane@acme.com</saml:AttributeValue>
+  </saml:Attribute>
+</saml:AttributeStatement>

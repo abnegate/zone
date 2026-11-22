@@ -8,6 +8,8 @@ pub enum Failure {
     Refused(#[from] Error),
     #[error(transparent)]
     Storage(ProviderError),
+    #[error("The change needs a Zone Enterprise license")]
+    Unentitled,
 }
 
 impl From<ProviderError> for Failure {

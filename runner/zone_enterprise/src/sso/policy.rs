@@ -14,19 +14,36 @@ pub struct Policy {
 
 impl Policy {
     pub fn admit(&self, issuer: &Issuer, claims: &Claims) -> Result<Identity, Error> {
-        let email = email(claims).ok_or(Error::EmailMissing)?;
-        if self.require_verified_email && !verified(claims) {
+        let identity = self.identity(
+            &claims.subject,
+            claims.email.as_deref(),
+            verified(claims),
+            claims.name.as_deref(),
+        )?;
+        if !self.hosted_domain_allowed(issuer, claims) {
+            return Err(Error::DomainNotAllowed);
+        }
+        Ok(identity)
+    }
+
+    pub(crate) fn identity(
+        &self,
+        subject: &str,
+        email: Option<&str>,
+        verified: bool,
+        name: Option<&str>,
+    ) -> Result<Identity, Error> {
+        let email = normalized(email).ok_or(Error::EmailMissing)?;
+        if self.require_verified_email && !verified {
             return Err(Error::EmailUnverified);
         }
-        if !self.domains.allows(&email) || !self.hosted_domain_allowed(issuer, claims) {
+        if !self.domains.allows(&email) {
             return Err(Error::DomainNotAllowed);
         }
         Ok(Identity {
-            subject: claims.subject.clone(),
+            subject: subject.to_owned(),
             email,
-            name: claims
-                .name
-                .as_deref()
+            name: name
                 .map(str::trim)
                 .filter(|name| !name.is_empty())
                 .map(str::to_owned),
@@ -51,10 +68,16 @@ impl Policy {
     }
 }
 
-fn email(claims: &Claims) -> Option<String> {
-    let email = claims.email.as_deref()?.trim().to_lowercase();
-    let (local, domain) = email.rsplit_once(AT)?;
-    (!local.is_empty() && !domain.is_empty()).then_some(email)
+fn normalized(email: Option<&str>) -> Option<String> {
+    let email = email?.trim().to_lowercase();
+    if email
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return None;
+    }
+    let (local, domain) = email.split_once(AT)?;
+    (!local.is_empty() && !domain.is_empty() && !domain.contains(AT)).then_some(email)
 }
 
 fn verified(claims: &Claims) -> bool {
@@ -161,6 +184,12 @@ mod tests {
             Some("jane"),
             Some("@acme.com"),
             Some("jane@"),
+            Some("x@evil.test@acme.com"),
+            Some("@@acme.com"),
+            Some("jane doe@acme.com"),
+            Some("jane\n@acme.com"),
+            Some("jane@acme\u{0}.com"),
+            Some("jane\u{2028}@acme.com"),
         ] {
             let claims = Claims {
                 email: email.map(str::to_owned),
@@ -172,6 +201,22 @@ mod tests {
                 "{email:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_email_with_a_second_at_never_reaches_the_domain_check() {
+        let claims = Claims {
+            email: Some("x@evil.test@acme.com".into()),
+            ..claims()
+        };
+        assert_eq!(
+            policy(&["acme.com"], false).admit(&issuer(OKTA), &claims),
+            Err(Error::EmailMissing)
+        );
+        assert_eq!(
+            policy(&["acme.com"], false).identity("name-id", claims.email.as_deref(), false, None),
+            Err(Error::EmailMissing)
+        );
     }
 
     #[test]
@@ -317,5 +362,59 @@ mod tests {
             policy(&["acme.com"], true).admit(&issuer(OKTA), &elsewhere),
             Err(Error::DomainNotAllowed)
         );
+    }
+
+    #[test]
+    fn identity_admits_an_unverified_email_when_verification_is_off() {
+        let identity = policy(&["acme.com"], false)
+            .identity(
+                "name-id",
+                Some(" Jane@Acme.com "),
+                false,
+                Some(" Jane Doe "),
+            )
+            .unwrap();
+        assert_eq!(
+            identity,
+            Identity {
+                subject: "name-id".into(),
+                email: "jane@acme.com".into(),
+                name: Some("Jane Doe".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn identity_refuses_what_admit_refuses() {
+        let trusting = policy(&["acme.com"], false);
+        assert_eq!(
+            trusting.identity("name-id", None, false, None),
+            Err(Error::EmailMissing)
+        );
+        assert_eq!(
+            trusting.identity("name-id", Some("jane@"), false, None),
+            Err(Error::EmailMissing)
+        );
+        assert_eq!(
+            trusting.identity("name-id", Some("jane@evil.test"), false, None),
+            Err(Error::DomainNotAllowed)
+        );
+        assert_eq!(
+            policy(&[], true).identity("name-id", Some("jane@acme.com"), false, None),
+            Err(Error::EmailUnverified)
+        );
+        assert!(
+            policy(&[], true)
+                .identity("name-id", Some("jane@acme.com"), true, None)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn identity_drops_a_blank_name() {
+        let identity = policy(&[], false)
+            .identity("name-id", Some("jane@acme.com"), false, Some(" "))
+            .unwrap();
+        assert_eq!(identity.name, None);
     }
 }

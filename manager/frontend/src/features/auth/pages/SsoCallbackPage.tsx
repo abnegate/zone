@@ -4,7 +4,7 @@ import AuthCard from '../components/AuthCard';
 import AuthStatus from '../components/AuthStatus';
 import { useAuth } from '../context';
 import { clearAttempt, readAttempt, type SsoAttempt } from '../ssoAttempt';
-import { messageOf, SSO_INCOMPLETE } from '../ssoMessages';
+import { messageOf, SSO_INCOMPLETE, ssoMessage } from '../ssoMessages';
 import './AuthPage.css';
 
 interface Callback {
@@ -28,10 +28,11 @@ function callbackOf(search: string): Callback {
   };
 }
 
-function refusalOf(callback: Callback): string {
+function refusalOf(callback: Callback, error: string): string {
   return (
-    callback.description?.trim() ||
-    `Your identity provider didn't complete the sign-in (${callback.error}).`
+    ssoMessage(error) ??
+    (callback.description?.trim() ||
+      `Your identity provider didn't complete the sign-in (${error}).`)
   );
 }
 
@@ -40,7 +41,7 @@ function outcomeOf(callback: Callback, attempt: SsoAttempt | null): Outcome {
     return { kind: 'failed', message: SSO_INCOMPLETE };
   }
   if (callback.error !== null) {
-    return { kind: 'failed', message: refusalOf(callback) };
+    return { kind: 'failed', message: refusalOf(callback, callback.error) };
   }
   if (!callback.code) {
     return { kind: 'failed', message: SSO_INCOMPLETE };

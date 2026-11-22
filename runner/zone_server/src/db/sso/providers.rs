@@ -4,7 +4,9 @@ use sqlx::{PgConnection, PgExecutor, Postgres, QueryBuilder};
 use uuid::Uuid;
 use zone_enterprise::sso::Protocol;
 
+use super::connection::Connection;
 use super::listing::Listing;
+use super::new_connection::NewConnection;
 use super::new_provider::NewProvider;
 use super::provider::ProviderRecord;
 use super::provider_changes::ProviderChanges;
@@ -12,35 +14,59 @@ use super::provider_error::{ProviderError, ProviderResult};
 use crate::db::DbResult;
 
 pub const DUPLICATE_KEY: &str = "sso_providers_issuer_client_id_key";
+pub const SAML_DUPLICATE_KEY: &str = "sso_providers_saml_issuer_key";
 
-const COLUMNS: &str = "id, protocol, display_name, issuer, client_id, client_secret, allowed_domains, require_verified_email, enabled, created_at, updated_at";
+const COLUMNS: &str = "id, protocol, display_name, issuer, client_id, client_secret, sso_url, certificates, metadata_url, allowed_domains, require_verified_email, enabled, created_at, updated_at";
 
 #[derive(sqlx::FromRow)]
-struct Row {
-    id: Uuid,
-    protocol: String,
-    display_name: String,
-    issuer: String,
-    client_id: String,
-    client_secret: String,
-    allowed_domains: Vec<String>,
-    require_verified_email: bool,
-    enabled: bool,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+pub(super) struct Row {
+    pub(super) id: Uuid,
+    pub(super) protocol: String,
+    pub(super) display_name: String,
+    pub(super) issuer: String,
+    pub(super) client_id: Option<String>,
+    pub(super) client_secret: Option<String>,
+    pub(super) sso_url: Option<String>,
+    pub(super) certificates: Option<Vec<String>>,
+    pub(super) metadata_url: Option<String>,
+    pub(super) allowed_domains: Vec<String>,
+    pub(super) require_verified_email: bool,
+    pub(super) enabled: bool,
+    pub(super) created_at: DateTime<Utc>,
+    pub(super) updated_at: DateTime<Utc>,
 }
 
 impl Row {
-    fn record(self) -> ProviderResult<ProviderRecord> {
-        let protocol = Protocol::parse(&self.protocol)
-            .ok_or_else(|| ProviderError::Protocol(self.id, self.protocol.clone()))?;
+    pub(super) fn record(self) -> ProviderResult<ProviderRecord> {
+        let inconsistent = || ProviderError::Protocol(self.id, self.protocol.clone());
+        let protocol = Protocol::parse(&self.protocol).ok_or_else(inconsistent)?;
+        let connection = match (
+            self.client_id,
+            self.client_secret,
+            self.sso_url,
+            self.certificates,
+            self.metadata_url,
+        ) {
+            (Some(client_id), Some(sealed_secret), None, None, None) => Connection::Oidc {
+                client_id,
+                sealed_secret,
+            },
+            (None, None, Some(sso_url), Some(certificates), metadata_url) => Connection::Saml {
+                sso_url,
+                certificates,
+                metadata_url,
+            },
+            _ => return Err(inconsistent()),
+        };
+        if (protocol == Protocol::Oidc) != matches!(connection, Connection::Oidc { .. }) {
+            return Err(inconsistent());
+        }
         Ok(ProviderRecord {
             id: self.id,
             protocol,
             display_name: self.display_name,
             issuer: self.issuer,
-            client_id: self.client_id,
-            sealed_secret: self.client_secret,
+            connection,
             allowed_domains: self.allowed_domains,
             require_verified_email: self.require_verified_email,
             enabled: self.enabled,
@@ -57,7 +83,11 @@ fn seal(secret: &SecretValue, key: &MasterKey) -> ProviderResult<String> {
 fn classify(error: sqlx::Error) -> ProviderError {
     match error.as_database_error() {
         Some(database)
-            if database.is_unique_violation() && database.constraint() == Some(DUPLICATE_KEY) =>
+            if database.is_unique_violation()
+                && matches!(
+                    database.constraint(),
+                    Some(DUPLICATE_KEY | SAML_DUPLICATE_KEY)
+                ) =>
         {
             ProviderError::Duplicate
         }
@@ -113,17 +143,43 @@ pub async fn create(
     key: &MasterKey,
     new: &NewProvider,
 ) -> ProviderResult<ProviderRecord> {
-    let sealed = seal(&new.client_secret, key)?;
+    let (client_id, sealed, sso_url, certificates, metadata_url) = match &new.connection {
+        NewConnection::Oidc {
+            client_id,
+            client_secret,
+        } => (
+            Some(client_id.as_str()),
+            Some(seal(client_secret, key)?),
+            None,
+            None,
+            None,
+        ),
+        NewConnection::Saml {
+            sso_url,
+            certificates,
+            metadata_url,
+        } => (
+            None,
+            None,
+            Some(sso_url.as_str()),
+            Some(certificates.as_slice()),
+            metadata_url.as_deref(),
+        ),
+    };
     let row: Row = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "INSERT INTO sso_providers \
-           (protocol, display_name, issuer, client_id, client_secret, allowed_domains, require_verified_email, enabled) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING {COLUMNS}"
+           (protocol, display_name, issuer, client_id, client_secret, sso_url, certificates, metadata_url, \
+            allowed_domains, require_verified_email, enabled) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING {COLUMNS}"
     )))
     .bind(new.protocol.as_str())
     .bind(&new.display_name)
     .bind(&new.issuer)
-    .bind(&new.client_id)
+    .bind(client_id)
     .bind(sealed)
+    .bind(sso_url)
+    .bind(certificates)
+    .bind(metadata_url)
     .bind(&new.allowed_domains)
     .bind(new.require_verified_email)
     .bind(new.enabled)
@@ -167,6 +223,21 @@ pub async fn update(
         assignments
             .push("client_secret = ")
             .push_bind_unseparated(sealed);
+    }
+    if let Some(sso_url) = &changes.sso_url {
+        assignments
+            .push("sso_url = ")
+            .push_bind_unseparated(sso_url);
+    }
+    if let Some(certificates) = &changes.certificates {
+        assignments
+            .push("certificates = ")
+            .push_bind_unseparated(certificates);
+    }
+    if let Some(metadata_url) = &changes.metadata_url {
+        assignments
+            .push("metadata_url = ")
+            .push_bind_unseparated(metadata_url);
     }
     if let Some(allowed_domains) = &changes.allowed_domains {
         assignments

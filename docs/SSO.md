@@ -1,9 +1,11 @@
 # Single sign-on
 
 Zone can sign people in through your company's identity provider (IdP) with
-OpenID Connect (OIDC). This page covers Okta, Microsoft Entra ID and Google
-Workspace. Other OIDC providers can work too if they meet the
-[requirements](#what-zone-needs-from-a-provider) below.
+OpenID Connect (OIDC) or SAML 2.0. This page covers Okta, Microsoft Entra ID
+and Google Workspace over OIDC, and Okta and Microsoft Entra ID over SAML.
+Other providers can work too if they meet the requirements for
+[OIDC](#what-zone-needs-from-a-provider) or
+[SAML](#what-zone-needs-from-a-saml-identity-provider).
 
 Single sign-on applies to the whole server. A server admin configures it
 under **Settings → This server → Single sign-on**, and only server admins
@@ -24,27 +26,40 @@ in its 30-day grace period after expiry. You install the license under
 | Team, in any state | Keeps working for providers already set up | Keeps working if it was on | Read-only, with an upgrade notice |
 | Removed, or never installed (Community) | Keeps working for providers already set up | Keeps working if it was on | Read-only, with an upgrade notice |
 
+The table applies to OIDC and SAML providers alike.
+
 Without a Zone Enterprise license that is active or in its grace period, a
 change is refused with `license_required`, except for changes that only reduce
-what SSO can do:
+what SSO can do, and one that keeps SAML working:
 
 - disabling a provider, with a request that changes nothing else
 - deleting a provider
 - turning enforcement off
+- refreshing a SAML provider's metadata, with a request that changes nothing
+  else and metadata that keeps the same entity ID
 
 So if a provider is compromised after your license lapses, you can still
 turn enforcement off and disable or delete the provider. The console shows
 the settings read-only without a license, so make these changes through the
 [API](#api).
 
+The metadata exception exists because a SAML identity provider rotates its
+signing certificate from time to time, and Zone only learns about a new
+certificate when you refresh the metadata. Without it, a lapsed server would
+lose SAML sign-in at the next rotation. If the refreshed metadata names a
+different entity ID, the change is refused with `license_required`, because
+a new entity ID unlinks every account (see
+[Changing the entity ID](#changing-the-entity-id)). See
+[Certificate rotation](#certificate-rotation-and-refreshing-metadata).
+
 On Community and Team, the section shows an upgrade notice that links to the
 License section, and lists any providers that already exist as read-only.
 
 On Community, the [member cap](LICENSING.md#the-community-member-cap) also
-applies to single sign-on: once the server has 3 active members, a first
-sign-in that would create an account is refused with `member_cap_reached`.
-People who already have an account, including one linked by email, keep
-signing in.
+applies to single sign-on, OIDC and SAML alike: once the server has 3 active
+members, a first sign-in that would create an account is refused with
+`member_cap_reached`. People who already have an account keep signing in,
+including, for OIDC, one linked by email.
 
 An SSO user who signs in counts toward licensed seats in the same way as a
 user who signs in with a password.
@@ -57,15 +72,17 @@ You need:
   [break-glass](#enforcement-and-break-glass) account.
 - [`APP_BASE_URL`](CONFIGURATION.md#app_base_url) set to the origin your
   browsers use to reach Zone, such as `https://zone.example.com`.
-- Outbound HTTPS from the Zone server to your identity provider. The
-  server, not the browser, fetches the provider's discovery document, keys
-  and tokens.
+- For OIDC, outbound HTTPS from the Zone server to your identity provider.
+  The server, not the browser, fetches the provider's discovery document,
+  keys and tokens. For SAML, the server only contacts the provider to fetch
+  its metadata when you give a metadata URL; the browser carries every
+  sign-in.
 - Admin access to your identity provider, so that you can register an
   application.
 
 ### The redirect URI
 
-Every provider needs Zone's redirect URI. It's always:
+Every OIDC provider needs Zone's redirect URI. It's always:
 
 ```
 {APP_BASE_URL}/sso/callback
@@ -89,10 +106,43 @@ Zone requests the scopes `openid email profile`. It uses the authorization
 code flow with PKCE (S256), `state` and `nonce`, and authenticates to the
 provider's token endpoint with the client secret.
 
+### The SAML service provider URLs
+
+Towards a SAML identity provider, Zone is a service provider (SP) with one
+identity for the whole server. Its values are always:
+
+| Value | URL |
+|---|---|
+| Entity ID | `{APP_BASE_URL}/api/auth/sso/saml/metadata` |
+| Assertion Consumer Service (ACS) URL | `{APP_BASE_URL}/api/auth/sso/saml/acs` |
+| Metadata URL | `{APP_BASE_URL}/api/auth/sso/saml/metadata` |
+
+The entity ID and the metadata URL are the same address: Zone serves its SP
+metadata at its own entity ID. As with the redirect URI, Zone takes only the
+scheme, host and port of `APP_BASE_URL`, so with
+`APP_BASE_URL=https://zone.example.com/zone` the ACS URL is
+`https://zone.example.com/api/auth/sso/saml/acs`. The Single sign-on section
+shows all three values with copy buttons, in the **SAML service provider**
+card.
+
+`GET {APP_BASE_URL}/api/auth/sso/saml/metadata` needs no sign-in and answers
+with `Content-Type: application/samlmetadata+xml`. It describes an
+`SPSSODescriptor` with `AuthnRequestsSigned="false"` and
+`WantAssertionsSigned="true"`, the persistent and email address NameID
+formats, and one HTTP-POST assertion consumer service at the ACS URL. Some
+identity providers can import it by URL instead of you typing the values.
+
+If you change `APP_BASE_URL`, all three values change with it, and you have
+to update them at every SAML identity provider.
+
 ## Adding a provider in Zone
 
 Once you've registered Zone with your identity provider, open **Settings →
-This server → Single sign-on**, choose **Add provider** and fill in:
+This server → Single sign-on** and choose **Add provider**. Under
+**Protocol**, choose **OpenID Connect** or **SAML 2.0**. You can't change a
+provider's protocol after you add it. For SAML, see
+[Adding a SAML provider](#adding-a-saml-provider). For OpenID Connect, fill
+in:
 
 | Field | What to enter |
 |---|---|
@@ -147,8 +197,13 @@ in [Accounts](#accounts-matching-linking-and-jit-provisioning). The
 `identities_cleared`.
 
 Changing any other setting, the client secret included, keeps every link.
+For SAML providers, the entity ID plays the issuer's part; see
+[Changing the entity ID](#changing-the-entity-id).
 
 ## Okta
+
+These steps connect Okta over OIDC. For SAML, see
+[Set up Okta for SAML](#set-up-okta-for-saml).
 
 ### Register Zone in Okta
 
@@ -194,6 +249,9 @@ You don't need to turn off **Require verified email** for Okta. Sign in
 once with a test user before you roll out.
 
 ## Microsoft Entra ID
+
+These steps connect Entra ID over OIDC. For SAML, see
+[Set up Entra ID for SAML](#set-up-entra-id-for-saml).
 
 ### Register Zone in Entra ID
 
@@ -307,6 +365,446 @@ Without allowed domains, Zone doesn't check `hd`, and any Google account
 that Google lets through gets a Zone account. The **Internal** user type
 limits that to your organization, but set allowed domains anyway.
 
+## SAML 2.0
+
+Zone implements SAML 2.0 Web Browser SSO as a service provider. Sign-in
+always starts at Zone: Zone sends the browser to the identity provider with
+an authentication request, and the provider posts a signed response back to
+Zone's ACS URL.
+
+### What Zone needs from a SAML identity provider
+
+Any SAML 2.0 identity provider can be used if it:
+
+- publishes metadata with a single `EntityDescriptor` that holds one
+  `IDPSSODescriptor` for SAML 2.0, with at least one signing certificate and
+  a `SingleSignOnService` for the HTTP-Redirect binding
+- serves that single sign-on endpoint over `https`, or from a loopback host
+- accepts an unsigned `AuthnRequest` over the HTTP-Redirect binding, and
+  answers with a `Response` over the HTTP-POST binding
+- signs the assertion, or the response that contains it, with an RSA key of
+  at least 2048 bits, using RSA-SHA256, RSA-SHA384 or RSA-SHA512
+- sends a NameID that doesn't change for a person and isn't transient
+- sends the person's email address in an attribute, or as an email address
+  NameID (see [Identity and attributes](#identity-and-attributes))
+- doesn't encrypt the assertion
+
+### Adding a SAML provider
+
+Register Zone at your identity provider first, with the
+[SAML service provider URLs](#the-saml-service-provider-urls). Then, in
+**Settings → This server → Single sign-on**, choose **Add provider**, choose
+**SAML 2.0** under **Protocol**, and fill in:
+
+| Field | What to enter |
+|---|---|
+| Display name | The label on the sign-in button, as in "Sign in with Okta". 1 to 64 characters. |
+| Metadata URL or Metadata XML | Either the URL of the identity provider's SAML metadata, or the metadata document itself, pasted in. Give one of the two, not both. |
+| Allowed domains | Required for SAML. The email domains that may sign in, such as `acme.com`. |
+| Enabled | Whether the provider's button shows on the sign-in page and its sign-ins are accepted. |
+
+There's no client ID, client secret or **Require verified email** for SAML.
+Zone reads the identity provider's entity ID, its single sign-on URL and its
+signing certificates from the metadata. When you edit a SAML provider, the
+console shows those values read-only, with each certificate's SHA-256
+fingerprint, so that you can compare them with what your identity provider
+shows.
+
+The same SAML entity ID can't be added twice (`sso_provider_duplicate`). An
+OIDC provider and a SAML provider may share an issuer string.
+
+### Metadata
+
+Zone reads the metadata once, when you save the provider, and never in the
+background. It doesn't check a signature on the metadata itself: it trusts
+the metadata because a server admin supplied it, and, for a metadata URL,
+because it came over TLS.
+
+When you give a metadata URL, the Zone server fetches it with much the same
+rules it uses for an OIDC discovery document:
+
+- The URL must use `https`. Plain `http` is accepted only for a loopback
+  host: `localhost`, `127.0.0.0/8` or `::1`. A private or LAN host is fine
+  over `https`.
+- The URL can't contain credentials or a fragment.
+- Zone doesn't follow redirects. Give the final URL.
+- The fetch times out after 10 seconds, and the document may be at most
+  1 MiB.
+
+In either case, the save fails with `sso_metadata_invalid` and a message
+that names the problem when:
+
+- the document isn't well-formed XML encoded as UTF-8, or declares a
+  document type (`<!DOCTYPE`), or refers to an entity other than the five
+  predefined XML entities. Zone never loads DTDs or external entities.
+- its root isn't an `md:EntityDescriptor`. An aggregate
+  `md:EntitiesDescriptor` that describes several entities is refused; use
+  the metadata of the single identity provider.
+- its `entityID` is missing, longer than 1024 characters, or contains
+  spaces or control characters. Any URI scheme is fine, so Okta's
+  `http://www.okta.com/…` entity IDs work.
+- it doesn't have exactly one `IDPSSODescriptor` whose
+  `protocolSupportEnumeration` includes SAML 2.0
+- it has no `SingleSignOnService` with the HTTP-Redirect binding, or that
+  service's `Location` isn't `https` (or a loopback host)
+- it has no signing certificate. Zone reads the `ds:X509Certificate` of
+  every `KeyDescriptor` whose `use` is `signing` or absent, and ignores keys
+  marked `use="encryption"`. Each certificate must hold an RSA key of at
+  least 2048 bits.
+
+### Allowed domains and verified email for SAML
+
+A SAML assertion doesn't say whether the identity provider verified the
+email address it carries. So for every SAML provider:
+
+- **Require verified email** is always off. A request that asks for it is
+  refused with `sso_verified_email_unsupported`.
+- At least one allowed domain is required. A provider without one is
+  refused with `sso_domain_required`.
+- Zone never links a SAML sign-in to an existing Zone account by email.
+  Someone whose email already belongs to a Zone account is refused with
+  `sso_email_conflict`, as described in [Verified email](#verified-email).
+  SAML sign-in either signs in an account already linked to the person's
+  NameID or creates a new account.
+
+There's no way to link an existing Zone account to a SAML identity. To move
+someone who already has a Zone account to SAML, delete their Zone account so
+that SAML creates a new one. Until then, they can keep signing in with a
+password, as long as SSO isn't required.
+
+### Identity and attributes
+
+Zone identifies each person by the value of the assertion's `NameID`, the
+SAML equivalent of the OIDC `sub`. Configure the identity provider to send a
+value that never changes for a person, such as a persistent identifier or an
+immutable user ID. A transient NameID is refused with
+`sso_assertion_invalid`, because it differs at every sign-in. If the NameID
+changes, the person's account is still linked to the old value, so their
+next sign-in creates a new account or, if their email already has an
+account, is refused with `sso_email_conflict`.
+
+Zone takes the email from the first of these attributes that the assertion
+carries, matched by the attribute's `Name`:
+
+1. `email`
+2. `http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress`
+3. `urn:oid:0.9.2342.19200300.100.1.3`
+4. `mail`
+
+If none of them is present, Zone uses the NameID itself when its format is
+`urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress`. An email attribute
+with more than one value counts as missing. Without an email, the sign-in
+is refused with `sso_email_missing`.
+
+Zone takes the display name from the first of these attributes:
+
+1. `displayName`
+2. `http://schemas.microsoft.com/identity/claims/displayname`
+3. `urn:oid:2.16.840.1.113730.3.1.241`
+4. `name`
+
+Without one, it joins a given name and a surname:
+
+- given name: `firstName`, `givenName`,
+  `http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname` or
+  `urn:oid:2.5.4.42`
+- surname: `lastName`, `surname`, `sn`,
+  `http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname` or
+  `urn:oid:2.5.4.4`
+
+Zone never uses Entra ID's
+`http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name` claim, because
+it carries the user principal name rather than a display name.
+
+An account that Zone creates at a SAML sign-in has its email marked as not
+verified, because SAML never vouches for it. The person can still set a
+password through password reset while SSO isn't required, if the server
+sends account mail.
+
+### What Zone checks
+
+Zone accepts a SAML response only at its ACS URL, only over HTTP-POST, and
+only as the answer to a sign-in that Zone itself started. Before it uses
+anything in the response, Zone checks:
+
+- **The XML.** The response must be well-formed UTF-8 XML 1.0 with no
+  document type declaration and no entities beyond the five predefined
+  ones.
+- **The response.** `Version` is `2.0`. `InResponseTo` equals the ID of the
+  request Zone sent for this sign-in. `Destination`, when present, equals
+  the ACS URL, and it must be present when the response is signed. `Issuer`,
+  when present, equals the provider's entity ID.
+- **The status.** A status other than
+  `urn:oasis:names:tc:SAML:2.0:status:Success` is refused with
+  `sso_sign_in_refused`, before any other check, so that an identity
+  provider's error response reaches the person as a refusal rather than an
+  invalid assertion.
+- **One assertion.** The document contains exactly one `saml:Assertion`,
+  and it is a direct child of the response. An `EncryptedAssertion` or
+  `EncryptedID` is refused.
+- **Signatures.** See [Which signatures Zone accepts](#which-signatures-zone-accepts).
+- **The assertion.** It has exactly one `Issuer`, equal to the provider's
+  entity ID, and its `IssueInstant` isn't in the future. It has exactly one
+  `Subject` with exactly one `NameID`, which isn't transient, and at least
+  one `AuthnStatement`.
+- **The subject confirmation.** At least one bearer `SubjectConfirmation`
+  has a `SubjectConfirmationData` whose `Recipient` equals the ACS URL,
+  whose `InResponseTo` equals the request ID and whose `NotOnOrAfter` hasn't
+  passed. It may not carry `NotBefore`.
+- **The conditions.** The assertion is within its `Conditions` `NotBefore`
+  and `NotOnOrAfter`. It has at least one `AudienceRestriction`, and every
+  `AudienceRestriction` contains Zone's entity ID. `OneTimeUse` and
+  `ProxyRestriction` are allowed. Any other condition is refused, because
+  Zone can't honour a condition it doesn't understand.
+- **Time.** Every timestamp must be in UTC, written with `Z`, with up to
+  nine digits of fractional seconds. Zone allows 60 seconds of clock skew,
+  the same leeway it gives OIDC ID tokens.
+- **Replay.** Zone remembers each assertion ID per provider until the
+  latest `NotOnOrAfter` in the assertion, plus the leeway, and refuses the
+  same assertion a second time.
+
+`Issuer`, `Audience` and `NameID` values are trimmed of surrounding
+whitespace before they're compared. Every value Zone uses is read from the
+assertion whose signature it verified, by walking that element's own
+children, never by searching the document. Comments inside a value are
+ignored, so a comment injected into a NameID or an email can't shorten it.
+
+Any failed check is refused with `sso_assertion_invalid`. The person sees a
+general message, and the server log has the reason, such as "it's meant for
+a different service provider". Zone never logs the SAML response itself.
+
+### Which signatures Zone accepts
+
+Zone accepts a signature on the assertion, or on the response that
+contains it, or both. At least one must be present, and every signature
+present must verify. An unsigned response is refused with
+`sso_assertion_invalid`.
+
+A signature counts only when it is a direct child of the response or the
+assertion, with at most one per element, and only when its single
+`Reference` points at the ID of that same element. Zone verifies:
+
+- the signature algorithm: RSA PKCS#1 v1.5 with SHA-256, SHA-384 or
+  SHA-512 (`http://www.w3.org/2001/04/xmldsig-more#rsa-sha256`,
+  `…#rsa-sha384` or `…#rsa-sha512`)
+- the digest algorithm: SHA-256, SHA-384 or SHA-512
+  (`http://www.w3.org/2001/04/xmlenc#sha256`,
+  `http://www.w3.org/2001/04/xmldsig-more#sha384` or
+  `http://www.w3.org/2001/04/xmlenc#sha512`)
+- canonicalization: exclusive XML canonicalization 1.0 without comments,
+  `http://www.w3.org/2001/10/xml-exc-c14n#`, optionally with an
+  `InclusiveNamespaces` `PrefixList`
+- transforms: exactly the enveloped-signature transform followed by
+  exclusive canonicalization
+- the key: one of the signing certificates from the provider's metadata.
+  Zone ignores any `KeyInfo` in the response, so a response can't bring its
+  own key. When the metadata lists several certificates, a signature by any
+  of them is accepted. Zone doesn't check the certificates' validity dates,
+  in line with the SAML metadata interoperability profile, so an expired
+  certificate keeps working until you refresh the metadata.
+
+SHA-1, ECDSA, DSA and HMAC signatures are refused, and so are inclusive
+canonicalization and canonicalization with comments.
+
+Zone's metadata says `WantAssertionsSigned="true"`, so identity providers
+that configure themselves from SP metadata, such as Keycloak, turn on
+assertion signing. Zone still accepts a response where only the response is
+signed, because that is just as safe here: the assertion Zone reads is
+inside the response it verified, and Zone finds it by its place in that
+signed element, not by its ID, so a second, forged assertion elsewhere in
+the document can't be swapped in. Responses with two assertions are refused
+outright.
+
+### Not supported
+
+Zone doesn't support:
+
+- IdP-initiated sign-in. A response that Zone didn't ask for, such as one
+  from a tile on the identity provider's dashboard, is refused with
+  `sso_state_invalid`. People sign in from Zone's sign-in page.
+- encrypted assertions or encrypted NameIDs. Zone has no SP decryption key,
+  so leave assertion encryption off at the identity provider.
+- single logout. Signing out of Zone doesn't sign the person out of the
+  identity provider, and the other way round.
+- signed authentication requests. Zone's requests are unsigned, and its
+  metadata says `AuthnRequestsSigned="false"`.
+- the HTTP-POST binding for requests and the Artifact binding. Zone sends
+  requests with HTTP-Redirect and accepts responses with HTTP-POST.
+- SHA-1 signatures and digests, and keys other than RSA of at least 2048
+  bits
+- forced re-authentication (`ForceAuthn`) and passive sign-in (`IsPassive`)
+
+Zone's authentication request asks for no particular NameID format: its
+`NameIDPolicy` has `AllowCreate="true"` and no `Format`, so the identity
+provider sends the format you configure there.
+
+### Certificate rotation and refreshing metadata
+
+Zone pins the signing certificates it found in the metadata when you saved
+the provider. It doesn't fetch the metadata again by itself, so after your
+identity provider gets a new signing certificate, refresh the metadata in
+Zone:
+
+- In the console, edit the provider, turn on **Read the metadata again**
+  under its metadata URL, and save. Saving the same URL with the switch off
+  sends nothing, so the certificates stay as they were. Or choose
+  **Paste XML** and paste the new metadata. A blank XML box keeps the
+  current metadata.
+- Through the API, send `PATCH /api/sso/providers/{provider_id}` with
+  `{"metadata_url": "…"}` or `{"metadata": "…"}`.
+
+To rotate without failed sign-ins:
+
+1. Add the new certificate at the identity provider without making it
+   active yet, if the provider allows that, so that its metadata lists both
+   certificates.
+2. Refresh the metadata in Zone. Zone now accepts signatures by either
+   certificate.
+3. Make the new certificate active at the identity provider.
+4. Once the old certificate is removed there, refresh the metadata in Zone
+   again, so that Zone stops trusting it.
+
+If your identity provider can only publish one certificate at a time,
+refresh the metadata in Zone right after you activate the new one. Sign-ins
+in between fail with `sso_assertion_invalid`.
+
+A refresh that keeps the same entity ID keeps every account link, and it
+works without a license, as described in [Licensing](#licensing).
+
+Any save that changes the entity ID, the single sign-on URL or the pinned
+certificates also ends every sign-in still in progress through that
+provider, including one the ACS already accepted whose handoff code the
+console hasn't redeemed yet: its response was checked against the old
+settings. Those people get `sso_state_invalid` and start again.
+
+### Changing the entity ID
+
+The entity ID plays the role of the OIDC issuer: a NameID is only unique
+within one identity provider. So when new metadata names a different entity
+ID, Zone unlinks every account linked through that provider, in the same
+save, and the `sso_provider.updated` audit entry records the number of links
+removed as `identities_cleared`.
+
+Because Zone never links a SAML sign-in by email, the people whose accounts
+were unlinked can't get back to those accounts through SAML: their next
+sign-in is refused with `sso_email_conflict`, and the only way forward is
+to delete those Zone accounts so that SAML creates new ones. So avoid
+changing a provider's entity ID: at the identity provider, keep using the
+same app, rather than creating a new one, when you change its settings.
+Without a license, a refresh that changes the entity ID is refused with
+`license_required`.
+
+### Set up Okta for SAML
+
+These steps follow Okta's documentation for the Admin Console as of November
+2026. Okta's own labels are in bold.
+
+1. In the Okta Admin Console, go to **Applications and Resources →
+   Applications** and choose **Create App Integration**. If Okta asks which
+   experience to use, choose **Classic experience**.
+2. Choose **SAML 2.0** as the sign-in method, then choose **Next**.
+3. Give the integration a name, such as Zone, and choose **Next**.
+4. Under the SAML settings:
+   - **Single sign-on URL**: Zone's ACS URL,
+     `{APP_BASE_URL}/api/auth/sso/saml/acs`. Keep **Use this for Recipient
+     URL and Destination URL** selected, because Zone checks both.
+   - **Audience URI (SP Entity ID)**: Zone's entity ID,
+     `{APP_BASE_URL}/api/auth/sso/saml/metadata`.
+   - **Default RelayState**: leave it blank. Zone sets the RelayState of
+     every sign-in itself.
+   - **Name ID format**: leave it at the default, Unspecified, or pick the
+     email address format. Don't pick a transient format.
+   - **Application username format**: a value that never changes for a
+     person, because Okta sends the application username as the NameID and
+     Zone links accounts by it. Okta also advises not to build it from
+     fields that people can edit themselves.
+   - Under **Show Advanced Settings**, keep **Assertion Signature** signed,
+     use SHA-256 for **Signature Algorithm** and **Digest Algorithm**, and
+     leave **Assertion Encryption** unencrypted.
+5. Choose **Next**, choose the option for an internal app, and choose
+   **Finish**.
+6. On the app's **Sign On** tab, in the **Attribute Statements** section,
+   choose **Add expression** three times and add these claims, each with a
+   **Name** and an **Expression**:
+
+   | Name | Expression |
+   |---|---|
+   | `email` | `user.profile.email` |
+   | `firstName` | `user.profile.firstName` |
+   | `lastName` | `user.profile.lastName` |
+
+   If your org still configures attribute statements in the integration
+   wizard, under **Attribute Statements (optional)**, add the same three
+   names there instead.
+7. On the **Assignments** tab, assign the people or groups who may use
+   Zone.
+8. On the **Sign On** tab, under the SAML 2.0 sign-on method, find
+   **Metadata details** and copy the **Metadata URL**.
+
+In Zone, add a SAML provider with that metadata URL and your email domains.
+Okta's entity ID for the app looks like `http://www.okta.com/exk…`. That's
+an identifier, not an address, so its `http` scheme is fine.
+
+Okta signs with the certificate that's active on the app's **Sign On** tab,
+under **SAML Signing Certificates**. When you generate or activate another
+certificate there, refresh the metadata in Zone as described in
+[Certificate rotation](#certificate-rotation-and-refreshing-metadata).
+
+Okta always uses the **Single sign-on URL** for sign-ins started from the
+Okta dashboard, which Zone refuses (see [Not supported](#not-supported)).
+Tell people to sign in from Zone's sign-in page.
+
+### Set up Entra ID for SAML
+
+These steps follow Microsoft's documentation for the Microsoft Entra admin
+center as of November 2026. Microsoft's own labels are in bold.
+
+1. Sign in to the [Microsoft Entra admin center](https://entra.microsoft.com)
+   as at least a Cloud Application Administrator and go to **Entra ID →
+   Enterprise apps → All applications**.
+2. Choose **New application**, then **Create your own application**. Enter
+   a name, such as Zone, select **Integrate any other application you don't
+   find in the gallery (Non-gallery)** and choose **Create**.
+3. In the app, under **Manage**, select **Single sign-on**, then **SAML**.
+4. In the **Basic SAML Configuration** section, choose **Edit** and set:
+   - **Identifier (Entity ID)**: Zone's entity ID,
+     `{APP_BASE_URL}/api/auth/sso/saml/metadata`
+   - **Reply URL (Assertion Consumer Service URL)**: Zone's ACS URL,
+     `{APP_BASE_URL}/api/auth/sso/saml/acs`
+
+   Then choose **Save**.
+5. In the **Attributes & Claims** section, choose **Edit**. Open the name
+   identifier claim, set **Choose name identifier format** to
+   **Persistent** and **Source attribute** to `user.objectid`, and save. A
+   user's object ID never changes, unlike their user principal name, which
+   Entra sends by default. Keep the default `emailaddress` claim, which
+   carries the user's mail attribute.
+6. In the **SAML Certificates** section, choose **Edit**. On the **SAML
+   Signing Certificate** page, keep **Signing Option** at the default, **Sign
+   SAML assertion**, and **Signing Algorithm** at **SHA-256**. Don't set up
+   token encryption.
+7. Still in the **SAML Certificates** section, copy the **App Federation
+   Metadata Url**. Use this per-app URL, which ends in `appid=` and the
+   application ID, rather than the tenant's general federation metadata,
+   because only the per-app metadata carries the app's signing certificate.
+8. Under **Manage → Properties**, set **Assignment required?** to **Yes**
+   and choose **Save**, then assign the users or groups who may use Zone.
+   Otherwise, anyone in the tenant can sign in.
+
+In Zone, add a SAML provider with that metadata URL and your email domains.
+Entra's entity ID is `https://sts.windows.net/{tenant-id}/`, with a trailing
+slash.
+
+A user with no mail attribute gets no `emailaddress` claim, and their
+sign-in is refused with `sso_email_missing`.
+
+Entra creates each SAML signing certificate for three years and emails the
+app's notification addresses 60, 30 and 7 days before it expires. To renew
+it, choose **New Certificate** on the **SAML Signing Certificate** page and
+save, refresh the metadata in Zone, then make the new certificate active
+there and refresh the metadata in Zone again. See
+[Certificate rotation](#certificate-rotation-and-refreshing-metadata).
+
 ## How sign-in works
 
 1. Enabled providers appear as **Sign in with {display name}** buttons on
@@ -330,6 +828,50 @@ limits that to your organization, but set allowed domains anyway.
 6. Zone applies the provider's policy (email present, verified, in an
    allowed domain), finds or creates the Zone account as described below,
    and signs the user in.
+
+### How SAML sign-in works
+
+1. The button and the origin rule are the same as for OIDC, and so are the
+   10-minute lifetime and the limit of 10,000 unexpired attempts.
+2. Zone sends the browser to the identity provider's single sign-on URL
+   with an unsigned `AuthnRequest` over the HTTP-Redirect binding, and a
+   `RelayState` that identifies the attempt.
+3. The identity provider posts its `SAMLResponse` and the `RelayState` to
+   Zone's ACS URL, `{APP_BASE_URL}/api/auth/sso/saml/acs`. The ACS reads at
+   most 1 MiB of form body; real responses are 5 to 150 KB. It accepts a
+   `RelayState` of at most 80 bytes, the limit the SAML HTTP-POST binding
+   sets (Zone's own is 43 characters). A larger body, or a longer, missing
+   or empty `RelayState`, gets a redirect to
+   `{APP_BASE_URL}/sso/callback?error=sso_state_invalid` with no `state`,
+   because Zone can't trust it to name an attempt.
+4. The server runs the checks in [What Zone checks](#what-zone-checks) and
+   applies the provider's policy (email present, in an allowed domain). It
+   does the XML parsing and signature checks on a blocking worker thread,
+   so a slow response never holds up other requests. Each attempt admits
+   one post: the first post for a `RelayState` claims the attempt before its
+   response is read, and any other post for it, even one arriving at the
+   same moment, gets `sso_state_invalid` without its response being parsed.
+   If a check fails, the claimed attempt is discarded. If the browser drops
+   the connection mid-check, the attempt stays claimed and simply expires.
+   The server checks at most one response per CPU core at a time, across
+   every provider, because parsing holds many times the response's size in
+   memory before its signature is known. A post that arrives while every
+   check is running isn't queued: its attempt is discarded and the browser
+   gets `sso_sign_in_failed`, and the person starts again.
+5. On success, the server redirects the browser with `303 See Other` to
+   `{APP_BASE_URL}/sso/callback?state=…&code=…`, with a one-time handoff
+   code that expires after 2 minutes. On failure, it redirects to
+   `{APP_BASE_URL}/sso/callback?state=…&error=…` with one of the codes in
+   [Troubleshooting](#troubleshooting). Both redirects carry
+   `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+6. The console hands the state and code to the Zone server, exactly as it
+   does for OIDC. The server checks that the code belongs to that attempt,
+   finds or creates the Zone account as described below, and signs the user
+   in.
+
+The handoff through the console keeps the same protection against login
+cross-site request forgery that OIDC has: the sign-in only completes in the
+browser that started it.
 
 ### Claims from userinfo
 
@@ -369,14 +911,15 @@ session signed in through it at once.
 
 Each time someone signs in, Zone looks for their account in this order.
 
-1. **By subject.** Zone remembers the provider's subject (`sub`) for each
-   linked account. A returning user is matched on that alone, even if
-   their email has changed at the provider. Zone doesn't change the
-   account's email in that case.
+1. **By subject.** Zone remembers the provider's subject (`sub`, or the
+   NameID for SAML) for each linked account. A returning user is matched
+   on that alone, even if their email has changed at the provider. Zone
+   doesn't change the account's email in that case.
 2. **By email.** If no account is linked to that subject, and the provider
    has **Require verified email** on, Zone looks for an account with the
    same email, ignoring case. If it finds one, it links that account to the
-   subject, and the user signs in to their existing account.
+   subject, and the user signs in to their existing account. This never
+   happens for SAML providers, which can't require a verified email.
 3. **Just-in-time (JIT) provisioning.** If no account matches, Zone
    creates one.
 
@@ -439,8 +982,11 @@ other change. Its password keeps working while SSO isn't required.
 
 A new account created at sign-in:
 
-- uses the email from the ID token, marked as verified
-- takes its display name from the provider's `name` claim when there is one
+- uses the email from the ID token, marked as verified, or for SAML the
+  email from the assertion, marked as not verified
+- takes its display name from the provider's `name` claim when there is
+  one, or for SAML from the attributes listed in
+  [Identity and attributes](#identity-and-attributes)
 - is a regular user, never a server admin
 - gets its own default organization and workspace, as a new registration
   does
@@ -457,6 +1003,9 @@ When allowed domains are set, only emails at those domains can sign in or
 be provisioned through that provider. Everyone else is refused with
 `sso_domain_not_allowed`.
 
+Allowed domains are optional for OIDC providers and required for SAML
+providers (`sso_domain_required`).
+
 **Without allowed domains, every identity your provider lets through gets
 a Zone account.** That's fine when the provider only admits your own staff,
 for example through Okta assignments, Entra's **Assignment required?** or
@@ -464,6 +1013,10 @@ Google's **Internal** user type. In any other case, set allowed domains.
 For Google, always set them, so that `hd` is checked.
 
 ## Verified email
+
+This setting exists only for OIDC providers. A SAML provider always behaves
+as if it were off; see
+[Allowed domains and verified email for SAML](#allowed-domains-and-verified-email-for-saml).
 
 **Require verified email** is on by default. While it's on, the ID token,
 or userinfo when the ID token leaves the claim out, must say the email is
@@ -549,12 +1102,18 @@ log. None of them ever contains a client secret.
 | Action | When | Recorded values |
 |---|---|---|
 | `sso_provider.created` | A provider is added | The provider's settings, and `client_secret_changed: true` |
-| `sso_provider.updated` | A provider is edited | The changed settings, before and after, plus `client_secret_changed: true` when the secret was replaced, and `identities_cleared` (the number of accounts unlinked) when the issuer or client ID changed |
+| `sso_provider.updated` | A provider is edited | The changed settings, before and after, plus `client_secret_changed: true` when the secret was replaced, and `identities_cleared` (the number of accounts unlinked) when the issuer, client ID or SAML entity ID changed |
 | `sso_provider.deleted` | A provider is deleted | The provider's settings |
 | `sso_enforcement.updated` | Enforcement is turned on or off | `required`, before and after |
 | `user.sso_linked` | An identity is linked to an existing account, whether or not the sign-in then gets a session | `provider_id`, `subject`, `reclaimed` |
 | `user.sso_signed_in` | Someone signs in with SSO | `provider_id`, `subject`, `provisioned`, `linked`, `reclaimed` |
 | `user.break_glass_signed_in` | A server admin signs in with a password while SSO is required | None |
+
+For a SAML provider, the provider's settings in `sso_provider.*` entries
+are `protocol`, `display_name`, `issuer` (the identity provider's entity
+ID), `sso_url`, `metadata_url`, `certificate_fingerprints`,
+`allowed_domains`, `require_verified_email` and `enabled`. SAML sign-ins write the same `user.sso_signed_in` entries as OIDC, with the
+NameID as `subject`.
 
 ## Disabling and deleting providers
 
@@ -577,12 +1136,24 @@ each one.
 |---|---|---|
 | `sso_discovery_failed` | Zone couldn't load or accept the provider's discovery document. When this happens at sign-in, the person sees a general message and the server log has the details. | The Issuer URL matches the document's `issuer` exactly. The Zone server can reach the provider. Every endpoint uses `https` or a loopback host. |
 | `sso_issuer_invalid` | The Issuer URL isn't valid. | It's an absolute `https` URL with no query or fragment. `http` is allowed only for loopback hosts. |
-| `sso_provider_duplicate` | A provider with that issuer and client ID already exists. | Edit the existing provider instead. |
+| `sso_provider_duplicate` | A provider with that issuer and client ID, or with that SAML entity ID, already exists. | Edit the existing provider instead. |
 | `sso_provider_not_found` | The provider doesn't exist or is disabled. | The provider is enabled. |
-| `sso_state_invalid` | The sign-in attempt is unknown, was already used, or is more than 10 minutes old. | Start again from the sign-in page. |
+| `sso_provider_required` | Enforcement is on, so the last enabled provider can't be disabled or deleted. | Turn enforcement off first, or enable another provider. |
+| `sso_display_name_invalid` | The display name is empty or longer than 64 characters. | Use 1 to 64 characters. |
+| `sso_client_id_invalid` | The client ID is empty or longer than 255 characters. | Copy the client ID from the provider again. |
+| `sso_client_secret_invalid` | The client secret is empty. | Paste the secret's value. |
+| `sso_domain_invalid` | An allowed domain isn't a plain domain name. | Use domains such as `acme.com`, without `@` or `*`. |
+| `sso_state_invalid` | The sign-in attempt is unknown, was already used, or is more than 10 minutes old. For SAML, also: the response wasn't started from Zone (IdP-initiated), it was posted twice (including twice at once), the post was over 1 MiB or its `RelayState` over 80 bytes, the handoff code was wrong or more than 2 minutes old, or an admin changed the provider's entity ID, single sign-on URL or certificates before the console redeemed the code. | Start again from Zone's sign-in page, not from the identity provider's dashboard. |
+| `sso_metadata_invalid` | Zone couldn't fetch or use the SAML metadata. The message names the problem. | The metadata URL uses `https` and doesn't redirect. The document is a single `EntityDescriptor` with an `IDPSSODescriptor`, an HTTP-Redirect `SingleSignOnService` and an RSA signing certificate of at least 2048 bits. See [Metadata](#metadata). Send either a metadata URL or metadata XML, not both. |
+| `sso_assertion_invalid` | The SAML response failed a check: its signature, audience, recipient, destination, issuer, time limits, subject, or it was replayed or encrypted. The person sees a general message and the server log has the reason. | See [What Zone checks](#what-zone-checks). The identity provider uses Zone's exact entity ID and ACS URL, signs with SHA-256 and doesn't encrypt. The metadata in Zone is current after a certificate change. The Zone server's clock is correct. |
+| `sso_sign_in_refused` | The identity provider answered with a status other than Success. The server log has the status. | The person is assigned to the app at the identity provider. |
+| `sso_sign_in_failed` | Zone couldn't finish a SAML sign-in for a reason on the server's side, such as its database being unavailable, a stored provider setting it can't read, or every SAML response check (one per CPU core) already running. | The server log. Try again. |
+| `sso_domain_required` | A SAML provider was saved without allowed domains. | Add at least one allowed domain. |
+| `sso_verified_email_unsupported` | A SAML provider was saved with `require_verified_email: true`. | Leave it out or set it to `false`. See [Allowed domains and verified email for SAML](#allowed-domains-and-verified-email-for-saml). |
+| `sso_protocol_mismatch` | A request set a field that belongs to the other protocol, such as a client secret on a SAML provider or a metadata URL on an OIDC provider. | Send only the fields for the provider's protocol. See [API](#api). |
 | `sso_token_exchange_failed` | The provider's token endpoint refused the code, or its userinfo endpoint failed. The person sees a general message and the server log has the details. | The client secret is correct and hasn't expired. The redirect URI registered at the provider is exactly `{APP_BASE_URL}/sso/callback`. |
 | `sso_id_token_invalid` | The ID token failed verification: signature, algorithm, issuer, audience, expiry or nonce, or the userinfo `sub` differed from it. | The Zone server's clock is correct. The client ID matches the provider's application. |
-| `sso_email_missing` | Neither the ID token nor userinfo has an `email` claim. | The provider puts `email` in the ID token. For Entra, add the `email` optional claim. |
+| `sso_email_missing` | Neither the ID token nor userinfo has an `email` claim. For SAML, the assertion has none of the email attributes, has more than one value in it, and its NameID isn't an email address NameID. | The provider puts `email` in the ID token. For Entra over OIDC, add the `email` optional claim. For SAML, see [Identity and attributes](#identity-and-attributes). |
 | `sso_email_unverified` | The email isn't marked verified while Require verified email is on. | See [Verified email](#verified-email). |
 | `sso_domain_not_allowed` | The email's domain, or the `hd` claim, isn't in the allowed domains. | The provider's allowed domains. |
 | `sso_email_conflict` | The account can't be matched safely. | See [Accounts](#accounts-matching-linking-and-jit-provisioning). |
@@ -595,9 +1166,20 @@ Zone accepts ID tokens signed with RS256, RS384, RS512, PS256, PS384,
 PS512, ES256, ES384 or EdDSA. When the discovery document lists
 `id_token_signing_alg_values_supported`, the token's algorithm must also be
 in that list. Unsigned tokens (`none`) and tokens signed with a shared
-secret (HS256 and the like) are always refused.
+secret (HS256 and the like) are always refused. For the SAML signature
+rules, see [Which signatures Zone accepts](#which-signatures-zone-accepts).
+
+A SAML sign-in that fails at the ACS URL reaches the browser as the `error`
+parameter of the redirect to `{APP_BASE_URL}/sso/callback`, such as
+`error=sso_assertion_invalid`, and the console shows the message for that
+code. `sso_metadata_invalid`, `sso_domain_required`,
+`sso_verified_email_unsupported` and `sso_protocol_mismatch` only ever
+answer admin requests.
 
 ## What Zone needs from a provider
+
+This section is about OIDC providers. For SAML, see
+[What Zone needs from a SAML identity provider](#what-zone-needs-from-a-saml-identity-provider).
 
 Any OIDC provider can be used if it:
 
@@ -622,47 +1204,88 @@ user who isn't a server admin gets 403.
 
 | Method and path | Purpose |
 |---|---|
-| `GET /api/sso` | Licensing state, enforcement, the redirect URI and the providers. Never includes secrets. |
+| `GET /api/sso` | Licensing state, enforcement, the redirect URI, the SAML service provider URLs and the providers. Never includes secrets. |
 | `POST /api/sso/providers` | Add a provider. |
-| `PATCH /api/sso/providers/{provider_id}` | Change a provider. Send only the fields you're changing. Leave out `client_secret` to keep the current one. |
+| `PATCH /api/sso/providers/{provider_id}` | Change a provider. Send only the fields you're changing. Leave out `client_secret` to keep the current one, and leave out `metadata_url` and `metadata` to keep the current SAML metadata. |
 | `DELETE /api/sso/providers/{provider_id}` | Delete a provider. |
 | `PUT /api/sso/enforcement` | Turn enforcement on or off with `{"required": true}` or `{"required": false}`. |
 
 Every change is checked against the license before anything else, except
-the ones listed under [Licensing](#licensing) that only reduce what SSO can
-do.
+the ones listed under [Licensing](#licensing).
 
-## SAML
+Two SAML endpoints are public, because the identity provider and the
+browser reach them without a Zone session:
 
-Zone doesn't support SAML 2.0 in this release. Native SAML is planned for a
-later release.
+| Method and path | Purpose |
+|---|---|
+| `GET /api/auth/sso/saml/metadata` | Zone's SP metadata, as `application/samlmetadata+xml`. Its URL is also Zone's entity ID. |
+| `POST /api/auth/sso/saml/acs` | The ACS. Takes a form of at most 1 MiB with `SAMLResponse` and a `RelayState` of at most 80 bytes, and answers `303` to `{APP_BASE_URL}/sso/callback` with the outcome. |
 
-If your identity provider only speaks SAML, put an OIDC bridge in front of
-it. The bridge signs users in through your SAML provider and acts as an
-OIDC provider towards Zone, so you add it to Zone like any other OIDC
-provider.
+### Settings
 
-- **Keycloak** (recommended): add your SAML provider as a SAML identity
-  provider in a Keycloak realm, then register Zone as an OIDC client in
-  that realm.
-- **Authentik**: add your SAML provider as a SAML source, and register Zone
-  with an OIDC provider and application that use that source.
-- Dex also has a SAML connector, but Dex's own documentation marks it as
-  unmaintained, so we don't recommend it.
+`GET /api/sso` returns `entitled`, `edition`, `status`, `required`,
+`redirect_uri`, `service_provider` and `providers`. `service_provider` holds
+the [SAML service provider URLs](#the-saml-service-provider-urls):
 
-Whichever bridge you use, set it up so that:
+```json
+{
+  "entity_id": "https://zone.example.com/api/auth/sso/saml/metadata",
+  "acs_url": "https://zone.example.com/api/auth/sso/saml/acs",
+  "metadata_url": "https://zone.example.com/api/auth/sso/saml/metadata"
+}
+```
 
-- the `sub` claim comes from the SAML provider's persistent NameID, or
-  another attribute that never changes for a user. Zone links accounts by
-  provider and subject, so when the `sub` changes, the person's account is
-  still linked to the old one and their sign-in is refused with
-  `sso_email_conflict`.
-- `email` and `email_verified` are passed through to the ID token. Without
-  `email_verified`, turn **Require verified email** off and set allowed
-  domains, as described in [Verified email](#verified-email).
-- the bridge's OIDC client for Zone has Zone's redirect URI,
-  `{APP_BASE_URL}/sso/callback`, registered.
+### Providers
 
-Then add a provider in Zone with the bridge's issuer, such as
-`https://keycloak.acme.com/realms/acme` for Keycloak, and the client ID and
-secret of the bridge's OIDC client.
+Each provider in `providers`, and the answer to a create or update, has
+these fields. Every field is always present; the ones that don't apply to
+the provider's protocol are `null` or empty.
+
+| Field | OIDC | SAML |
+|---|---|---|
+| `id` | The provider's ID. | The provider's ID. |
+| `protocol` | `"oidc"` | `"saml"` |
+| `display_name` | The button label. | The button label. |
+| `issuer` | The issuer URL. | The identity provider's entity ID. |
+| `client_id` | The client ID. | `null` |
+| `sso_url` | `null` | The identity provider's HTTP-Redirect single sign-on URL. |
+| `metadata_url` | `null` | The metadata URL, or `null` when the metadata was pasted. |
+| `certificate_fingerprints` | `[]` | The SHA-256 fingerprint of each signing certificate, in uppercase hex separated by colons, such as `3F:A2:…:9C`. |
+| `allowed_domains` | The allowed domains. | The allowed domains. |
+| `require_verified_email` | Whether a verified email is required. | Always `false`. |
+| `enabled` | Whether the provider is enabled. | Whether the provider is enabled. |
+| `created_at`, `updated_at` | Timestamps. | Timestamps. |
+
+`POST /api/sso/providers` takes:
+
+| Field | OIDC | SAML |
+|---|---|---|
+| `protocol` | `"oidc"`, the default when it's left out. | `"saml"` |
+| `display_name` | Required. | Required. |
+| `issuer`, `client_id`, `client_secret` | Required. | Must be left out or empty, or the request is refused with `sso_protocol_mismatch`. |
+| `metadata_url` | Must be left out (`sso_protocol_mismatch`). | Exactly one of `metadata_url` and `metadata` is required; otherwise the request is refused with `sso_metadata_invalid`. |
+| `metadata` | Must be left out (`sso_protocol_mismatch`). | The metadata XML, as a string. |
+| `allowed_domains` | Optional. | At least one is required (`sso_domain_required`). |
+| `require_verified_email` | Optional, `true` when it's left out. | Optional, `false` when it's left out. `true` is refused with `sso_verified_email_unsupported`. |
+| `enabled` | Optional, `true` when it's left out. | Optional, `true` when it's left out. |
+
+For example, to add a SAML provider from a metadata URL:
+
+```json
+{
+  "protocol": "saml",
+  "display_name": "Okta",
+  "metadata_url": "https://acme.okta.com/app/exk…/sso/saml/metadata",
+  "allowed_domains": ["acme.com"]
+}
+```
+
+`PATCH /api/sso/providers/{provider_id}` takes any of `display_name`,
+`issuer`, `client_id`, `client_secret`, `metadata_url`, `metadata`,
+`allowed_domains`, `require_verified_email` and `enabled`. On an OIDC
+provider, `metadata_url` and `metadata` are refused with
+`sso_protocol_mismatch`. On a SAML provider, `issuer`, `client_id` and
+`client_secret` are refused the same way, and `metadata_url` or `metadata`,
+one of the two, fetches or reads the metadata again and replaces the entity
+ID, single sign-on URL and certificates with what it holds. The protocol
+can't be changed.
