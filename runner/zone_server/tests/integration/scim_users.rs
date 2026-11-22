@@ -150,6 +150,7 @@ async fn organization_role(fixture: &Fixture, name: &str) -> Uuid {
     .unwrap()
     {
         Creation::Created(role) => role.id,
+        Creation::Forbidden => panic!("the creator does not hold roles:update"),
         Creation::NameTaken => panic!("{name} is already taken"),
     }
 }

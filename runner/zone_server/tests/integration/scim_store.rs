@@ -93,6 +93,7 @@ async fn custom_role(
             id: role.id,
             name: role.name,
         },
+        Creation::Forbidden => panic!("the creator does not hold roles:update"),
         Creation::NameTaken => panic!("{name} is already taken"),
     }
 }

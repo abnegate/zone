@@ -234,13 +234,24 @@ impl Fixture {
         create_organization(&self.inner, owner).await
     }
 
-    /// An organization-scope custom role holding the scope's base and `permissions`.
+    /// An organization-scope custom role holding the scope's base and `permissions`, created by an
+    /// owner of `organization`.
     pub async fn custom_role(
         &self,
         organization: Uuid,
         name: &str,
         permissions: &[Permission],
     ) -> Uuid {
+        let creator: Uuid = sqlx::query_scalar(
+            "SELECT user_id FROM organization_members \
+             WHERE organization_id = $1 AND role = $2 AND is_active \
+             ORDER BY created_at LIMIT 1",
+        )
+        .bind(organization)
+        .bind(OrgRole::Owner.as_str())
+        .fetch_one(self.pool())
+        .await
+        .unwrap();
         let names: Vec<String> = permissions
             .iter()
             .map(|permission| permission.name().to_owned())
@@ -252,11 +263,12 @@ impl Fixture {
             scope: Scope::Organization,
             grant: &grant,
         };
-        match custom_roles::create(self.pool(), organization, &definition, self.owner.id)
+        match custom_roles::create(self.pool(), organization, &definition, creator)
             .await
             .unwrap()
         {
             Creation::Created(role) => role.id,
+            Creation::Forbidden => panic!("the creator does not hold roles:update"),
             Creation::NameTaken => panic!("{name} is already taken"),
         }
     }
