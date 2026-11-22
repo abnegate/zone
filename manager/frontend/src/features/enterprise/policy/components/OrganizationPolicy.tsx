@@ -1,4 +1,6 @@
 import { UpgradeNotice } from '../../components/UpgradeNotice';
+import { RunnerPlacementCard } from '../../fleet/components/RunnerPlacementCard';
+import { organizationPlacement } from '../../fleet/placement';
 import { useUpdateOrganizationPolicy } from '../hooks';
 import { UPGRADE_NOTICE } from '../labels';
 import { community } from '../license';
@@ -36,6 +38,7 @@ export function OrganizationPolicy({ organizationId, policy }: OrganizationPolic
         onSave={(request, onSaved) => update.update(request, onSaved)}
         onReset={update.reset}
       />
+      <RunnerPlacementCard scope={organizationPlacement(organizationId)} />
     </>
   );
 }

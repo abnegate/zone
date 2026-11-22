@@ -2,6 +2,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { COMMUNITY_WORKSPACE_LABELS, WORKSPACE_LABELS } from '../../fleet/fixtures';
+import {
+  ORGANIZATION_REQUIRED_LABEL,
+  PLACEMENT_TITLE,
+  WORKSPACE_REQUIRED_LABEL,
+} from '../../fleet/messages';
+import { fromWorkspace, workspacePlacement } from '../../fleet/placement';
 import { Edition, LicenseStatus } from '../../schemas';
 import { OPEN_RULES } from '../draft';
 import {
@@ -30,8 +37,14 @@ import { ORGANIZATION_POLICY_LINK } from './WorkspacePolicySection';
 const workspace = mock();
 const updateWorkspace = mock();
 
+const runnerLabels = mock(async () => fromWorkspace(COMMUNITY_WORKSPACE_LABELS));
+
 mock.module('../api', () => ({
   policyApi: { organization: mock(), updateOrganization: mock(), workspace, updateWorkspace },
+}));
+
+mock.module('../../fleet/api', () => ({
+  fleetApi: { labels: runnerLabels, updateLabels: mock() },
 }));
 
 let WorkspacePolicySection: typeof import('./WorkspacePolicySection').WorkspacePolicySection;
@@ -120,6 +133,20 @@ describe('WorkspacePolicySection', () => {
 
     expect(screen.getByText(UPGRADE_NOTICE)).toBeInTheDocument();
     expect(screen.queryByRole('group', { name: 'Providers' })).not.toBeInTheDocument();
+  });
+
+  it('places the runner labels of the workspace below its agent policy, with what it inherits', async () => {
+    runnerLabels.mockResolvedValueOnce(fromWorkspace(WORKSPACE_LABELS));
+    await loaded(ACTIVE_WORKSPACE_INHERITED);
+
+    const placement = await screen.findByRole('region', { name: PLACEMENT_TITLE });
+    expect(
+      within(placement).getByRole('list', { name: ORGANIZATION_REQUIRED_LABEL })
+    ).toHaveTextContent('region=eu');
+    expect(
+      within(placement).getByRole('list', { name: WORKSPACE_REQUIRED_LABEL })
+    ).toHaveTextContent('gpu');
+    expect(runnerLabels).toHaveBeenCalledWith(workspacePlacement(ORGANIZATION_ID, WORKSPACE_ID));
   });
 
   it('marks inherited and unrestricted fields and shows the organization and effective values', async () => {

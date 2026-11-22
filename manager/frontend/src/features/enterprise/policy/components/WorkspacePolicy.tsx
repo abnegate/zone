@@ -1,4 +1,6 @@
 import { UpgradeNotice } from '../../components/UpgradeNotice';
+import { RunnerPlacementCard } from '../../fleet/components/RunnerPlacementCard';
+import { workspacePlacement } from '../../fleet/placement';
 import { useUpdateWorkspacePolicy } from '../hooks';
 import { UPGRADE_NOTICE } from '../labels';
 import { community } from '../license';
@@ -39,6 +41,7 @@ export function WorkspacePolicy({ organizationId, workspaceId, policy }: Workspa
         onSave={(request, onSaved) => update.update(request, onSaved)}
         onReset={update.reset}
       />
+      <RunnerPlacementCard scope={workspacePlacement(organizationId, workspaceId)} />
     </>
   );
 }
