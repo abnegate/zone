@@ -5,7 +5,7 @@ pub mod identity;
 pub mod refusal;
 pub mod registration;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use claimant::claimant;
 pub use identity::Identity;

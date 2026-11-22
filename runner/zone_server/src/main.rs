@@ -220,6 +220,7 @@ async fn main() {
         zone_server::workers::auto_project::spawn(state.clone());
     }
     let recovery = zone_server::workers::task::spawn_recovery(state.clone());
+    zone_server::workers::fleet::spawn(state.clone());
     let training = tokio::spawn(zone_server::train_jobs::recover(
         state.config().comfyui.clone(),
         state.train_jobs().clone(),

@@ -1,5 +1,6 @@
 use crate::common;
 
+use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::tasks;
 
 #[tokio::test]
@@ -140,11 +141,33 @@ async fn sweep_preserves_fresh_leases_and_newer_runs() {
         .unwrap();
     assert_eq!(run.triggered_by, Some(actor));
     let owner = uuid::Uuid::new_v4();
-    assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
     assert!(
-        !tasks::claim_task_run(&pool, run.id, uuid::Uuid::new_v4())
-            .await
-            .unwrap()
+        tasks::claim_task_run(
+            &pool,
+            run.id,
+            owner,
+            Claimant {
+                runner: None,
+                enforced: false
+            }
+        )
+        .await
+        .unwrap()
+        .claimed()
+    );
+    assert!(
+        !tasks::claim_task_run(
+            &pool,
+            run.id,
+            uuid::Uuid::new_v4(),
+            Claimant {
+                runner: None,
+                enforced: false
+            }
+        )
+        .await
+        .unwrap()
+        .claimed()
     );
     assert!(
         !tasks::heartbeat_task_run(&pool, run.id, uuid::Uuid::new_v4())
@@ -362,7 +385,20 @@ async fn stale_owner_cannot_write_progress_logs_or_terminal_state() {
     let run = tasks::create_task_run(&pool, task.id).await.unwrap();
     let first = uuid::Uuid::new_v4();
     let second = uuid::Uuid::new_v4();
-    assert!(tasks::claim_task_run(&pool, run.id, first).await.unwrap());
+    assert!(
+        tasks::claim_task_run(
+            &pool,
+            run.id,
+            first,
+            Claimant {
+                runner: None,
+                enforced: false
+            }
+        )
+        .await
+        .unwrap()
+        .claimed()
+    );
     sqlx::query("UPDATE task_runs SET owner=$2 WHERE id=$1")
         .bind(run.id)
         .bind(second)

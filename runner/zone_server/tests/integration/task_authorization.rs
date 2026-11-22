@@ -10,6 +10,7 @@ use serde_json::json;
 use tokio::time::timeout;
 use uuid::Uuid;
 use zone_server::db::actions::{self, StartTask};
+use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::tasks;
 use zone_server::services::checkout::Repository;
 use zone_server::services::github_app::Provider;
@@ -402,9 +403,18 @@ async fn pr_worker_rejects_legacy_foreign_project_associations() {
 async fn waiting(pool: &sqlx::PgPool, run: Uuid) -> zone_server::agent::question::Waiter {
     let owner = Uuid::new_v4();
     assert!(
-        tasks::claim_task_run(pool, run, owner)
-            .await
-            .expect("the run is claimable")
+        tasks::claim_task_run(
+            pool,
+            run,
+            owner,
+            Claimant {
+                runner: None,
+                enforced: false
+            }
+        )
+        .await
+        .expect("the run is claimable")
+        .claimed()
     );
     let waiter = zone_server::agent::question::expect(run);
     assert!(

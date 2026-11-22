@@ -2,6 +2,7 @@ use sqlx::ConnectOptions;
 use sqlx::migrate::MigrateError;
 use std::time::Duration;
 use uuid::Uuid;
+use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::{ai_settings, memory, migrations, tasks};
 
 use crate::common::Database;
@@ -390,9 +391,18 @@ async fn a_parked_run_keeps_its_lease_and_gives_it_back_once() {
     let run = tasks::create_task_run(&database.pool, task).await.unwrap();
     let owner = Uuid::new_v4();
     assert!(
-        tasks::claim_task_run(&database.pool, run.id, owner)
-            .await
-            .unwrap()
+        tasks::claim_task_run(
+            &database.pool,
+            run.id,
+            owner,
+            Claimant {
+                runner: None,
+                enforced: false
+            }
+        )
+        .await
+        .unwrap()
+        .claimed()
     );
     let question = serde_json::json!({"tool_call_id": "call_1", "questions": []});
     assert!(
@@ -473,9 +483,18 @@ async fn the_sweeper_orphans_a_parked_run_whose_worker_died() {
     let run = tasks::create_task_run(&database.pool, task).await.unwrap();
     let owner = Uuid::new_v4();
     assert!(
-        tasks::claim_task_run(&database.pool, run.id, owner)
-            .await
-            .unwrap()
+        tasks::claim_task_run(
+            &database.pool,
+            run.id,
+            owner,
+            Claimant {
+                runner: None,
+                enforced: false
+            }
+        )
+        .await
+        .unwrap()
+        .claimed()
     );
     assert!(
         tasks::park_task_run(

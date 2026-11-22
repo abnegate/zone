@@ -125,6 +125,7 @@ mod tests {
     use crate::auth::Permission;
     use crate::db::auto_projects::{self, Claim};
     use crate::db::context::{self, Lease, Store};
+    use crate::db::fleet::claimant::Claimant;
     use crate::db::recovery;
     use crate::db::tasks::{Mutation, RunMutation};
     use crate::db::testing::Tenant;
@@ -185,18 +186,17 @@ mod tests {
             panic!("the run was not admitted");
         };
         let owner = Uuid::new_v4();
+        let claimant = Claimant {
+            runner: Some(runner),
+            enforced: false,
+        };
         assert!(
-            tasks::claim_task_run(pool, run.id, owner)
+            tasks::claim_task_run(pool, run.id, owner, claimant)
                 .await
-                .expect("the claim"),
+                .expect("the claim")
+                .claimed(),
             "the run was not claimed"
         );
-        sqlx::query("UPDATE task_runs SET runner_id = $2 WHERE id = $1")
-            .bind(run.id)
-            .bind(runner)
-            .execute(pool)
-            .await
-            .expect("the run's runner");
 
         let chat: Uuid = sqlx::query_scalar(
             "INSERT INTO chats (workspace_id, title, model_name) \

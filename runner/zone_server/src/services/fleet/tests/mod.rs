@@ -14,13 +14,13 @@ use crate::state::{AppState, test_config, unreachable_pool};
 
 const KEY_ID: &str = "test-1";
 
-struct Server {
-    database: Database,
-    state: AppState,
+pub(crate) struct Server {
+    pub(crate) database: Database,
+    pub(crate) state: AppState,
 }
 
 impl Server {
-    async fn new(plan: Option<Plan>) -> Self {
+    pub(crate) async fn new(plan: Option<Plan>) -> Self {
         let database = Database::create("fleet_claimant").await;
         let state = AppState::new(test_config(), database.pool.clone(), None);
         state.disable_mcp();
@@ -75,7 +75,7 @@ impl Server {
         .unwrap()
     }
 
-    async fn remove(self) {
+    pub(crate) async fn remove(self) {
         drop(self.state);
         self.database.remove().await;
     }

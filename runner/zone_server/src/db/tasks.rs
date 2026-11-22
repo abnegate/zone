@@ -8,15 +8,15 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::auth::Permission;
+use crate::db::fleet::claim::Claim;
+use crate::db::fleet::claimant::Claimant;
+use crate::db::fleet::eligibility::{self, PLACEMENT, UNATTENDED};
+use crate::db::fleet::mode::Mode;
 use crate::services::chat::notice;
 use crate::services::github::pull_requests;
 use crate::services::task_progress;
 
-use super::{
-    DbResult,
-    auto_projects::{self, Claim},
-    workspace_members,
-};
+use super::{DbResult, auto_projects, workspace_members};
 
 mod origin;
 
@@ -302,6 +302,12 @@ pub(crate) const ACTIVE_RUN_STATUSES: &str = "('running','waiting')";
 /// `task_runs` aliased `r`. Its task stays reserved for it until the owner
 /// releases it or its lease lapses, so no second worker shares the branch.
 pub(crate) const DRAINING: &str = "r.status = 'cancelled' AND r.owner IS NOT NULL \
+     AND r.heartbeat_at > NOW() - INTERVAL '60 seconds'";
+
+/// An admitted run no execution has claimed yet, over `task_runs` aliased
+/// `r`. Its admission lapses with its heartbeat, after which the sweeper
+/// fails it.
+pub(crate) const UNCLAIMED: &str = "r.status = 'running' AND r.owner IS NULL \
      AND r.heartbeat_at > NOW() - INTERVAL '60 seconds'";
 
 /// Why the sweeper failed a run, both in the row it writes and in the frame it
@@ -1532,10 +1538,80 @@ pub(super) async fn create_task_run_in(
     insert_task_run(connection, task_id, actor).await
 }
 
-/// Claim a newly admitted run exactly once, before waiting for capacity.
-pub async fn claim_task_run(pool: &PgPool, run_id: Uuid, owner: Uuid) -> DbResult<bool> {
-    Ok(sqlx::query("UPDATE task_runs SET owner = $2, heartbeat_at = NOW() WHERE id = $1 AND status = 'running' AND owner IS NULL AND heartbeat_at > NOW() - INTERVAL '60 seconds'")
-        .bind(run_id).bind(owner).execute(pool).await?.rows_affected() == 1)
+/// Claim a newly admitted run exactly once, before waiting for capacity, and
+/// record the runner that claimed it.
+///
+/// Under fleet policy the claimant's runner must be one that unattended work
+/// placed in the run's own workspace may run on, and the runner row is held
+/// `FOR SHARE` until the claim commits: a revoke either refuses this claim or
+/// waits for it and then stops the run it made.
+pub async fn claim_task_run(
+    pool: &PgPool,
+    run_id: Uuid,
+    owner: Uuid,
+    claimant: Claimant,
+) -> DbResult<Claim> {
+    let mut transaction = pool.begin().await?;
+    if let (true, Some(runner)) = (claimant.enforced, claimant.runner) {
+        sqlx::query("SELECT 1 FROM fleet_runners WHERE id = $1 FOR SHARE")
+            .bind(runner)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    let claimed = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE task_runs r \
+         SET owner = $2, runner_id = (SELECT id FROM fleet_runners WHERE id = $3), \
+             heartbeat_at = NOW() \
+         WHERE r.id = $1 AND {UNCLAIMED} \
+           AND (NOT $4 OR EXISTS ( \
+               SELECT 1 FROM {PLACEMENT} JOIN fleet_runners runner ON runner.id = $3 \
+               WHERE t.id = r.task_id AND {UNATTENDED} \
+           ))"
+    )))
+    .bind(run_id)
+    .bind(owner)
+    .bind(claimant.runner)
+    .bind(claimant.enforced)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected()
+        == 1;
+    let claim = match claimed {
+        true => Claim::Claimed,
+        false => unclaimed(&mut transaction, run_id, claimant).await?,
+    };
+    transaction.commit().await?;
+    Ok(claim)
+}
+
+/// Why a claim changed nothing: the run is no one's to claim, or it is and
+/// the claimant's runner falls short of it.
+async fn unclaimed(
+    connection: &mut PgConnection,
+    run_id: Uuid,
+    claimant: Claimant,
+) -> DbResult<Claim> {
+    if !claimant.enforced {
+        return Ok(Claim::Unavailable);
+    }
+    let workspace: Option<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT t.workspace_id FROM task_runs r JOIN tasks t ON t.id = r.task_id \
+         WHERE r.id = $1 AND {UNCLAIMED}"
+    )))
+    .bind(run_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(workspace) = workspace else {
+        return Ok(Claim::Unavailable);
+    };
+    let shortfall = eligibility::shortfall(
+        connection,
+        claimant.runner,
+        Some(workspace),
+        Mode::Unattended,
+    )
+    .await?;
+    Ok(shortfall.map_or(Claim::Unavailable, Claim::Refused))
 }
 
 /// Refresh only the live lease held by this execution.
@@ -2128,7 +2204,7 @@ pub async fn create_unattended_task_run(
     pool: &PgPool,
     task_id: Uuid,
     actor: Uuid,
-    claim: Option<Claim>,
+    claim: Option<auto_projects::Claim>,
 ) -> DbResult<Unattended> {
     let mut transaction = pool.begin().await?;
     // Membership before the task lock, as every user-triggered admission
@@ -2320,9 +2396,18 @@ mod tests {
             .await
             .expect("a run");
         let owner = Uuid::new_v4();
-        let claimed = claim_task_run(&tenant.pool, run.id, owner)
-            .await
-            .expect("the claim");
+        let claimed = claim_task_run(
+            &tenant.pool,
+            run.id,
+            owner,
+            Claimant {
+                runner: None,
+                enforced: false,
+            },
+        )
+        .await
+        .expect("the claim")
+        .claimed();
         let execution = Execution {
             task: task.id,
             run: run.id,
