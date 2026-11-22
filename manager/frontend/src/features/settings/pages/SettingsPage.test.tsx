@@ -218,7 +218,7 @@ describe('SettingsPage', () => {
       expect(linkLabels('You')).toEqual(['Sessions']);
     });
 
-    it('adds License, Single sign-on and Audit export under This server for a server admin', () => {
+    it('adds License, Single sign-on, Runners and Audit export under This server for a server admin', () => {
       user = { is_admin: true };
 
       renderAt('/settings/workspace/general');
@@ -228,6 +228,7 @@ describe('SettingsPage', () => {
         'Connect a device',
         'License',
         'Single sign-on',
+        'Runners',
         'Audit export',
       ]);
     });
@@ -418,6 +419,24 @@ describe('SettingsPage', () => {
 
       expect(location()).toBe('/settings/workspace/general');
       expect(screen.queryByRole('link', { name: 'Single sign-on' })).not.toBeInTheDocument();
+    });
+
+    it('opens Runners for a server admin', () => {
+      user = { is_admin: true };
+
+      renderAt('/settings/server/runners');
+
+      const region = screen.getByRole('region', { name: 'Runners' });
+      expect(within(region).getByTestId('settings-content').textContent).toBe('server/runners');
+    });
+
+    it('sends someone who does not administer the server from Runners to the first visible section', () => {
+      user = { is_admin: false };
+
+      renderAt('/settings/server/runners');
+
+      expect(location()).toBe('/settings/workspace/general');
+      expect(screen.queryByRole('link', { name: 'Runners' })).not.toBeInTheDocument();
     });
 
     it('passes whether the user can read sources to the content', () => {
