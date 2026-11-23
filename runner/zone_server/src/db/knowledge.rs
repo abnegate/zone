@@ -653,9 +653,10 @@ pub async fn mark_for_refresh(pool: &PgPool, id: Uuid) -> DbResult<bool> {
 mod tests {
     use super::*;
     use crate::db::organizations;
+    use crate::db::testing::seat;
     use crate::db::users;
-    #[allow(unused_imports)]
     use crate::db::workspace_members;
+    use crate::db::workspace_members::WorkspaceRole;
     use crate::db::workspaces;
 
     #[test]
@@ -796,7 +797,6 @@ mod tests {
     }
 
     async fn setup_test_data(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
-        // Create test user
         let email = format!("test-{}@example.com", Uuid::new_v4());
         let user_id =
             users::create_user(pool, &email, "test_password_hash", Some("Test User"), false)
@@ -804,8 +804,7 @@ mod tests {
                 .expect("Failed to create user")
                 .id;
 
-        // Create organization
-        let org_id = organizations::create_organization(
+        let organization_id = organizations::create_organization(
             pool,
             &format!("Test Org {}", Uuid::new_v4()),
             &format!("test-org-{}", Uuid::new_v4()),
@@ -815,10 +814,9 @@ mod tests {
         .expect("Failed to create organization")
         .id;
 
-        // Create workspace
         let workspace_id = workspaces::create_workspace(
             pool,
-            org_id,
+            organization_id,
             &format!("Test Workspace {}", Uuid::new_v4()),
             &format!("test-ws-{}", Uuid::new_v4()),
             None,
@@ -827,7 +825,7 @@ mod tests {
         .expect("Failed to create workspace")
         .id;
 
-        (org_id, workspace_id, user_id)
+        (organization_id, workspace_id, user_id)
     }
 
     #[tokio::test]
@@ -998,24 +996,14 @@ mod tests {
         let pool = create_test_pool().await;
         let (organization, workspace, user) = setup_test_data(&pool).await;
         let (foreign_organization, foreign_workspace, foreign_user) = setup_test_data(&pool).await;
-        workspace_members::add_member(
-            &pool,
-            workspace,
-            user,
-            workspace_members::WorkspaceRole::Member,
-            None,
-        )
-        .await
-        .unwrap();
-        workspace_members::add_member(
+        seat(&pool, workspace, user, WorkspaceRole::Member).await;
+        seat(
             &pool,
             foreign_workspace,
             foreign_user,
-            workspace_members::WorkspaceRole::Member,
-            None,
+            WorkspaceRole::Member,
         )
-        .await
-        .unwrap();
+        .await;
         let content = format!(
             "  quasarneedle\n{}\n  ",
             "世界 🦀 complete document\n".repeat(2000)
@@ -1226,15 +1214,7 @@ mod tests {
     async fn document_sources_enforce_workspace_and_metadata_only_state() {
         let pool = create_test_pool().await;
         let (organization, workspace, user) = setup_test_data(&pool).await;
-        workspace_members::add_member(
-            &pool,
-            workspace,
-            user,
-            workspace_members::WorkspaceRole::Member,
-            None,
-        )
-        .await
-        .unwrap();
+        seat(&pool, workspace, user, WorkspaceRole::Member).await;
         let source: Uuid = sqlx::query_scalar("INSERT INTO sources (workspace_id, name, source_type, config) VALUES ($1, 'Repository', 'github', '{}') RETURNING id").bind(workspace).fetch_one(&pool).await.unwrap();
         let content = "full indexed 文件\n".repeat(2000);
         let id: Uuid = sqlx::query_scalar("INSERT INTO content_items (source_id, category, uri, title, content, content_hash) VALUES ($1, 'code', 'src/guide.md', 'Guide', $2, 'hash') RETURNING id").bind(source).bind(&content).fetch_one(&pool).await.unwrap();
