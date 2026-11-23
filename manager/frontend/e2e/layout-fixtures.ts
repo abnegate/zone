@@ -15,6 +15,7 @@ import type {
   ReleasesResponse,
   SourceOptions,
 } from '../src/features/releases/types';
+import type { SettingsAccess } from '../src/features/settings/navigation/sections';
 import type { AiSettings, WorkspaceAiSettings } from '../src/features/settings/workspace/types';
 import {
   wireCommits,
@@ -102,12 +103,24 @@ export function aiSettingsResponse(
   return workspaceAiSettingsPath.test(path) ? workspaceAiSettingsResponse(settings) : settings;
 }
 
+const adminRole = 'admin';
+
+export const adminSettingsAccess: SettingsAccess = {
+  organization: true,
+  organizationRole: adminRole,
+  workspace: true,
+  workspaceRole: adminRole,
+  installsModels: true,
+  readsSources: true,
+  administersServer: mockAdminUser.is_admin,
+};
+
 const mockMembers = [
   {
     user_id: mockAdminUser.id,
     email: 'admin@example.com',
     display_name: 'Admin User',
-    role: 'admin',
+    role: adminRole,
   },
   {
     user_id: 'user-2',
