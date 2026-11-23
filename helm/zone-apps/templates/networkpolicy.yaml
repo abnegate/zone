@@ -1,6 +1,7 @@
 {{- if .Values.networkPolicy.enabled }}
 ---
-# Default deny all traffic
+# Default deny for this release's pods only: nothing here admits the server
+# to the Postgres, Valkey and LiteLLM pods that share the namespace.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -8,7 +9,9 @@ metadata:
   labels:
     {{- include "zone-apps.labels" . | nindent 4 }}
 spec:
-  podSelector: {}
+  podSelector:
+    matchLabels:
+      {{- include "zone-apps.selectorLabels" . | nindent 6 }}
   policyTypes:
     - Ingress
     - Egress
@@ -36,7 +39,7 @@ spec:
               kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
       ports:
         - protocol: TCP
-          port: {{ .Values.server.service.port }}
+          port: {{ .Values.server.service.targetPort }}
 ---
 # Allow egress from server to database
 apiVersion: networking.k8s.io/v1
@@ -128,7 +131,7 @@ spec:
               kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
       ports:
         - protocol: TCP
-          port: {{ .Values.manager.service.port }}
+          port: {{ .Values.manager.service.targetPort }}
 ---
 # Allow egress from manager (for external resources like CDNs)
 apiVersion: networking.k8s.io/v1

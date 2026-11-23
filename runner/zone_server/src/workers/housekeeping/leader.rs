@@ -2,6 +2,7 @@
 
 pub mod tenure;
 pub mod timing;
+pub mod unsafe_timing;
 
 use std::io::ErrorKind;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -15,6 +16,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 
 pub use tenure::Tenure;
 pub use timing::Timing;
+pub use unsafe_timing::UnsafeTiming;
 
 use crate::db::DbResult;
 
@@ -40,8 +42,12 @@ pub struct Leadership {
 }
 
 impl Leadership {
-    /// Start campaigning for leadership against the database `options` reaches.
-    pub fn start(options: PgConnectOptions, timing: Timing) -> Self {
+    /// Start campaigning for leadership against the database `options` reaches, unless
+    /// `timing` could let this process lead alongside a successor.
+    pub fn start(options: PgConnectOptions, timing: Timing) -> Result<Self, UnsafeTiming> {
+        if !timing.is_safe() {
+            return Err(UnsafeTiming(timing));
+        }
         let leadership = Self::detached(timing);
         let task = tokio::spawn(campaign(
             options,
@@ -53,7 +59,7 @@ impl Leadership {
             .task
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(task);
-        leadership
+        Ok(leadership)
     }
 
     fn detached(timing: Timing) -> Self {
@@ -385,6 +391,19 @@ mod tests {
             .await
             .expect("releasing is noticed at once")
             .expect("the waiter does not panic");
+    }
+
+    #[tokio::test]
+    async fn an_election_on_unsafe_timing_is_refused() {
+        let timing = Timing {
+            wait: Duration::from_secs(5),
+            ..timing()
+        };
+
+        assert_eq!(
+            Leadership::start(PgConnectOptions::new(), timing).err(),
+            Some(UnsafeTiming(timing))
+        );
     }
 
     #[tokio::test]

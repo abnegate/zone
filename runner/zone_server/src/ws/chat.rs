@@ -106,7 +106,7 @@ const WS_POLL_INTERVAL_MS: u64 = 50;
 const SETTLE_POLL: Duration = Duration::from_millis(50);
 
 /// Told to a socket whose message would start a turn on a draining replica.
-const RESTARTING: &str = "This server is restarting, so it can't start a reply. Reconnecting you to another server; send your message again.";
+const RESTART_REFUSAL: &str = "This server is restarting, so it can't start a reply. Reconnecting you to another server; send your message again.";
 
 /// Authentication timeout in seconds
 const WS_AUTH_TIMEOUT_SECS: u64 = 30;
@@ -687,7 +687,7 @@ async fn dispatch(
         match relay::route(state, stream.chat_id, user_id, session_id, &command).await {
             relay::Route::Local if starts && state.drain().is_draining() => {
                 let refusal = ServerMessage::Error {
-                    message: RESTARTING.to_string(),
+                    message: RESTART_REFUSAL.to_string(),
                 };
                 let mut sender = sender.lock().await;
                 let _ = sender.send(refusal.to_ws_message()).await;

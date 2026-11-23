@@ -2,9 +2,8 @@
 # so the server and CloudNativePG each place one pod per worker. The script
 # names the cluster, repeats the first worker to match --workers, and
 # substitutes ZONE_HA_SHARED_DIR with a temporary host directory, mounted at
-# /shared on every node behind a hostPath ReadWriteMany volume. It passes
-# podSubnet to zone-apps as server.trustedProxies. No host ports: the script
-# reaches the cluster through the API server.
+# /shared on every node behind a hostPath ReadWriteMany volume. No host
+# ports: the script reaches the cluster through the API server.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 

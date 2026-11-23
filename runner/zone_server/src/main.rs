@@ -234,7 +234,8 @@ async fn main() {
     let leadership = Leadership::start(
         PgConnectOptions::from_str(&config.database_url).expect("DATABASE_URL is not a valid URL"),
         Timing::default(),
-    );
+    )
+    .expect("the default leader timing is safe");
     zone_server::workers::housekeeping::spawn(state.clone(), leadership.clone());
     zone_server::workers::reminders::spawn(state.clone(), Sweep::All);
     zone_server::workers::audit::spawn(

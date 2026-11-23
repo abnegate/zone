@@ -12,10 +12,10 @@ use uuid::Uuid;
 
 use super::command::Command;
 use super::ended::Ended;
+use super::pacer::Pacer;
 use super::packet::Packet;
 use super::shared::Shared;
 use super::status::Status;
-use super::throttle::Throttle;
 
 const LIBRARY: &str = "zone-bus";
 const BACKLOG: usize = 4096;
@@ -36,7 +36,7 @@ pub struct Valkey {
     manager: ConnectionManager,
     publisher: mpsc::Sender<Packet>,
     commands: mpsc::UnboundedSender<Command>,
-    dropped: Throttle,
+    dropped: Pacer,
 }
 
 impl Valkey {
@@ -74,7 +74,7 @@ impl Valkey {
             manager,
             publisher,
             commands,
-            dropped: Throttle::new(LOG_INTERVAL),
+            dropped: Pacer::new(LOG_INTERVAL),
         }
     }
 
@@ -100,7 +100,7 @@ impl Valkey {
 }
 
 async fn publish(mut manager: ConnectionManager, mut packets: mpsc::Receiver<Packet>) {
-    let failed = Throttle::new(LOG_INTERVAL);
+    let failed = Pacer::new(LOG_INTERVAL);
     let mut batch = Vec::with_capacity(BATCH);
     while packets.recv_many(&mut batch, BATCH).await > 0 {
         let mut pipeline = redis::pipe();
@@ -126,7 +126,7 @@ async fn subscribe(
     status: Arc<Status>,
     stop: CancellationToken,
 ) {
-    let disconnected = Throttle::new(LOG_INTERVAL);
+    let disconnected = Pacer::new(LOG_INTERVAL);
     let mut retry = FIRST_RETRY;
     loop {
         let attempt = tokio::select! {

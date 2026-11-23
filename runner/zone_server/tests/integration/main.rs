@@ -173,6 +173,7 @@ mod sso_scim_link;
 mod sso_sign_in;
 mod sso_store;
 mod sso_throttle;
+mod sso_throttle_forwarded;
 mod sync;
 mod task_authorization;
 mod task_bulk_edit;

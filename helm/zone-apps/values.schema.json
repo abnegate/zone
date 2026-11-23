@@ -71,6 +71,10 @@
         "externalValkey": {
           "type": "boolean",
           "description": "The existing secret's redisUrl key points at an external, managed Redis or Valkey"
+        },
+        "externalNetworkPolicy": {
+          "type": "boolean",
+          "description": "A NetworkPolicy outside this chart lets only the ingress controller reach the server pods"
         }
       }
     },

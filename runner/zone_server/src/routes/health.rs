@@ -8,8 +8,10 @@ use serde::Serialize;
 use crate::state::AppState;
 
 mod readiness;
+mod readiness_response;
 
 pub use readiness::Readiness;
+pub use readiness_response::ReadinessResponse;
 
 #[derive(Serialize)]
 pub struct HealthResponse {
@@ -25,17 +27,12 @@ pub async fn health_check() -> Json<HealthResponse> {
     })
 }
 
-#[derive(Serialize)]
-pub struct ReadinessResponse {
-    status: Readiness,
-}
-
 /// GET /health/ready, which fails only once the process is draining. Postgres
 /// and Valkey are left out on purpose: an outage of either would mark every
 /// replica unready at once and leave the Service with nowhere to send anyone.
 pub async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<ReadinessResponse>) {
     let status = Readiness::of(state.drain());
-    (status.code(), Json(ReadinessResponse { status }))
+    (status.code(), Json(status.into()))
 }
 
 #[cfg(test)]

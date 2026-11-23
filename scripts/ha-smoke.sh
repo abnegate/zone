@@ -19,6 +19,7 @@ litellm_deployment=litellm
 server_selector=app.kubernetes.io/instance=zone-apps,app.kubernetes.io/component=server
 server_port=8000
 readiness_path=/health/ready
+trusted_proxies='127.0.0.1/32,::1/128'
 database_probe_path=/api/auth/sso/providers
 failover_window=60
 poll_interval=0.5
@@ -31,7 +32,6 @@ keep_images=false
 workers=$default_workers
 database_instances=$database_instances_ha
 pods_per_node=1
-pod_subnet=''
 server_image=''
 console_image=''
 suffix=''
@@ -39,7 +39,6 @@ cluster=''
 workdir=''
 kubeconfig=''
 cluster_created=false
-drained_node=''
 built_images=()
 poller=''
 failures=()
@@ -364,7 +363,7 @@ secrets:
   litellmMasterKey: "$litellm_key"
   redisUrl: redis://$cache_name:6379
 server:
-  trustedProxies: $pod_subnet
+  trustedProxies: "$trusted_proxies"
   image:
 $(image_values "$server_image")
   resources:
@@ -451,7 +450,7 @@ Plan:
   images      server $server_image ($(image_source "$server_image"))
               console $console_image ($(image_source "$console_image"))
   charts      zone-infra, zone-ai, zone-apps with values-ha.yaml and the kind overrides
-              (server.trustedProxies $pod_subnet)
+              (server.trustedProxies $trusted_proxies: the smoke has no ingress controller)
   wait        $replicas Ready server pods, at most $pods_per_node per node, zone_cluster_bus_connected 1 on each
   disruptions with $readiness_path polled through the Service every ${poll_interval}s:
               delete a server pod; kubectl rollout restart (at most $pods_per_node server pods per node after it);
@@ -553,8 +552,6 @@ write_kind_config() {
     sed "s|\${ZONE_HA_SHARED_DIR}|$workdir/shared|g" "$root/k8s/kind-ha-config.yaml" | with_workers "$workers" >"$config"
     count=$(grep -c '^  - role: worker$' "$config" || true)
     [ "$count" -eq "$workers" ] || die "the generated kind config has $count workers, not $workers"
-    pod_subnet=$(awk -F'"' '/^  podSubnet:/ { print $2 }' "$config")
-    [ -n "$pod_subnet" ] || die 'k8s/kind-ha-config.yaml sets no networking.podSubnet'
 }
 
 create_cluster() {
@@ -923,14 +920,10 @@ servers_left_node() {
 }
 
 uncordon_node() {
-    if [ -z "$drained_node" ]; then
-        return
-    fi
-    if kubectl uncordon "$drained_node" >/dev/null; then
-        log "uncordoned $drained_node"
-        drained_node=''
+    if kubectl uncordon "$1" >/dev/null; then
+        log "uncordoned $1"
     else
-        log "could not uncordon $drained_node"
+        log "could not uncordon $1"
     fi
 }
 
@@ -938,7 +931,6 @@ drain_node() {
     local node
     node=$(drain_candidate) || die 'could not find the node of the Postgres primary'
     [ -n "$node" ] || die 'no worker runs a Ready server pod without the Postgres primary'
-    drained_node=$node
     log "draining $node"
     if kubectl drain "$node" --ignore-daemonsets --delete-emptydir-data --timeout="$drain_timeout"; then
         log "drained $node"
@@ -947,7 +939,7 @@ drain_node() {
     fi
     wait_until 300 servers_ready || record_failure "the server never returned to $replicas Ready pods while $node was drained"
     servers_left_node "$node" || record_failure "a server pod is still on $node after the drain"
-    uncordon_node
+    uncordon_node "$node"
     check_database_instances "after $node was uncordoned"
 }
 
@@ -1007,7 +999,6 @@ cleanup() {
         if [ "$status" -ne 0 ]; then
             show_diagnostics
         fi
-        uncordon_node
         delete_cluster
     fi
     remove_built_images

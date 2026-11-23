@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use abnegate_http::{RateLimitConfig, RateLimiter};
 use redis::aio::ConnectionManager;
 
-use crate::cluster::{Bus, LOG_INTERVAL, Namespace, Throttle};
+use crate::cluster::{Bus, LOG_INTERVAL, Namespace, Pacer};
 
 const PREFIX: &str = "zone";
 const TIMEOUT: Duration = Duration::from_millis(500);
@@ -27,7 +27,7 @@ pub struct Limiter<K> {
     local: RateLimiter<K>,
     bus: Bus,
     scope: Scope,
-    failed: Arc<Throttle>,
+    failed: Arc<Pacer>,
 }
 
 impl<K: Display + Hash + Eq> Limiter<K> {
@@ -36,7 +36,7 @@ impl<K: Display + Hash + Eq> Limiter<K> {
             local,
             bus,
             scope,
-            failed: Arc::new(Throttle::new(LOG_INTERVAL)),
+            failed: Arc::new(Pacer::new(LOG_INTERVAL)),
         }
     }
 

@@ -49,7 +49,7 @@ The following table lists the configurable parameters and their default values.
 
 ### High Availability
 
-`values-ha.yaml` is the supported HA topology: layer it over your values with `-f helm/zone-apps/values-ha.yaml`, set `server.agentState.persistence.storageClass` to a ReadWriteMany class, and set `server.trustedProxies` to your ingress controller's pod CIDR. An HA render without `server.trustedProxies` fails; `127.0.0.1/32,::1/128` trusts loopback only on purpose (see [Client Addresses](#client-addresses)).
+`values-ha.yaml` is the supported HA topology: layer it over your values with `-f helm/zone-apps/values-ha.yaml`, set `server.agentState.persistence.storageClass` to a ReadWriteMany class, and set `server.trustedProxies` to your ingress controller's pod CIDR. An HA render without `server.trustedProxies` fails; `127.0.0.1/32,::1/128` trusts loopback only on purpose (see [Client Addresses](#client-addresses)). So does one that trusts a network wider than one host while other pods can reach the server: set `networkPolicy.enabled`, or `highAvailability.externalNetworkPolicy` once a NetworkPolicy of your own admits only the ingress controller to the server pods (see [docs/HA.md](../../docs/HA.md#isolating-the-server)).
 
 Each server pod registers in the runner fleet under its own name: the HA render sets `ZONE_RUNNER_NAME` from the pod's `metadata.name`. The chart refuses `ZONE_RUNNER_NAME` in `server.env` or `commonEnv` with `highAvailability.enabled`, `server.autoscaling.enabled` or `server.replicaCount` above 1, because replicas sharing a name share one runner and only the newest takes work.
 
@@ -61,6 +61,7 @@ It needs Kubernetes 1.27 or later. Its topology spread constraints set `matchLab
 |-----------|-------------|---------|
 | `highAvailability.enabled` | Refuse a render whose replicas would not share one external Redis or Valkey: with `secrets.create`, `secrets.redisUrl` must name a host other than the in-cluster `valkey` service | `false` |
 | `highAvailability.externalValkey` | With `secrets.create` off, state that the existing secret's `secrets.keys.redisUrl` key points at an external, managed Redis or Valkey, which `helm template` cannot check | `false` |
+| `highAvailability.externalNetworkPolicy` | State that a NetworkPolicy outside this chart admits only the ingress controller to the server pods, so a `server.trustedProxies` network renders without `networkPolicy.enabled` | `false` |
 | `secrets.redisUrl` | `redis://` or `rediss://` URL written to the created secret's `valkey-url`, in place of `commonEnv.REDIS_URL` and the URL built from `VALKEY_HOST` | `""` |
 | `networkPolicy.externalValkeyCIDR` | CIDR of the external Redis or Valkey the server may reach; required with `networkPolicy.enabled` and `highAvailability.enabled` | `""` |
 | `networkPolicy.externalValkeyPort` | Its port, required with the CIDR | `null` |
@@ -309,7 +310,7 @@ server:
   trustedProxies: 10.244.0.0/16
 ```
 
-zone-server skips every hop in a trusted range as if it were a proxy, so a client whose own address is in one (a corporate install where users have private addresses, with `10.0.0.0/8` trusted) can put any address to the left of its own in `X-Forwarded-For` and be counted under that address instead. Every pod in the CIDR can do the same, so where pods other than the ingress controller share it, list the controller's pods more narrowly or keep them off zone-server with a network policy. See [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md#zone_trusted_proxies).
+zone-server skips every hop in a trusted range as if it were a proxy, so a client whose own address is in one (a corporate install where users have private addresses, with `10.0.0.0/8` trusted) can put any address to the left of its own in `X-Forwarded-For` and be counted under that address instead. Every pod in the CIDR can do the same, so where pods other than the ingress controller share it, list the controller's pods more narrowly or keep them off zone-server with a network policy. With `highAvailability.enabled` the render insists on one: see [docs/HA.md](../../docs/HA.md#isolating-the-server). See [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md#zone_trusted_proxies).
 
 ## Upgrading
 

@@ -58,10 +58,14 @@ secrets:
 # replicas would not share one external Redis or Valkey: with secrets.create,
 # secrets.redisUrl must name a host other than the in-cluster valkey service;
 # otherwise set externalValkey once secrets.existingSecret's redisUrl key
-# points at the managed endpoint, which helm template cannot check.
+# points at the managed endpoint, which helm template cannot check. It also
+# refuses a server.trustedProxies network wider than one host unless
+# networkPolicy.enabled keeps other pods off the server, or
+# externalNetworkPolicy states that a NetworkPolicy of your own does.
 highAvailability:
   enabled: false
   externalValkey: false
+  externalNetworkPolicy: false
 
 serviceAccount:
   create: true

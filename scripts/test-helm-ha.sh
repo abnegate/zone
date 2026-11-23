@@ -101,6 +101,7 @@ render_apps_ha() {
     render_ha zone-apps \
         --set "server.agentState.persistence.storageClass=$storage_class" \
         --set "server.trustedProxies=$trusted_proxies" \
+        --set highAvailability.externalNetworkPolicy=true \
         "$@"
 }
 
@@ -263,6 +264,8 @@ check_apps_ha_secret() {
 
     expect_renders 'a redis:// URL on a host that only starts with valkey renders' \
         render_apps_ha_created --set-string secrets.redisUrl=redis://valkey-cache.example.com:6379
+    expect_renders 'a redis:// URL on a host under a valkey domain outside the cluster renders' \
+        render_apps_ha_created --set-string secrets.redisUrl=redis://cache.valkey.example.com:6379
     expect_renders 'a redis:// URL on an IP address renders' \
         render_apps_ha_created --set-string 'secrets.redisUrl=redis://10.0.0.5:6379'
 }
@@ -279,7 +282,9 @@ check_apps_ha_refusals() {
         redis://valkey.zone:6379 \
         redis://valkey.zone.svc:6379 \
         redis://valkey.zone.svc.cluster.local:6379 \
-        rediss://:secret@valkey.zone.svc.cluster.local.:6380; do
+        rediss://:secret@valkey.zone.svc.cluster.local.:6380 \
+        redis://10-244-1-5.valkey.zone.svc.cluster.local:6379 \
+        redis://valkey-0.valkey.zone.svc:6379; do
         expect_refused "secrets.redisUrl naming the in-cluster valkey ($url) is refused" 'in-cluster valkey service' \
             render_apps_ha_created --set-string "secrets.redisUrl=$url"
     done
@@ -288,7 +293,8 @@ check_apps_ha_refusals() {
     expect_refused 'the template refuses a secrets.redisUrl scheme other than redis or rediss' 'must start with redis:// or rediss://' \
         render_apps_ha_created --skip-schema-validation --set-string secrets.redisUrl=http://redis.example.com:6379
     expect_refused 'a ReadWriteMany claim with no storage class is refused' 'storageClass must name a ReadWriteMany storage class' \
-        render_ha zone-apps --set highAvailability.externalValkey=true --set "server.trustedProxies=$trusted_proxies"
+        render_ha zone-apps --set highAvailability.externalValkey=true --set "server.trustedProxies=$trusted_proxies" \
+            --set highAvailability.externalNetworkPolicy=true
     for reason in server.trustedProxies "$trusted_proxies" "$loopback"; do
         expect_refused "HA without trusted proxies is refused, naming $reason" "$reason" \
             render_apps_ha_vouched --set server.trustedProxies=

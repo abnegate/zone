@@ -71,7 +71,7 @@ pub mod worker;
 pub use catchup::Catchup;
 pub use jitter::Jitter;
 pub use job::{Failure, Job, Sweeping};
-pub use leader::{LEADER_KEY, Leadership, Tenure, Timing};
+pub use leader::{LEADER_KEY, Leadership, Tenure, Timing, UnsafeTiming};
 pub use outcome::Outcome;
 pub use periodic::{Periodic, periodic};
 pub use registry::Registry;
