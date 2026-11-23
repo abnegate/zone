@@ -219,7 +219,16 @@ async fn entra_looks_up_creates_updates_and_deactivates_a_member() {
     )
     .await;
     assert_eq!(deactivated["active"], json!(false), "\"False\" deactivates");
-    assert!(!fixture.signed_in(&account.token).await);
+    assert!(
+        fixture.signed_in(&account.token).await,
+        "deactivating an account the organization adopted signed it out"
+    );
+    fixture
+        .inner
+        .client
+        .get_auth(&format!("/api/workspaces/{workspace}"), &account.token)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
     assert_eq!(
         fixture.seat(workspace, user).await,
         Some((WorkspaceRole::Member.as_str().to_owned(), false))
@@ -260,8 +269,8 @@ async fn entra_looks_up_creates_updates_and_deactivates_a_member() {
 async fn deleting_a_member_seats_successors_and_leaves_an_empty_workspace_ownerless() {
     let fixture = Fixture::new(PREFIX).await;
     let token = fixture.token().await;
-    let account = fixture.stranger().await;
-    let leaving = create(&fixture, &token.secret, &person(&account.email, "leaving")).await;
+    let leaving = create(&fixture, &token.secret, &person(&test_email(), "leaving")).await;
+    let account = fixture.sign_in(leaving).await;
     let staying_name = test_email();
     let staying = create(&fixture, &token.secret, &person(&staying_name, "staying")).await;
     let compliant = create(&fixture, &token.secret, &person(&test_email(), "compliant")).await;

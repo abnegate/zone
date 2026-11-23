@@ -2,6 +2,7 @@ use axum::http::{Method, StatusCode};
 use serde_json::{Value, json};
 use uuid::Uuid;
 use zone_server::auth::Permission;
+use zone_server::db::audit::actions;
 use zone_server::db::organization_members::{self, OrgRole};
 
 use crate::common::TestResponse;
@@ -9,7 +10,7 @@ use crate::common::scim::{
     self, Fixture, GROUP_SCHEMA, IssuedToken, PATCH_SCHEMA, USER_SCHEMA, assert_refused,
     assert_scim, resource_id,
 };
-use crate::common::sso::Account;
+use crate::common::sso::{Account, Audit};
 use crate::common::test_email;
 
 const PREFIX: &str = "scim_isolation";
@@ -546,6 +547,7 @@ async fn another_organizations_token_cannot_sign_out_its_members() {
             Some(false),
             "the deactivation did not take this organization's access"
         );
+        assert!(!fixture.admitted(fixture.organization, &person.token).await);
     }
     assert!(
         fixture.signed_in(&neighbour.member.token).await,
@@ -556,8 +558,13 @@ async fn another_organizations_token_cannot_sign_out_its_members() {
         "deactivating another organization's owner signed them out"
     );
     assert!(
-        !fixture.signed_in(&only_ours.token).await,
-        "a member of no other shared organization stayed signed in"
+        fixture.signed_in(&only_ours.token).await,
+        "deactivating an account the organization adopted signed it out"
+    );
+    assert!(
+        fixture
+            .admitted(neighbour.organization, &neighbour.owner.token)
+            .await
     );
 
     fixture
@@ -576,6 +583,164 @@ async fn another_organizations_token_cannot_sign_out_its_members() {
         held_in(&fixture, neighbour.organization, neighbour.member.id).await,
         Some((OrgRole::Member.as_str().to_owned(), None, true))
     );
+
+    fixture.cleanup().await;
+}
+
+fn signed_out(audit: &Audit) -> &Value {
+    &audit.new_values.as_ref().unwrap()["signed_out"]
+}
+
+#[tokio::test]
+async fn adopting_an_existing_account_never_signs_it_out() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    let person = fixture.stranger().await;
+    let path = format!("/Users/{}", person.id);
+    let mut inactive = user(&person.email, "00u-adopted");
+    inactive["active"] = json!(false);
+
+    let adopted = fixture.scim_post("/Users", &token.secret, &inactive).await;
+    assert_scim(&adopted, StatusCode::CREATED);
+    assert_eq!(
+        resource_id(&adopted),
+        person.id,
+        "the account joins as itself"
+    );
+    assert_eq!(
+        held_in(&fixture, fixture.organization, person.id)
+            .await
+            .map(|(.., active)| active),
+        Some(false)
+    );
+    assert!(
+        fixture.signed_in(&person.token).await,
+        "adopting an account as inactive signed it out"
+    );
+    assert!(!fixture.admitted(fixture.organization, &person.token).await);
+
+    let deactivated = fixture
+        .scim_patch(
+            &path,
+            &token.secret,
+            &patch(json!([{ "op": "replace", "value": { "active": false } }])),
+        )
+        .await;
+    assert_scim(&deactivated, StatusCode::OK);
+    assert!(
+        fixture.signed_in(&person.token).await,
+        "deactivating an adopted account signed it out"
+    );
+    assert!(!fixture.admitted(fixture.organization, &person.token).await);
+
+    fixture
+        .scim_delete(&path, &token.secret)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert_eq!(
+        held_in(&fixture, fixture.organization, person.id).await,
+        None
+    );
+    assert!(
+        fixture.signed_in(&person.token).await,
+        "deleting an adopted account signed it out"
+    );
+    assert!(!fixture.admitted(fixture.organization, &person.token).await);
+    assert!(
+        fixture.refreshes(&person).await,
+        "deprovisioning an adopted account revoked its refresh token"
+    );
+
+    let created = fixture.audits(actions::SCIM_USER_CREATED).await;
+    assert_eq!(created.len(), 1);
+    assert_eq!(signed_out(&created[0]), &json!(false));
+    let deleted = fixture.audits(actions::SCIM_USER_DELETED).await;
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(signed_out(&deleted[0]), &json!(false));
+    assert!(
+        fixture
+            .audits(actions::SCIM_USER_DEACTIVATED)
+            .await
+            .is_empty(),
+        "deactivating an inactive member that kept its sessions was audited as a sign-out"
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_account_this_organization_created_is_signed_out_when_it_leaves() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    let neighbour = neighbour(&fixture).await;
+    let deactivated = fixture
+        .sign_in(fixture.provision(&token.secret, &test_email()).await)
+        .await;
+    let deleted = fixture
+        .sign_in(fixture.provision(&token.secret, &test_email()).await)
+        .await;
+    let shared = fixture
+        .sign_in(fixture.provision(&token.secret, &test_email()).await)
+        .await;
+    organization_members::add_member(
+        fixture.pool(),
+        neighbour.organization,
+        shared.id,
+        OrgRole::Member,
+        None,
+    )
+    .await
+    .unwrap();
+
+    for person in [&deactivated, &shared] {
+        assert_scim(
+            &fixture
+                .scim_patch(
+                    &format!("/Users/{}", person.id),
+                    &token.secret,
+                    &patch(json!([{ "op": "replace", "value": { "active": false } }])),
+                )
+                .await,
+            StatusCode::OK,
+        );
+    }
+    fixture
+        .scim_delete(&format!("/Users/{}", deleted.id), &token.secret)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    for person in [&deactivated, &deleted] {
+        assert!(
+            !fixture.signed_in(&person.token).await,
+            "an account this organization created stayed signed in"
+        );
+        assert!(
+            !fixture.refreshes(person).await,
+            "an account this organization created kept its refresh token"
+        );
+    }
+    assert!(
+        fixture.signed_in(&shared.token).await,
+        "an account another organization shares was signed out"
+    );
+    assert!(
+        fixture
+            .admitted(neighbour.organization, &shared.token)
+            .await
+    );
+    assert!(!fixture.admitted(fixture.organization, &shared.token).await);
+
+    let deactivations = fixture.audits(actions::SCIM_USER_DEACTIVATED).await;
+    for (person, expected) in [(&deactivated, true), (&shared, false)] {
+        let audit = deactivations
+            .iter()
+            .find(|audit| audit.resource_id == Some(person.id))
+            .unwrap();
+        assert_eq!(signed_out(audit), &json!(expected));
+    }
+    let deletions = fixture.audits(actions::SCIM_USER_DELETED).await;
+    assert_eq!(deletions.len(), 1);
+    assert_eq!(signed_out(&deletions[0]), &json!(true));
 
     fixture.cleanup().await;
 }

@@ -684,12 +684,16 @@ async fn deactivating_then_reactivating_restores_workspaces_and_the_custom_role(
         seat(&fixture, workspace, person.id).await,
         Some((WorkspaceRole::Admin.as_str().to_owned(), false))
     );
+    assert!(
+        fixture.signed_in(&person.token).await,
+        "deactivating an account the organization adopted signed it out"
+    );
     fixture
         .inner
         .client
-        .get_auth("/api/auth/sessions", &person.token)
+        .get_auth(&format!("/api/workspaces/{workspace}"), &person.token)
         .await
-        .assert_status(StatusCode::UNAUTHORIZED);
+        .assert_status(StatusCode::FORBIDDEN);
     let listed = fixture
         .scim_get(
             &format!("/Users?filter=userName%20eq%20%22{}%22", person.email),
@@ -725,9 +729,19 @@ async fn deactivating_then_reactivating_restores_workspaces_and_the_custom_role(
         seat(&fixture, workspace, person.id).await,
         Some((WorkspaceRole::Admin.as_str().to_owned(), true))
     );
+    fixture
+        .inner
+        .client
+        .get_auth(&format!("/api/workspaces/{workspace}"), &person.token)
+        .await
+        .assert_status(StatusCode::OK);
 
     let deactivations = fixture.audits(actions::SCIM_USER_DEACTIVATED).await;
     assert_eq!(deactivations[0].actor_id, None);
+    assert_eq!(
+        deactivations[0].new_values.as_ref().unwrap()["signed_out"],
+        json!(false)
+    );
     let reactivations = fixture.audits(actions::SCIM_USER_REACTIVATED).await;
     assert_eq!(reactivations.len(), 1);
     assert_eq!(reactivations[0].actor_id, None);
@@ -914,9 +928,29 @@ async fn an_organization_over_its_budget_is_told_when_to_retry() {
     fixture.cleanup().await;
 }
 
-const REFUSE_REVOCATION: &str = "CREATE FUNCTION refuse_revocation() RETURNS trigger \
-     LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'session revocation refused'; END $$";
+const REFUSE_REVOCATION: &str = "CREATE OR REPLACE FUNCTION refuse_revocation() \
+     RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'revocation refused'; END $$";
 const ALLOW_REVOCATION: &str = "DROP TRIGGER refuse_revocation ON sessions";
+const REFUSE_INVITATION_REVOCATION: &str = "CREATE TRIGGER refuse_revocation \
+     BEFORE DELETE ON invitations FOR EACH ROW EXECUTE FUNCTION refuse_revocation()";
+const ALLOW_INVITATION_REVOCATION: &str = "DROP TRIGGER refuse_revocation ON invitations";
+
+/// Makes deleting any invitation fail until [`allow_invitation_revocation`].
+async fn refuse_invitation_revocation(fixture: &Fixture) {
+    for statement in [REFUSE_REVOCATION, REFUSE_INVITATION_REVOCATION] {
+        sqlx::query(statement)
+            .execute(fixture.pool())
+            .await
+            .unwrap();
+    }
+}
+
+async fn allow_invitation_revocation(fixture: &Fixture) {
+    sqlx::query(ALLOW_INVITATION_REVOCATION)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+}
 
 /// Makes revoking any session of `users` fail until [`allow_revocation`].
 async fn refuse_revocation(fixture: &Fixture, users: &[Uuid]) {
@@ -988,15 +1022,13 @@ async fn blocked(fixture: &Fixture) {
 async fn scim_removal_revokes_sessions_and_invitations_in_its_transaction() {
     let fixture = Fixture::new(PREFIX).await;
     let token = fixture.token().await;
-    let removed = fixture.stranger().await;
-    let deactivated = fixture.stranger().await;
+    let removed = fixture
+        .sign_in(fixture.provision(&token.secret, &address()).await)
+        .await;
+    let deactivated = fixture
+        .sign_in(fixture.provision(&token.secret, &address()).await)
+        .await;
     let linked = format!("Linked-{}", address());
-    for (person, external_id) in [(&removed, "00u-removed"), (&deactivated, "00u-deactivated")] {
-        fixture
-            .scim_post("/Users", &token.secret, &user(&person.email, external_id))
-            .await
-            .assert_status(StatusCode::CREATED);
-    }
     assert_scim(
         &fixture
             .scim_patch(
@@ -1122,7 +1154,8 @@ async fn a_post_creating_an_inactive_member_commits_nothing_when_it_fails() {
     let person = fixture.stranger().await;
     let mut body = user(&person.email, "00u-inactive");
     body["active"] = json!(false);
-    refuse_revocation(&fixture, &[person.id]).await;
+    invite(&fixture, &person.email).await;
+    refuse_invitation_revocation(&fixture).await;
 
     let failed = fixture.scim_post("/Users", &token.secret, &body).await;
     assert_refused(&failed, StatusCode::INTERNAL_SERVER_ERROR, None);
@@ -1131,8 +1164,9 @@ async fn a_post_creating_an_inactive_member_commits_nothing_when_it_fails() {
         None,
         "a failed inactive provisioning left a membership"
     );
+    assert_eq!(pending(&fixture).await, 1);
 
-    allow_revocation(&fixture).await;
+    allow_invitation_revocation(&fixture).await;
     let created = fixture.scim_post("/Users", &token.secret, &body).await;
     assert_scim(&created, StatusCode::CREATED);
     assert_eq!(created.json_value()["active"], json!(false));
@@ -1140,17 +1174,23 @@ async fn a_post_creating_an_inactive_member_commits_nothing_when_it_fails() {
         fixture.holding(person.id).await,
         Some((OrgRole::Member.as_str().to_owned(), None, false))
     );
-    assert!(!fixture.signed_in(&person.token).await);
+    assert_eq!(pending(&fixture).await, 0);
+    assert!(
+        fixture.signed_in(&person.token).await,
+        "adopting an account as inactive signed it out"
+    );
     assert_eq!(
         fixture.scim_actions().await,
-        vec![actions::SCIM_USER_CREATED.to_owned()],
+        vec![
+            actions::INVITATION_REVOKED.to_owned(),
+            actions::SCIM_USER_CREATED.to_owned(),
+        ],
         "an inactive provisioning is one created member"
     );
     let created = fixture.audits(actions::SCIM_USER_CREATED).await;
-    assert_eq!(
-        created[0].new_values.as_ref().unwrap()["active"],
-        json!(false)
-    );
+    let created = created[0].new_values.as_ref().unwrap();
+    assert_eq!(created["active"], json!(false));
+    assert_eq!(created["signed_out"], json!(false));
 
     fixture.cleanup().await;
 }

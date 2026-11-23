@@ -736,27 +736,47 @@ async fn a_removed_member_accepting_an_invitation_starts_without_their_old_works
     );
 }
 
+async fn deprovision(client: &TestClient, organization: Uuid, user: Uuid) -> members::SignOut {
+    let mut transaction = client.state().db().begin().await.unwrap();
+    let deprovisioned = members::deprovision(&mut transaction, organization, user)
+        .await
+        .expect("the member is deprovisioned");
+    transaction.commit().await.unwrap();
+    deprovisioned.sign_out
+}
+
 #[tokio::test]
-async fn deprovisioning_answers_the_members_token_with_unauthorized() {
+async fn deprovisioning_signs_out_only_an_account_the_organization_created() {
     let client = TestClient::with_db().await;
     let owner = account(&client).await;
     let member = account(&client).await;
     let tenant = tenant(&client, &owner).await;
     join(&client, &owner, tenant.organization, &member).await;
+
+    let sign_out = deprovision(&client, tenant.organization, member.user).await;
+    assert!(
+        !matches!(sign_out, members::SignOut::Revoked { .. }),
+        "an account the organization didn't create was signed out: {sign_out:?}"
+    );
     client
         .get_auth("/api/organizations", &member.token)
         .await
         .assert_status(StatusCode::OK);
 
-    let mut transaction = client.state().db().begin().await.unwrap();
-    let deprovisioned = members::deprovision(&mut transaction, tenant.organization, member.user)
-        .await
-        .expect("the member is deprovisioned");
-    transaction.commit().await.unwrap();
-
+    sqlx::query(
+        "INSERT INTO scim_users (organization_id, user_id, user_name, provisioned_password) \
+         VALUES ($1, $2, $3, 'provisioned')",
+    )
+    .bind(tenant.organization)
+    .bind(member.user)
+    .bind(&member.email)
+    .execute(client.state().db())
+    .await
+    .unwrap();
+    let sign_out = deprovision(&client, tenant.organization, member.user).await;
     assert!(
-        matches!(deprovisioned.sign_out, members::SignOut::Revoked { sessions } if sessions >= 1),
-        "no session was revoked: {deprovisioned:?}"
+        matches!(sign_out, members::SignOut::Revoked { sessions } if sessions >= 1),
+        "no session was revoked: {sign_out:?}"
     );
     client
         .get_auth("/api/organizations", &member.token)
