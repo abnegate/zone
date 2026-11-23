@@ -4,6 +4,7 @@
 #   helm upgrade --install zone-apps helm/zone-apps -f helm/zone-apps/values-ha.yaml \
 #     --set server.agentState.persistence.storageClass=<ReadWriteMany class> \
 #     --set server.trustedProxies=<ingress controller pod CIDR> \
+#     --set highAvailability.externalNetworkPolicy=true \
 #     --set highAvailability.externalValkey=true
 #
 # It needs Kubernetes 1.27 or later, at least 3 schedulable nodes, a
@@ -12,9 +13,13 @@
 # highAvailability.externalValkey once secrets.existingSecret's redisUrl key
 # points at it, or set secrets.create with secrets.redisUrl.
 #
-# server.trustedProxies is required: the render fails without it. Each server
-# pod registers as a fleet runner named after its pod, so the render also
-# fails when server.env or commonEnv sets one ZONE_RUNNER_NAME for them all.
+# server.trustedProxies is required: the render fails without it. A trusted
+# network wider than one host lets every pod in it forge X-Forwarded-For, so
+# the render also fails unless networkPolicy.enabled keeps other pods off the
+# server, or highAvailability.externalNetworkPolicy states that a NetworkPolicy
+# of your own does (see docs/HA.md). Each server pod registers as a fleet
+# runner named after its pod, so the render also fails when server.env or
+# commonEnv sets one ZONE_RUNNER_NAME for them all.
 
 highAvailability:
   enabled: true
@@ -62,7 +67,8 @@ server:
   terminationGracePeriodSeconds: 60
 
   # Required. Your ingress controller's pod CIDR, such as 10.244.0.0/16 on
-  # kind, so zone-server reads each client's address from X-Forwarded-For.
+  # kind, so zone-server reads each client's address from X-Forwarded-For,
+  # with a network policy that admits only the controller to the server.
   # Never a range your clients use. 127.0.0.1/32,::1/128 trusts loopback only.
   trustedProxies: ""
 

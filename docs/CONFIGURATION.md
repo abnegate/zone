@@ -119,8 +119,10 @@ For production, regenerate secrets for security.
   value in `.env` replaces either one. The `zone-apps` Helm chart leaves it
   unset unless you set `server.trustedProxies`, and warns after an install
   that leaves it empty. Its high-availability profile refuses to render
-  without it: to trust loopback only there, set `127.0.0.1/32,::1/128`. See
-  [HA.md](HA.md#installing).
+  without it: to trust loopback only there, set `127.0.0.1/32,::1/128`. It
+  also refuses a network wider than one host unless a network policy keeps
+  every pod but the ingress controller off the server. See
+  [HA.md](HA.md#isolating-the-server).
 - **Description**: The reverse proxies whose `X-Forwarded-For` header Zone
   believes, as a comma-separated list of IP addresses and networks. Zone uses
   the client address it resolves for the single sign-on rate limit and for

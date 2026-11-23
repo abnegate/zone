@@ -19,6 +19,7 @@ litellm_deployment=litellm
 server_selector=app.kubernetes.io/instance=zone-apps,app.kubernetes.io/component=server
 server_port=8000
 readiness_path=/health/ready
+trusted_proxies='127.0.0.1/32,::1/128'
 database_probe_path=/api/auth/sso/providers
 failover_window=60
 poll_interval=0.5
@@ -31,7 +32,6 @@ keep_images=false
 workers=$default_workers
 database_instances=$database_instances_ha
 pods_per_node=1
-pod_subnet=''
 server_image=''
 console_image=''
 suffix=''
@@ -364,7 +364,7 @@ secrets:
   litellmMasterKey: "$litellm_key"
   redisUrl: redis://$cache_name:6379
 server:
-  trustedProxies: $pod_subnet
+  trustedProxies: "$trusted_proxies"
   image:
 $(image_values "$server_image")
   resources:
@@ -451,7 +451,7 @@ Plan:
   images      server $server_image ($(image_source "$server_image"))
               console $console_image ($(image_source "$console_image"))
   charts      zone-infra, zone-ai, zone-apps with values-ha.yaml and the kind overrides
-              (server.trustedProxies $pod_subnet)
+              (server.trustedProxies $trusted_proxies: the smoke has no ingress controller)
   wait        $replicas Ready server pods, at most $pods_per_node per node, zone_cluster_bus_connected 1 on each
   disruptions with $readiness_path polled through the Service every ${poll_interval}s:
               delete a server pod; kubectl rollout restart (at most $pods_per_node server pods per node after it);
@@ -553,8 +553,6 @@ write_kind_config() {
     sed "s|\${ZONE_HA_SHARED_DIR}|$workdir/shared|g" "$root/k8s/kind-ha-config.yaml" | with_workers "$workers" >"$config"
     count=$(grep -c '^  - role: worker$' "$config" || true)
     [ "$count" -eq "$workers" ] || die "the generated kind config has $count workers, not $workers"
-    pod_subnet=$(awk -F'"' '/^  podSubnet:/ { print $2 }' "$config")
-    [ -n "$pod_subnet" ] || die 'k8s/kind-ha-config.yaml sets no networking.podSubnet'
 }
 
 create_cluster() {

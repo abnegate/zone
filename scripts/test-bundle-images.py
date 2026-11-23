@@ -163,6 +163,7 @@ OPERATOR_INPUTS = (
     OperatorInput('zone-apps', 'values-ha.yaml', 'highAvailability.externalValkey', True),
     OperatorInput('zone-apps', 'values-ha.yaml', 'server.agentState.persistence.storageClass', 'test-rwx'),
     OperatorInput('zone-apps', 'values-ha.yaml', 'server.trustedProxies', '10.244.0.0/16'),
+    OperatorInput('zone-apps', 'values-ha.yaml', 'highAvailability.externalNetworkPolicy', True),
     OperatorInput('zone-infra', 'values-ha.yaml', 'postgres.backup.objectStore', 'zone-backups'),
 )
 

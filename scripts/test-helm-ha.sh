@@ -100,6 +100,7 @@ render_apps_ha() {
     render_ha zone-apps \
         --set "server.agentState.persistence.storageClass=$storage_class" \
         --set "server.trustedProxies=$trusted_proxies" \
+        --set highAvailability.externalNetworkPolicy=true \
         "$@"
 }
 
@@ -275,7 +276,8 @@ check_apps_ha_refusals() {
     expect_refused 'the template refuses a secrets.redisUrl scheme other than redis or rediss' 'must start with redis:// or rediss://' \
         render_apps_ha_created --skip-schema-validation --set-string secrets.redisUrl=http://redis.example.com:6379
     expect_refused 'a ReadWriteMany claim with no storage class is refused' 'storageClass must name a ReadWriteMany storage class' \
-        render_ha zone-apps --set highAvailability.externalValkey=true --set "server.trustedProxies=$trusted_proxies"
+        render_ha zone-apps --set highAvailability.externalValkey=true --set "server.trustedProxies=$trusted_proxies" \
+            --set highAvailability.externalNetworkPolicy=true
     for reason in server.trustedProxies "$trusted_proxies" "$loopback"; do
         expect_refused "HA without trusted proxies is refused, naming $reason" "$reason" \
             render_apps_ha_vouched --set server.trustedProxies=

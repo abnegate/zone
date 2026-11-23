@@ -116,6 +116,87 @@ assert_trusted '' \
 assert_warned 'a blank server.trustedProxies is warned about' \
     --set-string 'server.trustedProxies= '
 
+render_ha() {
+    helm template zone-apps "$chart" --namespace zone \
+        -f "$chart/values-ha.yaml" \
+        --set highAvailability.externalValkey=true \
+        --set server.agentState.persistence.storageClass=test-rwx "$@"
+}
+
+isolated() {
+    render_ha "$@" \
+        --set networkPolicy.enabled=true \
+        --set networkPolicy.externalValkeyCIDR=10.20.0.0/16 \
+        --set networkPolicy.externalValkeyPort=6379
+}
+
+assert_ha_refused() {
+    message=$1
+    reason=$2
+    shift 2
+    if refusal=$(render_ha "$@" 2>&1 >/dev/null); then
+        printf '%s\n rendered instead of being refused\n' "$message" >&2
+        exit 1
+    fi
+    for expected in "$reason" networkPolicy.enabled highAvailability.externalNetworkPolicy; do
+        case "$refusal" in
+            *"$expected"*) ;;
+            *)
+                printf '%s\n refused without "%s":\n%s\n' "$message" "$expected" "$refusal" >&2
+                exit 1
+                ;;
+        esac
+    done
+}
+
+assert_ha_renders() {
+    message=$1
+    shift
+    if ! output=$("$@" 2>&1 >/dev/null); then
+        printf '%s\n the render was refused:\n%s\n' "$message" "$output" >&2
+        exit 1
+    fi
+}
+
+assert_ha_refused 'HA trusting a pod network with no network policy is refused' \
+    'trusts the network 10.244.0.0/16' \
+    --set server.trustedProxies=10.244.0.0/16
+
+assert_ha_refused 'HA trusting a network through server.env is refused' \
+    'trusts the network 10.42.0.0/16' \
+    --set server.env.ZONE_TRUSTED_PROXIES=10.42.0.0/16
+
+assert_ha_refused 'HA trusting an IPv6 network is refused' \
+    'trusts the network fd00:10:244::/56' \
+    --set-string 'server.trustedProxies=127.0.0.1/32\,fd00:10:244::/56'
+
+assert_ha_refused 'HA naming only the networks in a list of hosts and networks' \
+    'trusts the network 10.0.0.0/8, 172.31.0.0/24' \
+    --set-string 'server.trustedProxies=10.0.0.0/8\, 10.244.1.7/32\,172.31.0.0/24'
+
+assert_ha_refused 'HA trusting every address is refused' \
+    'trusts the network 0.0.0.0/0' \
+    --set server.trustedProxies=0.0.0.0/0
+
+assert_ha_renders 'HA trusting a pod network renders with the chart network policy' \
+    isolated --set server.trustedProxies=10.244.0.0/16
+
+assert_ha_renders 'HA trusting a pod network renders with a network policy of your own' \
+    render_ha --set server.trustedProxies=10.244.0.0/16 --set highAvailability.externalNetworkPolicy=true
+
+assert_ha_renders 'HA trusting loopback only renders without a network policy' \
+    render_ha --set-string 'server.trustedProxies=127.0.0.1/32\,::1/128'
+
+assert_ha_renders 'HA trusting the loopback network renders without a network policy' \
+    render_ha --set server.trustedProxies=127.0.0.0/8
+
+assert_ha_renders 'HA trusting single addresses renders without a network policy' \
+    render_ha --set-string 'server.trustedProxies=10.244.1.7\,10.244.1.8/32\,fd00::8/128\,198.51.100.7:4711'
+
+assert_trusted '10.244.0.0/16' \
+    'outside HA a trusted network needs no network policy' \
+    --set server.trustedProxies=10.244.0.0/16
+
 policies() {
     helm template zone-apps "$chart" --namespace zone \
         --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true "$@"

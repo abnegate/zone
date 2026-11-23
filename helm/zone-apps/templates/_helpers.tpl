@@ -124,10 +124,11 @@ secrets.redisUrl, refused unless its scheme is redis or rediss.
 
 {{/*
 Fails a highAvailability.enabled render whose replicas would not share one
-external, managed Redis or Valkey, or that leaves the server's trusted proxies
-unset. helm template cannot read an existing secret, so without secrets.create
-the operator vouches for the Redis or Valkey with
-highAvailability.externalValkey.
+external, managed Redis or Valkey, that leaves the server's trusted proxies
+unset, or that trusts a network no network policy closes to other pods. helm
+template cannot read an existing secret or the cluster's own policies, so the
+operator vouches for those with highAvailability.externalValkey and
+highAvailability.externalNetworkPolicy.
 */}}
 {{- define "zone-apps.highAvailability.validate" -}}
 {{- if .Values.secrets.create -}}
@@ -146,7 +147,11 @@ highAvailability.externalValkey.
 {{- fail (printf "highAvailability.enabled needs an external Redis or Valkey: point key %s of secrets.existingSecret at it and set highAvailability.externalValkey=true, or set secrets.create with secrets.redisUrl" (include "zone-apps.secretKey" (dict "root" . "name" "redisUrl" "default" "valkey-url"))) -}}
 {{- end -}}
 {{- if not (include "zone-apps.server.trustedProxies" .) -}}
-{{- fail "highAvailability.enabled needs server.trustedProxies, or zone-server sees every client at the ingress controller's address and throttles their single sign-on as one: set it to your ingress controller's pod CIDR, such as 10.244.0.0/16 on kind, or to 127.0.0.1/32,::1/128 to trust loopback only (escape the comma as \\, in --set)" -}}
+{{- fail "highAvailability.enabled needs server.trustedProxies, or zone-server sees every client at the ingress controller's address and throttles their single sign-on as one: set it to your ingress controller's pod CIDR, such as 10.244.0.0/16 on kind, with networkPolicy.enabled or highAvailability.externalNetworkPolicy, or to 127.0.0.1/32,::1/128 to trust loopback only (escape the comma as \\, in --set)" -}}
+{{- end -}}
+{{- $networks := include "zone-apps.server.trustedNetworks" . -}}
+{{- if and $networks (not .Values.networkPolicy.enabled) (not .Values.highAvailability.externalNetworkPolicy) -}}
+{{- fail (printf "server.trustedProxies trusts the network %s, and on most CNIs every pod in it can reach zone-server directly and forge X-Forwarded-For, evading the per-address single sign-on and SCIM limits and choosing the address recorded on its sessions and devices: set networkPolicy.enabled so only the ingress controller's namespace (networkPolicy.ingressNamespace) reaches the server, or enforce a NetworkPolicy of your own that does and set highAvailability.externalNetworkPolicy=true" $networks) -}}
 {{- end -}}
 {{- end }}
 
@@ -291,6 +296,27 @@ leaves it unset, so zone-server trusts loopback only.
 */}}
 {{- define "zone-apps.server.trustedProxies" -}}
 {{- coalesce (get (default dict .Values.server.env) "ZONE_TRUSTED_PROXIES") .Values.server.trustedProxies | default "" | toString | trim -}}
+{{- end }}
+
+{{/*
+The entries of ZONE_TRUSTED_PROXIES wider than one host, joined with ", ".
+A loopback network counts as one host: only the pod itself reaches it.
+*/}}
+{{- define "zone-apps.server.trustedNetworks" -}}
+{{- $networks := list -}}
+{{- range splitList "," (include "zone-apps.server.trustedProxies" .) -}}
+{{- $entry := trim . -}}
+{{- if contains "/" $entry -}}
+{{- $address := splitList "/" $entry | first -}}
+{{- $prefix := splitList "/" $entry | last | atoi -}}
+{{- $host := ternary 128 32 (contains ":" $address) -}}
+{{- $loopback := and (hasPrefix "127." $address) (ge $prefix 8) -}}
+{{- if not (or (ge $prefix $host) $loopback) -}}
+{{- $networks = append $networks $entry -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- join ", " $networks -}}
 {{- end }}
 
 {{/*

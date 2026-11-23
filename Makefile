@@ -269,7 +269,7 @@ tilt-down: ## Stop Tilt and clean up
 	@echo "$(GREEN)Tilt stopped. Kind cluster still running.$(NC)"
 	@echo "$(YELLOW)Run 'make kind-delete' to remove the cluster entirely.$(NC)"
 
-HELM_HA_APPS := --set highAvailability.externalValkey=true --set server.agentState.persistence.storageClass=test-rwx --set server.trustedProxies=10.244.0.0/16
+HELM_HA_APPS := --set highAvailability.externalValkey=true --set server.agentState.persistence.storageClass=test-rwx --set server.trustedProxies=10.244.0.0/16 --set highAvailability.externalNetworkPolicy=true
 HELM_HA_INFRA := --set postgres.backup.objectStore=zone-backups
 
 helm-lint: ## Lint and render Helm charts

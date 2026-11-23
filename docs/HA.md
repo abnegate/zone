@@ -71,14 +71,51 @@ helm upgrade --install zone-apps helm/zone-apps --namespace zone \
   -f helm/zone-apps/values-ha.yaml \
   --set server.agentState.persistence.storageClass=<ReadWriteMany class> \
   --set server.trustedProxies=<ingress controller pod CIDR> \
+  --set highAvailability.externalNetworkPolicy=true \
   --set highAvailability.externalValkey=true
 ```
 
 `server.trustedProxies` lists the proxies whose `X-Forwarded-For` zone-server believes, such as `10.244.0.0/16`, the pod CIDR of kind and flannel; use your ingress controller's pod CIDR. Every request reaches the servers through the ingress controller, so without it every client shares the controller's address and its [single sign-on limit](#shared-limits). An HA render without it fails, and the message gives that example. To trust loopback only on purpose, set it to `127.0.0.1/32,::1/128` (escape the comma for `--set`: `--set 'server.trustedProxies=127.0.0.1/32\,::1/128'`). See [ZONE_TRUSTED_PROXIES](CONFIGURATION.md#zone_trusted_proxies) for what a trusted range allows.
 
+A trusted network has to be closed to everything but the ingress controller; see [Isolating the server](#isolating-the-server). `highAvailability.externalNetworkPolicy=true` states that a policy of your own does that.
+
 `highAvailability.externalValkey=true` states that the existing secret's `valkey-url` key already points at the managed endpoint; use `secrets.create` with `secrets.redisUrl` instead to have the chart write it (see [Valkey](#valkey)). The secrets the charts read, and the 32-character `JWT_SECRET` and `ENCRYPTION_KEY`, are the same as for any install: see [helm/QUICK_START.md](../helm/QUICK_START.md).
 
 Set `postgres.storage.size` and `postgres.storage.storageClass` for the Postgres instances, and `server.agentState.persistence.size` (100Gi in the profile) for the shared volume. Every CLI turn writes a transcript to the shared volume and Zone prunes none of them, so size it for growth.
+
+### Isolating the server
+
+On most CNIs a pod CIDR holds every pod in the cluster, not just the ingress controller's. Any of them that can open a connection to a server pod is then a trusted proxy: it can put any address in `X-Forwarded-For`, so it is counted under addresses of its choosing by the single sign-on and SCIM limits, and it picks the address recorded on its sessions and devices. So an HA render whose `server.trustedProxies` (or `server.env.ZONE_TRUSTED_PROXIES`) holds a network wider than one host fails unless one of these keeps other pods off the server:
+
+- **`networkPolicy.enabled`**: the chart's policies admit only pods in `networkPolicy.ingressNamespace` (`haproxy-controller` by default) to the server's port, and need `networkPolicy.externalValkeyCIDR` and `networkPolicy.externalValkeyPort` in HA. They also limit the server's egress to DNS, Postgres, Valkey and LiteLLM, which cuts it off from single sign-on identity providers, git hosts and model providers, so few installs can use them as they stand.
+- **A policy of your own**, stated with `highAvailability.externalNetworkPolicy=true`. The chart cannot see it, so the setting is your statement that it holds. The least it takes, for a release named `zone-apps` behind the HAProxy controller:
+
+  ```yaml
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: zone-apps-server-from-ingress
+    namespace: zone
+  spec:
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/instance: zone-apps
+        app.kubernetes.io/component: server
+    policyTypes:
+      - Ingress
+    ingress:
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: haproxy-controller
+        ports:
+          - protocol: TCP
+            port: 8000
+  ```
+
+  Add a rule for your Prometheus if it scrapes `/metrics`. Your CNI must enforce NetworkPolicy.
+
+A single address (`10.244.1.7`, `/32` or `/128`) and loopback networks need neither, since no other pod can hold them.
 
 ## Sizing
 
@@ -272,6 +309,7 @@ To carry codex logins, session files and clones over, for a release named `zone-
      -f helm/zone-apps/values-ha.yaml \
      --set server.agentState.persistence.storageClass=<ReadWriteMany class> \
      --set server.trustedProxies=<ingress controller pod CIDR> \
+     --set highAvailability.externalNetworkPolicy=true \
      --set highAvailability.externalValkey=true \
      --set server.autoscaling.enabled=false --set server.replicaCount=0
    ```
@@ -446,7 +484,7 @@ What it sets up:
 - One control plane and N workers from `k8s/kind-ha-config.yaml`, with no host ports; it reaches the cluster through the API server.
 - A temporary host directory mounted at `/shared` on every node, behind a hostPath ReadWriteMany volume, as the agent-state volume.
 - CloudNativePG 1.30.0, and a single throwaway Valkey standing in for a managed one.
-- The three charts with `values-ha.yaml` and overrides for generated secrets, small resources, the shared storage class and `server.trustedProxies` set to the kind pod subnet, `10.244.0.0/16`.
+- The three charts with `values-ha.yaml` and overrides for generated secrets, small resources, the shared storage class and `server.trustedProxies` set to `127.0.0.1/32,::1/128`: the smoke reaches the servers through the API server, with no ingress controller in front of them, so nothing it sends needs a proxy trusted.
 - With fewer than 3 workers, Postgres runs N instances with `postgres.synchronous.dataDurability: preferred`. Each instance needs a node of its own, and under `required` a primary left without a standby stops committing. Two nodes are tested for the server but are not a supported topology.
 
 What it checks, in order. A failure is recorded and the run continues where it can; it exits non-zero if anything failed.
