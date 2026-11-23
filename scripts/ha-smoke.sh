@@ -39,7 +39,6 @@ cluster=''
 workdir=''
 kubeconfig=''
 cluster_created=false
-drained_node=''
 built_images=()
 poller=''
 failures=()
@@ -921,14 +920,10 @@ servers_left_node() {
 }
 
 uncordon_node() {
-    if [ -z "$drained_node" ]; then
-        return
-    fi
-    if kubectl uncordon "$drained_node" >/dev/null; then
-        log "uncordoned $drained_node"
-        drained_node=''
+    if kubectl uncordon "$1" >/dev/null; then
+        log "uncordoned $1"
     else
-        log "could not uncordon $drained_node"
+        log "could not uncordon $1"
     fi
 }
 
@@ -936,7 +931,6 @@ drain_node() {
     local node
     node=$(drain_candidate) || die 'could not find the node of the Postgres primary'
     [ -n "$node" ] || die 'no worker runs a Ready server pod without the Postgres primary'
-    drained_node=$node
     log "draining $node"
     if kubectl drain "$node" --ignore-daemonsets --delete-emptydir-data --timeout="$drain_timeout"; then
         log "drained $node"
@@ -945,7 +939,7 @@ drain_node() {
     fi
     wait_until 300 servers_ready || record_failure "the server never returned to $replicas Ready pods while $node was drained"
     servers_left_node "$node" || record_failure "a server pod is still on $node after the drain"
-    uncordon_node
+    uncordon_node "$node"
     check_database_instances "after $node was uncordoned"
 }
 
@@ -1005,7 +999,6 @@ cleanup() {
         if [ "$status" -ne 0 ]; then
             show_diagnostics
         fi
-        uncordon_node
         delete_cluster
     fi
     remove_built_images
