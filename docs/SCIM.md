@@ -760,7 +760,7 @@ identity provider's logs instead (Okta's **View Logs**, Entra's
 | Entra's lookups fail with `invalidFilter` | The matching attribute is `userName`, not an email attribute. |
 | A group's members don't get its role | The group is mapped. The identity provider has created or updated the members. They aren't owners. Another mapped group they're in may win. |
 | Someone removed in Zone keeps coming back | Remove them at the identity provider; it adds people it still assigns. |
-| Requests fail with 429 | The provider is sending more than 600 requests a minute for the organization, or more than 1,200 from one address, to one replica. It retries after `Retry-After`. |
+| Requests fail with 429 | The provider is sending more than 600 requests a minute for the organization to one replica, or its address sent one replica more than 1,200 rejected tokens in a minute and the provider's token isn't active. It retries after `Retry-After`. |
 | Provisioning stopped after a token change | Paste the new secret into the provider. A rotated secret stops working at once. |
 
 ## Audit log
