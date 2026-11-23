@@ -59,7 +59,7 @@ server:
       timeoutSeconds: 3
       failureThreshold: 2
 
-  terminationGracePeriodSeconds: 60
+  terminationGracePeriodSeconds: 75
 
   # Required. Your ingress controller's pod CIDR, such as 10.244.0.0/16 on
   # kind, so zone-server reads each client's address from X-Forwarded-For.

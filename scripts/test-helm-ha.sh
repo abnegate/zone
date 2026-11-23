@@ -6,6 +6,7 @@ storage_class=test-rwx
 trusted_proxies=10.244.0.0/16
 loopback='127.0.0.1/32,::1/128'
 failures=0
+shutdown_tail=27
 
 jwt_secret=0123456789abcdef0123456789abcdef
 encryption_key=fedcba9876543210fedcba9876543210
@@ -120,6 +121,17 @@ mount_subpath() {
     printf '%s | .volumeMounts[] | select(.mountPath == "%s") | .name + ":" + .subPath' "$apps_container" "$1"
 }
 
+expect_shutdown_budget() {
+    rendered=$1
+    termination=$(query "$rendered" "$apps_server | .spec.template.spec.terminationGracePeriodSeconds")
+    delay=$(query "$rendered" "$apps_container | .env[] | select(.name == \"ZONE_SHUTDOWN_DELAY_SECONDS\") | .value")
+    grace=$(query "$rendered" "$apps_container | .env[] | select(.name == \"ZONE_SHUTDOWN_GRACE_SECONDS\") | .value")
+    budget=$((delay + grace + shutdown_tail))
+    if [ "$termination" -lt "$budget" ]; then
+        fail 'a terminating server has time for its whole shutdown' " terminationGracePeriodSeconds $termination is under delay $delay + grace $grace + $shutdown_tail = $budget"
+    fi
+}
+
 check_apps_ha() {
     rendered=$(rendered_or_fail 'the zone-apps HA profile renders' \
         render_apps_ha_vouched \
@@ -164,12 +176,13 @@ check_apps_ha() {
         "$apps_container | .livenessProbe | .httpGet.path + \" \" + (.periodSeconds | tostring) + \" \" + (.failureThreshold | tostring)"
     expect 'the startup probe gives migrations 10 minutes' '/health 10 60' "$rendered" \
         "$apps_container | .startupProbe | .httpGet.path + \" \" + (.periodSeconds | tostring) + \" \" + (.failureThreshold | tostring)"
-    expect 'a terminating server has 60 seconds to drain' 60 "$rendered" \
+    expect 'a terminating server has 75 seconds to drain' 75 "$rendered" \
         "$apps_server | .spec.template.spec.terminationGracePeriodSeconds"
     expect 'the server keeps serving 10 seconds after SIGTERM' 10 "$rendered" \
         "$apps_container | .env[] | select(.name == \"ZONE_SHUTDOWN_DELAY_SECONDS\") | .value"
     expect 'the server gives HTTP 30 seconds to finish' 30 "$rendered" \
         "$apps_container | .env[] | select(.name == \"ZONE_SHUTDOWN_GRACE_SECONDS\") | .value"
+    expect_shutdown_budget "$rendered"
 
     expect 'the shared claim is ReadWriteMany on the given storage class' "ReadWriteMany $storage_class" "$rendered" \
         'select(.kind == "PersistentVolumeClaim" and .metadata.name == "zone-apps-shared-state") | .spec.accessModes[0] + " " + .spec.storageClassName'

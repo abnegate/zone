@@ -2653,7 +2653,7 @@ On SIGTERM the server:
 5. closes every WebSocket (chat, task run, context and model pull) with code 1012, Service Restart.
 6. finishes its background writes and releases housekeeping leadership, then exits.
 
-Both settings are read at startup. A blank value counts as unset, and a value that is not a whole number of seconds stops the server at startup. Leave both at 0 for a single server, which then stops at once, as it always did, apart from steps 4 to 6. On Kubernetes, keep `terminationGracePeriodSeconds` above delay + grace + about 20 seconds for steps 4 to 6; the HA profile (`helm/zone-apps/values-ha.yaml`) uses delay 10, grace 30 and a termination grace of 60.
+Both settings are read at startup. A blank value counts as unset, and a value that is not a whole number of seconds stops the server at startup. Leave both at 0 for a single server, which then stops at once, as it always did, apart from steps 4 to 6. Steps 4 to 6 take at most 27 seconds: up to 10 to stop replies, 2 to close sockets, 5 for background writes and 10 to release leadership. On Kubernetes, keep `terminationGracePeriodSeconds` at least delay + grace + 27; the HA profile (`helm/zone-apps/values-ha.yaml`) uses delay 10, grace 30 and a termination grace of 75.
 
 ### `ZONE_SHUTDOWN_DELAY_SECONDS`
 - **Default**: `0`
