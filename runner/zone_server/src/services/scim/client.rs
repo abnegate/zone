@@ -170,13 +170,16 @@ mod tests {
     #[test]
     fn anything_but_a_scim_bearer_secret_is_refused() {
         let secret = secret::generate();
-        for authorization in [
-            format!("Basic {secret}"),
-            "Bearer ".to_owned(),
-            "Bearer eyJhbGciOiJIUzI1NiJ9.e30.signature".to_owned(),
-            secret.clone(),
+        for (case, authorization) in [
+            ("a basic secret", format!("Basic {secret}")),
+            ("an empty bearer", "Bearer ".to_owned()),
+            (
+                "a bearer session token",
+                "Bearer eyJhbGciOiJIUzI1NiJ9.e30.signature".to_owned(),
+            ),
+            ("a secret without a scheme", secret.clone()),
         ] {
-            assert_eq!(bearer(&headers(&authorization)), None, "{authorization}");
+            assert_eq!(bearer(&headers(&authorization)), None, "{case}");
         }
         assert_eq!(bearer(&HeaderMap::new()), None);
     }
