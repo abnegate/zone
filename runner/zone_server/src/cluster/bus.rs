@@ -374,6 +374,28 @@ mod tests {
         silent(&mut control).await;
     }
 
+    #[tokio::test]
+    async fn the_same_request_asked_again_is_heard_again() {
+        let (asker, answerer) = pair();
+        let chat = Uuid::new_v4();
+        let mut control = answerer.subscribe(Topic::ChatControl(chat)).await;
+        let asked = title();
+
+        for _ in 0..2 {
+            let unanswered = asker
+                .request(Topic::ChatControl(chat), &asked, SILENCE)
+                .await;
+            assert!(unanswered.is_none());
+        }
+
+        let first = next(&mut control).await;
+        let second = next(&mut control).await;
+        assert_eq!(first.payload::<Title>().unwrap(), asked);
+        assert_eq!(second.payload::<Title>().unwrap(), asked);
+        assert_ne!(first.correlation(), second.correlation());
+        silent(&mut control).await;
+    }
+
     /// A genuine envelope sealed by a peer of this cluster at `issued_at`.
     fn sealed(topic: Topic, kind: Kind, issued_at: u64) -> (Envelope, Packet) {
         let channel: Arc<str> = topic.channel(&Namespace::derive(&master())).into();
