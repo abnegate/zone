@@ -365,11 +365,43 @@ cargo test -p zone_server --test integration -- \
 
 ### Smoke test on kind
 
-`scripts/ha-smoke.sh` installs the three profiles on a throwaway kind cluster with 3 workers, named `zone-ha-smoke-<random>`, and deletes it when it exits, whether it passed or not. It never touches another cluster. It runs a throwaway Valkey in place of a managed one and a host directory as the ReadWriteMany volume, then checks that `zone_cluster_bus_connected` reads 1 on every server pod and that readiness holds while it deletes a server pod, restarts the rollout and fails Postgres over.
+`scripts/ha-smoke.sh` installs the three profiles on a throwaway kind cluster named `zone-ha-smoke-<random>` and deletes it when it exits, whether it passed or not. It never touches another cluster.
 
 ```bash
-scripts/ha-smoke.sh --dry-run   # render and validate only; needs no cluster
-scripts/ha-smoke.sh --build     # build the server and console images, then run end to end
+scripts/ha-smoke.sh --dry-run                       # render and validate only; needs no cluster
+scripts/ha-smoke.sh --build --keep-images           # build the images, run on 3 workers, keep the images
+scripts/ha-smoke.sh --workers 2 --server-image <ref> --console-image <ref>
 ```
 
-Images published before `/health/ready` existed cannot pass, so an end-to-end run needs images built from this tree: build them with the script's build option (`--build`), or pass references to images you built with its server and console image options (`--server-image <ref>`, `--console-image <ref>`). The script itself lists its exact flags. It needs Docker, kind, kubectl and Helm, and about 30 GB free in the Docker VM.
+| Flag | Effect |
+| --- | --- |
+| `--dry-run` | Renders zone-infra, zone-ai and zone-apps with their `values-ha.yaml` and the kind overrides, validates them with kubeconform when it is installed, and prints the plan. Creates nothing. |
+| `--build` | Builds the server image (the Dockerfile's builder and runtime-base stages with `zone-server` and its entrypoint, without the agent toolchains) and the console image from this checkout. |
+| `--server-image`, `--console-image` | Use these images instead of building them. Images published before `/health/ready` existed cannot pass, so a run needs `--build` or both. |
+| `--keep-images` | Keeps the server and console images `--build` made and prints the command that reruns with them. |
+| `--workers N` | Runs N kind workers, 3 by default and at least 2. |
+
+It needs Docker, kind, kubectl, Helm and openssl, and about 30 GB free in the Docker VM for `--build`.
+
+What it sets up:
+
+- One control plane and N workers from `k8s/kind-ha-config.yaml`, with no host ports; it reaches the cluster through the API server.
+- A temporary host directory mounted at `/shared` on every node, behind a hostPath ReadWriteMany volume, as the agent-state volume.
+- CloudNativePG 1.30.0, and a single throwaway Valkey standing in for a managed one.
+- The three charts with `values-ha.yaml` and overrides for generated secrets, small resources, the shared storage class and `server.trustedProxies` set to the kind pod subnet, `10.244.0.0/16`.
+- With fewer than 3 workers, Postgres runs N instances with `postgres.synchronous.dataDurability: preferred`. Each instance needs a node of its own, and under `required` a primary left without a standby stops committing. Two nodes are tested for the server but are not a supported topology.
+
+What it checks, in order. A failure is recorded and the run continues where it can; it exits non-zero if anything failed.
+
+1. The Postgres cluster reaches N Ready instances (at most 3).
+2. 3 server pods are Ready with at most ceil(3 / N) on any node: distinct nodes on 3 workers, at most 2 per node on 2.
+3. Every server pod reads `zone_cluster_bus_connected 1` on `/metrics`, and reaches Postgres through `/api/auth/sso/providers`.
+4. The PodDisruptionBudgets exist: `zone-apps-server`, `zone-apps-manager`, `litellm`, `zone-postgres-primary`, and `zone-postgres`, which CloudNativePG creates only from 3 instances. The server's budget allows exactly 1 disruption.
+5. Four disruptions, each while `/health/ready` is polled through the Service every 0.5 seconds:
+   - **Pod deletion**: deletes a server pod, waits for 3 Ready pods and checks the spread again. A poll may land on the deleted pod while it drains, but none may find no Ready server.
+   - **Rollout restart**: `kubectl rollout restart` must finish within 600 seconds, then the spread is checked again, with the same tolerance.
+   - **Database failover**: promotes a standby with the cnpg kubectl plugin when it is installed, or else deletes the primary. Every server pod must reach the new primary within 60 seconds, no server pod may lose readiness or restart, and no poll may fail.
+   - **Node drain**: drains a worker that runs a server pod but not the Postgres primary with `kubectl drain --ignore-daemonsets --delete-emptydir-data --timeout=300s`. The drain must finish, 3 server pods must be Ready with none left on that node, and no poll may fail. It then uncordons the node and waits for the Postgres cluster to return to N Ready instances.
+6. Every server pod reads `zone_cluster_bus_connected 1` again.
+
+It prints each disruption's poll counts, and on failure the pods, recent events and server logs. On exit it uncordons a node it drained, deletes the cluster and the temporary directory, and removes the images it built unless `--keep-images` was given.
