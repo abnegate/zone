@@ -128,14 +128,7 @@ mod tests {
             .execute(&pool)
             .await
             .expect("a user");
-        sqlx::query(
-            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
-        )
-        .bind(workspace)
-        .bind(user)
-        .execute(&pool)
-        .await
-        .expect("a member");
+        crate::db::testing::seat(&pool, workspace, user, WorkspaceRole::Member).await;
         let chat = chat_in(&pool, workspace).await;
         Fixture {
             pool,

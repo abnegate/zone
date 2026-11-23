@@ -1041,9 +1041,7 @@ mod tests {
         )
         .await
         .unwrap();
-        workspace_members::add_member(&pool, workspace.id, user.id, WorkspaceRole::Member, None)
-            .await
-            .unwrap();
+        crate::db::testing::seat(&pool, workspace.id, user.id, WorkspaceRole::Member).await;
         let mut config = test_config();
         config.ollama_host = ollama_host.to_string();
         WorkspaceScope {

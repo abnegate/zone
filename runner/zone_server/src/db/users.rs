@@ -71,12 +71,13 @@ pub struct UserRow {
 }
 
 impl UserRow {
-    pub fn account(&self) -> Account {
+    pub fn account(&self, pristine: bool) -> Account {
         Account {
             id: self.id,
             active: self.is_active.unwrap_or(true),
             email_verified: self.email_verified,
             admin: self.is_admin.unwrap_or(false),
+            pristine,
         }
     }
 }
@@ -104,10 +105,9 @@ pub struct UserWithPermissions {
     pub permissions: Vec<String>,
 }
 
-/// Count total users
-pub async fn count_users(pool: &PgPool) -> DbResult<i64> {
+pub async fn count_users(executor: impl PgExecutor<'_>) -> DbResult<i64> {
     let result = sqlx::query_scalar!("SELECT COUNT(*) FROM users")
-        .fetch_one(pool)
+        .fetch_one(executor)
         .await?;
 
     Ok(result.unwrap_or(0))
@@ -308,6 +308,14 @@ pub async fn find_by_email_ignoring_case(
     .bind(email)
     .fetch_all(executor)
     .await
+}
+
+pub async fn lock(connection: &mut PgConnection, user_id: Uuid) -> DbResult<bool> {
+    let locked: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+        .bind(user_id)
+        .fetch_optional(&mut *connection)
+        .await?;
+    Ok(locked.is_some())
 }
 
 /// The row stays locked `FOR UPDATE` until the caller's transaction ends, so no session or

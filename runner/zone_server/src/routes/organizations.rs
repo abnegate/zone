@@ -20,7 +20,8 @@ use crate::db::organization_members::{
     self, Assigned, MemberWithUser, OrgRole, OrganizationMemberRow, Removal as MemberRemoval,
     RoleChange,
 };
-use crate::db::{organizations, users, workspaces};
+use crate::db::suspensions::{self, Successor};
+use crate::db::{invitations, organizations, users, workspaces};
 use crate::services::login::devices;
 use crate::services::members;
 use crate::state::AppState;
@@ -528,6 +529,46 @@ async fn audit_member(
     .await;
 }
 
+async fn audit_invitation(
+    state: &AppState,
+    actor: &OrganizationMember,
+    invitation: &invitations::Revoked,
+) {
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: Some(actor.organization_id),
+            workspace_id: None,
+            actor_id: actor.user_id,
+            actor_email: &actor.email,
+            action: actions::INVITATION_REVOKED,
+            resource_type: resources::INVITATION,
+            resource_id: Some(invitation.id),
+            old_values: Some(serde_json::json!({ "email": invitation.email })),
+            new_values: None,
+        },
+    )
+    .await;
+}
+
+async fn audit_successor(state: &AppState, actor: &OrganizationMember, successor: &Successor) {
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: Some(actor.organization_id),
+            workspace_id: Some(successor.workspace_id),
+            actor_id: actor.user_id,
+            actor_email: &actor.email,
+            action: actions::WORKSPACE_OWNER_SEATED,
+            resource_type: resources::WORKSPACE,
+            resource_id: Some(successor.workspace_id),
+            old_values: None,
+            new_values: Some(serde_json::json!({ "user_id": successor.user_id })),
+        },
+    )
+    .await;
+}
+
 /// Add member request. The console's organization form names the invitee by
 /// email, the workspace form and the API's own callers by id, so either
 /// identifies the member and exactly one must be given.
@@ -631,8 +672,6 @@ pub async fn add_member(
     (status, Json(response)).into_response()
 }
 
-/// Admits `target` and adds them to `member`'s organization, or restores their removed
-/// membership, in one transaction.
 async fn seat(
     state: &AppState,
     member: &OrganizationMember,
@@ -654,17 +693,22 @@ async fn seat(
                 "User is already a member of this organization",
             )));
         }
-        Some(_) => (
-            organization_members::reactivate_member(
-                &mut *transaction,
-                organization,
-                target,
-                role,
-                invited_by,
+        Some(_) => {
+            suspensions::forget(&mut *transaction, organization, target)
+                .await
+                .map_err(failed)?;
+            (
+                organization_members::reactivate_member(
+                    &mut *transaction,
+                    organization,
+                    target,
+                    role,
+                    invited_by,
+                )
+                .await,
+                StatusCode::OK,
             )
-            .await,
-            StatusCode::OK,
-        ),
+        }
         None => (
             organization_members::add_member(
                 &mut *transaction,
@@ -777,8 +821,20 @@ pub async fn remove_member(
     )
     .await
     {
-        Ok(MemberRemoval::Removed) => {
+        Ok(MemberRemoval::Removed {
+            suspension,
+            invitations,
+        }) => {
             audit_member(&state, &member, actions::MEMBER_REMOVED, path.user_id, None).await;
+            for successor in &suspension.successors {
+                audit_successor(&state, &member, successor).await;
+            }
+            for invitation in &invitations {
+                audit_invitation(&state, &member, invitation).await;
+            }
+            if let Err(error) = members::halt(&state, member.organization_id, path.user_id).await {
+                tracing::error!(%error, user_id = %path.user_id, "Failed to halt a removed member's running work");
+            }
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(MemberRemoval::Revoked) => revoked(Permission::MembersDelete).into_response(),

@@ -1,5 +1,5 @@
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { site, unconfirmed } from '../config.ts';
 import { pages } from './pages.ts';
 import { renderPage } from './render.ts';
@@ -8,7 +8,20 @@ export const websiteDirectory = join(import.meta.dir, '..');
 export const outputDirectory = join(websiteDirectory, 'dist');
 
 const templateDirectory = join(websiteDirectory, 'templates');
+const fragmentDirectory = join(templateDirectory, 'fragments');
 const staticDirectory = join(websiteDirectory, 'static');
+
+export function fragmentName(file: string): string {
+  return basename(file, '.html').replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
+}
+
+function readFragments(): Record<string, string> {
+  return Object.fromEntries(
+    readdirSync(fragmentDirectory)
+      .filter((file) => file.endsWith('.html'))
+      .map((file) => [fragmentName(file), readFileSync(join(fragmentDirectory, file), 'utf8')])
+  );
+}
 
 /// The address the site is served from, ending in a slash so pages resolve beneath it.
 export function baseURLFrom(address: string): URL {
@@ -21,10 +34,11 @@ export function defaultBaseURL(): URL {
 
 export function renderSite(baseURL: URL): ReadonlyMap<string, string> {
   const layout = readFileSync(join(templateDirectory, 'layout.html'), 'utf8');
+  const fragments = readFragments();
   return new Map(
     pages.map((page) => {
       const template = readFileSync(join(templateDirectory, page.template), 'utf8');
-      return [page.output, renderPage(page, pages, layout, template, site, baseURL)];
+      return [page.output, renderPage(page, pages, layout, template, fragments, site, baseURL)];
     })
   );
 }

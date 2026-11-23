@@ -13,10 +13,12 @@ use reqwest::Url;
 use serde_json::{Value, json};
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Postgres};
+use sqlx::{PgPool, Postgres, Transaction};
+use tokio::time::Instant;
 use uuid::Uuid;
 use zone_enterprise::sso::{Claims, testing};
 use zone_enterprise::{COMMUNITY_MEMBERS, MEMBER_ADMISSION_BUSY, MEMBER_CAP_REACHED, period_start};
+use zone_server::config::Config;
 use zone_server::db::seats;
 use zone_server::routes::workspaces::OUTSIDE_ORGANIZATION;
 use zone_server::services::members::SEATS_LOCK;
@@ -39,6 +41,14 @@ const ATTEMPTS: usize = 3;
 const HOLD_SEATS: &str = "SELECT pg_advisory_lock($1)";
 const RELEASE_SEATS: &str = "SELECT pg_advisory_unlock($1)";
 const SINGLE_CONNECTION_WAIT: Duration = Duration::from_secs(2);
+const FOUNDERS: i64 = 4;
+const HOLD_USERS: &str = "LOCK TABLE users IN SHARE MODE";
+const WAITING: &str = "SELECT COUNT(*) FROM pg_locks
+     WHERE NOT granted
+       AND database = (SELECT oid FROM pg_database WHERE datname = current_database())";
+const WAITING_POLL: Duration = Duration::from_millis(20);
+const WAITING_LIMIT: Duration = Duration::from_secs(30);
+const PATIENT_ADMISSION_WAIT: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
 struct Member {
@@ -74,6 +84,20 @@ impl Server {
     async fn uncapped() -> Self {
         Self {
             fixture: Fixture::new(PREFIX).await,
+        }
+    }
+
+    /// An uncapped server whose admissions wait for [`SEATS_LOCK`] longer than any test does.
+    async fn patient() -> Self {
+        Self {
+            fixture: Fixture::configured(
+                PREFIX,
+                Config {
+                    admission_wait: PATIENT_ADMISSION_WAIT,
+                    ..test_config()
+                },
+            )
+            .await,
         }
     }
 
@@ -288,6 +312,40 @@ impl Server {
             .unwrap()
     }
 
+    async fn admins(&self) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_admin")
+            .fetch_one(self.pool())
+            .await
+            .unwrap()
+    }
+
+    /// Lets every statement read `users` but holds back every insert into it until the holder's
+    /// transaction ends.
+    async fn hold_users(&self) -> Transaction<'static, Postgres> {
+        let mut holder = self.pool().begin().await.unwrap();
+        sqlx::query(HOLD_USERS).execute(&mut *holder).await.unwrap();
+        holder
+    }
+
+    /// Returns once `count` sessions on this server's database are waiting for a lock.
+    async fn await_waiting(&self, count: i64) {
+        let deadline = Instant::now() + WAITING_LIMIT;
+        loop {
+            let waiting: i64 = sqlx::query_scalar(WAITING)
+                .fetch_one(self.pool())
+                .await
+                .unwrap();
+            if waiting >= count {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "only {waiting} of {count} sessions came to wait for a lock"
+            );
+            tokio::time::sleep(WAITING_POLL).await;
+        }
+    }
+
     /// Holds [`SEATS_LOCK`] on a session of its own until [`Server::release_seats`].
     async fn hold_seats(&self) -> PoolConnection<Postgres> {
         let mut holder = self.pool().acquire().await.unwrap();
@@ -449,6 +507,29 @@ async fn the_first_sign_up_on_an_empty_server_is_admitted_as_the_admin() {
 
     assert!(server.is_admin(&first).await);
     server.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_first_sign_ups_on_an_uncapped_server_make_exactly_one_admin() {
+    let server = Arc::new(Server::patient().await);
+    let holder = server.hold_users().await;
+    let attempts: Vec<_> = (0..FOUNDERS)
+        .map(|_| {
+            let server = server.clone();
+            async move { server.sign_up(&test_email()).await }
+        })
+        .collect();
+
+    let (responses, ()) = tokio::join!(concurrently(attempts), async {
+        server.await_waiting(FOUNDERS).await;
+        holder.commit().await.unwrap();
+    });
+
+    for response in &responses {
+        response.assert_status(StatusCode::CREATED);
+    }
+    assert_eq!(server.admins().await, 1);
+    Server::finish(server).await;
 }
 
 #[tokio::test]

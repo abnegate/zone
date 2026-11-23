@@ -1587,15 +1587,13 @@ pub(crate) mod testing {
             )
             .await
             .expect("a user");
-            workspace_members::add_member(
+            crate::db::testing::seat(
                 &pool,
                 workspace.id,
                 actor.id,
                 workspace_members::WorkspaceRole::Member,
-                None,
             )
-            .await
-            .expect("a membership");
+            .await;
             let planned: Vec<PlannedTask> = (0..count)
                 .map(|index| PlannedTask {
                     kind: Kind::Feature,
@@ -1939,14 +1937,13 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("a user");
-        sqlx::query(
-            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+        crate::db::testing::seat(
+            &pool,
+            installation.workspace,
+            actor,
+            crate::db::workspace_members::WorkspaceRole::Member,
         )
-        .bind(installation.workspace)
-        .bind(actor)
-        .execute(&pool)
-        .await
-        .expect("a membership");
+        .await;
 
         let finalized = finalize(
             &pool,

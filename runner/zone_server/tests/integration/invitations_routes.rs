@@ -633,6 +633,45 @@ async fn test_accept_invitation_adds_to_workspaces() {
 }
 
 #[tokio::test]
+async fn test_accept_invitation_ignores_the_email_case() {
+    let client = TestClient::with_db().await;
+    let (owner_token, _) = register_user(&client, &test_email(), &test_password()).await;
+    let org_id = create_organization(
+        &client,
+        &owner_token,
+        "Test Org",
+        &format!("org-{}", Uuid::new_v4()),
+    )
+    .await;
+    let invite_email = test_email().to_uppercase();
+    let created = client
+        .post_json_auth(
+            &format!("/api/organizations/{org_id}/invitations"),
+            &json!({
+                "email": invite_email,
+                "workspace_ids": [],
+                "org_role": "member",
+                "workspace_role": "member"
+            }),
+            &owner_token,
+        )
+        .await;
+    created.assert_status(StatusCode::CREATED);
+    let token = created.json_value()["token"].as_str().unwrap().to_owned();
+    let (invited_token, _) =
+        register_user(&client, &invite_email.to_lowercase(), &test_password()).await;
+
+    client
+        .post_json_auth(
+            &format!("/api/invitations/{token}/accept"),
+            &json!({}),
+            &invited_token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+#[tokio::test]
 async fn test_accept_invitation_invalid_token() {
     let client = TestClient::with_db().await;
     let user_email = test_email();

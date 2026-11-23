@@ -138,7 +138,9 @@ fn unmet(permissions: &BTreeSet<Permission>) -> Option<(Permission, Permission)>
 const fn organization_threshold(permission: Permission) -> Option<OrgRole> {
     match permission {
         Permission::OrganizationRead => Some(OrgRole::Member),
-        Permission::OrganizationDelete | Permission::AdministratorsUpdate => Some(OrgRole::Owner),
+        Permission::OrganizationDelete
+        | Permission::AdministratorsUpdate
+        | Permission::ScimUpdate => Some(OrgRole::Owner),
         _ if matches!(permission.scope(), Scope::Organization) => Some(OrgRole::Admin),
         _ => None,
     }

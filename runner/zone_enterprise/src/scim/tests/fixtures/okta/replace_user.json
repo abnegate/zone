@@ -1,0 +1,21 @@
+{
+    "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+    "id": "{{user}}",
+    "userName": "{{user_name}}",
+    "name": {
+        "givenName": "Another",
+        "middleName": "Excited",
+        "familyName": "User"
+    },
+    "emails": [{
+        "primary": true,
+        "value": "{{user_name}}",
+        "type": "work",
+        "display": "{{user_name}}"
+    }],
+    "active": true,
+    "groups": [],
+    "meta": {
+        "resourceType": "User"
+    }
+}

@@ -1441,15 +1441,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("a user");
-            sqlx::query(
-                "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)",
-            )
-            .bind(workspace)
-            .bind(user)
-            .bind(WorkspaceRole::Viewer.as_str())
-            .execute(&pool)
-            .await
-            .expect("a member");
+            crate::db::testing::seat(&pool, workspace, user, WorkspaceRole::Viewer).await;
             seated.push(user);
         }
         let [viewer, reader, writer] = seated[..] else {
@@ -1517,7 +1509,9 @@ mod tests {
     async fn the_indexer_prefers_a_built_in_writer_to_an_earlier_custom_one() {
         let tenant = crate::db::testing::Tenant::new().await;
         let custom = tenant.workspace_holder(&[Permission::WorkspaceWrite]).await;
-        let member = tenant.user().await;
+        let member = tenant
+            .organization_member(crate::db::organization_members::OrgRole::Member)
+            .await;
         tenant.workspace_member(member, WorkspaceRole::Member).await;
         let source = widgets(&tenant.pool, tenant.workspace, None, None).await;
 

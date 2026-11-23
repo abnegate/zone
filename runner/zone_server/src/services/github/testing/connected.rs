@@ -29,7 +29,6 @@ use crate::db::sources;
 use crate::db::sources::NewSource;
 use crate::db::sources::SourceChanges;
 use crate::db::sources::SourceRow;
-use crate::db::workspace_members;
 use crate::db::workspace_members::WorkspaceRole;
 use crate::services::github_app::testing::installed;
 use crate::services::github_app::testing::provider;
@@ -53,9 +52,7 @@ impl Connected {
         let organization = seed_organization(&pool).await;
         let workspace = seed_workspace(&pool, organization).await;
         let user = seed_user(&pool).await;
-        workspace_members::add_member(&pool, workspace, user, WorkspaceRole::Admin, None)
-            .await
-            .expect("the user administers the workspace");
+        crate::db::testing::seat(&pool, workspace, user, WorkspaceRole::Admin).await;
         let mut config = test_config();
         config.github_api_url = github.uri();
         config.github_api_allows_http = true;

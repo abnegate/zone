@@ -28,7 +28,7 @@ use wiremock::matchers::{body_partial_json, body_string_contains, header, method
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_server::config::{Config, ModelBackend};
 use zone_server::db::chat_pull_requests::{self, NewPullRequest};
-use zone_server::db::workspace_members::{self, WorkspaceRole};
+use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::db::{github_installations, sources, workspaces};
 use zone_server::services::chat::pull_request::{AutoMerge, Error, Merge};
 use zone_server::state::AppState;
@@ -1019,15 +1019,13 @@ async fn a_viewer_can_read_and_diff_a_chats_pull_requests_but_not_change_them() 
         .expect("a viewer id")
         .parse()
         .expect("a user id");
-    workspace_members::add_member(
+    crate::common::seat::seat(
         workspace.state.db(),
         workspace.workspace,
         user,
         WorkspaceRole::Viewer,
-        None,
     )
-    .await
-    .expect("a viewer");
+    .await;
 
     let listed = workspace.listed(&viewer).await;
     assert_eq!(listed[0]["writable"], false, "{listed}");

@@ -25,6 +25,7 @@ export const SettingsSection = {
   Sources: 'sources',
   Members: 'members',
   Roles: 'roles',
+  Scim: 'scim',
   Devices: 'devices',
   Audit: 'audit',
   AuditExport: 'audit-export',
@@ -173,6 +174,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     section: SettingsSection.Roles,
     label: 'Roles',
     visible: grantedInOrganization(Permission.RolesUpdate),
+  },
+  {
+    group: SettingsGroup.Organization,
+    section: SettingsSection.Scim,
+    label: 'SCIM provisioning',
+    visible: grantedInOrganization(Permission.ScimUpdate),
   },
   {
     group: SettingsGroup.Organization,

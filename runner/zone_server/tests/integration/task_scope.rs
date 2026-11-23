@@ -59,15 +59,13 @@ async fn session_token(pool: &PgPool, actor: Uuid, secret: &str) -> String {
 async fn fixture() -> (PgPool, AppState, Uuid, Uuid, Uuid) {
     let pool = common::create_test_pool().await;
     let (organization, workspace, user) = common::setup_test_data(&pool).await;
-    workspace_members::add_member(
+    common::seat::seat(
         &pool,
         workspace,
         user,
         workspace_members::WorkspaceRole::Member,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
     let state = common::create_test_state(common::test_config(), pool.clone());
     (pool, state, organization, workspace, user)
 }

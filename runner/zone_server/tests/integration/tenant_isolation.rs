@@ -242,15 +242,13 @@ async fn test_cross_workspace_access_denied() {
     .await
     .expect("Failed to create user");
 
-    workspace_members::add_member(
+    common::seat::seat(
         &pool,
         ws1.id,
         user.id,
         workspace_members::WorkspaceRole::Member,
-        None,
     )
-    .await
-    .expect("Failed to add user to ws1");
+    .await;
 
     // User should be a member of ws1
     let is_ws1_member = workspace_members::is_member(&pool, user.id, ws1.id)

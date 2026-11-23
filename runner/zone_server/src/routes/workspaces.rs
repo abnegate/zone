@@ -462,15 +462,17 @@ async fn seat(
     user_id: Uuid,
     role: WorkspaceRole,
 ) -> Result<(StatusCode, WorkspaceMemberResponse), Refusal> {
-    if !workspace_members::in_organization(state.db(), member.workspace_id, user_id).await? {
+    let mut transaction = state.db().begin().await?;
+    if !workspace_members::in_organization(&mut transaction, member.workspace_id, user_id).await? {
         return Err(Refusal::Outside);
     }
     let seating =
-        match workspace_members::get_member(state.db(), member.workspace_id, user_id).await? {
+        match workspace_members::get_member(&mut *transaction, member.workspace_id, user_id).await?
+        {
             Some(existing) if existing.is_active => return Err(Refusal::Seated),
             Some(_) => {
                 workspace_members::reactivate_member(
-                    state.db(),
+                    &mut *transaction,
                     member.workspace_id,
                     user_id,
                     role,
@@ -481,7 +483,7 @@ async fn seat(
             }
             None => {
                 workspace_members::add_member(
-                    state.db(),
+                    &mut *transaction,
                     member.workspace_id,
                     user_id,
                     role,
@@ -492,9 +494,10 @@ async fn seat(
             }
         };
 
-    let row = workspace_members::get_member(state.db(), member.workspace_id, user_id)
+    let row = workspace_members::get_member(&mut *transaction, member.workspace_id, user_id)
         .await?
         .ok_or(Refusal::Vanished(seating))?;
+    transaction.commit().await?;
     let response = WorkspaceMemberResponse::new(row, built_in(role));
     audit_member(
         state,

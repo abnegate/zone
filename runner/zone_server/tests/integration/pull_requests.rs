@@ -39,7 +39,6 @@ use wiremock::matchers::path;
 use wiremock::matchers::query_param;
 use zone_server::config::Config;
 use zone_server::db::sources;
-use zone_server::db::workspace_members;
 use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::services::github::diff::PER_FILE_DIFF;
 use zone_server::services::github::pull_requests::LOG_TAIL;
@@ -624,15 +623,8 @@ impl Board {
 
     async fn viewer(&self) -> String {
         let (token, user) = registered(&self.client).await;
-        workspace_members::add_member(
-            self.state.db(),
-            self.workspace,
-            user,
-            WorkspaceRole::Viewer,
-            None,
-        )
-        .await
-        .expect("a viewer");
+        crate::common::seat::seat(self.state.db(), self.workspace, user, WorkspaceRole::Viewer)
+            .await;
         token
     }
 }
@@ -1726,9 +1718,7 @@ async fn writer(board: &Board, role: WorkspaceRole, global: &str) -> String {
     zone_server::db::users::assign_user_role(board.state.db(), user, global)
         .await
         .expect("the global role is assigned");
-    workspace_members::add_member(board.state.db(), board.workspace, user, role, None)
-        .await
-        .expect("a workspace member");
+    crate::common::seat::seat(board.state.db(), board.workspace, user, role).await;
     board
         .client
         .post_json(

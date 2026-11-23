@@ -81,7 +81,7 @@ impl Throttle {
     }
 }
 
-fn bucket(address: Option<IpAddr>) -> IpAddr {
+pub fn bucket(address: Option<IpAddr>) -> IpAddr {
     address.map_or(UNKNOWN, key)
 }
 

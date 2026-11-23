@@ -4,11 +4,15 @@
 //! Tokens are hashed before storage for security.
 
 use chrono::{DateTime, Duration, Utc};
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{Connection, Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
+
+mod revoked;
 
 use super::DbResult;
 use crate::utils::crypto::{generate_token, hash_token};
+
+pub use revoked::Revoked;
 
 const TOKEN_EXPIRY_DAYS: i64 = 7;
 
@@ -158,6 +162,8 @@ pub async fn accept_invitation(
         .parse()
         .unwrap_or(super::organization_members::OrgRole::Member);
 
+    super::suspensions::forget(&mut *transaction, invitation.organization_id, user_id).await?;
+
     super::organization_members::reactivate_member(
         &mut *transaction,
         invitation.organization_id,
@@ -242,6 +248,34 @@ pub async fn revoke_invitation(pool: &PgPool, invitation_id: Uuid) -> DbResult<(
     }
 
     Ok(())
+}
+
+pub async fn revoke_pending<'a, E>(
+    executor: E,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Vec<Revoked>>
+where
+    E: Executor<'a, Database = Postgres>,
+{
+    sqlx::query_as(
+        r#"
+        DELETE FROM invitations
+        WHERE organization_id = $1
+          AND accepted_at IS NULL
+          AND lower(email) IN (
+              SELECT lower(email) FROM users WHERE id = $2
+              UNION
+              SELECT lower(email) FROM scim_users
+              WHERE organization_id = $1 AND user_id = $2 AND email IS NOT NULL
+          )
+        RETURNING id, email
+        "#,
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .fetch_all(executor)
+    .await
 }
 
 /// Get a pending invitation for a specific email in an organization

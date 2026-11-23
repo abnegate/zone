@@ -20,6 +20,8 @@ pub mod mail;
 pub mod mcp;
 pub mod policy;
 pub mod replica;
+pub mod scim;
+pub mod seat;
 pub mod spend;
 pub mod sso;
 pub mod stand_in;
@@ -670,12 +672,10 @@ pub async fn setup_test_data(pool: &PgPool) -> (uuid::Uuid, uuid::Uuid, uuid::Uu
 /// trigger's role before it claims anything, and a task tool set reaches
 /// workspace tools only for a member.
 pub async fn setup_workspace_member(pool: &PgPool) -> (uuid::Uuid, uuid::Uuid, uuid::Uuid) {
-    use zone_server::db::workspace_members::{WorkspaceRole, add_member};
+    use zone_server::db::workspace_members::WorkspaceRole;
 
     let (organization, workspace, user) = setup_test_data(pool).await;
-    add_member(pool, workspace, user, WorkspaceRole::Member, None)
-        .await
-        .expect("the user joins the workspace it will run tasks in");
+    seat::seat(pool, workspace, user, WorkspaceRole::Member).await;
     (organization, workspace, user)
 }
 

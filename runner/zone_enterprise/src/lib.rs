@@ -17,6 +17,7 @@ mod payload;
 mod plan;
 pub mod policy;
 mod production;
+pub mod scim;
 mod seats;
 #[cfg(any(test, feature = "signing"))]
 mod signing;

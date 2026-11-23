@@ -36,6 +36,11 @@ const ALL_SECTIONS = [
   },
   { group: SettingsGroup.Organization, section: SettingsSection.Members, label: 'Members' },
   { group: SettingsGroup.Organization, section: SettingsSection.Roles, label: 'Roles' },
+  {
+    group: SettingsGroup.Organization,
+    section: SettingsSection.Scim,
+    label: 'SCIM provisioning',
+  },
   { group: SettingsGroup.Organization, section: SettingsSection.Devices, label: 'Devices' },
   { group: SettingsGroup.Organization, section: SettingsSection.Audit, label: 'Audit log' },
   {
@@ -82,6 +87,7 @@ const ORGANIZATION_AUDIT_EXPORT = settingsPath(
   SettingsSection.AuditExport
 );
 const ORGANIZATION_ROLES = settingsPath(SettingsGroup.Organization, SettingsSection.Roles);
+const ORGANIZATION_SCIM = settingsPath(SettingsGroup.Organization, SettingsSection.Scim);
 const ORGANIZATION_SPEND = settingsPath(SettingsGroup.Organization, SettingsSection.Spend);
 const SESSIONS = settingsPath(SettingsGroup.You, SettingsSection.Sessions);
 const SOURCES = settingsPath(SettingsGroup.Workspace, SettingsSection.Sources);
@@ -107,6 +113,7 @@ describe('settings constants', () => {
       Sources: 'sources',
       Members: 'members',
       Roles: 'roles',
+      Scim: 'scim',
       Devices: 'devices',
       Audit: 'audit',
       AuditExport: 'audit-export',
@@ -240,10 +247,14 @@ describe('visibleSections', () => {
         readsSources: true,
         administersServer: true,
       })
-    ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
+    ).toEqual(
+      pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You).filter(
+        (path) => path !== ORGANIZATION_SCIM
+      )
+    );
   });
 
-  it('shows all twenty-four sections to a server admin who owns the organization and administers the workspace', () => {
+  it('shows all twenty-five sections to a server admin who owns the organization and administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -254,7 +265,7 @@ describe('visibleSections', () => {
       administersServer: true,
     });
 
-    expect(visible).toHaveLength(24);
+    expect(visible).toHaveLength(25);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 
@@ -520,6 +531,52 @@ describe('visibleSections', () => {
     }
   });
 
+  it('shows SCIM provisioning only to organization owners, right after Roles', () => {
+    for (const [organizationRole, shown] of [
+      ['owner', true],
+      ['admin', false],
+      ['member', false],
+      [undefined, true],
+    ] as const) {
+      const visible = paths({
+        organization: true,
+        organizationRole,
+        workspace: true,
+        workspaceRole: 'viewer',
+        installsModels: false,
+        readsSources: false,
+        administersServer: false,
+      });
+      expect(visible.includes(ORGANIZATION_SCIM), String(organizationRole)).toBe(shown);
+      if (shown) {
+        expect(visible.indexOf(ORGANIZATION_SCIM), String(organizationRole)).toBe(
+          visible.indexOf(ORGANIZATION_ROLES) + 1
+        );
+      }
+    }
+  });
+
+  it('hides SCIM provisioning outside an organization and finds it only in the organization group', () => {
+    expect(
+      paths({
+        organization: false,
+        organizationRole: undefined,
+        workspace: false,
+        workspaceRole: undefined,
+        installsModels: true,
+        readsSources: true,
+        administersServer: true,
+      })
+    ).not.toContain(ORGANIZATION_SCIM);
+    expect(findSection(SettingsGroup.Organization, 'scim')).toMatchObject({
+      group: SettingsGroup.Organization,
+      section: SettingsSection.Scim,
+      label: 'SCIM provisioning',
+    });
+    expect(findSection(SettingsGroup.Server, 'scim')).toBeUndefined();
+    expect(ORGANIZATION_SCIM).toBe('/settings/organization/scim');
+  });
+
   it('hides Roles outside an organization', () => {
     expect(
       paths({
@@ -743,10 +800,11 @@ describe('permission-gated organization sections', () => {
     ]);
   });
 
-  it('gates AI defaults, Roles, Devices, Audit log, Audit export and Spend on their own permissions', () => {
+  it('gates AI defaults, Roles, SCIM provisioning, Devices, Audit log, Audit export and Spend on their own permissions', () => {
     const gates: [string, string][] = [
       [ORGANIZATION_AI, Permission.AiSettingsRead],
       [ORGANIZATION_ROLES, Permission.RolesUpdate],
+      [ORGANIZATION_SCIM, Permission.ScimUpdate],
       [ORGANIZATION_DEVICES, Permission.DevicesRead],
       [ORGANIZATION_AUDIT, Permission.AuditLogsRead],
       [ORGANIZATION_AUDIT_EXPORT, Permission.AuditUpdate],
@@ -769,10 +827,21 @@ describe('permission-gated organization sections', () => {
     ]);
   });
 
-  it('shows every organization section to the built-in admin permission set', () => {
-    const admin = ORGANIZATION_PERMISSIONS.filter(
-      (name) => name !== Permission.OrganizationDelete && name !== Permission.AdministratorsUpdate
+  it('shows every organization section but SCIM provisioning to the built-in admin permission set', () => {
+    const owner: readonly string[] = [
+      Permission.OrganizationDelete,
+      Permission.AdministratorsUpdate,
+      Permission.ScimUpdate,
+    ];
+    const admin = ORGANIZATION_PERMISSIONS.filter((name) => !owner.includes(name));
+    expect(organizationPaths(holding(admin))).toEqual(
+      pathsOf(SettingsGroup.Organization).filter((path) => path !== ORGANIZATION_SCIM)
     );
-    expect(organizationPaths(holding(admin))).toEqual(pathsOf(SettingsGroup.Organization));
+  });
+
+  it('shows every organization section to the built-in owner permission set', () => {
+    expect(organizationPaths(holding(ORGANIZATION_PERMISSIONS))).toEqual(
+      pathsOf(SettingsGroup.Organization)
+    );
   });
 });

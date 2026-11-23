@@ -15,7 +15,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use zone_server::agent::wait::{KIND_TASK_RUN, Waiting};
 use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::tasks::{self, Mutation, RunMutation};
-use zone_server::db::workspace_members::{self, WorkspaceRole};
+use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::services::task_progress::{ProgressMessage, TaskProgressBroadcaster};
 
 /// Start a test server and return the address
@@ -449,19 +449,14 @@ async fn test_ws_ping_pong() {
 
 /// Helper to create a project and task for testing
 async fn create_test_task() -> (uuid::Uuid, uuid::Uuid, String) {
-    use zone_server::db::{
-        projects, tasks,
-        workspace_members::{self, WorkspaceRole},
-    };
+    use zone_server::db::{projects, tasks, workspace_members::WorkspaceRole};
 
     let pool = common::create_test_pool().await;
     let (token, user_id) = get_ws_auth_token().await;
 
     // Setup test data (organization, workspace, user)
     let (_org_id, workspace_id, _user_id) = common::setup_test_data(&pool).await;
-    workspace_members::add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
-        .await
-        .expect("add workspace member");
+    common::seat::seat(&pool, workspace_id, user_id, WorkspaceRole::Member).await;
 
     // Create a project (pool, name, description, workspace_id)
     let project = projects::create_project(&pool, "WS Test Project", None, Some(workspace_id))
@@ -1069,9 +1064,7 @@ async fn the_state_hands_out_the_broadcaster_the_writers_publish_to() {
 async fn every_path_that_reads_a_run_carries_its_pending_wait() {
     let pool = common::create_test_pool().await;
     let (_, workspace, user) = common::setup_test_data(&pool).await;
-    workspace_members::add_member(&pool, workspace, user, WorkspaceRole::Owner, None)
-        .await
-        .expect("the workspace takes its owner");
+    common::seat::seat(&pool, workspace, user, WorkspaceRole::Owner).await;
     let fresh = task(&pool, workspace, "Fresh run").await;
     let task = task(&pool, workspace, "Every read path").await;
     let (run, owner) = claimed(&pool, task).await;

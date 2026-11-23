@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 use super::DbResult;
 use super::custom_roles::{self, Assignment, Membership, Reference, Summary};
+use super::invitations;
+use super::suspensions::{self, Suspension};
 use crate::auth::{Grant, Permission, Scope};
 
 /// Organization role hierarchy
@@ -150,21 +152,22 @@ where
     })
 }
 
-/// Remove a member from an organization (set inactive)
 pub async fn remove_member(pool: &PgPool, organization_id: Uuid, user_id: Uuid) -> DbResult<bool> {
-    let result = sqlx::query!(
-        r#"
-        UPDATE organization_members
-        SET is_active = FALSE, updated_at = NOW()
-        WHERE organization_id = $1 AND user_id = $2
-        "#,
-        organization_id,
-        user_id
+    let mut transaction = pool.begin().await?;
+    lock_owners(&mut transaction, organization_id).await?;
+    let member: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM organization_members WHERE organization_id = $1 AND user_id = $2 FOR UPDATE",
     )
-    .execute(pool)
+    .bind(organization_id)
+    .bind(user_id)
+    .fetch_optional(&mut *transaction)
     .await?;
-
-    Ok(result.rows_affected() > 0)
+    if member.is_none() {
+        return Ok(false);
+    }
+    suspensions::suspend(&mut transaction, organization_id, user_id).await?;
+    transaction.commit().await?;
+    Ok(true)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -273,7 +276,7 @@ fn outranked(caller: &Grant, target: &Membership<OrgRole>) -> bool {
 
 /// The organization's active owners, held for the length of the transaction so
 /// a count taken from them still describes the table when the update lands.
-async fn lock_owners(
+pub async fn lock_owners(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     organization_id: Uuid,
 ) -> DbResult<Vec<Uuid>> {
@@ -293,7 +296,10 @@ async fn lock_owners(
 /// Outcome of a removal that must leave an owner seated.
 #[derive(Debug)]
 pub enum Removal {
-    Removed,
+    Removed {
+        suspension: Suspension,
+        invitations: Vec<invitations::Revoked>,
+    },
     Revoked,
     Forbidden,
     Uncovered,
@@ -338,25 +344,44 @@ pub async fn remove_guarded(
         return Ok(Removal::LastOwner);
     }
 
-    let result = sqlx::query(
+    let suspension = suspensions::suspend(&mut transaction, organization_id, user_id).await?;
+    let invitations =
+        invitations::revoke_pending(&mut *transaction, organization_id, user_id).await?;
+    transaction.commit().await?;
+    Ok(Removal::Removed {
+        suspension,
+        invitations,
+    })
+}
+
+pub async fn shared_elsewhere(
+    executor: impl Executor<'_, Database = Postgres>,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<bool> {
+    sqlx::query_scalar(
         r#"
-        UPDATE organization_members
-        SET is_active = FALSE, updated_at = NOW()
-        WHERE organization_id = $1 AND user_id = $2 AND is_active = TRUE
+        SELECT EXISTS (
+            SELECT 1
+            FROM organization_members mine
+            INNER JOIN organizations o ON o.id = mine.organization_id
+            WHERE mine.user_id = $2
+              AND mine.organization_id <> $1
+              AND mine.is_active
+              AND o.is_active IS NOT FALSE
+              AND EXISTS (
+                  SELECT 1 FROM organization_members other
+                  WHERE other.organization_id = mine.organization_id
+                    AND other.user_id <> $2
+                    AND other.is_active
+              )
+        )
         "#,
     )
     .bind(organization_id)
     .bind(user_id)
-    .execute(&mut *transaction)
-    .await?;
-
-    transaction.commit().await?;
-
-    if result.rows_affected() > 0 {
-        Ok(Removal::Removed)
-    } else {
-        Ok(Removal::Missing)
-    }
+    .fetch_one(executor)
+    .await
 }
 
 /// Get a member by organization and user ID

@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
-import { SECTIONS } from '../src/features/settings/navigation/sections';
+import { visibleSections } from '../src/features/settings/navigation/sections';
 import { expect, test } from './fixtures';
-import { setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
+import { adminSettingsAccess, setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
 import { blockServiceWorker, CHAT_PROVIDERS, routeApi } from './test-utils';
 
 const compactWidth = 768;
@@ -144,7 +144,9 @@ test.describe('Page bar on a 375px phone', () => {
         return { label: link.textContent, left: rect.left, right: rect.right };
       })
     );
-    expect(items.map((item) => item.label)).toEqual(SECTIONS.map(({ label }) => label));
+    expect(items.map((item) => item.label)).toEqual(
+      visibleSections(adminSettingsAccess).map(({ label }) => label)
+    );
     for (const item of items) {
       expect(item.left, `${item.label} starts off screen`).toBeGreaterThanOrEqual(0);
       expect(item.right, `${item.label} ends off screen`).toBeLessThanOrEqual(viewport);

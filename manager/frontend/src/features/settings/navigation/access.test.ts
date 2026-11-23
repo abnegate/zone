@@ -28,6 +28,7 @@ const WORKSPACE_ROLES = [
 const ORGANIZATION_OWNER_ONLY: readonly PermissionName[] = [
   Permission.OrganizationDelete,
   Permission.AdministratorsUpdate,
+  Permission.ScimUpdate,
 ];
 const WORKSPACE_OWNER_ONLY: readonly PermissionName[] = [
   Permission.WorkspaceDelete,

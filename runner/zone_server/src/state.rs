@@ -47,6 +47,7 @@ use crate::services::mail::AccountMail;
 use crate::services::mcp_servers::hubs::Hubs;
 use crate::services::mcp_servers::status::Policy;
 use crate::services::network_denial::NetworkDenial;
+use crate::services::scim::{self, limit};
 use crate::services::sso::throttle::Throttle;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
@@ -62,6 +63,10 @@ const MAX_CONCURRENT_TRAIN: usize = 1;
 const MAX_CONCURRENT_FRAME_EXTRACT: usize = 4;
 /// Without a sweep, every client the rate limiter has ever seen stays in it.
 const RATE_LIMITER_CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
+
+fn read(limiter: &RwLock<Arc<scim::Limiter>>) -> Arc<scim::Limiter> {
+    Arc::clone(&limiter.read().unwrap_or_else(PoisonError::into_inner))
+}
 
 fn max_concurrent_saml() -> usize {
     std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
@@ -124,6 +129,7 @@ struct AppStateInner {
     pub context_service: Option<Arc<ContextService>>,
     pub mail: Option<Arc<AccountMail>>,
     pub limiter: Limiter<Uuid>,
+    pub scim_limiter: Arc<RwLock<Arc<scim::Limiter>>>,
     pub sso_throttle: Arc<Throttle>,
     pub sync_registry: SyncRegistry,
     pub pull_registry: PullRegistry,
@@ -258,6 +264,8 @@ impl AppState {
         let bus = Bus::loopback(&master_key);
         let local = RateLimiter::new(RateLimitConfig::default());
         let cleaned = local.clone();
+        let scim_limiter = Arc::new(RwLock::new(Arc::new(limit::limiter(bus.clone()))));
+        let scim_cleaned = Arc::clone(&scim_limiter);
         let sso_throttle = Arc::new(Throttle::new(config.sso_requests_per_minute, bus.clone()));
         let swept = Arc::clone(&sso_throttle);
         tokio::spawn(async move {
@@ -265,6 +273,7 @@ impl AppState {
             loop {
                 interval.tick().await;
                 cleaned.cleanup();
+                read(&scim_cleaned).cleanup();
                 swept.cleanup();
                 tracing::debug!("Rate limiter cleanup completed");
             }
@@ -291,6 +300,7 @@ impl AppState {
                 context_service,
                 mail,
                 limiter,
+                scim_limiter,
                 sso_throttle,
                 sync_registry: SyncRegistry::new(Arc::clone(&master_key)),
                 pull_registry: PullRegistry::new(),
@@ -462,6 +472,41 @@ impl AppState {
     /// The context-gather rate limit, shared by every replica on the bus's Valkey.
     pub fn limiter(&self) -> &Limiter<Uuid> {
         &self.inner.limiter
+    }
+
+    pub fn scim_limiter(&self) -> Arc<scim::Limiter> {
+        read(&self.inner.scim_limiter)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn limit_scim(&self, requests: u32, window: Duration) {
+        self.replace_scim_limiter(scim::Limiter::new(
+            requests,
+            window,
+            limit::ADDRESS_FAILURES,
+            limit::RELOAD,
+            Bus::loopback(&self.inner.master_key),
+        ));
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn limit_scim_addresses(&self, failures: u32) {
+        self.replace_scim_limiter(scim::Limiter::new(
+            limit::REQUESTS,
+            limit::WINDOW,
+            failures,
+            limit::RELOAD,
+            Bus::loopback(&self.inner.master_key),
+        ));
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    fn replace_scim_limiter(&self, limiter: scim::Limiter) {
+        *self
+            .inner
+            .scim_limiter
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(limiter);
     }
 
     /// The per-address limit on single sign-on starts and SAML posts.

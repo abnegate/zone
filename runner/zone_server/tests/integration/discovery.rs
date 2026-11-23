@@ -13,6 +13,7 @@
 //! database.
 
 use crate::common;
+use crate::common::seat::seat;
 
 use abnegate_agent::ToolResult;
 use serde_json::{Value, json};
@@ -28,7 +29,7 @@ use zone_server::db::knowledge::discovery::{
     CATEGORY, Kind, MAX_ENTRY_BYTES, Provenance, Source, fingerprint,
 };
 use zone_server::db::projects::{self, NewProject};
-use zone_server::db::workspace_members::{WorkspaceRole, add_member};
+use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::db::{chats, tasks, users};
 use zone_server::state::AppState;
 
@@ -200,9 +201,7 @@ impl Fixture {
         .await
         .expect("a second person")
         .id;
-        add_member(&self.pool, self.workspace, user, role, None)
-            .await
-            .expect("they join the workspace");
+        seat(&self.pool, self.workspace, user, role).await;
         self.people.push(user);
         user
     }

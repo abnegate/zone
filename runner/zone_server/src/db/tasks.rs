@@ -1846,16 +1846,63 @@ pub async fn stop_task_run_authorized(
     {
         return Ok(Mutation::NotFound);
     }
+    stop_locked(transaction, run_id)
+        .await
+        .map(Mutation::Applied)
+}
+
+pub async fn stop_task_run(pool: &PgPool, run_id: Uuid) -> DbResult<Mutation<Stop>> {
+    let mut transaction = pool.begin().await?;
+    let task_id: Option<Uuid> = sqlx::query_scalar("SELECT task_id FROM task_runs WHERE id = $1")
+        .bind(run_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    let Some(task_id) = task_id else {
+        return Ok(Mutation::NotFound);
+    };
+    let locked: Option<Uuid> = sqlx::query_scalar("SELECT id FROM tasks WHERE id = $1 FOR UPDATE")
+        .bind(task_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    if locked.is_none() {
+        return Ok(Mutation::NotFound);
+    }
+    stop_locked(transaction, run_id)
+        .await
+        .map(Mutation::Applied)
+}
+
+pub async fn live_runs_triggered_by(
+    pool: &PgPool,
+    user_id: Uuid,
+    workspaces: &[Uuid],
+) -> DbResult<Vec<Uuid>> {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT r.id FROM task_runs r JOIN tasks t ON t.id = r.task_id \
+         WHERE r.triggered_by = $1 AND t.workspace_id = ANY($2) \
+           AND r.status IN {ACTIVE_RUN_STATUSES} \
+         ORDER BY r.id"
+    )))
+    .bind(user_id)
+    .bind(workspaces)
+    .fetch_all(pool)
+    .await
+}
+
+async fn stop_locked(
+    mut transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: Uuid,
+) -> DbResult<Stop> {
     let Some((run, notice)) = cancel_run(&mut transaction, run_id, STOPPED).await? else {
         transaction.commit().await?;
-        return Ok(Mutation::Applied(Stop::Finished));
+        return Ok(Stop::Finished);
     };
     transaction.commit().await?;
     if let Some(notice) = notice {
         notice.publish();
     }
     task_progress::publish_terminal(run.id, CANCELLED, Some(STOPPED));
-    Ok(Mutation::Applied(Stop::Stopped(Box::new(run))))
+    Ok(Stop::Stopped(Box::new(run)))
 }
 
 /// Cancel a live run with `message` and pause its task, giving the run and

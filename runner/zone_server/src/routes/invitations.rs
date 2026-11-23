@@ -424,7 +424,7 @@ pub async fn accept_invitation(
         .map_err(unavailable)?
         .ok_or_else(|| refusal(StatusCode::UNAUTHORIZED, "User not found"))?;
 
-    if user.email != invitation.email {
+    if user.email.to_lowercase() != invitation.email.to_lowercase() {
         return Err(refusal(
             StatusCode::FORBIDDEN,
             "This invitation is for a different email address",

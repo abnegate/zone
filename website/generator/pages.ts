@@ -39,6 +39,23 @@ export const pages: ReadonlyArray<Page> = [
     linksFromBasePath: false,
   },
   {
+    template: 'contact.html',
+    output: 'contact/index.html',
+    title: 'Contact · Zone',
+    description:
+      'Ask about Zone plans, invoicing, licensing or a large rollout. A person replies by email.',
+    indexed: true,
+    linksFromBasePath: false,
+  },
+  {
+    template: 'contact-sent.html',
+    output: 'contact/sent/index.html',
+    title: 'Message sent · Zone',
+    description: 'Your message to the Zone team is on its way.',
+    indexed: false,
+    linksFromBasePath: false,
+  },
+  {
     template: 'not-found.html',
     output: '404.html',
     title: 'Page not found · Zone',

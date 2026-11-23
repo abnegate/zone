@@ -1929,19 +1929,21 @@ async fn an_email_is_stored_in_lower_case_and_looked_up_ignoring_case() {
     let account = users::find_by_email_ignoring_case(fixture.pool(), "ada@acme.com")
         .await
         .unwrap()[0]
-        .account();
+        .account(false);
     assert_eq!(account.id, ada.id);
     assert!(account.admin);
     assert!(!account.active);
     assert!(account.email_verified);
+    assert!(!account.pristine);
     let account = users::find_by_email_ignoring_case(fixture.pool(), "GRACE@acme.com")
         .await
         .unwrap()[0]
-        .account();
+        .account(true);
     assert_eq!(account.id, grace.id);
     assert!(!account.admin);
     assert!(account.active);
     assert!(!account.email_verified);
+    assert!(account.pristine);
     fixture.cleanup().await;
 }
 

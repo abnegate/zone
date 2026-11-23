@@ -1029,9 +1029,7 @@ mod tests {
         )
         .await
         .unwrap();
-        workspace_members::add_member(&pool, workspace.id, user.id, WorkspaceRole::Member, None)
-            .await
-            .unwrap();
+        crate::db::testing::seat(&pool, workspace.id, user.id, WorkspaceRole::Member).await;
         let scope = WorkspaceScope {
             state: AppState::new(test_config(), pool.clone(), None),
             workspace_id: workspace.id,
