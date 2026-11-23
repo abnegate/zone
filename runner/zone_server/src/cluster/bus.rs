@@ -1,4 +1,4 @@
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use abnegate_secret::MasterKey;
@@ -11,13 +11,15 @@ use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::clock::SKEW;
 use super::envelope::Envelope;
 use super::kind::Kind;
 use super::loopback::Loopback;
 use super::namespace::Namespace;
 use super::pending::Pending;
+use super::sealer::Sealer;
+use super::seen::Seen;
 use super::shared::Shared;
-use super::signer::Signer;
 use super::status::Status;
 use super::subscription::Subscription;
 use super::topic::Topic;
@@ -26,7 +28,7 @@ use super::valkey::{LOG_INTERVAL, Valkey};
 
 const CONFIRMATION: Duration = Duration::from_secs(2);
 
-/// The signed, best-effort bus replicas relay live state over: Valkey pub/sub
+/// The sealed, best-effort bus replicas relay live state over: Valkey pub/sub
 /// when it is configured, or an in-process loopback when it is not. Durable
 /// state stays in Postgres; nothing here is retried or persisted.
 #[derive(Clone)]
@@ -99,10 +101,11 @@ impl Bus {
         let shared = Arc::new_cyclic(|shared| Shared {
             instance,
             namespace,
-            signer: Signer::derive(master),
+            sealer: Sealer::derive(master),
             home,
             channels: DashMap::new(),
             pending: DashMap::new(),
+            seen: Mutex::new(Seen::new(Kind::Request.lifetime() + SKEW)),
             transport: transport(shared.clone(), stop.clone()),
             status,
             stop: stop.drop_guard(),
@@ -232,15 +235,18 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use super::*;
+    use crate::cluster::clock::{self, milliseconds};
     use crate::cluster::packet::Packet;
     use crate::secret;
     use serde::Deserialize;
+    use tokio::sync::broadcast;
     use tokio::sync::broadcast::error::TryRecvError;
 
     const PASSPHRASE: &str = "a-cluster-passphrase-of-at-least-32-bytes";
     const OTHER_PASSPHRASE: &str = "another-cluster-passphrase-of-32-bytes!";
     const WAIT: Duration = Duration::from_secs(2);
     const SILENCE: Duration = Duration::from_millis(200);
+    const MARKER: &str = "a-secret-the-wire-must-not-show";
 
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     struct Title {
@@ -311,6 +317,145 @@ mod tests {
     async fn silent(subscription: &mut Subscription) {
         tokio::time::sleep(SILENCE).await;
         assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    async fn crossing(wire: &mut broadcast::Receiver<Packet>) -> Packet {
+        tokio::time::timeout(WAIT, wire.recv())
+            .await
+            .expect("a packet crosses the hub")
+            .expect("the hub is open")
+    }
+
+    fn shows(bytes: &[u8], text: &str) -> bool {
+        bytes
+            .windows(text.len())
+            .any(|window| window == text.as_bytes())
+    }
+
+    #[tokio::test]
+    async fn a_chat_frame_crosses_the_wire_sealed() {
+        let hub = Loopback::new();
+        let mut wire = hub.tap();
+        let sender = Bus::attach(&hub, &master());
+        let receiver = Bus::attach(&hub, &master());
+        let chat = Uuid::new_v4();
+        let mut frames = receiver.subscribe(Topic::ChatFrames(chat)).await;
+        let header = format!("{MARKER}-in-the-header");
+        let payload = Bytes::from(format!(
+            r#"{{"type":"chunk","content":"{MARKER}-in-the-payload"}}"#
+        ));
+
+        sender.publish_raw(Topic::ChatFrames(chat), &header, payload.clone());
+
+        let packet = crossing(&mut wire).await;
+        assert!(!shows(&packet.bytes, MARKER), "{:?}", packet.bytes);
+        let envelope = next(&mut frames).await;
+        assert_eq!(envelope.bytes(), &payload);
+        assert_eq!(envelope.header::<String>().unwrap(), header);
+    }
+
+    #[tokio::test]
+    async fn a_request_delivered_twice_is_heard_once() {
+        let hub = Loopback::new();
+        let mut wire = hub.tap();
+        let asker = Bus::attach(&hub, &master());
+        let answerer = Bus::attach(&hub, &master());
+        let chat = Uuid::new_v4();
+        let mut control = answerer.subscribe(Topic::ChatControl(chat)).await;
+
+        let unanswered = asker
+            .request(Topic::ChatControl(chat), &title(), SILENCE)
+            .await;
+        let captured = crossing(&mut wire).await;
+        hub.send(captured);
+
+        assert!(unanswered.is_none());
+        assert_eq!(next(&mut control).await.kind(), Kind::Request);
+        silent(&mut control).await;
+    }
+
+    /// A genuine envelope sealed by a peer of this cluster at `issued_at`.
+    fn sealed(topic: Topic, kind: Kind, issued_at: u64) -> (Envelope, Packet) {
+        let channel: Arc<str> = topic.channel(&Namespace::derive(&master())).into();
+        let correlation = (kind == Kind::Request).then(Uuid::new_v4);
+        let envelope = Envelope::new(
+            topic,
+            kind,
+            Uuid::new_v4(),
+            correlation,
+            Bytes::new(),
+            Bytes::from(serde_json::to_vec(&title()).unwrap()),
+        );
+        let bytes = envelope.encode(&channel, &Sealer::derive(&master()), issued_at);
+        (envelope, Packet { channel, bytes })
+    }
+
+    fn ago(elapsed: Duration) -> u64 {
+        clock::now() - milliseconds(elapsed)
+    }
+
+    #[tokio::test]
+    async fn a_request_captured_longer_ago_than_its_lifetime_is_dropped() {
+        let hub = Loopback::new();
+        let receiver = Bus::attach(&hub, &master());
+        let chat = Uuid::new_v4();
+        let mut control = receiver.subscribe(Topic::ChatControl(chat)).await;
+        let lifetime = Kind::Request.lifetime();
+        let (_, replayed) = sealed(
+            Topic::ChatControl(chat),
+            Kind::Request,
+            ago(lifetime + Duration::from_secs(1)),
+        );
+        let (recent, packet) = sealed(
+            Topic::ChatControl(chat),
+            Kind::Request,
+            ago(lifetime - Duration::from_secs(2)),
+        );
+
+        hub.send(replayed);
+        silent(&mut control).await;
+        hub.send(packet);
+
+        assert_eq!(next(&mut control).await, recent);
+    }
+
+    #[tokio::test]
+    async fn a_message_is_dropped_once_older_than_its_own_lifetime() {
+        let hub = Loopback::new();
+        let receiver = Bus::attach(&hub, &master());
+        let mut titles = receiver.subscribe(Topic::Titles).await;
+        let (_, stale) = sealed(
+            Topic::Titles,
+            Kind::Message,
+            ago(Kind::Message.lifetime() + Duration::from_secs(1)),
+        );
+        let (older_than_a_request, packet) = sealed(
+            Topic::Titles,
+            Kind::Message,
+            ago(Kind::Request.lifetime() + Duration::from_secs(1)),
+        );
+
+        hub.send(stale);
+        silent(&mut titles).await;
+        hub.send(packet);
+
+        assert_eq!(next(&mut titles).await, older_than_a_request);
+    }
+
+    #[tokio::test]
+    async fn an_envelope_stamped_further_ahead_than_the_clock_skew_is_dropped() {
+        let hub = Loopback::new();
+        let receiver = Bus::attach(&hub, &master());
+        let mut titles = receiver.subscribe(Topic::Titles).await;
+        let (_, ahead) = sealed(
+            Topic::Titles,
+            Kind::Message,
+            clock::now() + milliseconds(SKEW + Duration::from_secs(2)),
+        );
+
+        hub.send(ahead);
+
+        silent(&mut titles).await;
     }
 
     #[tokio::test]
@@ -458,13 +603,14 @@ mod tests {
             Bytes::new(),
             Bytes::from(serde_json::to_vec(&title()).unwrap()),
         );
-        let genuine = envelope.encode(&channel, &Signer::derive(&master()));
+        let genuine = envelope.encode(&channel, &Sealer::derive(&master()), clock::now());
         let mut tampered = genuine.to_vec();
         let inside_payload = tampered.len() - 40;
         tampered[inside_payload] ^= 0x01;
         let forged = envelope.encode(
             &channel,
-            &Signer::derive(&secret::derive(OTHER_PASSPHRASE).unwrap()),
+            &Sealer::derive(&secret::derive(OTHER_PASSPHRASE).unwrap()),
+            clock::now(),
         );
 
         for bytes in [Bytes::from(tampered), forged] {

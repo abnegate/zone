@@ -1,3 +1,8 @@
+use std::time::Duration;
+
+const REQUEST_LIFETIME: Duration = Duration::from_secs(10);
+const LIFETIME: Duration = Duration::from_secs(30);
+
 /// What an envelope is for, which decides how the bus routes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -20,6 +25,16 @@ impl Kind {
     pub fn as_byte(self) -> u8 {
         self as u8
     }
+
+    /// How long after it was issued an envelope is still delivered. A request
+    /// acts on a chat or a task, so one captured off the wire stays usable
+    /// for the shortest time.
+    pub fn lifetime(self) -> Duration {
+        match self {
+            Self::Request => REQUEST_LIFETIME,
+            Self::Message | Self::Reply => LIFETIME,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -33,5 +48,11 @@ mod tests {
         }
         assert_eq!(Kind::from_byte(0), None);
         assert_eq!(Kind::from_byte(4), None);
+    }
+
+    #[test]
+    fn a_request_lives_shorter_than_anything_else() {
+        assert!(Kind::Request.lifetime() < Kind::Message.lifetime());
+        assert_eq!(Kind::Message.lifetime(), Kind::Reply.lifetime());
     }
 }

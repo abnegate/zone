@@ -36,6 +36,12 @@ impl Loopback {
     pub(super) fn attach(&self, shared: Weak<Shared>, stop: CancellationToken) {
         tokio::spawn(listen(self.hub.subscribe(), shared, stop));
     }
+
+    /// Every packet sent on the hub from now on, exactly as it crosses.
+    #[cfg(test)]
+    pub(super) fn tap(&self) -> broadcast::Receiver<Packet> {
+        self.hub.subscribe()
+    }
 }
 
 impl Default for Loopback {

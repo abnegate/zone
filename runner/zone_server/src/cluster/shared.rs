@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -8,11 +9,14 @@ use tokio_util::sync::DropGuard;
 use uuid::Uuid;
 
 use super::channel::Channel;
+use super::clock;
 use super::envelope::Envelope;
 use super::kind::Kind;
 use super::namespace::Namespace;
 use super::packet::Packet;
-use super::signer::Signer;
+use super::rejection::Rejection;
+use super::sealer::Sealer;
+use super::seen::Seen;
 use super::status::Status;
 use super::topic::Topic;
 use super::transport::Transport;
@@ -23,12 +27,13 @@ const CAPACITY: usize = 1024;
 pub struct Shared {
     pub instance: Uuid,
     pub namespace: Namespace,
-    pub signer: Signer,
+    pub sealer: Sealer,
     /// The channel of this instance's own topic, which replies arrive on and
     /// which stays subscribed for the bus's whole life.
     pub home: Arc<str>,
     pub channels: DashMap<Arc<str>, Channel>,
     pub pending: DashMap<Uuid, oneshot::Sender<Envelope>>,
+    pub seen: Mutex<Seen>,
     pub transport: Transport,
     pub status: Arc<Status>,
     pub stop: DropGuard,
@@ -52,13 +57,14 @@ impl Shared {
             return;
         }
         let channel: Arc<str> = topic.channel(&self.namespace).into();
-        let bytes = envelope.encode(&channel, &self.signer);
+        let bytes = envelope.encode(&channel, &self.sealer, clock::now());
         self.transport.send(Packet { channel, bytes });
     }
 
-    /// Checks an envelope that arrived on `channel` and hands it to whoever
+    /// Opens an envelope that arrived on `channel` and hands it to whoever
     /// waits for it. An envelope this instance sent comes back only on an
-    /// instance topic; anything that fails its signature is dropped.
+    /// instance topic; anything that does not open under this cluster's key,
+    /// is too old, or repeats a request already delivered is dropped.
     pub fn receive(&self, channel: &str, bytes: Bytes) {
         let topic = if *channel == *self.home {
             Topic::Instance(self.instance)
@@ -68,20 +74,38 @@ impl Shared {
                 None => return,
             }
         };
-        let unverified = match Envelope::decode(topic, bytes) {
-            Ok(unverified) => unverified,
-            Err(rejection) => {
-                tracing::debug!(channel, %rejection, "Dropped a bus envelope");
-                return;
-            }
-        };
-        if unverified.claimed().origin() == self.instance && !matches!(topic, Topic::Instance(_)) {
-            return;
-        }
-        match unverified.verify(channel, &self.signer) {
-            Ok(envelope) => self.deliver(channel, envelope),
+        match self.admit(channel, topic, bytes) {
+            Ok(Some(envelope)) => self.deliver(channel, envelope),
+            Ok(None) => {}
             Err(rejection) => tracing::debug!(channel, %rejection, "Dropped a bus envelope"),
         }
+    }
+
+    /// The envelope to deliver, or None for this instance's own echo.
+    fn admit(
+        &self,
+        channel: &str,
+        topic: Topic,
+        bytes: Bytes,
+    ) -> Result<Option<Envelope>, Rejection> {
+        let unverified = Envelope::decode(topic, bytes)?;
+        if unverified.origin() == self.instance && !matches!(topic, Topic::Instance(_)) {
+            return Ok(None);
+        }
+        if !unverified.fresh(clock::now()) {
+            return Err(Rejection::Stale);
+        }
+        let envelope = unverified.open(channel, &self.sealer)?;
+        if let (Kind::Request, Some(correlation)) = (envelope.kind(), envelope.correlation())
+            && !self
+                .seen
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .first(envelope.origin(), correlation, Instant::now())
+        {
+            return Err(Rejection::Replayed);
+        }
+        Ok(Some(envelope))
     }
 
     fn deliver(&self, channel: &str, envelope: Envelope) {

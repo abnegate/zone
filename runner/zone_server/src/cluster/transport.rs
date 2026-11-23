@@ -17,7 +17,7 @@ pub enum Transport {
 
 impl Transport {
     /// Whether an envelope published now could reach another instance, so a
-    /// lone loopback bus skips signing envelopes nobody would hear.
+    /// lone loopback bus skips sealing envelopes nobody would hear.
     pub fn reaches_peers(&self) -> bool {
         match self {
             Self::Loopback(loopback) => loopback.has_peers(),

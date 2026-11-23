@@ -4,20 +4,25 @@ use uuid::Uuid;
 
 use super::kind::Kind;
 use super::rejection::Rejection;
-use super::signer::{Signer, TAG_BYTES};
+use super::sealer::{NONCE_BYTES, Sealer, TAG_BYTES};
 use super::topic::Topic;
 use super::unverified::Unverified;
 
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const UUID_BYTES: usize = 16;
 const ABSENT: u8 = 0;
 const PRESENT: u8 = 1;
-const FIXED_BYTES: usize = 1 + 1 + UUID_BYTES + 1 + UUID_BYTES + 4;
+const ISSUED_AT_BYTES: usize = 8;
+const LENGTH_BYTES: usize = 4;
+pub(super) const FRAMING_BYTES: usize =
+    1 + 1 + UUID_BYTES + 1 + UUID_BYTES + ISSUED_AT_BYTES + NONCE_BYTES;
+const MINIMUM_BYTES: usize = FRAMING_BYTES + LENGTH_BYTES + TAG_BYTES;
 
 /// One message on the bus: who sent it, the request it answers or opens, a
 /// small header the receiver can read without touching the payload, and the
-/// payload bytes. On the wire it carries an HMAC over all of them and the
-/// channel it was published on.
+/// payload bytes. On the wire the header and payload are sealed, and the
+/// framing around them, the time it was issued and the channel it was
+/// published on are authenticated with them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {
     topic: Topic,
@@ -78,10 +83,12 @@ impl Envelope {
         &self.payload
     }
 
-    pub(super) fn encode(&self, channel: &str, signer: &Signer) -> Bytes {
-        let mut buffer = BytesMut::with_capacity(
-            FIXED_BYTES + self.header.len() + self.payload.len() + TAG_BYTES,
-        );
+    /// The envelope sealed for `channel`, stamped as issued at `issued_at`
+    /// milliseconds since the Unix epoch.
+    pub(super) fn encode(&self, channel: &str, sealer: &Sealer, issued_at: u64) -> Bytes {
+        let nonce = Sealer::nonce();
+        let mut buffer =
+            BytesMut::with_capacity(MINIMUM_BYTES + self.header.len() + self.payload.len());
         buffer.put_u8(VERSION);
         buffer.put_u8(self.kind.as_byte());
         buffer.put_slice(self.origin.as_bytes());
@@ -95,22 +102,24 @@ impl Envelope {
                 buffer.put_slice(Uuid::nil().as_bytes());
             }
         }
+        buffer.put_u64(issued_at);
+        buffer.put_slice(&nonce);
         buffer.put_u32(u32::try_from(self.header.len()).expect("a header fits in four bytes"));
         buffer.put_slice(&self.header);
         buffer.put_slice(&self.payload);
-        let tag = signer.sign(channel, &buffer);
+        let (framing, body) = buffer.split_at_mut(FRAMING_BYTES);
+        let tag = sealer.seal(&nonce, channel, framing, body);
         buffer.put_slice(&tag);
         buffer.freeze()
     }
 
-    /// Reads the framing without checking the signature, so an envelope the
-    /// receiver would drop anyway costs no HMAC.
+    /// Reads the framing without opening the body, so an envelope the
+    /// receiver would drop anyway costs no decryption.
     pub(super) fn decode(topic: Topic, bytes: Bytes) -> Result<Unverified, Rejection> {
-        if bytes.len() < FIXED_BYTES + TAG_BYTES {
+        if bytes.len() < MINIMUM_BYTES {
             return Err(Rejection::Truncated);
         }
-        let body = bytes.len() - TAG_BYTES;
-        let mut reader = bytes.slice(..body);
+        let mut reader = &bytes[..FRAMING_BYTES];
         if reader.get_u8() != VERSION {
             return Err(Rejection::Version);
         }
@@ -123,17 +132,22 @@ impl Envelope {
             ABSENT => None,
             _ => return Err(Rejection::Truncated),
         };
-        let header_length = reader.get_u32() as usize;
-        if reader.remaining() < header_length {
-            return Err(Rejection::Truncated);
-        }
-        let header = reader.split_to(header_length);
-        let envelope = Self::new(topic, kind, origin, correlation, header, reader);
-        Ok(Unverified::new(envelope, bytes, body))
+        let issued_at = reader.get_u64();
+        let mut nonce = [0u8; NONCE_BYTES];
+        reader.copy_to_slice(&mut nonce);
+        Ok(Unverified::new(
+            topic,
+            kind,
+            origin,
+            correlation,
+            issued_at,
+            nonce,
+            bytes,
+        ))
     }
 }
 
-fn read_uuid(reader: &mut Bytes) -> Uuid {
+fn read_uuid(reader: &mut &[u8]) -> Uuid {
     let mut id = [0u8; UUID_BYTES];
     reader.copy_to_slice(&mut id);
     Uuid::from_bytes(id)
@@ -141,32 +155,64 @@ fn read_uuid(reader: &mut Bytes) -> Uuid {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::cluster::clock::{SKEW, milliseconds};
     use crate::secret;
 
     const PASSPHRASE: &str = "a-cluster-passphrase-of-at-least-32-bytes";
+    const OTHER_PASSPHRASE: &str = "another-cluster-passphrase-of-32-bytes!";
     const CHANNEL: &str = "zone:0123456789abcdef:titles";
+    const ISSUED_AT: u64 = 1_800_000_000_000;
+    const HEADER: &str = r#"{"sequence":7}"#;
+    const PAYLOAD: &str = r#"{"title":"Hello"}"#;
 
-    fn signer() -> Signer {
-        Signer::derive(&secret::derive(PASSPHRASE).unwrap())
+    fn sealer() -> Sealer {
+        Sealer::derive(&secret::derive(PASSPHRASE).unwrap())
     }
 
-    fn envelope() -> Envelope {
+    fn envelope(kind: Kind) -> Envelope {
         Envelope::new(
             Topic::Titles,
-            Kind::Request,
+            kind,
             Uuid::new_v4(),
             Some(Uuid::new_v4()),
-            Bytes::from_static(br#"{"sequence":7}"#),
-            Bytes::from_static(br#"{"title":"Hello"}"#),
+            Bytes::from_static(HEADER.as_bytes()),
+            Bytes::from_static(PAYLOAD.as_bytes()),
         )
     }
 
+    fn shows(bytes: &[u8], text: &str) -> bool {
+        bytes
+            .windows(text.len())
+            .any(|window| window == text.as_bytes())
+    }
+
+    fn opened(bytes: Bytes, channel: &str, sealer: &Sealer) -> Result<Envelope, Rejection> {
+        Envelope::decode(Topic::Titles, bytes)
+            .and_then(|unverified| unverified.open(channel, sealer))
+    }
+
+    fn issued_after(kind: Kind, elapsed: Duration) -> bool {
+        let encoded = envelope(kind).encode(CHANNEL, &sealer(), ISSUED_AT);
+        Envelope::decode(Topic::Titles, encoded)
+            .unwrap()
+            .fresh(ISSUED_AT + milliseconds(elapsed))
+    }
+
+    fn issued_ahead_by(ahead: Duration) -> bool {
+        let encoded = envelope(Kind::Request).encode(CHANNEL, &sealer(), ISSUED_AT);
+        Envelope::decode(Topic::Titles, encoded)
+            .unwrap()
+            .fresh(ISSUED_AT - milliseconds(ahead))
+    }
+
     #[test]
-    fn an_encoded_envelope_decodes_and_verifies_to_itself() {
-        let signer = signer();
+    fn an_encoded_envelope_decodes_and_opens_to_itself() {
+        let sealer = sealer();
         for original in [
-            envelope(),
+            envelope(Kind::Request),
             Envelope::new(
                 Topic::Actions,
                 Kind::Message,
@@ -176,51 +222,77 @@ mod tests {
                 Bytes::new(),
             ),
         ] {
-            let encoded = original.encode(CHANNEL, &signer);
-            let decoded = Envelope::decode(original.topic(), encoded)
-                .unwrap()
-                .verify(CHANNEL, &signer)
-                .unwrap();
+            let encoded = original.encode(CHANNEL, &sealer, ISSUED_AT);
+            let unverified = Envelope::decode(original.topic(), encoded).unwrap();
 
-            assert_eq!(decoded, original);
+            assert_eq!(unverified.origin(), original.origin());
+            assert_eq!(unverified.issued_at(), ISSUED_AT);
+            assert_eq!(unverified.open(CHANNEL, &sealer).unwrap(), original);
         }
     }
 
     #[test]
+    fn the_wire_shows_neither_the_header_nor_the_payload() {
+        let encoded = envelope(Kind::Message).encode(CHANNEL, &sealer(), ISSUED_AT);
+
+        assert!(!shows(&encoded, HEADER), "{encoded:?}");
+        assert!(!shows(&encoded, PAYLOAD), "{encoded:?}");
+        assert!(!shows(&encoded, "Hello"), "{encoded:?}");
+    }
+
+    #[test]
+    fn the_same_envelope_seals_differently_each_time() {
+        let sealer = sealer();
+        let original = envelope(Kind::Message);
+
+        assert_ne!(
+            original.encode(CHANNEL, &sealer, ISSUED_AT),
+            original.encode(CHANNEL, &sealer, ISSUED_AT)
+        );
+    }
+
+    #[test]
     fn a_tampered_envelope_is_rejected_wherever_the_byte_flips() {
-        let signer = signer();
-        let encoded = envelope().encode(CHANNEL, &signer);
+        let sealer = sealer();
+        let encoded = envelope(Kind::Request).encode(CHANNEL, &sealer, ISSUED_AT);
 
         for index in 0..encoded.len() {
             let mut tampered = encoded.to_vec();
             tampered[index] ^= 0x01;
-            let verified = Envelope::decode(Topic::Titles, Bytes::from(tampered))
-                .and_then(|unverified| unverified.verify(CHANNEL, &signer));
-            assert!(verified.is_err(), "flipping byte {index} went unnoticed");
+            assert!(
+                opened(Bytes::from(tampered), CHANNEL, &sealer).is_err(),
+                "flipping byte {index} went unnoticed"
+            );
         }
     }
 
     #[test]
     fn an_envelope_replayed_onto_another_channel_is_rejected() {
-        let signer = signer();
-        let encoded = envelope().encode(CHANNEL, &signer);
+        let sealer = sealer();
+        let encoded = envelope(Kind::Request).encode(CHANNEL, &sealer, ISSUED_AT);
 
-        let replayed = Envelope::decode(Topic::Actions, encoded)
-            .unwrap()
-            .verify("zone:0123456789abcdef:actions", &signer);
-
-        assert_eq!(replayed, Err(Rejection::Signature));
+        assert_eq!(
+            opened(encoded, "zone:0123456789abcdef:actions", &sealer),
+            Err(Rejection::Seal)
+        );
     }
 
     #[test]
-    fn a_short_or_unknown_envelope_is_rejected_before_its_signature() {
-        let signer = signer();
-        let encoded = envelope().encode(CHANNEL, &signer);
+    fn an_envelope_sealed_under_another_master_key_is_rejected() {
+        let other = Sealer::derive(&secret::derive(OTHER_PASSPHRASE).unwrap());
+        let encoded = envelope(Kind::Message).encode(CHANNEL, &other, ISSUED_AT);
+
+        assert_eq!(opened(encoded, CHANNEL, &sealer()), Err(Rejection::Seal));
+    }
+
+    #[test]
+    fn a_short_or_unknown_envelope_is_rejected_before_it_is_opened() {
+        let encoded = envelope(Kind::Message).encode(CHANNEL, &sealer(), ISSUED_AT);
         let mut future = encoded.to_vec();
         future[0] = VERSION + 1;
 
         assert_eq!(
-            Envelope::decode(Topic::Titles, encoded.slice(..FIXED_BYTES)).err(),
+            Envelope::decode(Topic::Titles, encoded.slice(..MINIMUM_BYTES - 1)).err(),
             Some(Rejection::Truncated)
         );
         assert_eq!(
@@ -230,15 +302,45 @@ mod tests {
     }
 
     #[test]
-    fn a_header_longer_than_the_body_is_truncated() {
-        let signer = signer();
-        let mut encoded = envelope().encode(CHANNEL, &signer).to_vec();
-        let length_offset = FIXED_BYTES - 4;
-        encoded[length_offset..FIXED_BYTES].copy_from_slice(&u32::MAX.to_be_bytes());
+    fn a_sealed_header_longer_than_the_body_is_truncated() {
+        let sealer = sealer();
+        let genuine = envelope(Kind::Message).encode(CHANNEL, &sealer, ISSUED_AT);
+        let framing = &genuine[..FRAMING_BYTES];
+        let nonce: [u8; NONCE_BYTES] = framing[FRAMING_BYTES - NONCE_BYTES..].try_into().unwrap();
+        let mut body = u32::MAX.to_be_bytes().to_vec();
+        let tag = sealer.seal(&nonce, CHANNEL, framing, &mut body);
+        let forged = Bytes::from([framing, &body, &tag].concat());
 
-        assert_eq!(
-            Envelope::decode(Topic::Titles, Bytes::from(encoded)).err(),
-            Some(Rejection::Truncated)
-        );
+        assert_eq!(opened(forged, CHANNEL, &sealer), Err(Rejection::Truncated));
+    }
+
+    #[test]
+    fn a_request_is_fresh_for_its_lifetime_only() {
+        let lifetime = Kind::Request.lifetime();
+
+        assert!(issued_after(Kind::Request, Duration::ZERO));
+        assert!(issued_after(Kind::Request, lifetime));
+        assert!(!issued_after(
+            Kind::Request,
+            lifetime + Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn messages_and_replies_stay_fresh_longer_than_requests() {
+        let past_a_request = Kind::Request.lifetime() + Duration::from_secs(1);
+        let lifetime = Kind::Message.lifetime();
+
+        for kind in [Kind::Message, Kind::Reply] {
+            assert!(issued_after(kind, past_a_request));
+            assert!(issued_after(kind, lifetime));
+            assert!(!issued_after(kind, lifetime + Duration::from_millis(1)));
+        }
+    }
+
+    #[test]
+    fn an_envelope_from_a_clock_ahead_is_fresh_only_within_the_skew() {
+        assert!(issued_ahead_by(SKEW));
+        assert!(!issued_ahead_by(SKEW + Duration::from_millis(1)));
     }
 }

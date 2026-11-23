@@ -2,7 +2,7 @@ use std::fmt;
 
 use abnegate_secret::MasterKey;
 
-use super::signer::subkey;
+use super::subkey::subkey;
 
 const PURPOSE: &str = "zone-bus:namespace";
 const HEXADECIMAL_LENGTH: usize = 16;
@@ -34,7 +34,7 @@ impl fmt::Display for Namespace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cluster::signer::TAG_BYTES;
+    use crate::cluster::subkey::SUBKEY_BYTES;
     use crate::secret;
 
     const PASSPHRASE: &str = "a-cluster-passphrase-of-at-least-32-bytes";
@@ -66,10 +66,10 @@ mod tests {
     }
 
     #[test]
-    fn the_namespace_is_not_a_prefix_of_the_signing_key() {
+    fn the_namespace_is_not_a_prefix_of_the_sealing_key() {
         let master = secret::derive(PASSPHRASE).unwrap();
-        let signing = hex::encode::<[u8; TAG_BYTES]>(subkey(&master, "zone-bus:signing"));
+        let sealing = hex::encode::<[u8; SUBKEY_BYTES]>(subkey(&master, "zone-bus:sealing"));
 
-        assert!(!signing.starts_with(Namespace::derive(&master).as_str()));
+        assert!(!sealing.starts_with(Namespace::derive(&master).as_str()));
     }
 }
