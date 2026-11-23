@@ -1,6 +1,10 @@
 import type { Page } from '@playwright/test';
 import type { Overview } from '../src/features/analytics/types';
 import {
+  COMMUNITY_ORGANIZATION_LABELS,
+  COMMUNITY_WORKSPACE_LABELS,
+} from '../src/features/enterprise/fleet/fixtures';
+import {
   COMMUNITY_ORGANIZATION,
   COMMUNITY_WORKSPACE,
 } from '../src/features/enterprise/policy/fixtures';
@@ -83,6 +87,10 @@ const workspaceAiSettingsPath = /\/workspaces\/[^/]+\/settings\/ai$/;
 const ORGANIZATION_AGENT_POLICY = /^\/api\/organizations\/[^/]+\/agent-policy$/;
 
 const WORKSPACE_AGENT_POLICY = /^\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/agent-policy$/;
+
+const ORGANIZATION_RUNNER_LABELS = /^\/api\/organizations\/[^/]+\/runner-labels$/;
+
+const WORKSPACE_RUNNER_LABELS = /^\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/runner-labels$/;
 
 export function workspaceAiSettingsResponse(
   settings: AiSettings = mockAiSettings
@@ -1264,6 +1272,8 @@ export async function setupCommonRoutes(page: Page, populated = false): Promise<
     else if (path.endsWith('/device-policy')) body = { mode: 'open' };
     else if (ORGANIZATION_AGENT_POLICY.test(path)) body = COMMUNITY_ORGANIZATION;
     else if (WORKSPACE_AGENT_POLICY.test(path)) body = COMMUNITY_WORKSPACE;
+    else if (ORGANIZATION_RUNNER_LABELS.test(path)) body = COMMUNITY_ORGANIZATION_LABELS;
+    else if (WORKSPACE_RUNNER_LABELS.test(path)) body = COMMUNITY_WORKSPACE_LABELS;
     else if (/\/settings\/ai(?:\/effective)?$/.test(path)) body = aiSettingsResponse(path);
     else if (path === '/api/organizations') body = { organizations: [mockOrganization] };
     else if (/\/organizations\/[^/]+\/workspaces$/.test(path))

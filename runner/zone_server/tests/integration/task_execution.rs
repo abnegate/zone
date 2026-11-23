@@ -4,6 +4,7 @@ use crate::common;
 
 use uuid::Uuid;
 use zone_server::agent::wait::Waiting;
+use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::tasks;
 
 const COMPLETED: &str = "completed";
@@ -1477,9 +1478,10 @@ impl Leased {
 async fn lease() -> Leased {
     let leased = admit().await;
     assert!(
-        tasks::claim_task_run(&leased.pool, leased.run, leased.owner)
+        tasks::claim_task_run(&leased.pool, leased.run, leased.owner, Claimant::UNENFORCED)
             .await
-            .expect("the new run is claimable"),
+            .expect("the new run is claimable")
+            .claimed(),
         "a freshly admitted run takes a lease"
     );
     leased
@@ -1957,9 +1959,15 @@ async fn a_stop_cancels_a_run_no_worker_has_claimed_yet() {
     assert_stop_response(&admitted.stop().await, admitted.run);
     assert_stopped(&admitted.pool, admitted.task, admitted.run).await;
     assert!(
-        !tasks::claim_task_run(&admitted.pool, admitted.run, admitted.owner)
-            .await
-            .unwrap(),
+        !tasks::claim_task_run(
+            &admitted.pool,
+            admitted.run,
+            admitted.owner,
+            Claimant::UNENFORCED
+        )
+        .await
+        .unwrap()
+        .claimed(),
         "a stopped run cannot be claimed afterwards"
     );
 

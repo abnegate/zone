@@ -15,6 +15,7 @@ use crate::common::context::{Harness, answer, calls, successful, tool};
 use serde_json::{Value, json};
 use std::time::Duration;
 use uuid::Uuid;
+use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::reminders::Sweep;
 use zone_server::workers::reminders::{Lease, run};
 
@@ -463,10 +464,15 @@ async fn a_watch_turn_that_lost_its_claim_is_stopped_and_its_successor_keeps_the
     assert_eq!(owed(&harness, reminder).await, 2, "two firings are owed");
 
     let claim = || async {
-        zone_server::db::reminders::claim_turn(&harness.pool, sweep, lease.duration)
-            .await
-            .unwrap()
-            .expect("an owed firing is offered")
+        zone_server::db::reminders::claim_turn(
+            &harness.pool,
+            sweep,
+            lease.duration,
+            Claimant::UNENFORCED,
+        )
+        .await
+        .unwrap()
+        .expect("an owed firing is offered")
     };
     let mut first = claim().await;
     for _ in 1..3 {
@@ -487,7 +493,7 @@ async fn a_watch_turn_that_lost_its_claim_is_stopped_and_its_successor_keeps_the
     let running = tokio::spawn({
         let state = state.clone();
         let first = first.clone();
-        async move { run(&state, first, lease).await }
+        async move { run(&state, first, lease, Claimant::UNENFORCED).await }
     });
     until_requests(&harness, 1).await;
     lapse(&harness, first.id, lease).await;
@@ -501,9 +507,12 @@ async fn a_watch_turn_that_lost_its_claim_is_stopped_and_its_successor_keeps_the
     let after_stop = messages(&harness).await;
     let baseline_after_stop = baseline(&harness, reminder).await;
 
-    tokio::time::timeout(STOPPED_WITHIN, run(&state, successor, lease))
-        .await
-        .expect("the stopped turn released the chat's queue for the firing that took over");
+    tokio::time::timeout(
+        STOPPED_WITHIN,
+        run(&state, successor, lease, Claimant::UNENFORCED),
+    )
+    .await
+    .expect("the stopped turn released the chat's queue for the firing that took over");
     let stored = messages(&harness).await;
     let baseline_after_successor = baseline(&harness, reminder).await;
 
@@ -641,10 +650,15 @@ async fn a_turn_stopped_for_a_lapsed_claim_leaves_its_firing_owed_for_the_next_a
         .await
         .expect("the due firing is written down as an owed turn");
     let claim = || async {
-        zone_server::db::reminders::claim_turn(&harness.pool, sweep, lease.duration)
-            .await
-            .unwrap()
-            .expect("the owed firing is offered")
+        zone_server::db::reminders::claim_turn(
+            &harness.pool,
+            sweep,
+            lease.duration,
+            Claimant::UNENFORCED,
+        )
+        .await
+        .unwrap()
+        .expect("the owed firing is offered")
     };
     let first = claim().await;
 
@@ -652,7 +666,7 @@ async fn a_turn_stopped_for_a_lapsed_claim_leaves_its_firing_owed_for_the_next_a
     let running = tokio::spawn({
         let state = state.clone();
         let first = first.clone();
-        async move { run(&state, first, lease).await }
+        async move { run(&state, first, lease, Claimant::UNENFORCED).await }
     });
     until_requests(&harness, 1).await;
     lapse(&harness, first.id, lease).await;
@@ -664,9 +678,12 @@ async fn a_turn_stopped_for_a_lapsed_claim_leaves_its_firing_owed_for_the_next_a
     let after_stop = messages(&harness).await;
 
     let retaken = claim().await;
-    tokio::time::timeout(SETTLED_WITHIN, run(&state, retaken.clone(), lease))
-        .await
-        .expect("the stopped turn released the chat's queue for the next attempt");
+    tokio::time::timeout(
+        SETTLED_WITHIN,
+        run(&state, retaken.clone(), lease, Claimant::UNENFORCED),
+    )
+    .await
+    .expect("the stopped turn released the chat's queue for the next attempt");
     let stored = messages(&harness).await;
 
     assert_eq!(
@@ -760,25 +777,36 @@ async fn a_watch_turn_that_outlived_its_lease_leaves_its_firing_owed() {
         .await
         .expect("the due firing is written down as an owed turn");
     let claim = || async {
-        zone_server::db::reminders::claim_turn(&harness.pool, sweep, short.duration)
-            .await
-            .unwrap()
-            .expect("the owed firing is offered")
+        zone_server::db::reminders::claim_turn(
+            &harness.pool,
+            sweep,
+            short.duration,
+            Claimant::UNENFORCED,
+        )
+        .await
+        .unwrap()
+        .expect("the owed firing is offered")
     };
     let state = common::create_test_state(harness.config.clone(), harness.pool.clone());
 
     let first = claim().await;
-    tokio::time::timeout(SETTLED_WITHIN, run(&state, first.clone(), short))
-        .await
-        .expect("the turn runs to its own end");
+    tokio::time::timeout(
+        SETTLED_WITHIN,
+        run(&state, first.clone(), short, Claimant::UNENFORCED),
+    )
+    .await
+    .expect("the turn runs to its own end");
     let still_owed = owed(&harness, reminder).await;
     let baseline_after_late = baseline(&harness, reminder).await;
     let after_late = messages(&harness).await;
 
     let retaken = claim().await;
-    tokio::time::timeout(SETTLED_WITHIN, run(&state, retaken.clone(), long))
-        .await
-        .expect("the next attempt runs to its own end");
+    tokio::time::timeout(
+        SETTLED_WITHIN,
+        run(&state, retaken.clone(), long, Claimant::UNENFORCED),
+    )
+    .await
+    .expect("the next attempt runs to its own end");
     let stored = messages(&harness).await;
 
     assert!(

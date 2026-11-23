@@ -16,6 +16,7 @@ use zone_server::config::{AgentConfig, Config};
 use zone_server::db::audit::actions::AGENT_POLICY_TURN_DENIED;
 use zone_server::db::reminders::{self, Reminder, Sweep};
 use zone_server::db::{licenses, migrations, policies};
+use zone_server::services::fleet;
 use zone_server::state::AppState;
 use zone_server::workers::reminders::{Lease, run};
 
@@ -621,14 +622,18 @@ async fn a_reminder_on_a_denied_route_sends_no_completion() {
     reminders::deliver_next(&fixture.database.pool, sweep)
         .await
         .unwrap();
-    let owed = reminders::claim_turn(&fixture.database.pool, sweep, lease.duration)
+    let claimant = fleet::claimant(&fixture.state).await;
+    let owed = reminders::claim_turn(&fixture.database.pool, sweep, lease.duration, claimant)
         .await
         .unwrap()
         .expect("the firing is owed a turn");
 
-    tokio::time::timeout(Duration::from_secs(30), run(&fixture.state, owed, lease))
-        .await
-        .expect("the refused firing ends");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        run(&fixture.state, owed, lease, claimant),
+    )
+    .await
+    .expect("the refused firing ends");
 
     assert!(fixture.completions().await.is_empty());
     assert_eq!(fixture.stored("assistant").await, 0);

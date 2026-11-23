@@ -214,6 +214,8 @@ export const AUDIT_ACTIONS = [
   'scim_user.deactivated',
   'scim_user.reactivated',
   'scim_user.deleted',
+  'runner_labels.updated',
+  'fleet.run_refused',
 ] as const;
 export const AUDIT_RESOURCE_TYPES = [
   'organization',
@@ -229,6 +231,8 @@ export const AUDIT_RESOURCE_TYPES = [
   'role',
   'scim_token',
   'scim_group',
+  'organization_runner_labels',
+  'workspace_runner_labels',
 ] as const;
 
 export const AuditActionSchema = z.string().min(1);

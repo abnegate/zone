@@ -485,6 +485,7 @@ pub async fn tail_task_log(
 mod tests {
     use super::*;
     use crate::db::custom_roles::testing;
+    use crate::db::fleet::claimant::Claimant;
     use crate::db::reminders;
     use crate::db::reminders::Delivered;
     use crate::db::reminders::Sweep;
@@ -1135,11 +1136,11 @@ mod tests {
 
         // One from each schedule, and then nothing: the second firing of each
         // is waiting on the first, not on the other schedule.
-        let first = reminders::claim_turn(&pool, sweep, LEASE)
+        let first = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("the oldest firing is claimable");
-        let second = reminders::claim_turn(&pool, sweep, LEASE)
+        let second = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("the other schedule is not held up by the first");
@@ -1148,7 +1149,7 @@ mod tests {
             "a schedule with a firing in flight must not be handed its next one"
         );
         assert!(
-            reminders::claim_turn(&pool, sweep, LEASE)
+            reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
                 .await
                 .unwrap()
                 .is_none(),
@@ -1160,7 +1161,7 @@ mod tests {
         reminders::finish_turn(&pool, first.id, first.attempts)
             .await
             .unwrap();
-        let next = reminders::claim_turn(&pool, sweep, LEASE)
+        let next = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("the firing behind a finished one is offered");
@@ -1237,7 +1238,7 @@ mod tests {
         .await
         .unwrap();
 
-        let third = reminders::claim_turn(&pool, sweep, LEASE)
+        let third = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("a firing whose claim went stale is offered again");
@@ -1249,7 +1250,7 @@ mod tests {
             .unwrap();
         assert_eq!(attempts, 3, "the third claim reaches the attempt bound");
         assert!(
-            reminders::claim_turn(&pool, sweep, LEASE)
+            reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
                 .await
                 .unwrap()
                 .is_none(),
@@ -1339,10 +1340,15 @@ mod tests {
         reminders::deliver_next(&pool, Sweep::Workspace(workspace))
             .await
             .unwrap();
-        let turn = reminders::claim_turn(&pool, Sweep::Workspace(workspace), LEASE)
-            .await
-            .unwrap()
-            .expect("the watch's firing is claimable");
+        let turn = reminders::claim_turn(
+            &pool,
+            Sweep::Workspace(workspace),
+            LEASE,
+            Claimant::UNENFORCED,
+        )
+        .await
+        .unwrap()
+        .expect("the watch's firing is claimable");
         assert_eq!(
             reminders::record_observation(&pool, &turn, Uuid::new_v4(), LEASE)
                 .await
@@ -1602,7 +1608,7 @@ mod tests {
 
         let delivered = reminders::deliver_next(&pool, sweep).await.unwrap();
         assert_eq!(delivered, Delivered::Settled);
-        let turn = reminders::claim_turn(&pool, sweep, LEASE)
+        let turn = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("a prompt leaves a turn to run");
@@ -1612,7 +1618,7 @@ mod tests {
         assert_eq!(turn.reminder_id, id);
         assert!(turn.prompt.starts_with("Say what changed"), "{turn:?}");
         assert!(
-            reminders::claim_turn(&pool, sweep, LEASE)
+            reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
                 .await
                 .unwrap()
                 .is_none(),
@@ -1644,7 +1650,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            reminders::claim_turn(&pool, sweep, LEASE)
+            reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
                 .await
                 .unwrap()
                 .is_none(),
@@ -1690,14 +1696,14 @@ mod tests {
         // Three claims, each abandoned: the lease of zero is a worker that
         // never came back, without a test that has to wait out a real one.
         for attempt in 1..=3 {
-            let turn = reminders::claim_turn(&pool, sweep, ABANDONED)
+            let turn = reminders::claim_turn(&pool, sweep, ABANDONED, Claimant::UNENFORCED)
                 .await
                 .unwrap()
                 .unwrap_or_else(|| panic!("attempt {attempt} must be offered the turn"));
             assert_eq!(turn.reminder_id, id);
         }
         assert!(
-            reminders::claim_turn(&pool, sweep, ABANDONED)
+            reminders::claim_turn(&pool, sweep, ABANDONED, Claimant::UNENFORCED)
                 .await
                 .unwrap()
                 .is_none(),
@@ -1795,7 +1801,7 @@ mod tests {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let sweep = Sweep::Workspace(workspace);
         let reminder = owed_turn(&pool, workspace, user, chat_id).await;
-        let first = reminders::claim_turn(&pool, sweep, LEASE)
+        let first = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("the owed firing is claimable");
@@ -1808,7 +1814,7 @@ mod tests {
             .execute(&mut *renewal_in_flight)
             .await
             .unwrap();
-        let second = reminders::claim_turn(&pool, sweep, LEASE)
+        let second = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("a lapsed claim does not hold its sibling back");
@@ -1817,7 +1823,7 @@ mod tests {
         let before = claimed_at(&pool, first.id).await;
 
         assert!(
-            !reminders::renew_turn(&pool, first.id, first.attempts, LEASE)
+            !reminders::renew_turn(&pool, first.id, first.attempts, LEASE, Claimant::UNENFORCED)
                 .await
                 .unwrap(),
             "a lapsed claim is not the worker's to renew"
@@ -1845,7 +1851,7 @@ mod tests {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let sweep = Sweep::Workspace(workspace);
         let reminder = owed_turn(&pool, workspace, user, chat_id).await;
-        let first = reminders::claim_turn(&pool, sweep, LEASE)
+        let first = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("the owed firing is claimable");
@@ -1859,7 +1865,10 @@ mod tests {
             .unwrap();
         let renewal = tokio::spawn({
             let pool = pool.clone();
-            async move { reminders::renew_turn(&pool, first.id, first.attempts, SHORT).await }
+            async move {
+                reminders::renew_turn(&pool, first.id, first.attempts, SHORT, Claimant::UNENFORCED)
+                    .await
+            }
         });
         tokio::time::sleep(SHORT * 2).await;
         sqlx::query(
@@ -1906,7 +1915,7 @@ mod tests {
             .unwrap();
         let claim = tokio::spawn({
             let pool = pool.clone();
-            async move { reminders::claim_turn(&pool, sweep, SHORT).await }
+            async move { reminders::claim_turn(&pool, sweep, SHORT, Claimant::UNENFORCED).await }
         });
         tokio::time::sleep(SHORT * 2).await;
         let released: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
@@ -1944,7 +1953,7 @@ mod tests {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let sweep = Sweep::Workspace(workspace);
         let reminder = owed_turn(&pool, workspace, user, chat_id).await;
-        let turn = reminders::claim_turn(&pool, sweep, LEASE)
+        let turn = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("the owed firing is claimable");
@@ -1952,7 +1961,7 @@ mod tests {
 
         age(&pool, turn.id, LEASE - std::time::Duration::from_secs(60)).await;
         assert!(
-            reminders::renew_turn(&pool, turn.id, turn.attempts, LEASE)
+            reminders::renew_turn(&pool, turn.id, turn.attempts, LEASE, Claimant::UNENFORCED)
                 .await
                 .unwrap(),
             "the worker holding the claim renews it"
@@ -1962,7 +1971,7 @@ mod tests {
             "a renewal starts the lease over"
         );
         assert!(
-            reminders::claim_turn(&pool, sweep, LEASE)
+            reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
                 .await
                 .unwrap()
                 .is_none(),
@@ -1970,7 +1979,7 @@ mod tests {
         );
 
         backdate(&pool, turn.id).await;
-        let again = reminders::claim_turn(&pool, sweep, LEASE)
+        let again = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("a claim nobody renewed lapses and the firing is offered again");
@@ -1993,12 +2002,12 @@ mod tests {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let sweep = Sweep::Workspace(workspace);
         let reminder = owed_turn(&pool, workspace, user, chat_id).await;
-        let first = reminders::claim_turn(&pool, sweep, LEASE)
+        let first = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("the owed firing is claimable");
         backdate(&pool, first.id).await;
-        let second = reminders::claim_turn(&pool, sweep, LEASE)
+        let second = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("the lapsed claim is taken over");
@@ -2007,7 +2016,7 @@ mod tests {
         let before = claimed_at(&pool, first.id).await;
 
         assert!(
-            !reminders::renew_turn(&pool, first.id, first.attempts, LEASE)
+            !reminders::renew_turn(&pool, first.id, first.attempts, LEASE, Claimant::UNENFORCED)
                 .await
                 .unwrap(),
             "the first worker's claim is gone, so its renewal says so"
@@ -2018,9 +2027,15 @@ mod tests {
             "a stale renewal leaves the newer claim's lease alone"
         );
         assert!(
-            reminders::renew_turn(&pool, second.id, second.attempts, LEASE)
-                .await
-                .unwrap(),
+            reminders::renew_turn(
+                &pool,
+                second.id,
+                second.attempts,
+                LEASE,
+                Claimant::UNENFORCED
+            )
+            .await
+            .unwrap(),
             "the newer claim is still inside its lease, so only the attempt turned the stale renewal away"
         );
 
@@ -2049,7 +2064,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let first = reminders::claim_turn(&pool, sweep, LEASE)
+        let first = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("the owed firing is claimable");
@@ -2061,7 +2076,7 @@ mod tests {
             .execute(&mut *first_still_running)
             .await
             .unwrap();
-        let second = reminders::claim_turn(&pool, sweep, LEASE)
+        let second = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("the next firing starts once the first one's claim lapsed");
@@ -2119,12 +2134,12 @@ mod tests {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let sweep = Sweep::Workspace(workspace);
         let reminder = owed_turn(&pool, workspace, user, chat_id).await;
-        let first = reminders::claim_turn(&pool, sweep, LEASE)
+        let first = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("the owed firing is claimable");
         backdate(&pool, first.id).await;
-        let second = reminders::claim_turn(&pool, sweep, LEASE)
+        let second = reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
             .await
             .unwrap()
             .expect("the lapsed claim is taken over");
@@ -2223,7 +2238,7 @@ mod tests {
             "another workspace's due reminder is not this sweep's to deliver"
         );
         assert!(
-            reminders::claim_turn(&pool, sweep, LEASE)
+            reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
                 .await
                 .unwrap()
                 .is_none(),
@@ -2261,7 +2276,7 @@ mod tests {
         );
         assert_eq!(delivered().await, 1);
         assert_eq!(
-            reminders::claim_turn(&pool, elsewhere, LEASE)
+            reminders::claim_turn(&pool, elsewhere, LEASE, Claimant::UNENFORCED)
                 .await
                 .unwrap()
                 .map(|turn| turn.reminder_id),
@@ -2308,7 +2323,7 @@ mod tests {
 
         reminders::cancel(&pool, workspace, user, id).await.unwrap();
         assert!(
-            reminders::claim_turn(&pool, sweep, LEASE)
+            reminders::claim_turn(&pool, sweep, LEASE, Claimant::UNENFORCED)
                 .await
                 .unwrap()
                 .is_none(),

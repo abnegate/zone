@@ -34,7 +34,7 @@ Zone has three editions:
 |---|---|---|
 | **Community** | Free | Every product feature, for up to 3 [active members](#the-community-member-cap) per server. |
 | **Team** | Paid | Everything in Community with no member cap, plus spend reports and budgets. |
-| **Enterprise** | Paid | Everything in Team, plus [single sign-on](SSO.md), [SCIM provisioning](SCIM.md), [agent and model policy](POLICY.md), [custom roles](ROLES.md), and [audit export, streaming and retention](AUDIT.md). |
+| **Enterprise** | Paid | Everything in Team, plus [single sign-on](SSO.md), [SCIM provisioning](SCIM.md), [agent and model policy](POLICY.md), [runner fleet policy](FLEET.md), [custom roles](ROLES.md), and [audit export, streaming and retention](AUDIT.md). |
 
 A server with no license runs Community. A Team or Enterprise license unlocks
 its plan's features while it's active and through its grace period. Both paid

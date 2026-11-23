@@ -40,7 +40,10 @@ again as soon as a Zone Enterprise license is installed.
 A stored license key that no longer verifies, for example after an upgrade
 changes the keys Zone trusts, isn't treated as removed. The saved policies stay
 enforced, and every change is refused with `license_required` until an admin
-installs a key that verifies or removes the license.
+installs a key that verifies or removes the license. The console shows the
+agent policy and runner placement read-only, with a notice that the key no
+longer verifies and the policy stays enforced until an admin replaces or
+removes the key.
 
 If Zone can't read the license or a policy when it needs it, it refuses
 instead of running unrestricted. The refusal is `policy_unreadable`; a task
@@ -472,6 +475,18 @@ Zone writes these entries to the organization's audit log.
 | `agent_policy.tool_denied` | A tool call above the ceiling is refused in an unattended run, or `fetch_url` is refused a host | `chat`, `task` or `workspace` | `code`, and `detail`: the tool's name or the host |
 
 Saving a policy without changing it writes no entry.
+
+## Runner placement
+
+The **Agent policy** pages also have a **Runner placement** card for the
+runner labels an organization or workspace requires of the runners that take
+its unattended work: task runs, reminder turns and auto-project drives. The
+same people edit them, with `policies:update` and `workspace_policies:update`,
+but they are part of [runner fleet policy](FLEET.md), not of the agent policy.
+They have their own API (`/runner-labels`), their own audit action
+(`runner_labels.updated`) and their own codes, and they combine differently: a
+workspace's labels add to its organization's, and `[]` requires nothing. Chats
+ignore them. See [Placement](FLEET.md#placement).
 
 ## Codes
 

@@ -55,6 +55,7 @@ const ALL_SECTIONS = [
   { group: SettingsGroup.Server, section: SettingsSection.Connect, label: 'Connect a device' },
   { group: SettingsGroup.Server, section: SettingsSection.License, label: 'License' },
   { group: SettingsGroup.Server, section: SettingsSection.Sso, label: 'Single sign-on' },
+  { group: SettingsGroup.Server, section: SettingsSection.Runners, label: 'Runners' },
   { group: SettingsGroup.Server, section: SettingsSection.AuditExport, label: 'Audit export' },
   { group: SettingsGroup.You, section: SettingsSection.Sessions, label: 'Sessions' },
 ] as const;
@@ -79,6 +80,7 @@ const FEATURES = settingsPath(SettingsGroup.Server, SettingsSection.Features);
 const CONNECT = settingsPath(SettingsGroup.Server, SettingsSection.Connect);
 const LICENSE = settingsPath(SettingsGroup.Server, SettingsSection.License);
 const SSO = settingsPath(SettingsGroup.Server, SettingsSection.Sso);
+const RUNNERS = settingsPath(SettingsGroup.Server, SettingsSection.Runners);
 const SERVER_AUDIT_EXPORT = settingsPath(SettingsGroup.Server, SettingsSection.AuditExport);
 const ORGANIZATION_AUDIT_EXPORT = settingsPath(
   SettingsGroup.Organization,
@@ -122,6 +124,7 @@ describe('settings constants', () => {
       Connect: 'connect',
       License: 'license',
       Sso: 'sso',
+      Runners: 'runners',
       Sessions: 'sessions',
     });
   });
@@ -443,7 +446,7 @@ describe('visibleSections', () => {
     expect(sso(false)).toBe(false);
   });
 
-  it('shows License, Single sign-on and Audit export to a server admin outside any organization, after Connect a device', () => {
+  it('shows License, Single sign-on, Runners and Audit export to a server admin outside any organization, after Connect a device', () => {
     expect(
       paths({
         organization: false,
@@ -454,7 +457,34 @@ describe('visibleSections', () => {
         readsSources: false,
         administersServer: true,
       })
-    ).toEqual([CONNECT, LICENSE, SSO, SERVER_AUDIT_EXPORT, SESSIONS]);
+    ).toEqual([CONNECT, LICENSE, SSO, RUNNERS, SERVER_AUDIT_EXPORT, SESSIONS]);
+  });
+
+  it('shows Runners under This server only to a server admin', () => {
+    const runners = (administersServer: boolean) =>
+      paths({
+        organization: true,
+        organizationRole: 'owner',
+        workspace: true,
+        workspaceRole: 'admin',
+        installsModels: true,
+        readsSources: true,
+        administersServer,
+      }).includes(RUNNERS);
+
+    expect(runners(true)).toBe(true);
+    expect(runners(false)).toBe(false);
+  });
+
+  it('finds Runners only in the server group', () => {
+    expect(findSection(SettingsGroup.Server, 'runners')).toMatchObject({
+      group: SettingsGroup.Server,
+      section: SettingsSection.Runners,
+      label: 'Runners',
+    });
+    expect(findSection(SettingsGroup.Organization, 'runners')).toBeUndefined();
+    expect(findSection(SettingsGroup.Workspace, 'runners')).toBeUndefined();
+    expect(RUNNERS).toBe('/settings/server/runners');
   });
 
   it('shows the organization Audit export only to organization owners and admins', () => {

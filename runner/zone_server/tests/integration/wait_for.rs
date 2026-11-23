@@ -27,6 +27,7 @@ use zone_core::llm::LlmClient;
 use zone_server::agent::{
     AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend, WorkspaceScope, run, wait,
 };
+use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::tasks;
 use zone_server::state::AppState;
 
@@ -438,9 +439,10 @@ async fn leased_run(pool: &PgPool) -> Leased {
     let prepared = prepared_run(pool, "Waits on something").await;
     let owner = Uuid::new_v4();
     assert!(
-        tasks::claim_task_run(pool, prepared.run, owner)
+        tasks::claim_task_run(pool, prepared.run, owner, Claimant::UNENFORCED)
             .await
-            .expect("the claim is writable"),
+            .expect("the claim is writable")
+            .claimed(),
         "a fresh run is claimable"
     );
     Leased {

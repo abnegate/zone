@@ -23,6 +23,7 @@ use zone_server::agent::discovery::{Declined, RECORD_DISCOVERY, RECORDED, REPLAC
 use zone_server::agent::memory::rules::Refusal;
 use zone_server::agent::tools::PLAN_HELD;
 use zone_server::agent::{ActionReceipt, ActionTarget, ChatTools, WorkspaceScope};
+use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::knowledge;
 use zone_server::db::knowledge::discovery::{
     CATEGORY, Kind, MAX_ENTRY_BYTES, Provenance, Source, fingerprint,
@@ -175,9 +176,10 @@ impl Fixture {
             .id;
         let owner = Uuid::new_v4();
         assert!(
-            tasks::claim_task_run(&self.pool, run, owner)
+            tasks::claim_task_run(&self.pool, run, owner, Claimant::UNENFORCED)
                 .await
-                .expect("the claim is writable"),
+                .expect("the claim is writable")
+                .claimed(),
             "a fresh run is claimable"
         );
         (

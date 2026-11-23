@@ -169,6 +169,13 @@ pub mod actions {
     pub const SCIM_USER_DEACTIVATED: &str = "scim_user.deactivated";
     pub const SCIM_USER_REACTIVATED: &str = "scim_user.reactivated";
     pub const SCIM_USER_DELETED: &str = "scim_user.deleted";
+
+    pub const FLEET_POLICY_UPDATED: &str = "fleet_policy.updated";
+    pub const RUNNER_REGISTERED: &str = "runner.registered";
+    pub const RUNNER_UPDATED: &str = "runner.updated";
+    pub const RUNNER_REMOVED: &str = "runner.removed";
+    pub const RUNNER_LABELS_UPDATED: &str = "runner_labels.updated";
+    pub const FLEET_RUN_REFUSED: &str = "fleet.run_refused";
 }
 
 pub mod resources {
@@ -203,6 +210,10 @@ pub mod resources {
     pub const SPEND_EXPORT: &str = "spend_export";
     pub const SCIM_TOKEN: &str = "scim_token";
     pub const SCIM_GROUP: &str = "scim_group";
+    pub const FLEET_POLICY: &str = "fleet_policy";
+    pub const RUNNER: &str = "runner";
+    pub const ORGANIZATION_RUNNER_LABELS: &str = "organization_runner_labels";
+    pub const WORKSPACE_RUNNER_LABELS: &str = "workspace_runner_labels";
 }
 
 /// Log an action to the audit trail
@@ -610,5 +621,25 @@ mod tests {
         assert_eq!(actions::ROLE_UPDATED, "role.updated");
         assert_eq!(actions::ROLE_DELETED, "role.deleted");
         assert_eq!(resources::ROLE, "role");
+    }
+
+    #[test]
+    fn fleet_changes_are_recorded_under_the_fleet_wire_names() {
+        assert_eq!(actions::FLEET_POLICY_UPDATED, "fleet_policy.updated");
+        assert_eq!(actions::RUNNER_REGISTERED, "runner.registered");
+        assert_eq!(actions::RUNNER_UPDATED, "runner.updated");
+        assert_eq!(actions::RUNNER_REMOVED, "runner.removed");
+        assert_eq!(actions::RUNNER_LABELS_UPDATED, "runner_labels.updated");
+        assert_eq!(actions::FLEET_RUN_REFUSED, "fleet.run_refused");
+        assert_eq!(resources::FLEET_POLICY, "fleet_policy");
+        assert_eq!(resources::RUNNER, "runner");
+        assert_eq!(
+            resources::ORGANIZATION_RUNNER_LABELS,
+            "organization_runner_labels"
+        );
+        assert_eq!(
+            resources::WORKSPACE_RUNNER_LABELS,
+            "workspace_runner_labels"
+        );
     }
 }

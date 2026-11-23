@@ -9,6 +9,7 @@ import {
   organizationScope,
   Permission,
   RolesSection,
+  RunnersSection,
   ScimSection,
   SERVER_SCOPE,
   SpendPage,
@@ -194,6 +195,8 @@ function serverContent(section: SettingsSection): ReactNode {
       return <LicenseSection />;
     case SettingsSection.Sso:
       return <SsoSection />;
+    case SettingsSection.Runners:
+      return <RunnersSection />;
     case SettingsSection.AuditExport:
       return <AuditExportSection scope={SERVER_SCOPE} />;
     default:

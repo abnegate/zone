@@ -70,6 +70,7 @@ mock.module('../../enterprise', () => ({
   organizationScope: (id: string) => ({ kind: 'organization', organizationId: id }),
   Permission,
   RolesSection: licensed('roles-section'),
+  RunnersSection: licensed('runners-section'),
   ScimSection: licensed('scim-section'),
   SERVER_SCOPE: { kind: 'server' },
   SpendPage: marker('spend-page'),
@@ -524,6 +525,26 @@ describe('SettingsContent', () => {
         <SettingsContent
           group={SettingsGroup.Server}
           section={SettingsSection.Sso}
+          access={access('admin', 'owner')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('shows the runners to a server admin', () => {
+      renderSection(SettingsGroup.Server, SettingsSection.Runners, {
+        ...access('viewer', 'member'),
+        administersServer: true,
+      });
+      expect(propsOf('runners-section')).toEqual({});
+      expect(screen.getByTestId('runners-section').dataset.administersServer).toBe('true');
+    });
+
+    it('renders no runners for anyone who does not administer the server', () => {
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Server}
+          section={SettingsSection.Runners}
           access={access('admin', 'owner')}
         />
       );

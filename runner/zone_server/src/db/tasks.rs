@@ -8,15 +8,16 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::auth::Permission;
+use crate::db::fleet::claim::Outcome;
+use crate::db::fleet::claimant::Claimant;
+use crate::db::fleet::eligibility::{self, PLACEMENT, UNATTENDED};
+use crate::db::fleet::mode::Mode;
+use crate::db::fleet::shortfall::Shortfall;
 use crate::services::chat::notice;
 use crate::services::github::pull_requests;
 use crate::services::task_progress;
 
-use super::{
-    DbResult,
-    auto_projects::{self, Claim},
-    workspace_members,
-};
+use super::{DbResult, auto_projects, workspace_members};
 
 mod origin;
 
@@ -296,12 +297,18 @@ pub struct TaskRow {
 /// The statuses a run holds while it still owns its lease and its task's
 /// admission slot. A run parked on a question is idle, not finished: it keeps
 /// heartbeating, keeps blocking a second admission, and stays sweepable.
-const ACTIVE_RUN_STATUSES: &str = "('running','waiting')";
+pub(crate) const ACTIVE_RUN_STATUSES: &str = "('running','waiting')";
 
 /// A stopped run whose owner is still alive to tear it down, over
 /// `task_runs` aliased `r`. Its task stays reserved for it until the owner
 /// releases it or its lease lapses, so no second worker shares the branch.
 pub(crate) const DRAINING: &str = "r.status = 'cancelled' AND r.owner IS NOT NULL \
+     AND r.heartbeat_at > NOW() - INTERVAL '60 seconds'";
+
+/// An admitted run no execution has claimed yet, over `task_runs` aliased
+/// `r`. Its admission lapses with its heartbeat, after which the sweeper
+/// fails it.
+pub(crate) const UNCLAIMED: &str = "r.status = 'running' AND r.owner IS NULL \
      AND r.heartbeat_at > NOW() - INTERVAL '60 seconds'";
 
 /// Why the sweeper failed a run, both in the row it writes and in the frame it
@@ -1532,10 +1539,84 @@ pub(super) async fn create_task_run_in(
     insert_task_run(connection, task_id, actor).await
 }
 
-/// Claim a newly admitted run exactly once, before waiting for capacity.
-pub async fn claim_task_run(pool: &PgPool, run_id: Uuid, owner: Uuid) -> DbResult<bool> {
-    Ok(sqlx::query("UPDATE task_runs SET owner = $2, heartbeat_at = NOW() WHERE id = $1 AND status = 'running' AND owner IS NULL AND heartbeat_at > NOW() - INTERVAL '60 seconds'")
-        .bind(run_id).bind(owner).execute(pool).await?.rows_affected() == 1)
+/// Claim a newly admitted run exactly once, before waiting for capacity, and
+/// record the runner that claimed it.
+///
+/// Under fleet policy the claimant's runner must be its own and one that
+/// unattended work placed in the run's own workspace may run on, and the
+/// runner row is [held](eligibility::hold) until the claim commits: a revoke
+/// either refuses this claim or waits for it and then stops the run it made.
+pub async fn claim_task_run(
+    pool: &PgPool,
+    run_id: Uuid,
+    owner: Uuid,
+    claimant: Claimant,
+) -> DbResult<Outcome> {
+    let mut transaction = pool.begin().await?;
+    let held = eligibility::hold(&mut transaction, claimant).await?;
+    let claimed = held.is_none()
+        && sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE task_runs r \
+         SET owner = $2, runner_id = (SELECT id FROM fleet_runners WHERE id = $3), \
+             heartbeat_at = NOW() \
+         WHERE r.id = $1 AND {UNCLAIMED} \
+           AND (NOT $4 OR EXISTS ( \
+               SELECT 1 FROM {PLACEMENT} JOIN fleet_runners runner ON runner.id = $3 \
+               WHERE t.id = r.task_id AND {UNATTENDED} \
+           ))"
+        )))
+        .bind(run_id)
+        .bind(owner)
+        .bind(claimant.runner)
+        .bind(claimant.enforced)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected()
+            == 1;
+    let claim = if claimed {
+        Outcome::Claimed
+    } else {
+        unclaimed(&mut transaction, run_id, claimant, held).await?
+    };
+    transaction.commit().await?;
+    Ok(claim)
+}
+
+/// Why a claim changed nothing: the run is no one's to claim, or it is and
+/// the claimant's runner falls short of it, as `held` already found or as the
+/// runner row says.
+async fn unclaimed(
+    connection: &mut PgConnection,
+    run_id: Uuid,
+    claimant: Claimant,
+    held: Option<Shortfall>,
+) -> DbResult<Outcome> {
+    if !claimant.enforced {
+        return Ok(Outcome::Unavailable);
+    }
+    let workspace: Option<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT t.workspace_id FROM task_runs r JOIN tasks t ON t.id = r.task_id \
+         WHERE r.id = $1 AND {UNCLAIMED}"
+    )))
+    .bind(run_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(workspace) = workspace else {
+        return Ok(Outcome::Unavailable);
+    };
+    let shortfall = match held {
+        Some(held) => Some(held),
+        None => {
+            eligibility::shortfall(
+                connection,
+                claimant.runner,
+                Some(workspace),
+                Mode::Unattended,
+            )
+            .await?
+        }
+    };
+    Ok(shortfall.map_or(Outcome::Unavailable, Outcome::Refused))
 }
 
 /// Refresh only the live lease held by this execution.
@@ -1812,11 +1893,35 @@ async fn stop_locked(
     mut transaction: sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: Uuid,
 ) -> DbResult<Stop> {
-    let row: Option<TaskRunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = $2, completed_at = NOW(), error_message = $3, current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL, heartbeat_at = CASE WHEN owner IS NOT NULL AND heartbeat_at > NOW() - INTERVAL '60 seconds' THEN NOW() ELSE heartbeat_at END WHERE id = $1 AND status IN {ACTIVE_RUN_STATUSES} RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait, plan")))
-        .bind(run_id).bind(CANCELLED).bind(STOPPED).fetch_optional(&mut *transaction).await?;
-    let Some(run) = row else {
+    let Some((run, notice)) = cancel_run(&mut transaction, run_id, STOPPED).await? else {
         transaction.commit().await?;
         return Ok(Stop::Finished);
+    };
+    transaction.commit().await?;
+    if let Some(notice) = notice {
+        notice.publish();
+    }
+    task_progress::publish_terminal(run.id, CANCELLED, Some(STOPPED));
+    Ok(Stop::Stopped(Box::new(run)))
+}
+
+/// Cancel a live run with `message` and pause its task, giving the run and
+/// the notice to publish once the caller commits; `None` when the run had
+/// already ended.
+///
+/// The caller must already hold the run's task `FOR UPDATE`, so the task is
+/// locked before the run. A run whose owner is alive keeps its task reserved
+/// under [`DRAINING`], with its lease renewed for the teardown, until that
+/// owner releases it or recovery does once the lease lapses.
+pub(crate) async fn cancel_run(
+    transaction: &mut PgConnection,
+    run_id: Uuid,
+    message: &str,
+) -> DbResult<Option<(TaskRunRow, Option<notice::Notice>)>> {
+    let row: Option<TaskRunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = $2, completed_at = NOW(), error_message = $3, current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL, heartbeat_at = CASE WHEN owner IS NOT NULL AND heartbeat_at > NOW() - INTERVAL '60 seconds' THEN NOW() ELSE heartbeat_at END WHERE id = $1 AND status IN {ACTIVE_RUN_STATUSES} RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait, plan")))
+        .bind(run_id).bind(CANCELLED).bind(message).fetch_optional(&mut *transaction).await?;
+    let Some(run) = row else {
+        return Ok(None);
     };
     let draining: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT EXISTS(SELECT 1 FROM task_runs r WHERE r.id = $1 AND {DRAINING})"
@@ -1826,13 +1931,8 @@ async fn stop_locked(
     .await?;
     sqlx::query("UPDATE tasks SET status = $3, updated_at = NOW(), active_run_id = CASE WHEN $4 THEN active_run_id END WHERE id = $1 AND active_run_id = $2")
         .bind(run.task_id).bind(run.id).bind(PAUSED).bind(draining).execute(&mut *transaction).await?;
-    let notice = notice::announce_run(&mut transaction, run.id, CANCELLED, Some(STOPPED)).await?;
-    transaction.commit().await?;
-    if let Some(notice) = notice {
-        notice.publish();
-    }
-    task_progress::publish_terminal(run.id, CANCELLED, Some(STOPPED));
-    Ok(Stop::Stopped(Box::new(run)))
+    let notice = notice::announce_run(transaction, run.id, CANCELLED, Some(message)).await?;
+    Ok(Some((run, notice)))
 }
 
 /// Update task run progress
@@ -2156,7 +2256,7 @@ pub async fn create_unattended_task_run(
     pool: &PgPool,
     task_id: Uuid,
     actor: Uuid,
-    claim: Option<Claim>,
+    claim: Option<auto_projects::Claim>,
 ) -> DbResult<Unattended> {
     let mut transaction = pool.begin().await?;
     // Membership before the task lock, as every user-triggered admission
@@ -2348,9 +2448,10 @@ mod tests {
             .await
             .expect("a run");
         let owner = Uuid::new_v4();
-        let claimed = claim_task_run(&tenant.pool, run.id, owner)
+        let claimed = claim_task_run(&tenant.pool, run.id, owner, Claimant::UNENFORCED)
             .await
-            .expect("the claim");
+            .expect("the claim")
+            .claimed();
         let execution = Execution {
             task: task.id,
             run: run.id,

@@ -1,0 +1,104 @@
+.runner-placement {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-3);
+  min-width: 0;
+  margin-top: var(--ui-space-6);
+}
+
+.runner-placement-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  min-width: 0;
+}
+
+.runner-placement-title {
+  margin: 0;
+  font-size: var(--ui-text-base);
+  font-weight: 600;
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+}
+
+.runner-placement-description {
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-secondary);
+}
+
+.runner-placement-layer,
+.runner-placement-available {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1-5);
+  min-width: 0;
+}
+
+.runner-placement-layer-label {
+  margin: 0;
+  font-size: var(--ui-text-xs);
+  font-weight: 500;
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-secondary);
+}
+
+.runner-placement-chip--locked {
+  padding-inline-end: var(--ui-space-2);
+  border-style: dashed;
+  background: var(--ui-bg-muted);
+  color: var(--ui-text-secondary);
+}
+
+.runner-placement-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ui-space-1-5);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.runner-placement-options li {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.runner-placement-option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ui-space-1-5);
+  max-width: 100%;
+  min-width: 0;
+  padding: 0 var(--ui-space-2);
+  border: 1px dashed var(--ui-border);
+  border-radius: var(--ui-radius-full);
+  background: transparent;
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-space-6);
+  color: var(--ui-text-primary);
+  cursor: pointer;
+}
+
+.runner-placement-option:hover {
+  border-style: solid;
+  background: var(--ui-bg-hover);
+}
+
+.runner-placement-option:focus-visible {
+  outline: 2px solid var(--ui-border-focus);
+  outline-offset: 1px;
+}
+
+.runner-placement-option-label {
+  min-width: 0;
+  font-family: var(--ui-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.runner-placement-option-count {
+  flex-shrink: 0;
+  color: var(--ui-text-muted);
+}

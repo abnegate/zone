@@ -22,6 +22,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_core::application::application;
 use zone_server::agent::tools::context;
 use zone_server::agent::{ChatTools, WorkspaceScope};
+use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::tasks;
 use zone_server::state::AppState;
 
@@ -241,9 +242,10 @@ async fn leased_run(pool: &PgPool) -> Leased {
     let prepared = prepared_run(pool).await;
     let owner = Uuid::new_v4();
     assert!(
-        tasks::claim_task_run(pool, prepared.run, owner)
+        tasks::claim_task_run(pool, prepared.run, owner, Claimant::UNENFORCED)
             .await
-            .expect("the claim is writable"),
+            .expect("the claim is writable")
+            .claimed(),
         "a fresh run is claimable"
     );
     Leased {

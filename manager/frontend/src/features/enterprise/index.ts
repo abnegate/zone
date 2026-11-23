@@ -12,6 +12,7 @@ export {
   MemberCapRefusal,
   UpgradeNotice,
 } from './components';
+export { RunnerPlacementCard, RunnersSection } from './fleet';
 export * from './hooks';
 export { LicenseRefusal } from './LicenseRefusal';
 export { LICENSE_PATH } from './licensePath';

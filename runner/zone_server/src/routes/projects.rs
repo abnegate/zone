@@ -16,16 +16,22 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
+use crate::db::context;
+use crate::db::fleet::eligibility;
+use crate::db::fleet::mode::Mode;
 use crate::db::github_installations::{self, InstallationStatus, InstallationSummary};
 use crate::db::projects::{self, LinkError, NewProject, ProjectRow, Reorder};
 use crate::db::{auto_projects, chats, sources, sync_config, tasks, workspace_members};
 use crate::error::ServerError;
+use crate::routes::chats::unleased;
 use crate::routes::policy::asked::Asked;
+use crate::services::fleet;
 use crate::services::model::Model;
 use crate::services::policy::Subject;
 use crate::services::route::Route;
 use crate::state::AppState;
 use crate::sync::hook::Removal;
+use crate::ws::chat::Audience;
 
 use super::common::Timestamps;
 
@@ -348,6 +354,32 @@ pub struct AutoProjectRequest {
     model_name: Option<String>,
 }
 
+/// The answer refusing an auto project when fleet policy would refuse this runner the planner
+/// chat's lease, judged as the lease judges it, so the brief isn't taken into a chat whose turn
+/// can't run. A revoke landing after this is still told to the chat, as a denial, when the
+/// planner's turn is refused the lease.
+async fn refusal(state: &AppState, workspace_id: Uuid) -> Result<Option<Response>, ServerError> {
+    let claimant = fleet::claimant(state).await;
+    if !claimant.enforced {
+        return Ok(None);
+    }
+    let mut transaction = state.db().begin().await?;
+    let shortfall = match eligibility::hold(&mut transaction, claimant).await? {
+        Some(shortfall) => Some(shortfall),
+        None => {
+            eligibility::shortfall(
+                &mut *transaction,
+                claimant.runner,
+                Some(workspace_id),
+                Mode::Interactive,
+            )
+            .await?
+        }
+    };
+    transaction.rollback().await?;
+    Ok(shortfall.map(|shortfall| unleased::response(context::Error::Refused(shortfall))))
+}
+
 /// Where the interview happens.
 #[derive(Debug, Serialize)]
 pub struct AutoProjectResponse {
@@ -363,7 +395,9 @@ const BRIEF_TITLE_CHARS: usize = 72;
 ///
 /// Opens a planner chat with the brief as its first message and runs the
 /// first turn, which asks the first card. The person carries on in the chat;
-/// the project appears when the interview ends.
+/// the project appears when the interview ends. Under fleet policy, a runner
+/// that may not take the planner chat answers 503 with its `fleet_runner_*`
+/// code and opens nothing.
 pub async fn start_auto(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -415,6 +449,9 @@ pub async fn start_auto(
         .chars()
         .take(BRIEF_TITLE_CHARS)
         .collect();
+    if let Some(refused) = refusal(&state, workspace_id).await? {
+        return Ok(refused);
+    }
     let chat = chats::create_purposed_chat(
         state.db(),
         workspace_id,
@@ -436,6 +473,7 @@ pub async fn start_auto(
             user_id,
             &brief,
             Some(serde_json::json!({"source": "auto_project", "actor_id": user_id})),
+            Audience::Watched,
         )
         .await;
     });
