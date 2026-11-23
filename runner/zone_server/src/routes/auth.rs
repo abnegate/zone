@@ -124,13 +124,7 @@ pub async fn register(
         }
     };
 
-    let is_admin = match users::count_users(state.db()).await {
-        Ok(0) => true,
-        Ok(_) => false,
-        Err(error) => return unavailable(&error),
-    };
-
-    let user = match enroll(&state, cap, &request, &password_hash, is_admin).await {
+    let user = match enroll(&state, cap, &request, &password_hash).await {
         Ok(user) => user,
         Err(refusal) => return *refusal,
     };
@@ -142,16 +136,16 @@ pub async fn register(
 }
 
 /// Admits, inserts and furnishes the account in one transaction, so the newcomer counts against
-/// the member cap from the moment it commits.
+/// the member cap, and decides who is first, from the moment it commits.
 async fn enroll(
     state: &AppState,
     cap: Cap,
     request: &RegisterRequest,
     password_hash: &str,
-    is_admin: bool,
 ) -> Result<UserRow, Box<Response>> {
     let mut transaction = state.db().begin().await.map_err(rejected)?;
     members::admit(&mut transaction, cap, None).await?;
+    let is_admin = members::first(&mut transaction, cap).await?;
     let user = provision::insert(
         &mut transaction,
         &request.email,
