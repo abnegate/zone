@@ -3,8 +3,10 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 use uuid::Uuid;
+use zone_server::services::fleet::identity::NAME;
 
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1:6379";
+const RUNNER: &str = "replica";
 const JWT_SECRET: &str = "replica-test-jwt-secret-of-at-least-32-bytes";
 const LITELLM_KEY: &str = "replica-test-key";
 const AGENTS: &str = "agents";
@@ -61,7 +63,8 @@ impl Environment {
         self.shared.path().join(CLONES)
     }
 
-    /// The full environment of a replica listening on `port` with `home` as HOME.
+    /// The full environment of a replica listening on `port` with `home` as HOME. Each replica
+    /// gets a runner name of its own, as each pod of a deployment does.
     pub fn variables(&self, port: u16, home: &std::path::Path) -> Vec<(String, String)> {
         let refused = super::super::REFUSED_URL.to_string();
         let mut variables: Vec<(String, String)> = [
@@ -69,6 +72,7 @@ impl Environment {
             ("HOME", home.display().to_string()),
             ("HOST", "127.0.0.1".to_string()),
             ("PORT", port.to_string()),
+            (NAME, format!("{RUNNER}-{port}")),
             ("DATABASE_URL", self.database_url.clone()),
             ("REDIS_URL", self.redis_url.clone()),
             ("JWT_SECRET", JWT_SECRET.to_string()),
