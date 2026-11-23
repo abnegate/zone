@@ -53,9 +53,9 @@ impl Revoked {
 /// `tasks`) take them in. The caller must already hold `fleet_policy`
 /// `FOR UPDATE` and no other lock. This locks the runner row, which waits for
 /// every claim holding it `FOR SHARE`, so a claim that committed first is seen
-/// and stopped here; then the runner's leases and projects; then each live
-/// run's task before the run, and the chat it announces the stop in, in task
-/// id order.
+/// and stopped here; then the runner's leases; then its projects in id order,
+/// as `auto_projects::reopen` takes them; then each live run's task before the
+/// run, and the chat it announces the stop in, in task id order.
 pub async fn revoke(
     transaction: &mut PgConnection,
     runner: Uuid,
@@ -88,11 +88,18 @@ pub async fn revoke(
     .bind(runner)
     .execute(&mut *transaction)
     .await?;
-    sqlx::query(
-        "UPDATE projects SET auto_claim_id = NULL, auto_claimed_at = statement_timestamp() \
-         WHERE auto_claim_runner_id = $1 AND auto_claim_id IS NOT NULL",
+    let driven: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM projects WHERE auto_claim_runner_id = $1 AND auto_claim_id IS NOT NULL \
+         ORDER BY id FOR NO KEY UPDATE",
     )
     .bind(runner)
+    .fetch_all(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE projects SET auto_claim_id = NULL, auto_claimed_at = statement_timestamp() \
+         WHERE id = ANY($1)",
+    )
+    .bind(&driven)
     .execute(&mut *transaction)
     .await?;
 
@@ -612,5 +619,87 @@ mod tests {
             vec![work.run],
             "the revoke stopped the runner's run"
         );
+    }
+
+    /// Two projects the runner drives, the later id stored first, so a revoke
+    /// that locked them in storage order would take the later one first.
+    async fn driven_in_reverse(tenant: &Tenant, runner: Uuid) -> (Uuid, Uuid) {
+        let mut ids = [Uuid::new_v4(), Uuid::new_v4()];
+        ids.sort();
+        let [first, second] = ids;
+        sqlx::query(
+            "INSERT INTO projects (id, workspace_id, name, auto, auto_claim_id, auto_claimed_at, \
+               auto_claim_runner_id) \
+             SELECT id, $1, 'Revocation', TRUE, gen_random_uuid(), NOW(), $2 \
+             FROM unnest($3::uuid[]) WITH ORDINALITY AS stored(id, position) ORDER BY position",
+        )
+        .bind(tenant.workspace)
+        .bind(runner)
+        .bind(vec![second, first])
+        .execute(&tenant.pool)
+        .await
+        .expect("two claimed projects");
+        (first, second)
+    }
+
+    /// `auto_projects::reopen` locks projects in id order. A revoke queued
+    /// behind the first of two projects the runner drives holds no lock on the
+    /// second, so the reopen takes the second and finishes, and then the revoke
+    /// clears both claims.
+    #[tokio::test]
+    async fn a_revoke_waiting_on_a_reopen_lets_the_reopen_finish() {
+        let tenant = Tenant::new().await;
+        let pool = &tenant.pool;
+        let revoked_runner = runner(pool).await;
+        let (first, second) = driven_in_reverse(&tenant, revoked_runner).await;
+        let stored_in_reverse: bool = sqlx::query_scalar(
+            "SELECT (SELECT ctid FROM projects WHERE id = $2) < \
+                    (SELECT ctid FROM projects WHERE id = $1)",
+        )
+        .bind(first)
+        .bind(second)
+        .fetch_one(pool)
+        .await
+        .expect("where the projects are stored");
+
+        let mut reopen = pool.begin().await.expect("a reopen");
+        let backend: i32 = sqlx::query_scalar(
+            "SELECT pg_backend_pid() FROM projects WHERE id = $1 FOR NO KEY UPDATE",
+        )
+        .bind(first)
+        .fetch_one(&mut *reopen)
+        .await
+        .expect("the first project");
+        let revoke = revoking(pool, revoked_runner);
+        queued_behind(pool, backend).await;
+        let locked = sqlx::query("SELECT id FROM projects WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(second)
+            .execute(&mut *reopen)
+            .await
+            .map(|_| ());
+        let committed = reopen.commit().await;
+        let revoked = revoke.await;
+        let claims: Vec<Option<Uuid>> =
+            sqlx::query_scalar("SELECT auto_claim_id FROM projects WHERE id = ANY($1)")
+                .bind(vec![first, second])
+                .fetch_all(pool)
+                .await
+                .expect("the projects");
+
+        sqlx::query("DELETE FROM projects WHERE id = ANY($1)")
+            .bind(vec![first, second])
+            .execute(pool)
+            .await
+            .expect("the projects are removed");
+        remove(pool, &[revoked_runner]).await;
+        tenant.cleanup().await;
+
+        assert!(stored_in_reverse, "the later project was not stored first");
+        assert!(
+            locked.is_ok() && committed.is_ok(),
+            "the reopen failed behind the revoke: {locked:?} {committed:?}"
+        );
+        assert!(revoked.is_ok(), "the revoke failed: {revoked:?}");
+        assert_eq!(claims, vec![None, None], "a project kept its claim");
     }
 }
