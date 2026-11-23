@@ -72,6 +72,7 @@ use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use abnegate_search::{SearchContext, SearchHit, SearxngClient, sanitize_query};
 
+mod audience;
 mod confinement;
 mod denial;
 mod ending;
@@ -79,6 +80,7 @@ pub mod job;
 mod queue;
 mod sent;
 
+pub use audience::Audience;
 use confinement::Confinement;
 use ending::Ending;
 use queue::{Finished, Interrupted, Queued, Started};
@@ -478,7 +480,7 @@ fn drive(
                 &message.content,
                 message.metadata,
                 generation,
-                false,
+                Audience::Interactive,
             )
             .await
             .saved()
@@ -2731,20 +2733,14 @@ async fn handle_audio_generation(
 ///
 /// Chat requires write access (Member role or higher) since it creates messages.
 /// This is intentionally stricter than context.rs which only requires membership.
-/// `unattended` says nobody is watching this turn, which is what an automation's
-/// firing is. It withholds the chat's auto-approve from that turn and nothing
-/// else. Auto-approve is a standing "yes" a person gave while they were present
-/// to see what they were saying yes to; a scheduled turn runs hours later with
-/// nobody there, and its prompt can carry text the model itself wrote from
-/// something it read, so a tool that writes to the host or leaves the workspace
-/// must still be put to somebody. It waits, finds no one, and is declined —
-/// which is the right answer when the alternative is acting unasked. Reading
-/// tools are below that tier and run either way, so a watch still works.
+/// `audience` decides whether the chat's auto-approve applies and whether a
+/// fleet refusal is told to the chat.
 /// Whether the user's message was saved: a queued turn stopped before then has
 /// left nothing in the chat, so the queue puts it back. A turn fleet policy
-/// refused the chat's lease saved nothing either, and says so as a denial. An
-/// unattended one says nothing in the chat: it stays owed, and another runner
-/// takes it, so telling whoever watches to reload would be wrong.
+/// refused the chat's lease saved nothing either. Unless it is owed, it says so
+/// as a denial, since nothing else will run it. An owed turn says nothing in the
+/// chat: it stays owed and another runner takes it, so telling whoever watches to
+/// reload would be wrong.
 async fn handle_send_message(
     state: &AppState,
     stream: &Arc<ChatStream>,
@@ -2754,7 +2750,7 @@ async fn handle_send_message(
     content: &str,
     metadata: Option<serde_json::Value>,
     mut request: Generation,
-    unattended: bool,
+    audience: Audience,
 ) -> Sent {
     let generation = CHAT_GENERATIONS
         .entry(chat_id)
@@ -2787,9 +2783,7 @@ async fn handle_send_message(
         Ok(session) => session,
         Err(db::context::Error::Refused(shortfall)) => {
             let refusal = crate::services::fleet::refusal::of(shortfall);
-            if unattended {
-                tracing::info!(%chat_id, code = refusal.code(), "Fleet policy refused this runner an unattended turn, so it stays owed for another runner");
-            } else {
+            if audience.announces_refusal() {
                 publish(
                     stream,
                     ServerMessage::Denied {
@@ -2798,6 +2792,8 @@ async fn handle_send_message(
                     },
                 )
                 .await;
+            } else {
+                tracing::info!(%chat_id, code = refusal.code(), "Fleet policy refused this runner an owed turn, so it stays owed for another runner");
             }
             return Sent::Refused;
         }
@@ -2910,7 +2906,7 @@ async fn handle_send_message(
                 // while telling the model they were not gated -- and a
                 // confirmed call made on that belief would sit waiting out the
                 // approval timeout for somebody who is not there.
-                if unattended {
+                if !audience.approves() {
                     chat.auto_approve = false;
                 }
                 request
@@ -2989,9 +2985,10 @@ async fn handle_send_message(
 ///
 /// It gets one thing deliberately different: approvals are not waived. The
 /// chat's auto-approve is a person's standing yes, given while they were there
-/// to see what it applied to, and this turn runs when they are not. See the
-/// `unattended` flag on `handle_send_message` for what that withholds and what
-/// it leaves alone.
+/// to see what it applied to, and this turn runs when they are not. `audience`
+/// is [`Audience::Watched`] when somebody waits on the turn in the chat, so a
+/// fleet refusal is told to it, and [`Audience::Owed`] when a schedule owes it
+/// and another runner takes it after a refusal.
 ///
 /// No socket is needed because none was ever required. `ChatStream::of` keys a
 /// broadcast channel by chat id and `publish` drops a frame nobody is
@@ -3013,6 +3010,7 @@ pub(crate) async fn run_turn(
     user_id: Uuid,
     content: &str,
     metadata: Option<serde_json::Value>,
+    audience: Audience,
 ) -> Uuid {
     let message_id = Uuid::new_v4();
     run_turn_as(
@@ -3023,6 +3021,7 @@ pub(crate) async fn run_turn(
         user_id,
         content,
         metadata,
+        audience,
     )
     .await;
     message_id
@@ -3031,8 +3030,8 @@ pub(crate) async fn run_turn(
 /// [`run_turn`] with its answer's id chosen by the caller, so the caller can
 /// stop this turn and no other through [`cancel_turn`] while it runs. Says
 /// what became of the message, [`Sent::Refused`] when fleet policy refused this
-/// runner the chat, so the caller can leave the work owed rather than count it
-/// run.
+/// runner the chat, so the caller of an owed turn can leave it owed rather than
+/// count it run.
 pub(crate) async fn run_turn_as(
     state: &AppState,
     message_id: Uuid,
@@ -3041,6 +3040,7 @@ pub(crate) async fn run_turn_as(
     user_id: Uuid,
     content: &str,
     metadata: Option<serde_json::Value>,
+    audience: Audience,
 ) -> Sent {
     let stream = ChatStream::of(chat_id);
     let generation = Generation::registered(chat_id, message_id);
@@ -3053,9 +3053,7 @@ pub(crate) async fn run_turn_as(
         content,
         metadata,
         generation,
-        // There is no socket here and no person behind one, which is the
-        // definition of unattended.
-        true,
+        audience,
     )
     .await;
     let released = queue::with(chat_id, |queue| match queue.release() {
@@ -6213,6 +6211,7 @@ cat 'DIR/reply.jsonl'
                         self.user,
                         content,
                         None,
+                        Audience::Watched,
                     )
                     .await
                 }

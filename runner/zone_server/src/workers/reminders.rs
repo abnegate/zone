@@ -8,6 +8,7 @@ use crate::db::reminders::PendingTurn;
 use crate::db::reminders::Sweep;
 use crate::services::fleet;
 use crate::state::AppState;
+use crate::ws::chat::Audience;
 use crate::ws::chat::Sent;
 use serde_json::json;
 use std::sync::Arc;
@@ -241,6 +242,7 @@ pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease, claimant: Cl
                 "reminder_id": turn.reminder_id,
                 "actor_id": turn.user_id,
             })),
+            Audience::Owed,
         ),
     )
     .await;

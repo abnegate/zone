@@ -7,10 +7,10 @@ use crate::error::ServerError;
 use crate::routes::common::ErrorResponse;
 use crate::services::fleet::refusal;
 
-/// The answer to a write whose chat lease could not be taken. Fleet policy refusing this runner
-/// the chat is 503 with the refusal's `fleet_runner_*` code, since another server can take it;
-/// anything else is the conflict a busy or changed chat is.
-pub(super) fn response(error: Error) -> Response {
+/// The answer to a write whose chat lease could not be taken, or would be refused. Fleet policy
+/// refusing this runner the chat is 503 with the refusal's `fleet_runner_*` code, since another
+/// server can take it; anything else is the conflict a busy or changed chat is.
+pub(in crate::routes) fn response(error: Error) -> Response {
     match error {
         Error::Refused(shortfall) => {
             let refusal = refusal::of(shortfall);

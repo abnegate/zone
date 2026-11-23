@@ -3,8 +3,8 @@
 pub enum Sent {
     Saved,
     Unsaved,
-    /// Fleet policy refused this runner the chat's lease, so nothing reached the chat and the
-    /// work is still owed.
+    /// Fleet policy refused this runner the chat's lease, so nothing reached the chat. An owed
+    /// turn is still owed.
     Refused,
 }
 

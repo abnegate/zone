@@ -6,7 +6,7 @@ mod snippet;
 pub(super) mod subagents;
 pub(super) mod tasks;
 pub(super) mod token_usage;
-mod unleased;
+pub(super) mod unleased;
 
 use axum::{
     Json,
