@@ -278,10 +278,9 @@ says how many connected, active and current runners carry every required
 label. When that count is 0, the card warns that no active runner on the
 minimum version carries the labels: task runs fail at once with
 `fleet_no_runner`, and reminder turns and auto-project drives wait until one
-does. Only
-someone who may change the labels also sees, under **Labels runners carry**,
-the labels the fleet's runners carry, with how many connected runners that
-aren't revoked carry each (see
+does. Only someone who may change the labels also sees, under **Labels
+runners carry**, the labels the fleet's runners carry, with how many
+connected runners that aren't revoked carry each (see
 [Who can see and change what](#who-can-see-and-change-what)).
 
 With a lapsed license, or a stored key that no longer verifies, the card
