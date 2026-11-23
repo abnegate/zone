@@ -8,12 +8,13 @@ pub use window::Window;
 
 use std::fmt::Display;
 use std::hash::Hash;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use abnegate_http::{RateLimitConfig, RateLimiter};
 use redis::aio::ConnectionManager;
 
-use crate::cluster::{Bus, Namespace};
+use crate::cluster::{Bus, LOG_INTERVAL, Namespace, Throttle};
 
 const PREFIX: &str = "zone";
 const TIMEOUT: Duration = Duration::from_millis(500);
@@ -26,11 +27,17 @@ pub struct Limiter<K> {
     local: RateLimiter<K>,
     bus: Bus,
     scope: Scope,
+    failed: Arc<Throttle>,
 }
 
 impl<K: Display + Hash + Eq> Limiter<K> {
     pub fn new(local: RateLimiter<K>, bus: Bus, scope: Scope) -> Self {
-        Self { local, bus, scope }
+        Self {
+            local,
+            bus,
+            scope,
+            failed: Arc::new(Throttle::new(LOG_INTERVAL)),
+        }
     }
 
     /// The same limiter, sharing its local counts, on another bus.
@@ -55,10 +62,12 @@ impl<K: Display + Hash + Eq> Limiter<K> {
         match self.count(connection, &subject).await {
             Ok(decision) => decision,
             Err(reason) => {
-                tracing::warn!(
-                    %reason,
-                    "Valkey could not count a rate-limited request, so this replica limits it on its own count"
-                );
+                if self.failed.ready() {
+                    tracing::warn!(
+                        %reason,
+                        "Valkey could not count a rate-limited request, so this replica limits it on its own count"
+                    );
+                }
                 self.local.check_rate_limit(subject).into()
             }
         }
@@ -143,7 +152,7 @@ mod tests {
 
         assert_eq!(
             key(&namespace, Scope::Gather, user, 29_000_000),
-            format!("zone:{namespace}:limit:550e8400-e29b-41d4-a716-446655440000:29000000")
+            format!("zone:{namespace}:gather:550e8400-e29b-41d4-a716-446655440000:29000000")
         );
     }
 

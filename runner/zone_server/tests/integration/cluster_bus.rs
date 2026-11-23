@@ -5,6 +5,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use futures::StreamExt;
 use metrics::{Gauge, GaugeFn};
 use serde::{Deserialize, Serialize};
 use sqlx::ConnectOptions;
@@ -21,6 +22,7 @@ const STARTUP: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(100);
 const CONNECTED: f64 = 1.0;
 const DISCONNECTED: f64 = 0.0;
+const MARKER: &str = "a-secret-the-wire-must-not-show";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct Title {
@@ -197,6 +199,44 @@ async fn envelopes_from_one_publisher_arrive_in_order() {
             format!(r#"{{"type":"chunk","sequence":{sequence}}}"#).as_bytes()
         );
     }
+}
+
+#[tokio::test]
+async fn a_chat_frame_reaches_valkey_sealed() {
+    let (first, second) = pair().await;
+    let chat = Uuid::new_v4();
+    let mut frames = second.subscribe(Topic::ChatFrames(chat)).await;
+    let mut eavesdropper = redis::Client::open(redis_url())
+        .unwrap()
+        .get_async_pubsub()
+        .await
+        .unwrap();
+    eavesdropper
+        .subscribe(Topic::ChatFrames(chat).channel(first.namespace()))
+        .await
+        .unwrap();
+    let mut overheard = eavesdropper.on_message();
+    let header = format!("{MARKER}-in-the-header");
+    let payload = bytes::Bytes::from(format!(
+        r#"{{"type":"chunk","content":"{MARKER}-in-the-payload"}}"#
+    ));
+
+    first.publish_raw(Topic::ChatFrames(chat), &header, payload.clone());
+
+    let raw = tokio::time::timeout(WAIT, overheard.next())
+        .await
+        .expect("the eavesdropper hears the frame")
+        .expect("the eavesdropper stays subscribed");
+    let wire = raw.get_payload_bytes();
+    assert!(
+        !wire
+            .windows(MARKER.len())
+            .any(|window| window == MARKER.as_bytes()),
+        "{wire:?}"
+    );
+    let envelope = next(&mut frames).await;
+    assert_eq!(envelope.bytes(), &payload);
+    assert_eq!(envelope.header::<String>().unwrap(), header);
 }
 
 #[tokio::test]

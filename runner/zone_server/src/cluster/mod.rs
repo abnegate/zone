@@ -1,9 +1,11 @@
-//! The cross-replica bus: signed envelopes over Valkey pub/sub, or an
+//! The cross-replica bus: sealed envelopes over Valkey pub/sub, or an
 //! in-process loopback when no Valkey is configured.
 
 mod bus;
 mod channel;
+mod clock;
 mod command;
+mod ended;
 mod envelope;
 mod kind;
 mod loopback;
@@ -11,9 +13,11 @@ mod namespace;
 mod packet;
 mod pending;
 mod rejection;
+mod sealer;
+mod seen;
 mod shared;
-mod signer;
 mod status;
+mod subkey;
 mod subscription;
 mod throttle;
 mod topic;
@@ -27,7 +31,9 @@ pub use kind::Kind;
 pub use loopback::Loopback;
 pub use namespace::Namespace;
 pub use subscription::Subscription;
+pub use throttle::Throttle;
 pub use topic::Topic;
+pub use valkey::LOG_INTERVAL;
 
 /// Makes aws-lc-rs the process's rustls provider. The dependency tree enables
 /// both of rustls's providers, so without this the first TLS connection that

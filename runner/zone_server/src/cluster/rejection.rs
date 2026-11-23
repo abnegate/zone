@@ -7,6 +7,10 @@ pub enum Rejection {
     Version,
     #[error("the envelope has an unknown kind")]
     Kind,
-    #[error("the envelope's signature does not verify")]
-    Signature,
+    #[error("the envelope does not open under this cluster's key on this channel")]
+    Seal,
+    #[error("the envelope was issued outside its lifetime")]
+    Stale,
+    #[error("the request was already delivered")]
+    Replayed,
 }

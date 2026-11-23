@@ -11,6 +11,7 @@ use zone_server::cluster::Bus;
 use zone_server::services::limit::{Scope, Window, key};
 use zone_server::state::AppState;
 
+use crate::common::logs::capturing;
 use crate::common::{
     TestClient, TestResponse, create_test_pool, create_test_state, test_config, test_email,
     test_password,
@@ -179,11 +180,9 @@ async fn with_valkey_down_each_replica_limits_on_its_own_count() {
     limited_alone(&second, user).await;
 }
 
-#[tokio::test]
-async fn a_count_valkey_cannot_increment_is_limited_by_this_replica_alone() {
-    let state = replica(&redis_url()).await;
-    connected(&state).await;
-    let user = Uuid::new_v4();
+/// Stores something that is not a count under `user`'s keys for this window
+/// and the next, so Valkey refuses to increment them.
+async fn uncountable(state: &AppState, user: Uuid) {
     let mut connection = valkey().await;
     let current = Window::current(WINDOW).index;
     for window in [current, current + 1] {
@@ -196,8 +195,35 @@ async fn a_count_valkey_cannot_increment_is_limited_by_this_replica_alone() {
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn a_count_valkey_cannot_increment_is_limited_by_this_replica_alone() {
+    let state = replica(&redis_url()).await;
+    connected(&state).await;
+    let user = Uuid::new_v4();
+    uncountable(&state, user).await;
 
     limited_alone(&state, user).await;
+}
+
+#[tokio::test]
+async fn a_valkey_that_keeps_refusing_counts_is_warned_about_once() {
+    let (captured, _guard) = capturing("zone_server::services::limit=warn");
+    let state = replica(&redis_url()).await;
+    connected(&state).await;
+    let user = Uuid::new_v4();
+    uncountable(&state, user).await;
+
+    limited_alone(&state, user).await;
+
+    let log = captured.text();
+    assert_eq!(
+        log.matches("Valkey could not count a rate-limited request")
+            .count(),
+        1,
+        "{log}"
+    );
 }
 
 #[tokio::test]

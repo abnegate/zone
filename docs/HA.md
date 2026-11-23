@@ -28,7 +28,7 @@ flowchart TD
 Replicas coordinate through three things:
 
 - **Postgres** holds every piece of durable state: chats, the chat lease that says which replica runs a turn, task runs and their heartbeats, and the ledgers that stop a report or alert going out twice. One replica at a time holds the housekeeping leadership lock and runs the cluster-wide sweeps.
-- **Valkey** carries the cluster bus: signed messages that relay live chat frames, chat commands, task question answers, titles and action cards between replicas, plus the shared context-search and single sign-on rate limits. Nothing in it is durable.
+- **Valkey** carries the cluster bus: encrypted, authenticated messages that relay live chat frames, chat commands, task question answers, titles and action cards between replicas, plus the shared context-search and single sign-on rate limits. Nothing in it is durable.
 - **The shared volume** holds what the agent CLIs and git need on disk: sign-in homes, clones, worktrees, chat workspaces and artifacts.
 
 ## Minimum cluster
@@ -180,7 +180,7 @@ Valkey holds nothing durable and needs no backup.
 
 Keep these outside the cluster. Without them a restored database is unreadable or unusable:
 
-- `ENCRYPTION_KEY`: Claude sign-ins, MCP server secrets, SSO client secrets and other credentials are sealed with keys derived from it, and every replica derives the cluster bus's signing key and namespace from it. A restore under another key shows every Claude Code sign-in as expired and leaves sealed values unopenable.
+- `ENCRYPTION_KEY`: Claude sign-ins, MCP server secrets, SSO client secrets and other credentials are sealed with keys derived from it, and every replica derives the cluster bus's sealing key and namespace from it. A restore under another key shows every Claude Code sign-in as expired and leaves sealed values unopenable.
 - `JWT_SECRET`: under another value, every session signs out.
 - The database credentials in the secret CloudNativePG bootstraps from, and the superuser secret if you created one.
 - The license key. Zone keeps the installed license in the database, so a restore brings it back, but keep the key string from the license email so you can paste it into a fresh install.
@@ -329,7 +329,11 @@ The server reads `REDIS_URL` only from the secret, under the key `secrets.keys.r
 
 Either way, check the result after installing: every server pod's `/metrics` should report `zone_cluster_bus_connected 1`. While `REDIS_URL` is set but the bus is disconnected, or could not use the URL at all, it reads 0 and the server logs an error, at most once a minute. Alert on it. A wrong URL shows up there, not as a failure to start: the server starts with Valkey down.
 
-Every replica of one install must share `ENCRYPTION_KEY`: the bus signs every message with a key derived from it and names its channels and keys under a namespace derived from it. Installs with different keys can share one Valkey without hearing each other.
+Every replica of one install must share `ENCRYPTION_KEY`. The bus seals every message with XChaCha20-Poly1305 under a key derived from it, so chat frames, commands, answers, titles and action cards cross Valkey encrypted, and a message opens only on the channel it was published to. The bus also names its channels and keys under a namespace derived from the key, so installs with different keys can share one Valkey without reading or hearing each other's messages.
+
+Each message carries the time it was sealed. A replica drops a command more than 10 seconds old, any other message more than 30 seconds old, and anything stamped more than 5 seconds in its future, and delivers a command once however often it arrives, so a message captured from Valkey cannot be replayed later. Keep the replicas' clocks in sync, as Kubernetes nodes running NTP are: a replica whose clock runs more than 5 seconds ahead of another's, or 10 seconds behind it, has its commands dropped there.
+
+Sealing hides what the messages say, not that they exist. Whoever can read the Valkey still sees the channel names, which carry chat and replica ids, the size and timing of messages, and the keys of the [shared limits](#shared-limits), which carry user ids, organization ids and client addresses. Whoever can write to it can drop messages and raise or use up those limits. So still give each install its own Valkey, or at least an ACL user restricted to the `zone:<namespace>:*` keys and channels, and reach it over `rediss://`.
 
 With `networkPolicy.enabled`, the server's egress normally admits only the in-cluster Valkey pods. In HA it admits `networkPolicy.externalValkeyCIDR` on `networkPolicy.externalValkeyPort` instead, and the render fails when either is missing.
 
@@ -404,10 +408,10 @@ The failover coverage runs on every pull request, in `.github/workflows/rust-tes
 | `high_availability_updates` | Titles and action cards made on one replica reach sockets on another. |
 | `housekeeping_election` | Cluster sweeps run on one replica and replica sweeps on both; leadership moves without overlap when the leader's session is terminated, partitioned or paused; a leader that starts draining stops leading at once and another replica takes the lock; a digest goes out once per slot and a regression is alerted once across leader changes. |
 | `task_relay` | An answer posted on one replica resolves a run waiting on another; titles and action cards cross once and are never relayed back. |
-| `shared_limiter` | Two replicas sharing Valkey together allow exactly the limit per window, and fall back to their own counts without it. |
+| `shared_limiter` | Two replicas sharing Valkey together allow exactly the limit per window, and fall back to their own counts without it, warning about a Valkey that refuses to count once a minute rather than on every request. |
 | `shared_sso_throttle` | Two replicas sharing Valkey together allow one client address exactly `ZONE_SSO_REQUESTS_PER_MINUTE` single sign-on requests per window, refuse the next on either with 429 and `Retry-After`, still allow another address, and limit on their own without Valkey. |
 | `high_availability_fleet` | Each replica registers as a runner of its own, under the name it was given, as each pod does. |
-| `cluster_bus` | Delivery between peers, ordering, request and reply, isolation by master key, resubscribing after a killed subscription, and starting with Valkey down with the gauge at 0. |
+| `cluster_bus` | Delivery between peers, ordering, request and reply, frames sealed on the wire, isolation by master key, resubscribing after a killed subscription, and starting with Valkey down with the gauge at 0. |
 
 To run them locally, start a Postgres with pgvector and a Valkey, apply migrations from `runner/zone_server` with `sqlx migrate run`, then from `runner`:
 

@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::command::Command;
+use super::ended::Ended;
 use super::packet::Packet;
 use super::shared::Shared;
 use super::status::Status;
@@ -116,11 +117,6 @@ async fn publish(mut manager: ConnectionManager, mut packets: mpsc::Receiver<Pac
             tracing::warn!(%error, "Could not publish to the cluster bus; other replicas missed envelopes");
         }
     }
-}
-
-enum Ended {
-    Stopped,
-    Lost(String),
 }
 
 async fn subscribe(
