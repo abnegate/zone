@@ -11,7 +11,9 @@
 //!
 //! **On a queue.** [`reminders`] drains persisted reminders as they come due,
 //! and [`audit`] streams audit events to their destinations, both coordinating
-//! across server instances through database locks.
+//! across server instances through database locks. Under fleet policy,
+//! [`fleet`] picks up task runs the runner that admitted them may not take;
+//! every server polls for its own, since each is a runner of its own.
 //!
 //! **On an event.** Task execution, pull request creation and repair, embedding
 //! generation, context gathering, source indexing, title generation, conflict
@@ -24,6 +26,7 @@ pub mod auto_project;
 pub mod conflict;
 pub mod embeddings;
 pub mod evaluation;
+pub mod fleet;
 pub mod gathering;
 pub mod housekeeping;
 pub mod indexing;

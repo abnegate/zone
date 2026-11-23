@@ -45,8 +45,6 @@ const NOT_LOCAL: &str = "claude.com can send a sign-in back to Zone only when th
                          on the machine Zone runs on and opens Zone at a localhost address the \
                          server lists in ZONE_CONSOLE_ORIGINS. Paste the code instead.";
 const ENDED: &str = "This sign-in was cancelled, or another one started after it.";
-const DEMOTED: &str = "Only organization admins can sign in to coding agents, and whoever \
-                       started this sign-in no longer is one. Start again.";
 const SESSION_ENDED: &str =
     "The Zone session that started this sign-in has ended. Sign in to Zone and start again.";
 const STARTED_ELSEWHERE: &str = "Someone else started this Claude sign-in, or it was started in \
@@ -404,19 +402,20 @@ async fn authorize(
     connection: &mut PgConnection,
     pending: &Pending,
 ) -> Result<(), Error> {
+    let needed = Permission::AgentLoginsUpdate;
     let access = ai_settings::authorize_organization(
         &mut *connection,
         pending.organization,
         pending.user,
-        Permission::AgentLoginsUpdate,
+        needed,
     )
     .await;
     match access {
         Ok(()) => {}
-        Err(AccessError::Forbidden(_)) => return Err(Error::Forbidden(DEMOTED)),
+        Err(AccessError::Forbidden(_)) => return Err(Error::Demoted(needed)),
         Err(AccessError::NotFound(_)) => {
             return match organizations::get_organization(state.db(), pending.organization).await? {
-                Some(_) => Err(Error::Forbidden(DEMOTED)),
+                Some(_) => Err(Error::Demoted(needed)),
                 None => Err(Error::Deleted),
             };
         }

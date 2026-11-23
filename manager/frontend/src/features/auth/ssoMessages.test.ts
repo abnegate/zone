@@ -17,6 +17,7 @@ const CALLBACK_CODES = [
   'sso_assertion_invalid',
   'sso_sign_in_refused',
   'sso_sign_in_failed',
+  'sso_rate_limited',
   'account_disabled',
 ];
 
@@ -56,6 +57,13 @@ describe('ssoMessages', () => {
     );
   });
 
+  it('pins the message for a network that started too many sign-ins', () => {
+    expect(SSO_MESSAGES[SsoCode.RateLimited]).toBe(
+      'Too many sign-in attempts from your network. Wait a minute, then try again.'
+    );
+    expect(ssoMessage('sso_rate_limited')).toBe(SSO_MESSAGES[SsoCode.RateLimited]);
+  });
+
   it('looks up a known code and returns null for anything else', () => {
     expect(ssoMessage('sso_required')).toBe(SSO_MESSAGES[SsoCode.Required]);
     expect(ssoMessage('device_pending')).toBeNull();
@@ -67,6 +75,13 @@ describe('ssoMessages', () => {
     it('uses the message for a known refusal code', () => {
       const error = new AuthRequestError('This server requires single sign-on.', 'sso_required');
       expect(messageOf(error, 'Login failed')).toBe(SSO_MESSAGES[SsoCode.Required]);
+    });
+
+    it('explains a refused start from a network over the limit', () => {
+      const error = new AuthRequestError('Server text', 'sso_rate_limited');
+      expect(messageOf(error, 'Single sign-on could not start')).toBe(
+        SSO_MESSAGES[SsoCode.RateLimited]
+      );
     });
 
     it("keeps the server's message for a code it does not know", () => {

@@ -208,7 +208,7 @@ pub async fn get_user_by_id(pool: &PgPool, id: Uuid) -> DbResult<Option<UserRow>
 }
 
 /// Update last login timestamp
-pub async fn update_last_login(pool: &PgPool, user_id: Uuid) -> DbResult<()> {
+pub async fn update_last_login(executor: impl PgExecutor<'_>, user_id: Uuid) -> DbResult<()> {
     sqlx::query!(
         r#"
         UPDATE users
@@ -217,7 +217,7 @@ pub async fn update_last_login(pool: &PgPool, user_id: Uuid) -> DbResult<()> {
         "#,
         user_id
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
 
     Ok(())

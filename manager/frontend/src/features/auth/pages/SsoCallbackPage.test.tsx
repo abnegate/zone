@@ -219,6 +219,30 @@ describe('SsoCallbackPage', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(SSO_INCOMPLETE);
   });
 
+  it('explains a rate-limited SAML post, which arrives with no state, to a browser mid sign-in', async () => {
+    arrive(`?error=${SsoCode.RateLimited}`, { state: 'state-1', next: '/' });
+    await settle();
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent(SSO_MESSAGES[SsoCode.RateLimited]);
+    expect(alert.textContent).not.toContain(SsoCode.RateLimited);
+    expect(mockCompleteSso).not.toHaveBeenCalled();
+  });
+
+  it('shows only the generic message for a rate-limited callback when nothing was saved', async () => {
+    arrive(`?error=${SsoCode.RateLimited}`);
+    await settle();
+
+    expect(screen.getByRole('alert')).toHaveTextContent(SSO_INCOMPLETE);
+  });
+
+  it('shows only the generic message for a rate-limited callback whose state does not match', async () => {
+    arrive(`?error=${SsoCode.RateLimited}&state=forged`, { state: 'state-1', next: '/' });
+    await settle();
+
+    expect(screen.getByRole('alert')).toHaveTextContent(SSO_INCOMPLETE);
+  });
+
   it('hides the description when nothing was saved', () => {
     arrive('?error=access_denied&error_description=Call+0800&state=state-1');
 

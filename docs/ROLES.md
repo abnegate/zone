@@ -71,7 +71,8 @@ organization admin doesn't make you a member of its workspaces, and a
 workspace role grants nothing in the organization. The organization reaches
 into its workspaces in four places only:
 
-- `policies:update` changes every workspace's agent policy too;
+- `policies:update` changes every workspace's agent policy and runner labels
+  too;
 - workspace AI and MCP settings also need organization membership;
 - `workspaces:create` creates a workspace, and its creator becomes the
   workspace's owner, with every workspace permission there, including its
@@ -98,7 +99,7 @@ because a budget's answer carries its target's spend, name and email.
 
 | Permission | What it allows | Built-in roles | In custom roles |
 |---|---|---|---|
-| `organization:read` | See the organization and its members, its GitHub connection and repositories, its MCP servers and its agent policy | member, admin, owner | Always, as the base |
+| `organization:read` | See the organization and its members, its GitHub connection and repositories, its MCP servers, its agent policy and its runner labels | member, admin, owner | Always, as the base |
 | `organization:update` | Change the organization's name and description | admin, owner | Yes |
 | `organization:delete` | Delete the organization | owner | No |
 | `members:create` | Add a member | admin, owner | Yes |
@@ -116,7 +117,7 @@ because a budget's answer carries its target's spend, name and email.
 | `ai_settings:read` | Read the organization's AI settings | admin, owner | Yes |
 | `ai_settings:update` | Change and clear the organization's AI settings | admin, owner | Yes |
 | `agent_logins:update` | Sign the organization's coding agents in and out | admin, owner | Yes |
-| `policies:update` | Change the organization's agent policy, and the agent policy of every workspace in it | admin, owner | Yes |
+| `policies:update` | Change the organization's agent policy and the [runner labels](FLEET.md#placement) its unattended work requires, and the same for every workspace in it | admin, owner | Yes |
 | `audit_logs:read` | Read and download the organization's audit log | admin, owner | Yes |
 | `audit:update` | Manage audit streaming destinations, exports and retention | admin, owner | Yes |
 | `spend:read` | See the organization's spend reports and budgets, and download spend as CSV (see [SPEND.md](SPEND.md)) | admin, owner | Yes |
@@ -127,7 +128,7 @@ because a budget's answer carries its target's spend, name and email.
 
 | Permission | What it allows | Built-in roles | In custom roles |
 |---|---|---|---|
-| `workspace:read` | See the workspace and its members, and read its chats, projects, tasks, sources, knowledge, pull requests, releases, analytics, theme, actions, AI settings, MCP servers and agent policy | viewer, member, admin, owner | Always, as the base |
+| `workspace:read` | See the workspace and its members, and read its chats, projects, tasks, sources, knowledge, pull requests, releases, analytics, theme, actions, AI settings, MCP servers, agent policy and runner labels | viewer, member, admin, owner | Always, as the base |
 | `workspace:write` | Chat, create and run tasks and projects, change sources, knowledge, documents, the theme and actions, and mount host folders | member, admin, owner | Yes |
 | `workspace:update` | Change the workspace's name and description | admin, owner | Yes |
 | `workspace:delete` | Delete the workspace | owner | No |
@@ -137,7 +138,7 @@ because a budget's answer carries its target's spend, name and email.
 | `workspace_administrators:update` | Seat, change and remove workspace admins and owners | owner | No |
 | `workspace_ai_settings:update` | Change the workspace's AI settings | admin, owner | Yes |
 | `workspace_mcp_servers:update` | Change the workspace's MCP server settings | admin, owner | Yes |
-| `workspace_policies:update` | Change the workspace's agent policy | admin, owner | Yes |
+| `workspace_policies:update` | Change the workspace's agent policy and the [runner labels](FLEET.md#placement) its unattended work requires | admin, owner | Yes |
 | `project_syncs:update` | Add and remove a project's sync, and rotate its webhook secret | admin, owner | Yes |
 | `pull_requests:override` | Merge a pull request from the Pull Requests page as a GitHub administrator, when the server allows it with [`ZONE_GITHUB_ADMIN_MERGE`](CONFIGURATION.md#zone_github_admin_merge) (off by default) | admin, owner | Yes |
 
@@ -146,9 +147,9 @@ because a budget's answer carries its target's spend, name and email.
 A few permissions belong to the server, not to an organization, and come from
 the server-wide roles `admin`, `user` and `viewer`: `models:create`,
 `models:delete`, `pull_requests:update` and `releases:create`. The server
-admin flag, which covers the license, single sign-on and server-wide audit
-settings, is separate again. None of these can go in a custom role, and an
-organization's roles never grant them. Merging a pull request needs
+admin flag, which covers the license, single sign-on, server-wide audit
+settings and the [runner fleet](FLEET.md), is separate again. None of these
+can go in a custom role, and an organization's roles never grant them. Merging a pull request needs
 `pull_requests:update` on the server and `workspace:write` in the workspace;
 creating a release needs `releases:create` and `workspace:write`.
 
@@ -251,6 +252,21 @@ give a custom role afterwards. It needs `members:create` or
   `workspace_members:create` but not `workspace:write` can add viewers but
   not members.
 
+These role checks come first. Then, on a Community server at its
+[member cap](LICENSING.md#the-community-member-cap), adding or reactivating
+someone who isn't already an active member is refused with 403
+`member_cap_reached`. So an add that is beyond your permissions reads
+`role_exceeds`, not `member_cap_reached`, however full the server is, and an
+organization add of an admin or owner by someone without
+`administrators:update` is refused with a plain 403 before the cap is
+counted. The count and the addition are one step, so with one place left
+exactly one of several simultaneous adds gets in; an add that waits more than
+about 5 seconds for its turn answers 503 `member_admission_busy` and changes
+nothing.
+
+A workspace takes only members of its organization: adding anyone else is
+refused with 409 `outside_organization`. Add them to the organization first.
+
 ### Invitations
 
 An invitation names an organization role (`org_role`), and optionally a
@@ -269,11 +285,20 @@ workspace role (`workspace_role`) and the workspaces it applies to
   This is the reach organization admins have always had, so give
   `invitations:create` only to people you'd trust to add members to every
   workspace.
+- On a Community server at its member cap, the cap is checked when the
+  invitation is sent and again when it is accepted, each time with 403
+  `member_cap_reached` for someone who isn't already an active member. Sending
+  reserves no place, so an invitation sent under the cap can still be
+  refused when it's accepted. The
+  role checks above come first, so inviting beyond your permissions reads
+  `role_exceeds` on a full server too.
 
 ### Editing a role
 
 Creating, editing and deleting roles needs `roles:update`, which only
-built-in organization admins and owners hold, and the license.
+built-in organization admins and owners hold, and the license. Each change
+checks `roles:update` again while it holds your membership, so a change
+that races your demotion is refused with 403 rather than saved.
 
 Narrowing a role, so that it holds fewer permissions, is always allowed.
 Widening a **workspace** role that active members hold needs
@@ -375,6 +400,9 @@ choosing **Manage budgets** chooses **See spend**.
 | `name_reserved` | 400 | The name is a built-in role's. |
 | `role_name_taken` | 409 | Another role in the organization has this name, ignoring case. |
 | `role_in_use` | 409 | Active members hold the role. The response's `members` says how many. |
+| `member_cap_reached` | 403 | The Community member cap is reached, and the person added, reactivated or invited isn't already an active member. See [Adding and reactivating members](#adding-and-reactivating-members). |
+| `member_admission_busy` | 503 | Too many people were joining the capped server at once, and the add, reactivation or acceptance waited more than about 5 seconds for its turn. Nothing changed; try again. |
+| `outside_organization` | 409 | The person added to a workspace isn't a member of its organization. |
 
 A refusal without a code carries its reason in `error`, such as
 "Organization admin access required".

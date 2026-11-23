@@ -12,6 +12,7 @@ pub mod comfy;
 pub mod context;
 pub mod database;
 pub mod eventually;
+pub mod fleet;
 pub mod github_app;
 pub mod identity_provider;
 pub mod logs;
@@ -44,6 +45,7 @@ use zone_context::embeddings::EmbeddingService;
 
 use zone_server::config::AgentConfig;
 use zone_server::config::Config;
+use zone_server::config::DEFAULT_SSO_REQUESTS_PER_MINUTE;
 use zone_server::routes::create_router;
 use zone_server::services::mail::AccountMail;
 use zone_server::state::AppState;
@@ -72,6 +74,12 @@ pub const UNREACHABLE_USAGE: &str = "http://127.0.0.1:1";
 /// A loopback port nothing listens on, the instance's LiteLLM unless `LITELLM_HOST` names one,
 /// so no test registers spend keys with a LiteLLM running on this machine.
 pub const UNREACHABLE_LITELLM: &str = "http://127.0.0.1:9";
+
+/// Short, so a test that holds every SAML response check isn't kept waiting for the refusal.
+pub const SAML_PERMIT_WAIT: Duration = Duration::from_millis(50);
+
+/// Short, so a test that holds the seat lock isn't kept waiting for the busy answer.
+pub const ADMISSION_WAIT: Duration = Duration::from_millis(100);
 
 /// Agent settings whose usage reads go to [`UNREACHABLE_USAGE`].
 pub fn agents() -> AgentConfig {
@@ -130,6 +138,10 @@ pub fn test_config() -> Config {
         connect_urls: Vec::new(),
         mcp_enabled: true,
         mcp_commands: false,
+        trusted_proxies: Default::default(),
+        sso_requests_per_minute: DEFAULT_SSO_REQUESTS_PER_MINUTE,
+        saml_permit_wait: SAML_PERMIT_WAIT,
+        admission_wait: ADMISSION_WAIT,
     }
 }
 
@@ -601,6 +613,10 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         connect_urls: Vec::new(),
         mcp_enabled: true,
         mcp_commands: false,
+        trusted_proxies: Default::default(),
+        sso_requests_per_minute: DEFAULT_SSO_REQUESTS_PER_MINUTE,
+        saml_permit_wait: SAML_PERMIT_WAIT,
+        admission_wait: ADMISSION_WAIT,
     }
 }
 

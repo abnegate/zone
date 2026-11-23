@@ -6,7 +6,7 @@
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
-use zone_enterprise::LICENSE_REQUIRED;
+use zone_enterprise::{LICENSE_REQUIRED, MEMBER_CAP_REACHED};
 use zone_server::auth::{Permission, Scope};
 use zone_server::db::audit::actions;
 use zone_server::db::custom_roles::{AMBIGUOUS_ASSIGNMENT, EXCEEDS};
@@ -225,7 +225,6 @@ async fn member_lists_rank_a_custom_role_by_the_built_in_role_it_covers() {
     let organization_role = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Organization,
         &organization_permissions,
     )
@@ -248,19 +247,11 @@ async fn member_lists_rank_a_custom_role_by_the_built_in_role_it_covers() {
         names_of(Scope::Organization, &organization_permissions)
     );
 
-    let reading = role(
-        fixture.pool(),
-        fixture.organization,
-        fixture.owner.id,
-        Scope::Workspace,
-        &[],
-    )
-    .await;
+    let reading = role(fixture.pool(), fixture.organization, Scope::Workspace, &[]).await;
     let writing_permissions = [Permission::WorkspaceWrite, Permission::ProjectSyncsUpdate];
     let writing = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Workspace,
         &writing_permissions,
     )
@@ -301,7 +292,6 @@ async fn escalation_through_the_member_routes_is_refused_with_role_exceeds() {
     let auditors = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Organization,
         &[Permission::AuditLogsRead],
     )
@@ -310,7 +300,6 @@ async fn escalation_through_the_member_routes_is_refused_with_role_exceeds() {
     let writers = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Workspace,
         &[Permission::WorkspaceWrite],
     )
@@ -442,19 +431,11 @@ async fn a_lapsed_license_refuses_custom_assignments_but_not_built_in_ones() {
     let organization_role = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Organization,
         &[],
     )
     .await;
-    let workspace_role = role(
-        fixture.pool(),
-        fixture.organization,
-        fixture.owner.id,
-        Scope::Workspace,
-        &[],
-    )
-    .await;
+    let workspace_role = role(fixture.pool(), fixture.organization, Scope::Workspace, &[]).await;
     let member = organization_member(&fixture).await;
     let viewer = workspace_viewer(&fixture).await;
     fixture.store_license(&lapsed()).await;
@@ -634,7 +615,6 @@ async fn a_custom_assignment_answers_and_audits_the_role_it_assigned() {
     let organization_role = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Organization,
         &[Permission::AuditLogsRead],
     )
@@ -642,7 +622,6 @@ async fn a_custom_assignment_answers_and_audits_the_role_it_assigned() {
     let workspace_role = role(
         fixture.pool(),
         fixture.organization,
-        fixture.owner.id,
         Scope::Workspace,
         &[Permission::WorkspaceWrite],
     )
@@ -694,10 +673,13 @@ async fn a_custom_assignment_answers_and_audits_the_role_it_assigned() {
             role.to_string(),
             "{recorded}"
         );
-        assert!(
-            recorded["custom_role"]["name"]
-                .as_str()
-                .is_some_and(|name| name.starts_with("Role ")),
+        let name: String = sqlx::query_scalar("SELECT name FROM custom_roles WHERE id = $1")
+            .bind(role)
+            .fetch_one(fixture.pool())
+            .await
+            .expect("the role is stored");
+        assert_eq!(
+            recorded["custom_role"]["name"], name,
             "the audit names the role: {recorded}"
         );
         assert_eq!(recorded["role"], *rank, "{recorded}");
@@ -875,6 +857,71 @@ async fn an_inviter_never_invites_beyond_its_grant() {
         "an invitation within the inviter's grant is sent: {}",
         describe(&call, &response)
     );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_custom_holder_inviting_beyond_its_grant_to_a_full_community_server_reads_role_exceeds() {
+    let fixture = fixture().await;
+    let holder = organization_holder(
+        &fixture,
+        &[Permission::InvitationsCreate, Permission::MembersCreate],
+    )
+    .await;
+    fixture.member(OrgRole::Member, None).await;
+    fixture.state().cap_members();
+    let invitations = format!("/api/organizations/{}/invitations", fixture.organization);
+    let stranger = format!("{}@example.test", Uuid::new_v4());
+
+    let call = Call::post(
+        invitations.clone(),
+        json!({ "email": stranger, "org_role": OrgRole::Admin.as_str() }),
+    );
+    let response = call.send(&fixture, &holder.token).await;
+    assert!(
+        refused_with(&response, EXCEEDS),
+        "the role checks come before the cap: {}",
+        describe(&call, &response)
+    );
+
+    let call = Call::post(
+        invitations,
+        json!({ "email": stranger, "org_role": OrgRole::Member.as_str() }),
+    );
+    let response = call.send(&fixture, &holder.token).await;
+    assert!(
+        refused_with(&response, MEMBER_CAP_REACHED),
+        "{}",
+        describe(&call, &response)
+    );
+
+    let existing = user(fixture.pool()).await;
+    let call = Call::post(
+        organization_members_path(&fixture),
+        json!({ "user_id": existing, "role": OrgRole::Admin.as_str() }),
+    );
+    let response = call.send(&fixture, &holder.token).await;
+    assert_eq!(
+        response.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        describe(&call, &response)
+    );
+    assert_eq!(
+        response.json_value(),
+        json!({ "error": "Only owners can grant admin or owner role" }),
+        "an admin grant by a non-owner is refused before the cap: {}",
+        describe(&call, &response)
+    );
+
+    let invited: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM invitations WHERE organization_id = $1")
+            .bind(fixture.organization)
+            .fetch_one(fixture.pool())
+            .await
+            .expect("the invitations are counted");
+    assert_eq!(invited, 0, "a refused invitation is never stored");
 
     fixture.cleanup().await;
 }

@@ -67,6 +67,10 @@ fn test_config() -> Config {
         connect_urls: Vec::new(),
         mcp_enabled: true,
         mcp_commands: false,
+        trusted_proxies: Default::default(),
+        sso_requests_per_minute: zone_server::config::DEFAULT_SSO_REQUESTS_PER_MINUTE,
+        saml_permit_wait: common::SAML_PERMIT_WAIT,
+        admission_wait: common::ADMISSION_WAIT,
     }
 }
 

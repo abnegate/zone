@@ -357,7 +357,7 @@ async fn answering(
 /// Applies one forwarded request, answering only as the replica holding the
 /// chat. A replica in its grace period holds nothing, so it takes a forwarded
 /// Send only by taking the chat's lease first, and stays silent when another
-/// replica has it.
+/// replica has it or fleet policy refuses this runner the chat.
 async fn answer(
     state: &AppState,
     stream: &Arc<ChatStream>,
@@ -410,7 +410,7 @@ async fn answer(
     if reserved {
         match Session::acquire(state, chat, workspace, Uuid::new_v4()).await {
             Ok(session) => Reservation::hold(chat, session),
-            Err(crate::db::context::Error::Busy) => return,
+            Err(crate::db::context::Error::Busy | crate::db::context::Error::Refused(_)) => return,
             Err(error) => {
                 tracing::warn!(%chat, %error, "Could not take the chat for a forwarded message");
                 return;

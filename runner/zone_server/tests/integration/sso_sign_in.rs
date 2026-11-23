@@ -271,6 +271,17 @@ impl Server {
         .unwrap()
     }
 
+    /// Whether the last recorded login is the one the account's creating transaction recorded.
+    async fn last_login_at_creation(&self, id: Uuid) -> bool {
+        sqlx::query_scalar(
+            "SELECT COALESCE(last_login_at = created_at, false) FROM users WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(self.fixture.pool())
+        .await
+        .unwrap()
+    }
+
     async fn password_hash(&self, id: Uuid) -> String {
         sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
             .bind(id)
@@ -526,6 +537,19 @@ async fn a_first_sign_in_provisions_a_verified_member_with_an_organization_of_th
         .await
         .unwrap();
     assert_eq!(time_zone.as_deref(), Some(TIME_ZONE));
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_provisioning_sign_in_records_the_login_once_and_a_later_one_records_it_again() {
+    let server = Server::new().await;
+
+    let first = server.signed_in(unchanged).await;
+    assert!(server.last_login_at_creation(first.user).await);
+
+    let second = server.signed_in(unchanged).await;
+    assert_eq!(second.user, first.user);
+    assert!(!server.last_login_at_creation(first.user).await);
     server.cleanup().await;
 }
 

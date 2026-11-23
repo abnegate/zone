@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 use crate::config::{AutoProjectConfig, Config};
 use crate::db::auto_projects;
+use crate::services::fleet;
 use crate::state::AppState;
 use crate::workers::auto_project::review::outage::Outages;
 use crate::workers::conflict;
@@ -142,8 +143,15 @@ pub async fn tick(
     driving: &Arc<DashMap<Uuid, ()>>,
 ) {
     let running: Vec<Uuid> = driving.iter().map(|entry| *entry.key()).collect();
-    let due = match auto_projects::claim_due(state.db(), CLAIM_LEASE, PROJECTS_PER_TICK, &running)
-        .await
+    let claimant = fleet::claimant(state).await;
+    let due = match auto_projects::claim_due(
+        state.db(),
+        CLAIM_LEASE,
+        PROJECTS_PER_TICK,
+        &running,
+        claimant,
+    )
+    .await
     {
         Ok(due) => due,
         Err(error) => {
@@ -166,7 +174,7 @@ pub async fn tick(
                 async move { driver::drive_project(state, services, config, project_id, &lease).await }
             };
             if let Err(error) =
-                lease::holding(state.db().clone(), claim, CLAIM_RENEWAL, drive).await
+                lease::holding(state.db().clone(), claim, claimant, CLAIM_RENEWAL, drive).await
             {
                 tracing::warn!(%project_id, %error, "Auto project drive failed; retrying next tick");
             }

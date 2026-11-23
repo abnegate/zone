@@ -21,6 +21,7 @@ pub mod context_gatherings;
 pub mod custom_roles;
 pub mod devices;
 pub mod email_verification;
+pub mod fleet;
 pub mod gathering_events;
 pub mod github_apps;
 pub mod github_connection_states;

@@ -4,6 +4,7 @@
 //! such as the license, or that must not see another test's rows.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -104,9 +105,7 @@ impl Tenant {
     /// A custom role of this tenant's organization holding `permissions` and
     /// the base of `scope`.
     pub async fn custom_role(&self, scope: Scope, permissions: &[Permission]) -> Uuid {
-        let creator = self.user().await;
-        custom_roles::testing::role(&self.pool, self.organization, creator, scope, permissions)
-            .await
+        custom_roles::testing::composed(&self.pool, self.organization, scope, permissions).await
     }
 
     pub async fn hold_organization_role(&self, user: Uuid, role: Uuid) {
@@ -173,4 +172,27 @@ impl Database {
         .await
         .expect("the test's database to be dropped");
     }
+}
+
+/// Waits until another session queues for a lock the session `backend` holds.
+pub async fn queued_behind(pool: &PgPool, backend: i32) {
+    let queued = async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(backend)
+            .fetch_one(pool)
+            .await
+            .expect("the sessions waiting on a lock");
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), queued)
+        .await
+        .expect("a session queues behind the held lock");
 }

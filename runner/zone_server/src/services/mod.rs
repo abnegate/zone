@@ -17,6 +17,7 @@ pub mod completion_tokens;
 pub mod embedding;
 pub mod endpoint;
 pub mod failure;
+pub mod fleet;
 pub mod github;
 pub mod github_app;
 pub mod hosts;

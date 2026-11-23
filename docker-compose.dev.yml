@@ -60,6 +60,10 @@ services:
       - APP_BASE_URL=${APP_BASE_URL:-http://localhost:3001}
       # Traefik's consoles, plus the Vite server published on localhost:3001.
       - ZONE_CONSOLE_ORIGINS=${ZONE_CONSOLE_ORIGINS-http://localhost:3001,http://manager.localhost,https://manager.localhost,http://manager.${DOMAIN_HOST_WEBUI},https://manager.${DOMAIN_HOST_WEBUI}}
+      # Traefik, and the Vite server from zone_edge or zone_internal, whichever
+      # its lookup of manager answers with. Never the networks' gateways, which
+      # published ports such as 8000 and 3001 arrive through.
+      - ZONE_TRUSTED_PROXIES=${ZONE_TRUSTED_PROXIES-172.31.0.250,172.31.0.251,172.30.0.251}
       - SQLX_OFFLINE=true
       - RUST_LOG=zone_server=debug,zone_core=debug,abnegate_agent=debug,zone_context=debug
       - RUST_BACKTRACE=1
@@ -124,8 +128,10 @@ services:
       - CHOKIDAR_USEPOLLING=true
       - CHOKIDAR_INTERVAL=300
     networks:
-      - edge
-      - internal
+      edge:
+        ipv4_address: 172.31.0.251
+      internal:
+        ipv4_address: 172.30.0.251
     depends_on:
       manager:
         condition: service_started

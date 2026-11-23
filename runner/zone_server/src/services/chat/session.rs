@@ -42,6 +42,7 @@ use crate::services::chat::driver::Driver;
 use crate::services::chat::handover::Handover;
 use crate::services::completion_tokens::merge_stops;
 use crate::services::endpoint::Endpoint;
+use crate::services::fleet;
 use crate::services::mcp_servers::load;
 use crate::services::mcp_servers::status::Status;
 use crate::services::project_directory::{self, Start};
@@ -952,7 +953,8 @@ impl Session {
         workspace: Uuid,
         turn: Uuid,
     ) -> Result<Self, Error> {
-        let store = Store::new(state.db().clone(), chat, Some(workspace));
+        let claimant = fleet::claimant(state).await;
+        let store = Store::new(state.db().clone(), chat, Some(workspace)).claiming(claimant);
         let lease = store.acquire(turn, LEASE_LIFETIME).await?;
         let guard = store.keep_alive(lease.clone(), LEASE_LIFETIME)?;
         Ok(Self {

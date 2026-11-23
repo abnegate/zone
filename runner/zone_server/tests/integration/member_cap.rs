@@ -2,21 +2,29 @@
 //! and nobody who is already a member is ever turned away.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::StatusCode;
 use chrono::{DateTime, TimeDelta, Utc};
+use futures::future::join_all;
 use reqwest::Url;
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::pool::PoolConnection;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, Postgres};
 use uuid::Uuid;
 use zone_enterprise::sso::{Claims, testing};
-use zone_enterprise::{COMMUNITY_MEMBERS, MEMBER_CAP_REACHED, period_start};
+use zone_enterprise::{COMMUNITY_MEMBERS, MEMBER_ADMISSION_BUSY, MEMBER_CAP_REACHED, period_start};
 use zone_server::db::seats;
 use zone_server::routes::workspaces::OUTSIDE_ORGANIZATION;
+use zone_server::services::members::SEATS_LOCK;
+use zone_server::state::AppState;
 
 use crate::common::identity_provider::IdentityProvider;
 use crate::common::sso::{Fixture, active, grace, lapsed, lapsed_team, team};
-use crate::common::{TestResponse, test_email, test_password};
+use crate::common::{TestClient, TestResponse, test_config, test_email, test_password};
 
 const PREFIX: &str = "member_cap";
 const REGISTER: &str = "/api/auth/register";
@@ -27,7 +35,12 @@ const LICENSE: &str = "/api/license";
 const PUBLIC_PROVIDERS: &str = "/api/auth/sso/providers";
 const CALLBACKS: &str = "/api/auth/sso/callbacks";
 const UNVERIFIED_KEY: &str = "garbage";
+const ATTEMPTS: usize = 3;
+const HOLD_SEATS: &str = "SELECT pg_advisory_lock($1)";
+const RELEASE_SEATS: &str = "SELECT pg_advisory_unlock($1)";
+const SINGLE_CONNECTION_WAIT: Duration = Duration::from_secs(2);
 
+#[derive(Clone)]
 struct Member {
     id: Uuid,
     email: String,
@@ -218,6 +231,18 @@ impl Server {
             .unwrap();
     }
 
+    /// People who signed up and then left every organization: each counts again the moment a
+    /// membership lands.
+    async fn stranded(&self, count: usize) -> Vec<Member> {
+        let mut stranded = Vec::with_capacity(count);
+        for _ in 0..count {
+            let member = self.join().await;
+            self.strand(&member).await;
+            stranded.push(member);
+        }
+        stranded
+    }
+
     async fn backdate(&self, member: &Member, to: DateTime<Utc>) {
         sqlx::query("UPDATE users SET last_login_at = ($1 AT TIME ZONE 'UTC') WHERE id = $2")
             .bind(to)
@@ -263,8 +288,49 @@ impl Server {
             .unwrap()
     }
 
+    /// Holds [`SEATS_LOCK`] on a session of its own until [`Server::release_seats`].
+    async fn hold_seats(&self) -> PoolConnection<Postgres> {
+        let mut holder = self.pool().acquire().await.unwrap();
+        sqlx::query(HOLD_SEATS)
+            .bind(SEATS_LOCK)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        holder
+    }
+
+    async fn release_seats(mut holder: PoolConnection<Postgres>) {
+        sqlx::query(RELEASE_SEATS)
+            .bind(SEATS_LOCK)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+    }
+
+    /// A capped server on this one's database whose pool has a single connection and whose
+    /// license has never been read.
+    async fn single_connection(&self) -> (TestClient, PgPool) {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(SINGLE_CONNECTION_WAIT)
+            .connect_with((*self.pool().connect_options()).clone())
+            .await
+            .unwrap();
+        let state = AppState::new(test_config(), pool.clone(), None);
+        state.disable_mcp();
+        state.cap_members();
+        (TestClient::with_state(state), pool)
+    }
+
     async fn cleanup(self) {
         self.fixture.cleanup().await;
+    }
+
+    async fn finish(server: Arc<Self>) {
+        Arc::into_inner(server)
+            .expect("every attempt has settled")
+            .cleanup()
+            .await;
     }
 }
 
@@ -719,5 +785,271 @@ async fn under_the_cap_an_organization_is_reactivated_counting_only_those_who_re
 
     assert!(server.organization_active(organization).await);
     assert!(seats::member(server.pool(), owner.id).await.unwrap());
+    server.cleanup().await;
+}
+
+/// Runs every attempt on a task of its own, so password hashing on one never holds up another.
+async fn concurrently<F>(attempts: impl IntoIterator<Item = F>) -> Vec<TestResponse>
+where
+    F: Future<Output = TestResponse> + Send + 'static,
+{
+    join_all(attempts.into_iter().map(tokio::spawn))
+        .await
+        .into_iter()
+        .map(|settled| settled.expect("an attempt panicked"))
+        .collect()
+}
+
+/// The index of the one attempt answered with `admitted`; every other one was refused at the cap.
+fn admitted_once(responses: &[TestResponse], admitted: StatusCode) -> usize {
+    let statuses: Vec<StatusCode> = responses.iter().map(|response| response.status).collect();
+    let winners: Vec<usize> = statuses
+        .iter()
+        .enumerate()
+        .filter(|(_, status)| **status == admitted)
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one of the attempts is admitted: {statuses:?}"
+    );
+    for (index, response) in responses.iter().enumerate() {
+        if index != winners[0] {
+            refused(response);
+        }
+    }
+    winners[0]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_sign_ups_one_below_the_cap_admit_exactly_one() {
+    let server = Arc::new(Server::capped().await);
+    server.members(2).await;
+    let emails: Vec<String> = (0..ATTEMPTS).map(|_| test_email()).collect();
+
+    let responses = concurrently(emails.iter().cloned().map(|email| {
+        let server = server.clone();
+        async move { server.sign_up(&email).await }
+    }))
+    .await;
+
+    let admitted = admitted_once(&responses, StatusCode::CREATED);
+    for (index, email) in emails.iter().enumerate() {
+        if index != admitted {
+            assert_eq!(server.users_with_email(email).await, 0, "{email}");
+        }
+    }
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS);
+    Server::finish(server).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_first_single_sign_ons_one_below_the_cap_provision_exactly_one() {
+    let server = Arc::new(Server::capped().await);
+    let admin = server.join().await;
+    server.fixture.store_license(&active()).await;
+    let single_sign_on = Arc::new(SingleSignOn::configure(&server, &admin).await);
+    server.fixture.store_license(&lapsed()).await;
+    server.join().await;
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS - 1);
+    let emails: Vec<String> = (0..ATTEMPTS).map(|_| test_email()).collect();
+
+    let responses = concurrently(emails.iter().cloned().enumerate().map(|(index, email)| {
+        let server = server.clone();
+        let single_sign_on = single_sign_on.clone();
+        async move {
+            single_sign_on
+                .sign_in(&server, stranger(&format!("racer-{index}"), &email))
+                .await
+        }
+    }))
+    .await;
+
+    let admitted = admitted_once(&responses, StatusCode::OK);
+    for (index, email) in emails.iter().enumerate() {
+        let expected = i64::from(index == admitted);
+        assert_eq!(server.users_with_email(email).await, expected, "{email}");
+    }
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS);
+    drop(single_sign_on);
+    Server::finish(server).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_invitation_accepts_one_below_the_cap_admit_exactly_one() {
+    let server = Arc::new(Server::capped().await);
+    let invitees = server.stranded(ATTEMPTS).await;
+    let owner = server.join().await;
+    server.join().await;
+    let mut tokens = Vec::with_capacity(ATTEMPTS);
+    for invitee in &invitees {
+        tokens.push(server.invited(&owner, &invitee.email).await);
+    }
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS - 1);
+
+    let responses = concurrently(
+        invitees
+            .iter()
+            .cloned()
+            .zip(tokens)
+            .map(|(invitee, token)| {
+                let server = server.clone();
+                async move { server.accept(&token, &invitee).await }
+            }),
+    )
+    .await;
+
+    let admitted = admitted_once(&responses, StatusCode::OK);
+    for (index, invitee) in invitees.iter().enumerate() {
+        assert_eq!(
+            seats::member(server.pool(), invitee.id).await.unwrap(),
+            index == admitted
+        );
+    }
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS);
+    Server::finish(server).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_adds_one_below_the_cap_admit_exactly_one() {
+    let server = Arc::new(Server::capped().await);
+    let targets = server.stranded(ATTEMPTS).await;
+    let owner = server.join().await;
+    server.join().await;
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS - 1);
+
+    let responses = concurrently(targets.iter().cloned().map(|target| {
+        let server = server.clone();
+        let owner = owner.clone();
+        async move { server.add(&owner, &target).await }
+    }))
+    .await;
+
+    let admitted = admitted_once(&responses, StatusCode::CREATED);
+    for (index, target) in targets.iter().enumerate() {
+        assert_eq!(
+            seats::member(server.pool(), target.id).await.unwrap(),
+            index == admitted
+        );
+    }
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS);
+    Server::finish(server).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_organization_creates_one_below_the_cap_admit_exactly_one() {
+    let server = Arc::new(Server::capped().await);
+    let founders = server.stranded(ATTEMPTS).await;
+    server.members(2).await;
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS - 1);
+
+    let responses = concurrently(founders.iter().cloned().map(|founder| {
+        let server = server.clone();
+        async move { server.create_organization(&founder).await }
+    }))
+    .await;
+
+    let admitted = admitted_once(&responses, StatusCode::CREATED);
+    for (index, founder) in founders.iter().enumerate() {
+        assert_eq!(
+            seats::member(server.pool(), founder.id).await.unwrap(),
+            index == admitted
+        );
+    }
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS);
+    Server::finish(server).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_reactivations_one_below_the_cap_reactivate_exactly_one() {
+    let server = Arc::new(Server::capped().await);
+    let mut owners = Vec::with_capacity(ATTEMPTS);
+    for _ in 0..ATTEMPTS {
+        let owner = server.join().await;
+        let organization = server.organization(&owner).await;
+        server
+            .activate(&owner, organization, false)
+            .await
+            .assert_status(StatusCode::OK);
+        owners.push((owner, organization));
+    }
+    server.members(2).await;
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS - 1);
+
+    let responses = concurrently(owners.iter().cloned().map(|(owner, organization)| {
+        let server = server.clone();
+        async move { server.activate(&owner, organization, true).await }
+    }))
+    .await;
+
+    let admitted = admitted_once(&responses, StatusCode::OK);
+    for (index, (_, organization)) in owners.iter().enumerate() {
+        assert_eq!(
+            server.organization_active(*organization).await,
+            index == admitted
+        );
+    }
+    assert_eq!(server.active().await, COMMUNITY_MEMBERS);
+    Server::finish(server).await;
+}
+
+#[tokio::test]
+async fn a_seat_lock_held_past_the_timeout_answers_busy() {
+    let server = Server::capped().await;
+    let holder = server.hold_seats().await;
+    let email = test_email();
+
+    let response = server.sign_up(&email).await;
+
+    Server::release_seats(holder).await;
+    response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.json_value(),
+        json!({
+            "error": "Too many people are joining this server at once. Try again in a moment.",
+            "code": MEMBER_ADMISSION_BUSY,
+        })
+    );
+    assert_eq!(server.users_with_email(&email).await, 0);
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_existing_member_joining_another_organization_waits_for_the_seat_lock() {
+    let server = Server::capped().await;
+    let member = server.join().await;
+    let holder = server.hold_seats().await;
+
+    let response = server.create_organization(&member).await;
+
+    Server::release_seats(holder).await;
+    response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.json_value()["code"], json!(MEMBER_ADMISSION_BUSY));
+    server
+        .create_organization(&member)
+        .await
+        .assert_status(StatusCode::CREATED);
+    server.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_admission_reads_the_cap_before_its_transaction_takes_the_only_connection() {
+    let server = Server::capped().await;
+    let founder = server.stranded(1).await.remove(0);
+    let (client, pool) = server.single_connection().await;
+
+    let response = client
+        .post_json_auth(
+            ORGANIZATIONS,
+            &json!({ "name": "Single", "slug": format!("single-{}", Uuid::new_v4().simple()) }),
+            &founder.access,
+        )
+        .await;
+
+    drop(client);
+    pool.close().await;
+    response.assert_status(StatusCode::CREATED);
+    assert!(seats::member(server.pool(), founder.id).await.unwrap());
     server.cleanup().await;
 }

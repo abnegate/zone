@@ -228,6 +228,14 @@ over server.baseUrl over commonEnv; otherwise it is the first ingress host.
 {{- end }}
 
 {{/*
+ZONE_TRUSTED_PROXIES for zone-server: server.env wins over server.trustedProxies, and empty
+leaves it unset, so zone-server trusts loopback only.
+*/}}
+{{- define "zone-apps.server.trustedProxies" -}}
+{{- coalesce (get (default dict .Values.server.env) "ZONE_TRUSTED_PROXIES") .Values.server.trustedProxies | default "" | toString | trim -}}
+{{- end }}
+
+{{/*
 Secret name used by zone-server
 */}}
 {{- define "zone-apps.secretsName" -}}

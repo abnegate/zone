@@ -284,7 +284,7 @@ class ChatsApi {
       body: JSON.stringify(request),
     });
     if (!response.ok) {
-      throw await ApiError.from(response, 'Failed to send message');
+      throw await ApiError.refused(response, 'Failed to send message');
     }
     const data = parse(MessageResponseSchema, await response.json());
     return data.message;
@@ -312,7 +312,7 @@ class ChatsApi {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
-      throw await ApiError.from(response, 'Failed to delete message');
+      throw await ApiError.refused(response, 'Failed to delete message');
     }
   }
 

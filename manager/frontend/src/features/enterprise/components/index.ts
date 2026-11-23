@@ -1,4 +1,5 @@
 export { AdministersServerProvider } from './AdministersServer';
+export { LicenseId } from './LicenseId';
 export { LicenseKeyForm } from './LicenseKeyForm';
 export { LicenseRenewal } from './LicenseRenewal';
 export { LicenseSection } from './LicenseSection';
@@ -8,4 +9,5 @@ export { MemberCapRefusal } from './MemberCapRefusal';
 export { RemoveLicenseDialog } from './RemoveLicenseDialog';
 export { Switch } from './Switch';
 export { ToneBadge } from './ToneBadge';
+export { UnverifiedNotice } from './UnverifiedNotice';
 export { UpgradeNotice } from './UpgradeNotice';

@@ -9,6 +9,7 @@ on:
       - 'Makefile'
       - 'scripts/test-helm-base-url.sh'
       - 'scripts/test-helm-ha.sh'
+      - 'scripts/test-helm-trusted-proxies.sh'
       - '.github/workflows/helm.yml'
   pull_request:
     paths:
@@ -17,6 +18,7 @@ on:
       - 'Makefile'
       - 'scripts/test-helm-base-url.sh'
       - 'scripts/test-helm-ha.sh'
+      - 'scripts/test-helm-trusted-proxies.sh'
       - '.github/workflows/helm.yml'
 
 permissions:
@@ -48,3 +50,6 @@ jobs:
         run: |
           yq --version
           sh scripts/test-helm-ha.sh
+
+      - name: Verify the server trusts only the proxies it is given
+        run: sh scripts/test-helm-trusted-proxies.sh

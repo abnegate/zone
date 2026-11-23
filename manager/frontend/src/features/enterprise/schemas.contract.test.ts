@@ -34,6 +34,8 @@ const RENEWAL = join(SERVER, 'services/license/renewal');
 const ERRORS = join(ENTERPRISE, 'error.rs');
 const MEMBERS = join(ENTERPRISE, 'members.rs');
 
+const MEMBER_ADMISSION_BUSY = 'member_admission_busy';
+
 const CODE = /pub const [A-Z_]+: &str = "([^"]+)";/g;
 const MEMBER_CAP = /pub const COMMUNITY_MEMBERS: u32 = (\d+);/;
 const OPTION = /^pub\s+([a-z_][a-z_0-9]*)\s*:\s*Option</;
@@ -141,8 +143,8 @@ describe('the license vocabularies match the server', () => {
     expect(sorted(PLANS)).toEqual(sorted(rustVariants(read(join(ENTERPRISE, 'plan.rs')), 'Plan')));
   });
 
-  test('a refusal at the member cap carries the code the server sends', () => {
-    expect(codes(MEMBERS)).toEqual([MemberCapCode]);
+  test('a refusal at the member cap carries the code the server sends, beside the busy answer', () => {
+    expect(codes(MEMBERS)).toEqual([MemberCapCode, MEMBER_ADMISSION_BUSY]);
   });
 
   test('the member cap without a license is the one the server enforces', () => {

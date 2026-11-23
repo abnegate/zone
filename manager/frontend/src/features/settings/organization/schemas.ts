@@ -200,6 +200,8 @@ export const AUDIT_ACTIONS = [
   'role.created',
   'role.updated',
   'role.deleted',
+  'runner_labels.updated',
+  'fleet.run_refused',
 ] as const;
 export const AUDIT_RESOURCE_TYPES = [
   'organization',
@@ -213,6 +215,8 @@ export const AUDIT_RESOURCE_TYPES = [
   'audit_retention',
   'audit_export',
   'role',
+  'organization_runner_labels',
+  'workspace_runner_labels',
 ] as const;
 
 export const AuditActionSchema = z.string().min(1);

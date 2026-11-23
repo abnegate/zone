@@ -95,6 +95,15 @@ rollout, an eviction or a reschedule). Saved Claude tokens are sealed in the
 database. /app/clones is on the same emptyDir, so project chats lose their clones,
 and any work left in them, at the same moments.
 {{- end }}
+{{- if not (include "zone-apps.server.trustedProxies" .) }}
+
+WARNING: server.trustedProxies is empty, so zone-server trusts no proxy's
+X-Forwarded-For. Every request reaches it from the ingress controller's pod,
+so every client shares one single sign-on throttle bucket per zone-server pod
+and the devices list shows the ingress controller's address. Set
+server.trustedProxies to your ingress controller's pod CIDR, never a range
+your clients use; see the chart README.
+{{- end }}
 {{- if .Values.server.env.ZONE_AGENT_CALLBACK }}
 
 NOTE: server.env.ZONE_AGENT_CALLBACK is set. claude.com sends the admin's

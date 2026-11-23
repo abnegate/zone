@@ -13,11 +13,25 @@ pub enum Variable {
     SmtpPassword,
     SmtpFrom,
     SmtpFromName,
+    Revoked,
+    TrustedProxies,
+    AddressLimit,
+    KeyLimit,
+    RegistryService,
+    RegistryRepositories,
+    RegistryKeyGeneration,
+    BundleBucket,
+    BundleRegion,
+    BundleEndpoint,
+    BundlePrefix,
+    BundleAccessKeyId,
+    BundleSecretAccessKey,
+    RevokedSubscriptions,
 }
 
 impl Variable {
     #[cfg(test)]
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 27] = [
         Self::PrivateKeyFile,
         Self::PrivateKey,
         Self::KeyId,
@@ -31,6 +45,20 @@ impl Variable {
         Self::SmtpPassword,
         Self::SmtpFrom,
         Self::SmtpFromName,
+        Self::Revoked,
+        Self::TrustedProxies,
+        Self::AddressLimit,
+        Self::KeyLimit,
+        Self::RegistryService,
+        Self::RegistryRepositories,
+        Self::RegistryKeyGeneration,
+        Self::BundleBucket,
+        Self::BundleRegion,
+        Self::BundleEndpoint,
+        Self::BundlePrefix,
+        Self::BundleAccessKeyId,
+        Self::BundleSecretAccessKey,
+        Self::RevokedSubscriptions,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -48,6 +76,20 @@ impl Variable {
             Self::SmtpPassword => "SMTP_PASSWORD",
             Self::SmtpFrom => "SMTP_FROM",
             Self::SmtpFromName => "SMTP_FROM_NAME",
+            Self::Revoked => "ZONE_LICENSE_REVOKED",
+            Self::TrustedProxies => "ZONE_LICENSE_TRUSTED_PROXIES",
+            Self::AddressLimit => "ZONE_LICENSE_ADDRESS_LIMIT",
+            Self::KeyLimit => "ZONE_LICENSE_KEY_LIMIT",
+            Self::RegistryService => "ZONE_REGISTRY_SERVICE",
+            Self::RegistryRepositories => "ZONE_REGISTRY_REPOSITORIES",
+            Self::RegistryKeyGeneration => "ZONE_REGISTRY_KEY_GENERATION",
+            Self::BundleBucket => "ZONE_BUNDLE_BUCKET",
+            Self::BundleRegion => "ZONE_BUNDLE_REGION",
+            Self::BundleEndpoint => "ZONE_BUNDLE_ENDPOINT",
+            Self::BundlePrefix => "ZONE_BUNDLE_PREFIX",
+            Self::BundleAccessKeyId => "ZONE_BUNDLE_ACCESS_KEY_ID",
+            Self::BundleSecretAccessKey => "ZONE_BUNDLE_SECRET_ACCESS_KEY",
+            Self::RevokedSubscriptions => "ZONE_LICENSE_REVOKED_SUBSCRIPTIONS",
         }
     }
 
@@ -85,6 +127,20 @@ mod tests {
                 "SMTP_PASSWORD",
                 "SMTP_FROM",
                 "SMTP_FROM_NAME",
+                "ZONE_LICENSE_REVOKED",
+                "ZONE_LICENSE_TRUSTED_PROXIES",
+                "ZONE_LICENSE_ADDRESS_LIMIT",
+                "ZONE_LICENSE_KEY_LIMIT",
+                "ZONE_REGISTRY_SERVICE",
+                "ZONE_REGISTRY_REPOSITORIES",
+                "ZONE_REGISTRY_KEY_GENERATION",
+                "ZONE_BUNDLE_BUCKET",
+                "ZONE_BUNDLE_REGION",
+                "ZONE_BUNDLE_ENDPOINT",
+                "ZONE_BUNDLE_PREFIX",
+                "ZONE_BUNDLE_ACCESS_KEY_ID",
+                "ZONE_BUNDLE_SECRET_ACCESS_KEY",
+                "ZONE_LICENSE_REVOKED_SUBSCRIPTIONS",
             ]
         );
     }

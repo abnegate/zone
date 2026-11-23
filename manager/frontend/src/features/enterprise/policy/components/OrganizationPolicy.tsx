@@ -1,14 +1,16 @@
 import { UpgradeNotice } from '../../components/UpgradeNotice';
+import { RunnerPlacementCard } from '../../fleet/components/RunnerPlacementCard';
+import { organizationPlacement } from '../../fleet/placement';
+import { Permission } from '../../roles/schemas';
 import { useUpdateOrganizationPolicy } from '../hooks';
 import { UPGRADE_NOTICE } from '../labels';
-import { community } from '../license';
+import { community, unverified } from '../license';
 import { PolicyScope } from '../source';
 import type { OrganizationPolicyResponse } from '../types';
 import { PolicyEditor } from './PolicyEditor';
 import { PolicyStatus } from './PolicyStatus';
 
-export const ORGANIZATION_READ_ONLY =
-  'Only organization owners and admins can change the agent policy.';
+export const ORGANIZATION_READ_ONLY = `Changing the agent policy needs the ${Permission.PoliciesUpdate} permission in this organization.`;
 
 interface OrganizationPolicyProps {
   organizationId: string;
@@ -18,7 +20,7 @@ interface OrganizationPolicyProps {
 export function OrganizationPolicy({ organizationId, policy }: OrganizationPolicyProps) {
   const update = useUpdateOrganizationPolicy(organizationId);
 
-  if (community(policy)) {
+  if (community(policy) && !unverified(policy)) {
     return <UpgradeNotice message={UPGRADE_NOTICE} className="policy-notice" />;
   }
 
@@ -36,6 +38,7 @@ export function OrganizationPolicy({ organizationId, policy }: OrganizationPolic
         onSave={(request, onSaved) => update.update(request, onSaved)}
         onReset={update.reset}
       />
+      <RunnerPlacementCard scope={organizationPlacement(organizationId)} />
     </>
   );
 }

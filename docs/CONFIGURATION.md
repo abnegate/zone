@@ -105,6 +105,60 @@ For production, regenerate secrets for security.
 - **Generate**: `openssl rand -base64 32`
 - **Usage**: Required if using VPN profile (web search)
 
+### `ZONE_TRUSTED_PROXIES`
+- **Default**: unset, which trusts loopback only: `127.0.0.0/8` and `::1`.
+  The compose file sets `172.31.0.250`, the address it pins Traefik to on
+  `zone_edge`. The dev overlay adds the dev console's Vite proxy, pinned to
+  `172.31.0.251` on `zone_edge` and `172.30.0.251` on `zone_internal`, which
+  sets `X-Forwarded-For` to the browser's address instead of appending to
+  whatever the browser sent. Both
+  trust single addresses rather than the networks, because every published
+  port, such as the dev overlay's `8000` and `3001` or the VPN overlay's
+  `127.0.0.1:8000`, reaches the manager from the network's gateway, and
+  trusting it would let anyone who can reach that port name any address. A
+  value in `.env` replaces either one. The `zone-apps` Helm chart leaves it
+  unset unless you set `server.trustedProxies`, and warns after an install
+  that leaves it empty.
+- **Description**: The reverse proxies whose `X-Forwarded-For` header Zone
+  believes, as a comma-separated list of IP addresses and networks. Zone uses
+  the client address it resolves for the single sign-on rate limit and for
+  the address it records on sessions and devices. When the TCP peer is a
+  listed proxy, Zone reads `X-Forwarded-For` from the right, skips every
+  listed hop, and takes the first one that isn't listed. When the peer isn't
+  listed, Zone ignores the header and uses the peer. It never reads
+  `X-Real-IP`. An entry may carry a port, as Azure Application Gateway and
+  IIS ARR send it (`198.51.100.7:4711`, `[2001:db8::1]:443`); Zone drops the
+  port.
+- **Example**: `172.31.0.250`, Traefik in the compose stack, or your ingress
+  controller's pod CIDR, such as `10.244.0.0/16`. List every proxy between
+  the internet and Zone that appends to `X-Forwarded-For`.
+- **Note**: Set it to your proxies' own addresses, such as your ingress
+  controller's pod CIDR, never a range your clients use. Zone skips every
+  hop in a trusted range as if it were a proxy, so a client whose own
+  address is in one, say `10.5.5.5` inside a trusted `10.0.0.0/8`, can put
+  any address to the left of its own in `X-Forwarded-For` and be counted
+  under that address instead. Only loopback is trusted by default, so a peer
+  on your LAN, such as `192.168.1.5`, is the client, whatever it forwards.
+  An empty value trusts nothing, not even loopback. An entry that isn't an
+  IP address or network stops the server at startup with an error naming
+  it. Behind a proxy that isn't listed, every client shares the proxy's
+  address and so its single sign-on limit. See
+  [SSO.md](SSO.md#rate-limits-and-client-addresses).
+
+### `ZONE_SSO_REQUESTS_PER_MINUTE`
+- **Default**: `120`
+- **Description**: How many single sign-on starts and SAML responses one
+  client address may send in a minute, counted together. Over the limit, a
+  start gets `429` with `Retry-After` and the code `sso_rate_limited`, and a
+  SAML post is sent back to the console with that code. IPv6 clients are
+  counted by their /64 network. The first refusal of an address in each
+  minute is logged as a warning, the rest at debug.
+- **Note**: The count is kept in each server process's memory, so the limit
+  is per replica: with three replicas behind a load balancer, one address
+  can make up to three times as many requests. It must be a whole number of
+  at least 1; `0` or anything else stops the server at startup. See
+  [SSO.md](SSO.md#rate-limits-and-client-addresses).
+
 ---
 
 ## 🤖 Ollama Model Configuration
@@ -890,9 +944,13 @@ is signed in, the panel lists each account with its plan, its state, and
 meters for its five-hour and weekly windows saying when each resets, and
 offers **Add another Claude account** or **Add another ChatGPT account** to
 sign in one more. While the panel is open and no sign-in is in progress, it
-reads the accounts' usage again every minute. Only organization admins and
-owners can sign in or out. Other members see the status, with "Ask an
-organization admin to sign in" while the agent is not signed in.
+reads the accounts' usage again every minute. Signing in or out needs the
+`agent_logins:update` permission, which organization owners and admins hold
+and a custom role can carry. A sign-in started by someone who loses it before
+the sign-in finishes is refused with "This sign-in needs the
+agent_logins:update permission, and whoever started it no longer holds it.
+Start again." Other members see the status, with "Ask an organization admin
+to sign in" while the agent is not signed in.
 
 **How sign-ins are told apart.** Each sign-in is one row, keyed by the account
 it signed in to, and signing in to an account the organization already holds
@@ -2601,6 +2659,20 @@ Both settings are read at startup. A blank value counts as unset, and a value th
 
 ---
 
+## Runner fleet
+
+Every Zone server process registers as a runner in its server's fleet, on every edition, and heartbeats every 15 seconds. Under a Zone Enterprise license, server admins can cordon or revoke a runner and set a minimum version, and organizations and workspaces can require runner labels for their unattended work. Both settings are read once at startup. See [FLEET.md](FLEET.md) for the whole policy.
+
+### `ZONE_RUNNER_NAME`
+- **Default**: the `HOSTNAME` environment variable, else `/etc/hostname`, else `zone-` followed by 8 random hex digits
+- **Description**: The name this server registers as. A runner's state belongs to its name, so a cordoned or revoked name stays that way when its server restarts. A name must be unique to one live server process: the newest process registered under a name holds it, and while it heartbeats, an older process sharing the name claims no work under an Enterprise license and logs a warning on every heartbeat. A process that started later takes the name over at once, so a restart or rollout hands it over without a gap; a process takes the name over from one that hasn't heartbeated for 60 seconds. Never give a Kubernetes Deployment's replicas one name: for a name that stays the same for each pod across restarts, run a StatefulSet and keep the default, since its pods keep their host names. See [FLEET.md](FLEET.md#names-carry-state). Surrounding spaces are trimmed, and a blank value counts as unset.
+
+### `ZONE_RUNNER_LABELS`
+- **Default**: none
+- **Description**: The labels this runner carries, comma-separated, such as `region=eu,gpu`. Unattended work in a workspace (task runs, reminder turns and auto-project drives) runs only on runners that carry every label its organization and workspace require; chats ignore labels. A label is 1 to 63 characters of lowercase letters, digits and `.`, `_`, `-`, `=` and `/`, starting with a letter or digit. Spaces around an entry are trimmed, blank entries are skipped and repeats collapse. A label that breaks a rule, such as `GPU`, stops the server at startup with a message beginning `Refusing to start: ZONE_RUNNER_LABELS is invalid (fleet_label_invalid).` and naming the label, so a misconfigured server can't boot into the wrong placement. Label names are visible beyond this server's operators: the **Runner placement** card lists every label the fleet's runners carry, with how many carry each, to anyone who may change an organization's or workspace's runner labels, so on a server several organizations share, every organization's label editors see them. Keep anything you wouldn't show every organization out of label names. See [FLEET.md](FLEET.md#who-can-see-and-change-what).
+
+---
+
 ## 🔒 VPN Configuration - Optional
 
 **VPN is completely optional!** Enable it to send all stack internet traffic through Gluetun, including private web search.
@@ -2756,6 +2828,7 @@ Regenerate secrets for production:
 | Workspace digests | No | ✅ Yes (off) |
 | License renewal | No | ✅ Yes (on) |
 | Shutdown | No | ✅ Yes (stops at once) |
+| Runner fleet | No | Yes (host name, no labels) |
 
 *Security variables have insecure defaults. Change for production.
 
@@ -2822,6 +2895,7 @@ Need to find a specific config? Quick lookup:
 - **Workspace digests**: ZONE_REPORT_ENABLED, ZONE_REPORT_CADENCE, ZONE_REPORT_HOUR, ZONE_REPORT_WEEKDAY, ZONE_REPORT_DAY_OF_MONTH
 - **License renewal**: ZONE_LICENSE_RENEWAL, ZONE_LICENSE_RENEWAL_URL
 - **Shutdown**: ZONE_SHUTDOWN_DELAY_SECONDS, ZONE_SHUTDOWN_GRACE_SECONDS
+- **Runner fleet**: ZONE_RUNNER_NAME, ZONE_RUNNER_LABELS
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
 - **Timezone**: TZ
 - **VPN**: VPN_*, OPENVPN_*

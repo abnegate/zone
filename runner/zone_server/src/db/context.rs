@@ -14,6 +14,11 @@ use uuid::Uuid;
 
 use super::chat_subagents;
 use super::chats::typed;
+use super::fleet::claimant::Claimant;
+use super::fleet::eligibility::{self, INTERACTIVE};
+use super::fleet::mode::Mode;
+use super::fleet::shortfall::Shortfall;
+use crate::services::fleet::refusal;
 
 pub use abnegate_agent::chat::{Guard, Lease, StoredMessage};
 
@@ -34,6 +39,10 @@ pub enum Error {
     Integrity(String),
     #[error("Conversation evidence was not found in this chat")]
     NotFound,
+    #[error("This conversation store has no claimant, so it can't take the chat's lease")]
+    Unclaimed,
+    #[error("{}", refusal::of(.0.clone()))]
+    Refused(Shortfall),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
     #[error(transparent)]
@@ -48,6 +57,8 @@ impl From<Error> for ChatError {
             Error::Conflict => ChatError::Conflict,
             Error::Integrity(detail) => ChatError::Integrity(detail),
             Error::NotFound => ChatError::NotFound,
+            Error::Unclaimed => ChatError::Integrity(error.to_string()),
+            Error::Refused(_) => ChatError::Backend(error.to_string()),
             Error::Database(error) => ChatError::Backend(error.to_string()),
             Error::Json(error) => ChatError::Backend(error.to_string()),
         }
@@ -64,41 +75,79 @@ pub struct Store {
     pool: PgPool,
     chat_id: Uuid,
     workspace_id: Option<Uuid>,
+    claimant: Option<Claimant>,
 }
 
 impl Store {
-    /// The scope must come from an authorized chat, never from model tool arguments.
+    /// The scope must come from an authorized chat, never from model tool arguments. A store
+    /// made here reads and writes under a lease but can't take one until it is
+    /// [claiming](Self::claiming).
     pub fn new(pool: PgPool, chat_id: Uuid, workspace_id: Option<Uuid>) -> Self {
         Self {
             pool,
             chat_id,
             workspace_id,
+            claimant: None,
         }
     }
 
-    pub async fn acquire(&self, owner: Uuid, lifetime: Duration) -> Result<Lease, Error> {
-        let milliseconds = milliseconds(lifetime)?;
-        let row = sqlx::query("INSERT INTO chat_leases (chat_id, owner, fence, expires_at)
-            SELECT id, $3, 1, clock_timestamp() + $4 * interval '1 millisecond'
-            FROM chats WHERE id = $1 AND workspace_id IS NOT DISTINCT FROM $2
-            ON CONFLICT (chat_id) DO UPDATE SET owner = EXCLUDED.owner,
-            fence = chat_leases.fence + 1, expires_at = clock_timestamp() + $4 * interval '1 millisecond'
-            WHERE chat_leases.expires_at <= clock_timestamp()
-            RETURNING owner, fence, expires_at")
-            .bind(self.chat_id).bind(self.workspace_id).bind(owner).bind(milliseconds)
-            .fetch_optional(&self.pool).await?;
-        match row {
-            Some(row) => Ok(Lease::new(
-                self.chat_id,
-                row.get("owner"),
-                row.get("fence"),
-                row.get("expires_at"),
-            )),
-            None => {
-                self.scope(&mut *self.pool.acquire().await?).await?;
-                Err(Error::Busy)
-            }
+    /// This store, taking the chat's lease as `claimant`, so fleet policy judges the runner
+    /// before any turn starts.
+    pub fn claiming(self, claimant: Claimant) -> Self {
+        Self {
+            claimant: Some(claimant),
+            ..self
         }
+    }
+
+    /// Takes the chat's lease for `owner`, recording the claimant's runner on it. Under fleet
+    /// policy the runner must be the claimant's own and is [held](eligibility::hold) until the
+    /// lease commits, so a revoke either refuses this or, waiting behind it, expires the lease it
+    /// wrote.
+    pub async fn acquire(&self, owner: Uuid, lifetime: Duration) -> Result<Lease, Error> {
+        let claimant = self.claimant.ok_or(Error::Unclaimed)?;
+        let milliseconds = milliseconds(lifetime)?;
+        let mut transaction = self.pool.begin().await?;
+        if let Some(shortfall) = eligibility::hold(&mut transaction, claimant).await? {
+            self.scope(&mut transaction).await?;
+            return Err(Error::Refused(shortfall));
+        }
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!("INSERT INTO chat_leases (chat_id, owner, fence, expires_at, runner_id)
+            SELECT id, $3, 1, clock_timestamp() + $4 * interval '1 millisecond',
+            (SELECT id FROM fleet_runners WHERE id = $5)
+            FROM chats WHERE id = $1 AND workspace_id IS NOT DISTINCT FROM $2
+            AND (NOT $6 OR EXISTS (SELECT 1 FROM fleet_runners runner CROSS JOIN fleet_policy policy
+                WHERE runner.id = $5 AND {INTERACTIVE}))
+            ON CONFLICT (chat_id) DO UPDATE SET owner = EXCLUDED.owner,
+            fence = chat_leases.fence + 1, expires_at = clock_timestamp() + $4 * interval '1 millisecond',
+            runner_id = EXCLUDED.runner_id
+            WHERE chat_leases.expires_at <= clock_timestamp()
+            RETURNING owner, fence, expires_at")))
+            .bind(self.chat_id).bind(self.workspace_id).bind(owner).bind(milliseconds)
+            .bind(claimant.runner).bind(claimant.enforced)
+            .fetch_optional(&mut *transaction).await?;
+        let Some(row) = row else {
+            self.scope(&mut transaction).await?;
+            if claimant.enforced
+                && let Some(shortfall) = eligibility::shortfall(
+                    &mut *transaction,
+                    claimant.runner,
+                    self.workspace_id,
+                    Mode::Interactive,
+                )
+                .await?
+            {
+                return Err(Error::Refused(shortfall));
+            }
+            return Err(Error::Busy);
+        };
+        transaction.commit().await?;
+        Ok(Lease::new(
+            self.chat_id,
+            row.get("owner"),
+            row.get("fence"),
+            row.get("expires_at"),
+        ))
     }
 
     pub async fn renew(&self, lease: &Lease, lifetime: Duration) -> Result<Lease, Error> {

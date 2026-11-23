@@ -4,11 +4,15 @@ use std::sync::Arc;
 
 use zone_enterprise::Keyring;
 
+use crate::bundle::{BundleSettings, Presigner};
 use crate::config::Config;
-use crate::http::{Context, Renewer, Server, router};
+use crate::gate::{self, Gate, Limits, Throttle};
+use crate::http::{Context, Distributor, Registrar, Renewer, Server, router};
 use crate::mail::Relay;
 use crate::polar::{self, Proxy};
+use crate::registry::{RegistrySettings, TokenKey};
 use crate::serve_error::ServeError;
+use crate::signer::Signer;
 
 /// Checks the whole configuration before listening, so a bad setting stops the
 /// process at startup instead of failing a paying customer's delivery.
@@ -38,6 +42,21 @@ pub async fn serve(
 /// serving yet. Renewal is on only when `POLAR_ACCESS_TOKEN` is set.
 pub async fn start(config: Config) -> Result<Server, ServeError> {
     let relay = Relay::new(&config.smtp)?;
+    let gate = Gate::new(
+        config.keyring.clone(),
+        config.revoked.clone(),
+        config.proxies.clone(),
+    );
+    let registrar = config
+        .registry
+        .map(|settings| registrar(settings, &config.signer, gate.clone(), config.limits));
+    let distributor = config
+        .bundles
+        .map(|settings| distributor(settings, gate, config.limits))
+        .transpose()?;
+    if registrar.is_some() || distributor.is_some() {
+        gate::announce(&config.proxies);
+    }
     let renewer = match config.access_token {
         Some(token) => Some(Renewer::new(
             config.keyring,
@@ -65,6 +84,14 @@ pub async fn start(config: Config) -> Result<Server, ServeError> {
         Some(renewer) => context.with_renewer(renewer),
         None => context,
     };
+    let context = match registrar {
+        Some(registrar) => context.with_registrar(registrar),
+        None => context,
+    };
+    let context = match distributor {
+        Some(distributor) => context.with_distributor(distributor),
+        None => context,
+    };
     let server = Server::bind(config.listen, router(context)).await?;
     tracing::info!(
         address = %config.listen,
@@ -75,6 +102,35 @@ pub async fn start(config: Config) -> Result<Server, ServeError> {
         "Listening for Polar webhooks"
     );
     Ok(server)
+}
+
+fn registrar(settings: RegistrySettings, signer: &Signer, gate: Gate, limits: Limits) -> Registrar {
+    let key = TokenKey::derive(signer, settings.generation);
+    let throttle = Throttle::new(limits);
+    drop(throttle.spawn_cleanup());
+    let registrar = Registrar::new(gate, key, settings, throttle);
+    tracing::info!(
+        service = registrar.service(),
+        key_id = registrar.key_id(),
+        "Issuing registry tokens"
+    );
+    registrar
+}
+
+fn distributor(
+    settings: BundleSettings,
+    gate: Gate,
+    limits: Limits,
+) -> Result<Distributor, ServeError> {
+    tracing::info!(
+        bucket = settings.bucket.name(),
+        prefix = settings.prefix.as_str(),
+        "Serving air-gapped bundles"
+    );
+    let presigner = Presigner::new(settings, Proxy::System).map_err(ServeError::Storage)?;
+    let throttle = Throttle::new(limits);
+    drop(throttle.spawn_cleanup());
+    Ok(Distributor::new(gate, presigner, throttle))
 }
 
 /// The container runs the signer as PID 1, which the kernel gives no default

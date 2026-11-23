@@ -132,23 +132,25 @@ describe('SettingsNav', () => {
       ['Connect a device', '/settings/server/connect'],
       ['License', '/settings/server/license'],
       ['Single sign-on', '/settings/server/sso'],
+      ['Runners', '/settings/server/runners'],
       ['Audit export', '/settings/server/audit-export'],
       ['Sessions', '/settings/you/sessions'],
     ]);
   });
 
-  it('lists License, Single sign-on and Audit export under This server only for a server admin', () => {
+  it('lists License, Single sign-on, Runners and Audit export under This server only for a server admin', () => {
     renderNav(ownerAccess);
     expect(linkLabels('This server')).toEqual([
       'Features',
       'Connect a device',
       'License',
       'Single sign-on',
+      'Runners',
       'Audit export',
     ]);
   });
 
-  it('leaves License, Single sign-on and Audit export out of This server for anyone who does not administer the server', () => {
+  it('leaves License, Single sign-on, Runners and Audit export out of This server for anyone who does not administer the server', () => {
     renderNav({ ...ownerAccess, administersServer: false });
     expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
   });

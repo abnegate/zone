@@ -194,7 +194,7 @@ jobs:
 
             if [ ! -f "$baseline_file" ]; then
               echo "NEW: $filename"
-              printf -- '- **NEW**: `%s`\n' "$filename" >> "$report"
+              printf -- "- **NEW**: \`%s\`\n" "$filename" >> "$report"
               changed_count=$((changed_count + 1))
               cp "$pr_file" "$diff_file"
               continue
@@ -211,7 +211,7 @@ jobs:
             fi
             if [ "$baseline_size" != "$pr_size" ]; then
               echo "RESIZED: $filename ($baseline_size -> $pr_size)"
-              printf -- '- **RESIZED**: `%s` (%s to %s)\n' "$filename" "$baseline_size" "$pr_size" >> "$report"
+              printf -- "- **RESIZED**: \`%s\` (%s to %s)\n" "$filename" "$baseline_size" "$pr_size" >> "$report"
               changed_count=$((changed_count + 1))
               cp "$pr_file" "$diff_file"
               continue
@@ -250,7 +250,7 @@ jobs:
 
             if [ "$verdict" = 'changed' ]; then
               echo "CHANGED: $filename ($diff_pixels of $total px, ${percent}%)"
-              printf -- '- **CHANGED**: `%s` (%s pixels, %s%% of the image)\n' \
+              printf -- "- **CHANGED**: \`%s\` (%s pixels, %s%% of the image)\n" \
                 "$filename" "$diff_pixels" "$percent" >> "$report"
               changed_count=$((changed_count + 1))
               im_composite -blend 50% "$baseline_file" "$pr_file" \
@@ -273,7 +273,7 @@ jobs:
               filename=$(basename "$baseline_file")
               if [ ! -f "screenshots-pr/$filename" ]; then
                 echo "REMOVED: $filename"
-                printf -- '- **REMOVED**: `%s`\n' "$filename" >> "$report"
+                printf -- "- **REMOVED**: \`%s\`\n" "$filename" >> "$report"
                 changed_count=$((changed_count + 1))
               fi
             done
@@ -448,7 +448,7 @@ jobs:
           # it can trust that a missing screenshot really was deleted; one that
           # finds an older artifact cannot, because those carried every
           # committed PNG as well.
-          (cd screenshots && ls -1 ./*.png | sed 's|^\./||') > screenshots/rendered-screenshots.txt
+          (cd screenshots && shopt -s failglob && printf '%s\n' *.png) > screenshots/rendered-screenshots.txt
         env:
           RUN_SCREENSHOTS: 'true'
 

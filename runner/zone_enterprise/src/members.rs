@@ -5,6 +5,7 @@ use crate::license::License;
 
 pub const COMMUNITY_MEMBERS: u32 = 3;
 pub const MEMBER_CAP_REACHED: &str = "member_cap_reached";
+pub const MEMBER_ADMISSION_BUSY: &str = "member_admission_busy";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Members {

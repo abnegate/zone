@@ -34,6 +34,7 @@ use zone_server::services::embedding::create_embedding_service;
 use zone_server::services::embedding::default_embedding_model;
 use zone_server::services::embedding::embedding_engine_from_env;
 use zone_server::services::embedding::embedding_host;
+use zone_server::services::fleet::Identity;
 use zone_server::services::login;
 use zone_server::services::mail;
 use zone_server::services::mail::AccountMail;
@@ -82,6 +83,7 @@ async fn main() {
 
     // Load config
     let config = Config::from_env().expect("Failed to load configuration");
+    let identity = Identity::from_env().unwrap_or_else(|misconfigured| panic!("{misconfigured}"));
 
     // Connect to database with ANN session knobs on every checkout.
     let db = zone_server::db::DbPool::connect(&config.database_url)
@@ -225,7 +227,9 @@ async fn main() {
     );
     let state = state.with_bus(bus);
     zone_server::services::task_relay::serve(state.bus()).await;
+    state.set_identity(identity);
     state.prepare().await;
+    zone_server::workers::fleet::heartbeat(&state).await;
 
     let leadership = Leadership::start(
         PgConnectOptions::from_str(&config.database_url).expect("DATABASE_URL is not a valid URL"),
@@ -244,6 +248,7 @@ async fn main() {
         zone_server::workers::auto_project::spawn(state.clone());
     }
     let recovery = zone_server::workers::task::spawn_recovery(state.clone());
+    zone_server::workers::fleet::spawn(state.clone());
     let training = tokio::spawn(zone_server::train_jobs::recover(
         state.config().comfyui.clone(),
         state.train_jobs().clone(),
@@ -317,9 +322,12 @@ async fn serve(
 ) -> std::io::Result<()> {
     let listening = CancellationToken::new();
     let mut server = tokio::spawn(
-        axum::serve(listener, app)
-            .with_graceful_shutdown(listening.clone().cancelled_owned())
-            .into_future(),
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(listening.clone().cancelled_owned())
+        .into_future(),
     );
     let ended = tokio::select! {
         joined = &mut server => Some(joined),

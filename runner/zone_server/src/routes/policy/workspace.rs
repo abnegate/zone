@@ -6,20 +6,20 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 use zone_enterprise::policy::{Effective, Patch, Rules};
-use zone_enterprise::{Edition, Status};
+use zone_enterprise::{Edition, Feature, Status};
 
 use super::access::{self, Access};
 use super::refusal::Refusal;
 use super::standing::Standing;
 use super::{caller, rules, serialized};
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, Permission};
 use crate::db::audit::{actions, resources};
 use crate::db::policies::{self, Stored};
 use crate::routes::common::{AuditEvent, audit};
 use crate::state::AppState;
 
 const MISSING: &str = "Workspace not found";
-const FORBIDDEN: &str = "Only workspace admins, or organization owners and admins, can change this workspace's agent policy";
+const NEEDED: Permission = Permission::WorkspacePoliciesUpdate;
 
 type WorkspacePath = Result<Path<(Uuid, Uuid)>, PathRejection>;
 
@@ -95,7 +95,7 @@ async fn read(
     let outer = policies::organization(&mut *transaction, organization).await?;
     let stored = policies::workspace(&mut *transaction, workspace).await?;
     transaction.commit().await?;
-    let standing = Standing::of(&state.stored_license().await?, Utc::now());
+    let standing = Standing::of(&state.stored_license().await?, Utc::now(), Feature::Policy);
     Ok(WorkspaceResponse::new(
         standing,
         access,
@@ -118,8 +118,8 @@ async fn write(
     let license = state.stored_license().await;
     let mut transaction = state.db().begin().await?;
     let access = access::workspace(&mut transaction, organization, workspace, user).await?;
-    access.write(FORBIDDEN)?;
-    let standing = Standing::of(&license?, Utc::now());
+    access.write(NEEDED)?;
+    let standing = Standing::of(&license?, Utc::now(), Feature::Policy);
     standing.require()?;
     let Json(patch) = body.map_err(Refusal::Body)?;
     let outer = rules(

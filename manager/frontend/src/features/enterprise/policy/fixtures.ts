@@ -55,6 +55,12 @@ export const LAPSED_ORGANIZATION: OrganizationPolicyResponse = {
   updated_at: UPDATED_AT,
 };
 
+export const UNVERIFIED_ORGANIZATION: OrganizationPolicyResponse = {
+  ...LAPSED_ORGANIZATION,
+  edition: Edition.Community,
+  status: LicenseStatus.Community,
+};
+
 export const TEAM_ORGANIZATION: OrganizationPolicyResponse = {
   ...COMMUNITY_ORGANIZATION,
   edition: Edition.Team,
@@ -101,4 +107,12 @@ export const ACTIVE_WORKSPACE_OVERRIDDEN: WorkspacePolicyResponse = {
     domains: ['github.com'],
   },
   updated_at: UPDATED_AT,
+};
+
+export const UNVERIFIED_WORKSPACE: WorkspacePolicyResponse = {
+  ...ACTIVE_WORKSPACE_OVERRIDDEN,
+  entitled: false,
+  edition: Edition.Community,
+  status: LicenseStatus.Community,
+  editable: false,
 };

@@ -108,7 +108,7 @@ impl IntoResponse for Page {
 fn status(error: &Error) -> StatusCode {
     match error {
         Error::Unreadable(_) | Error::Invalid(_) => StatusCode::BAD_REQUEST,
-        Error::Forbidden(_) => StatusCode::FORBIDDEN,
+        Error::Forbidden(_) | Error::Demoted(_) => StatusCode::FORBIDDEN,
         Error::Deleted => StatusCode::NOT_FOUND,
         Error::Refused(_) | Error::Unreachable(_) => StatusCode::BAD_GATEWAY,
         Error::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
