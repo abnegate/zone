@@ -9,6 +9,9 @@ metadata:
     app.kubernetes.io/component: llm-proxy
 spec:
   maxUnavailable: {{ .Values.litellm.podDisruptionBudget.maxUnavailable }}
+  {{- with .Values.litellm.podDisruptionBudget.unhealthyPodEvictionPolicy }}
+  unhealthyPodEvictionPolicy: {{ . }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: litellm

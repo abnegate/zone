@@ -11,6 +11,9 @@ spec:
   {{- else }}
   minAvailable: {{ .Values.manager.podDisruptionBudget.minAvailable }}
   {{- end }}
+  {{- with .Values.manager.podDisruptionBudget.unhealthyPodEvictionPolicy }}
+  unhealthyPodEvictionPolicy: {{ . }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "zone-apps.manager.selectorLabels" . | nindent 6 }}

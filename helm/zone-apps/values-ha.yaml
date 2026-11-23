@@ -32,9 +32,12 @@ server:
       maxSurge: 1
       maxUnavailable: 0
 
+  # AlwaysAllow lets a drain evict a replica that is not Ready, or a crash
+  # loop blocks the drain for as long as it lasts.
   podDisruptionBudget:
     enabled: true
     maxUnavailable: 1
+    unhealthyPodEvictionPolicy: AlwaysAllow
 
   probes:
     startup:
@@ -126,6 +129,7 @@ manager:
   podDisruptionBudget:
     enabled: true
     maxUnavailable: 1
+    unhealthyPodEvictionPolicy: AlwaysAllow
 
   podAntiAffinity:
     preferredDuringSchedulingIgnoredDuringExecution:

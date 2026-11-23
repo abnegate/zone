@@ -5,23 +5,33 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 namespace=zone
 replicas=3
+default_workers=3
+minimum_workers=2
+database_instances_ha=3
+replica_budget_instances=3
 cnpg_manifest=https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/4b5e244a7d031f67e025c83c1555e7726ecbbfa1/releases/cnpg-1.30.0.yaml
 cache_name=zone-ha-cache
 cache_image=valkey/valkey:8.1.10-alpine@sha256:b21fd94099dcd4bc6b2b9230daef69b6558b887ad4a2a1afe56ff6e745a88cdb
 storage_class=zone-ha-shared
 database_cluster=zone-postgres
 server_deployment=zone-apps-server
+litellm_deployment=litellm
 server_selector=app.kubernetes.io/instance=zone-apps,app.kubernetes.io/component=server
 server_port=8000
 readiness_path=/health/ready
 database_probe_path=/api/auth/sso/providers
 failover_window=60
 poll_interval=0.5
+drain_timeout=300s
 required_tools='docker kind kubectl helm openssl'
-expected_budgets='zone-apps-server zone-apps-manager litellm zone-postgres zone-postgres-primary'
 
 dry_run=false
 build=false
+keep_images=false
+workers=$default_workers
+database_instances=$database_instances_ha
+pods_per_node=1
+pod_subnet=''
 server_image=''
 console_image=''
 suffix=''
@@ -29,6 +39,7 @@ cluster=''
 workdir=''
 kubeconfig=''
 cluster_created=false
+drained_node=''
 built_images=()
 poller=''
 failures=()
@@ -36,14 +47,15 @@ results=()
 
 usage() {
     cat <<'EOF'
-Usage: scripts/ha-smoke.sh [--dry-run] [--build] [--server-image IMAGE] [--console-image IMAGE]
+Usage: scripts/ha-smoke.sh [--dry-run] [--build] [--keep-images] [--workers N]
+                           [--server-image IMAGE] [--console-image IMAGE]
 
 Creates a throwaway kind cluster (zone-ha-smoke-<random>: one control plane,
-three workers), installs zone-infra, zone-ai and zone-apps with their HA values,
-and checks that the server survives a pod deletion, a rollout restart and a
-CloudNativePG primary failover while /health/ready is polled through the
-Service. The cluster, the temporary directory and any image the script built
-are removed on exit.
+three workers by default), installs zone-infra, zone-ai and zone-apps with their
+HA values, and checks that the server survives a pod deletion, a rollout
+restart, a CloudNativePG primary failover and a node drain while /health/ready
+is polled through the Service. The cluster, the temporary directory and any
+image the script built are removed on exit.
 
   --dry-run              Render and validate the HA charts with the kind
                          overrides, check prerequisites and print the plan.
@@ -52,6 +64,12 @@ are removed on exit.
                          checkout. The server image is the Dockerfile's
                          builder and runtime-base stages with zone-server and
                          its entrypoint, without the agent toolchains.
+  --keep-images          Keep the server and console images --build made and
+                         print their tags, for a later run's --server-image
+                         and --console-image.
+  --workers N            Run N kind workers (default 3, at least 2). Below 3,
+                         Postgres runs N instances with preferred synchronous
+                         durability, since each instance needs a node.
   --server-image IMAGE   Use IMAGE for zone-server instead of building it.
   --console-image IMAGE  Use IMAGE for the console instead of building it.
   -h, --help             Show this help.
@@ -79,6 +97,13 @@ parse_arguments() {
         case $1 in
             --dry-run) dry_run=true ;;
             --build) build=true ;;
+            --keep-images) keep_images=true ;;
+            --workers)
+                [ $# -gt 1 ] || die '--workers needs a count'
+                workers=$2
+                shift
+                ;;
+            --workers=*) workers=${1#*=} ;;
             --server-image)
                 [ $# -gt 1 ] || die '--server-image needs an image'
                 server_image=$2
@@ -99,6 +124,19 @@ parse_arguments() {
         esac
         shift
     done
+    set_topology
+}
+
+set_topology() {
+    case $workers in
+        '' | *[!0-9]*) die "--workers takes a whole number, not '$workers'" ;;
+    esac
+    workers=$((10#$workers))
+    [ "$workers" -ge "$minimum_workers" ] || die "--workers must be at least $minimum_workers"
+    if [ "$workers" -lt "$database_instances_ha" ]; then
+        database_instances=$workers
+    fi
+    pods_per_node=$(((replicas + workers - 1) / workers))
 }
 
 check_prerequisites() {
@@ -168,6 +206,23 @@ image_values() {
         printf '    digest: "%s"\n' "$digest"
     fi
     printf '    pullPolicy: IfNotPresent\n'
+}
+
+database_topology_values() {
+    if [ "$database_instances" -ge "$database_instances_ha" ]; then
+        return
+    fi
+    printf '  instances: %s\n' "$database_instances"
+    printf '  synchronous:\n'
+    printf '    dataDurability: preferred\n'
+}
+
+expected_budgets() {
+    printf 'zone-apps-server zone-apps-manager litellm'
+    if [ "$database_instances" -ge "$replica_budget_instances" ]; then
+        printf ' zone-postgres'
+    fi
+    printf ' zone-postgres-primary'
 }
 
 write_overrides() {
@@ -273,6 +328,7 @@ postgres:
     limits:
       cpu: "1"
       memory: 1Gi
+$(database_topology_values)
 EOF
 
     cat >"$workdir/zone-ai.yaml" <<'EOF'
@@ -296,7 +352,7 @@ litellm:
       memory: 256Mi
     limits:
       cpu: "1"
-      memory: 1Gi
+      memory: 3Gi
 EOF
 
     cat >"$workdir/zone-apps.yaml" <<EOF
@@ -308,6 +364,7 @@ secrets:
   litellmMasterKey: "$litellm_key"
   redisUrl: redis://$cache_name:6379
 server:
+  trustedProxies: $pod_subnet
   image:
 $(image_values "$server_image")
   resources:
@@ -367,21 +424,41 @@ image_source() {
     esac
 }
 
+database_durability() {
+    if [ "$database_instances" -ge "$database_instances_ha" ]; then
+        printf 'required'
+    else
+        printf 'preferred'
+    fi
+}
+
+kept_images_plan() {
+    if [ "$keep_images" = true ]; then
+        printf 'the server and console images --build makes'
+    else
+        printf 'none'
+    fi
+}
+
 print_plan() {
     cat <<EOF
 Plan:
-  cluster     $cluster (1 control plane, 3 workers, no host ports; kubeconfig kept in a temporary directory)
+  cluster     $cluster (1 control plane, $workers workers, no host ports; kubeconfig kept in a temporary directory)
   shared      a temporary host directory at /shared on every node, behind the hostPath ReadWriteMany class $storage_class
   operator    CloudNativePG from $cnpg_manifest
+  database    $database_instances Postgres instances ($(database_durability) synchronous durability)
   cache       $cache_name ($cache_image) standing in for a managed Valkey
   images      server $server_image ($(image_source "$server_image"))
               console $console_image ($(image_source "$console_image"))
   charts      zone-infra, zone-ai, zone-apps with values-ha.yaml and the kind overrides
-  wait        $replicas Ready server pods on distinct nodes, zone_cluster_bus_connected 1 on each
+              (server.trustedProxies $pod_subnet)
+  wait        $replicas Ready server pods, at most $pods_per_node per node, zone_cluster_bus_connected 1 on each
   disruptions with $readiness_path polled through the Service every ${poll_interval}s:
-              delete a server pod; kubectl rollout restart; fail over the Postgres primary
-              (server pods reach the new primary within ${failover_window}s)
-  budgets     $expected_budgets
+              delete a server pod; kubectl rollout restart (at most $pods_per_node server pods per node after it);
+              fail over the Postgres primary (server pods reach the new primary within ${failover_window}s);
+              drain a worker running a server pod but not the primary (--timeout=$drain_timeout), then uncordon it
+  budgets     $(expected_budgets)
+  images kept $(kept_images_plan)
 EOF
 }
 
@@ -433,15 +510,60 @@ build_images() {
     esac
 }
 
+kind_config() {
+    printf '%s/kind-config.yaml' "$workdir"
+}
+
+with_workers() {
+    awk -v count="$1" '
+        function emit(   copy) {
+            for (copy = 0; copy < count; copy++) {
+                printf "%s", block
+            }
+            emitted = 1
+        }
+        /^  - role: / || /^[^ ]/ || /^$/ {
+            if (inside && !emitted) {
+                emit()
+            }
+            inside = 0
+        }
+        /^  - role: worker$/ {
+            inside = 1
+            capturing = block == ""
+        }
+        inside {
+            if (capturing) {
+                block = block $0 "\n"
+            }
+            next
+        }
+        { print }
+        END {
+            if (inside && !emitted) {
+                emit()
+            }
+        }
+    '
+}
+
+write_kind_config() {
+    local config count
+    config=$(kind_config)
+    sed "s|\${ZONE_HA_SHARED_DIR}|$workdir/shared|g" "$root/k8s/kind-ha-config.yaml" | with_workers "$workers" >"$config"
+    count=$(grep -c '^  - role: worker$' "$config" || true)
+    [ "$count" -eq "$workers" ] || die "the generated kind config has $count workers, not $workers"
+    pod_subnet=$(awk -F'"' '/^  podSubnet:/ { print $2 }' "$config")
+    [ -n "$pod_subnet" ] || die 'k8s/kind-ha-config.yaml sets no networking.podSubnet'
+}
+
 create_cluster() {
-    local config=$workdir/kind-config.yaml
     if kind get clusters 2>/dev/null | grep -qx "$cluster"; then
         die "kind cluster $cluster already exists"
     fi
-    sed "s|\${ZONE_HA_SHARED_DIR}|$workdir/shared|g" "$root/k8s/kind-ha-config.yaml" >"$config"
     cluster_created=true
     log "creating kind cluster $cluster"
-    kind create cluster --name "$cluster" --config "$config" --kubeconfig "$kubeconfig" --wait 180s
+    kind create cluster --name "$cluster" --config "$(kind_config)" --kubeconfig "$kubeconfig" --wait 180s
 }
 
 worker_nodes() {
@@ -475,13 +597,17 @@ install_charts() {
     log 'waiting for the Postgres cluster'
     kubectl wait "clusters.postgresql.cnpg.io/$database_cluster" -n "$namespace" \
         --for=condition=Ready --timeout=900s
+    check_database_instances 'after install'
     kubectl wait databases.postgresql.cnpg.io/zone-manager -n "$namespace" \
         --for=jsonpath='{.status.applied}'=true --timeout=300s
 
     install_chart zone-ai
     install_chart zone-apps
-    log "waiting for $replicas Ready server pods on distinct nodes"
-    wait_until 900 servers_settled || die "the server never settled on $replicas Ready pods on distinct nodes"
+    log "waiting for $replicas Ready server pods, at most $pods_per_node per node"
+    wait_until 900 servers_settled ||
+        die "the server never settled on $replicas Ready pods with at most $pods_per_node per node"
+    kubectl rollout status "deployment/$litellm_deployment" -n "$namespace" --timeout=600s ||
+        die 'LiteLLM never became available'
 }
 
 install_chart() {
@@ -521,7 +647,16 @@ servers_ready() {
 }
 
 servers_spread() {
-    [ "$(ready_server_pods_by_node | awk '{ print $2 }' | sort -u | wc -l | tr -d ' ')" -eq "$replicas" ]
+    ready_server_pods_by_node | awk -v limit="$pods_per_node" '
+        { count[$2]++ }
+        END {
+            for (node in count) {
+                if (count[node] > limit) {
+                    exit 1
+                }
+            }
+        }
+    '
 }
 
 ready_server_pods_by_node() {
@@ -533,10 +668,12 @@ servers_settled() {
 }
 
 check_spread() {
+    local placement
+    placement=$(ready_server_pods_by_node | tr '\n' ';')
     if servers_spread; then
-        log "the $replicas server pods are on distinct nodes $1"
+        log "no node holds more than $pods_per_node of the $replicas server pods $1: $placement"
     else
-        record_failure "the server pods share a node $1: $(ready_server_pods_by_node | tr '\n' ';')"
+        record_failure "a node holds more than $pods_per_node of the $replicas server pods $1: $placement"
     fi
 }
 
@@ -584,7 +721,7 @@ servers_reach_database() {
 
 check_budgets() {
     local budget allowed
-    for budget in $expected_budgets; do
+    for budget in $(expected_budgets); do
         if kubectl get pdb "$budget" -n "$namespace" >/dev/null 2>&1; then
             log "PodDisruptionBudget $budget exists"
         else
@@ -752,6 +889,68 @@ fail_over_database() {
     fi
 }
 
+ready_database_instances() {
+    kubectl get "clusters.postgresql.cnpg.io/$database_cluster" -n "$namespace" -o jsonpath='{.status.readyInstances}'
+}
+
+database_instances_ready() {
+    local ready
+    ready=$(ready_database_instances 2>/dev/null) || return 1
+    [ "$ready" = "$database_instances" ]
+}
+
+check_database_instances() {
+    if wait_until 600 database_instances_ready; then
+        log "the Postgres cluster has $database_instances Ready instances $1"
+    else
+        record_failure "the Postgres cluster has $(ready_database_instances 2>/dev/null || true) Ready instances $1, not $database_instances"
+    fi
+}
+
+pod_node() {
+    kubectl get pod "$1" -n "$namespace" -o jsonpath='{.spec.nodeName}'
+}
+
+drain_candidate() {
+    local primary_node
+    primary_node=$(pod_node "$(current_primary)") || return 1
+    [ -n "$primary_node" ] || return 1
+    ready_server_pods_by_node | awk -v primary="$primary_node" '$2 != primary { print $2; exit }'
+}
+
+servers_left_node() {
+    server_pods | awk -v node="$1" '$2 == node { found = 1 } END { exit found }'
+}
+
+uncordon_node() {
+    if [ -z "$drained_node" ]; then
+        return
+    fi
+    if kubectl uncordon "$drained_node" >/dev/null; then
+        log "uncordoned $drained_node"
+        drained_node=''
+    else
+        log "could not uncordon $drained_node"
+    fi
+}
+
+drain_node() {
+    local node
+    node=$(drain_candidate) || die 'could not find the node of the Postgres primary'
+    [ -n "$node" ] || die 'no worker runs a Ready server pod without the Postgres primary'
+    drained_node=$node
+    log "draining $node"
+    if kubectl drain "$node" --ignore-daemonsets --delete-emptydir-data --timeout="$drain_timeout"; then
+        log "drained $node"
+    else
+        record_failure "kubectl drain $node did not finish within $drain_timeout"
+    fi
+    wait_until 300 servers_ready || record_failure "the server never returned to $replicas Ready pods while $node was drained"
+    servers_left_node "$node" || record_failure "a server pod is still on $node after the drain"
+    uncordon_node
+    check_database_instances "after $node was uncordoned"
+}
+
 show_diagnostics() {
     log 'diagnostics'
     kubectl get pods -A -o wide
@@ -774,10 +973,29 @@ delete_cluster() {
     kind delete cluster --name "$cluster" --kubeconfig "$kubeconfig"
 }
 
+kept() {
+    [ "$keep_images" = true ] && { [ "$1" = "$server_image" ] || [ "$1" = "$console_image" ]; }
+}
+
 remove_built_images() {
     local image
     for image in ${built_images[@]+"${built_images[@]}"}; do
-        docker image rm "$image" >/dev/null 2>&1 && log "removed image $image"
+        if kept "$image"; then
+            log "kept image $image"
+        else
+            docker image rm "$image" >/dev/null 2>&1 && log "removed image $image"
+        fi
+    done
+}
+
+print_kept_images() {
+    local image
+    for image in ${built_images[@]+"${built_images[@]}"}; do
+        if kept "$image"; then
+            printf 'Rerun with the kept images: scripts/ha-smoke.sh --server-image %s --console-image %s\n' \
+                "$server_image" "$console_image"
+            return
+        fi
     done
 }
 
@@ -789,9 +1007,11 @@ cleanup() {
         if [ "$status" -ne 0 ]; then
             show_diagnostics
         fi
+        uncordon_node
         delete_cluster
     fi
     remove_built_images
+    print_kept_images
     if [ -n "$workdir" ]; then
         rm -rf "$workdir" || log "could not remove $workdir"
     fi
@@ -827,6 +1047,7 @@ run() {
     measure 'pod deletion' tolerant delete_server_pod
     measure 'rollout restart' tolerant restart_servers
     measure 'database failover' strict fail_over_database
+    measure 'node drain' strict drain_node
     check_bus 'after the disruptions'
     report
 }
@@ -841,6 +1062,7 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
     prepare_workdir
+    write_kind_config
     write_overrides
     render_charts
     validate_rendered
