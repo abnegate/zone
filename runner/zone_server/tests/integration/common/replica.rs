@@ -17,6 +17,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tokio::process::{Child, Command};
 use uuid::Uuid;
+use zone_server::services::fleet::identity::NAME;
 
 pub use account::Account;
 pub use environment::Environment;
@@ -33,6 +34,7 @@ const LOG_TAIL_LINES: usize = 200;
 pub struct Replica {
     child: Child,
     port: u16,
+    name: String,
     home: TempDir,
     http: reqwest::Client,
 }
@@ -46,9 +48,15 @@ impl Replica {
             let home = TempDir::new().expect("a home for the replica");
             let port = free_port();
             let log = File::create(home.path().join(LOG)).expect("the replica's log");
+            let variables = environment.variables(port, home.path());
+            let name = variables
+                .iter()
+                .find(|(variable, _)| variable == NAME)
+                .map(|(_, value)| value.clone())
+                .expect("the replica has a runner name");
             let child = Command::new(BINARY)
                 .env_clear()
-                .envs(environment.variables(port, home.path()))
+                .envs(variables)
                 .current_dir(home.path())
                 .stdin(Stdio::null())
                 .stdout(log.try_clone().expect("the replica's log"))
@@ -59,6 +67,7 @@ impl Replica {
             let mut replica = Self {
                 child,
                 port,
+                name,
                 home,
                 http: reqwest::Client::new(),
             };
@@ -89,6 +98,11 @@ impl Replica {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// The runner name the process registers its fleet runner under.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub fn url(&self, path: &str) -> String {
