@@ -214,11 +214,13 @@ server:
       size: 1Gi
       storageClass: ""
 
-  # maxUnavailable, when set, replaces minAvailable.
+  # maxUnavailable, when set, replaces minAvailable. unhealthyPodEvictionPolicy
+  # (IfHealthyBudget or AlwaysAllow) is left to Kubernetes when empty.
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
     maxUnavailable: null
+    unhealthyPodEvictionPolicy: ""
 
   podAntiAffinity:
     preferredDuringSchedulingIgnoredDuringExecution:
@@ -269,11 +271,13 @@ manager:
   env:
     PORT: "3001"
 
-  # maxUnavailable, when set, replaces minAvailable.
+  # maxUnavailable, when set, replaces minAvailable. unhealthyPodEvictionPolicy
+  # (IfHealthyBudget or AlwaysAllow) is left to Kubernetes when empty.
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
     maxUnavailable: null
+    unhealthyPodEvictionPolicy: ""
 
   podAntiAffinity:
     preferredDuringSchedulingIgnoredDuringExecution:

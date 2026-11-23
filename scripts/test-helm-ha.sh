@@ -128,6 +128,8 @@ check_apps_ha() {
         "$apps_server | .spec.strategy | .type + \" \" + (.rollingUpdate.maxSurge | tostring) + \" \" + (.rollingUpdate.maxUnavailable | tostring)"
     expect 'the server PDB allows one disruption and sets no minAvailable' '1 false' "$rendered" \
         'select(.kind == "PodDisruptionBudget" and .metadata.name == "zone-apps-server") | (.spec.maxUnavailable | tostring) + " " + (.spec | has("minAvailable") | tostring)'
+    expect 'a drain may evict a server pod that is not Ready' AlwaysAllow "$rendered" \
+        'select(.kind == "PodDisruptionBudget" and .metadata.name == "zone-apps-server") | .spec.unhealthyPodEvictionPolicy'
 
     expect 'the server prefers spreading across hostnames' kubernetes.io/hostname "$rendered" \
         "$apps_server | .spec.template.spec.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].podAffinityTerm.topologyKey"
@@ -176,6 +178,8 @@ check_apps_ha() {
         'select(.kind == "HorizontalPodAutoscaler" and .metadata.name == "zone-apps-manager") | .spec.minReplicas'
     expect 'the console PDB allows one disruption and sets no minAvailable' '1 false' "$rendered" \
         'select(.kind == "PodDisruptionBudget" and .metadata.name == "zone-apps-manager") | (.spec.maxUnavailable | tostring) + " " + (.spec | has("minAvailable") | tostring)'
+    expect 'a drain may evict a console pod that is not Ready' AlwaysAllow "$rendered" \
+        'select(.kind == "PodDisruptionBudget" and .metadata.name == "zone-apps-manager") | .spec.unhealthyPodEvictionPolicy'
     expect 'the console prefers spreading across hostnames' kubernetes.io/hostname "$rendered" \
         "$apps_manager | .spec.template.spec.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].podAffinityTerm.topologyKey"
 
@@ -276,6 +280,8 @@ check_apps_default() {
         '[select(.kind == "Deployment") | .spec.template.spec.topologySpreadConstraints[] | select(has("matchLabelKeys"))] | length'
     expect 'the default server keeps its own termination grace' null "$rendered" \
         "$apps_server | .spec.template.spec.terminationGracePeriodSeconds"
+    expect 'the default PDBs keep the Kubernetes unhealthy pod eviction policy' 0 "$rendered" \
+        '[select(.kind == "PodDisruptionBudget") | select(.spec | has("unhealthyPodEvictionPolicy"))] | length'
     expect 'the default server egress reaches the in-cluster valkey pods' 1 "$(render zone-apps --set networkPolicy.enabled=true)" \
         "[$apps_egress | select(.to[0].podSelector.matchLabels[\"app.kubernetes.io/name\"] == \"valkey\")] | length"
 
@@ -405,6 +411,8 @@ check_ai_ha() {
         "$ai_pdb | (.spec.maxUnavailable | tostring) + \" \" + (.spec | has(\"minAvailable\") | tostring)"
     expect 'the LiteLLM PDB selects the LiteLLM pods' litellm "$rendered" \
         "$ai_pdb | .spec.selector.matchLabels[\"app.kubernetes.io/name\"]"
+    expect 'a drain may evict a LiteLLM pod that is not Ready' AlwaysAllow "$rendered" \
+        "$ai_pdb | .spec.unhealthyPodEvictionPolicy"
 
     litellm_workers=$(query "$rendered" "$ai_litellm_workers")
     litellm_memory=$(mebibytes "$(query "$rendered" "$ai_litellm | .spec.template.spec.containers[0].resources.limits.memory")")

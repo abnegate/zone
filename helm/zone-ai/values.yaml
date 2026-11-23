@@ -73,9 +73,12 @@ litellm:
 
   podAntiAffinity: {}
 
+  # unhealthyPodEvictionPolicy (IfHealthyBudget or AlwaysAllow) is left to
+  # Kubernetes when empty.
   podDisruptionBudget:
     enabled: false
     maxUnavailable: 1
+    unhealthyPodEvictionPolicy: ""
 
   models:
     - name: "llama3.1:8b"
