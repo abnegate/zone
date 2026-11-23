@@ -8,6 +8,7 @@ use sqlx::ConnectOptions;
 use tokio::time::Instant;
 use uuid::Uuid;
 use zone_enterprise::fleet::Refusal;
+use zone_server::db::fleet::state::State;
 use zone_server::db::{licenses, migrations};
 use zone_server::services::fleet::identity::NAME;
 
@@ -70,6 +71,18 @@ impl Deployment {
             .expect("the runners can be read")
     }
 
+    /// Revokes the runner registered under `name`, as an admin on another replica would, with no
+    /// signal reaching the process that holds it.
+    async fn revoke(&self, name: &str) {
+        let revoked = sqlx::query("UPDATE fleet_runners SET state = $2 WHERE name = $1")
+            .bind(name)
+            .bind(State::Revoked.as_str())
+            .execute(&self.database.pool)
+            .await
+            .expect("the runner can be revoked");
+        assert_eq!(revoked.rows_affected(), 1, "{name} has a runner row");
+    }
+
     async fn retire(self, replicas: Vec<Replica>) {
         for mut replica in replicas {
             replica.kill().await;
@@ -97,14 +110,15 @@ async fn turn(replica: &Replica, account: &Account) -> Vec<Received> {
     let chat = account.chat(replica, false).await;
     let mut socket = ChatSocket::joined(replica, chat, &account.token, JOIN).await;
     socket.say(Uuid::new_v4(), "Hello").await;
+    ended(&mut socket).await
+}
+
+/// Every frame up to the one ending the socket's next turn: its answer, a denial or an error.
+async fn ended(socket: &mut ChatSocket) -> Vec<Received> {
     let mut frames = Vec::new();
     loop {
         let Some(frame) = socket.next(TURN).await else {
-            panic!(
-                "the turn on {} never ended: {:?}",
-                replica.name(),
-                texts(&frames)
-            );
+            panic!("the turn never ended: {:?}", texts(&frames));
         };
         let ended = [ANSWERED, DENIED, FAILED].contains(&frame.kind());
         frames.push(frame);
@@ -209,4 +223,47 @@ async fn under_fleet_policy_a_replica_whose_name_a_newer_one_took_takes_no_work(
         texts(&served)
     );
     assert_eq!(chunks(&served), reply.text());
+}
+
+#[tokio::test]
+async fn under_fleet_policy_a_send_a_revoked_replica_hears_in_its_grace_runs_elsewhere_undenied() {
+    let deployment = Deployment::enforced().await;
+    let first = deployment.replica().await;
+    let second = deployment.replica().await;
+    let reply = Reply::counted(3, PAUSE);
+    deployment.litellm.fall_back_to(reply.clone());
+    let account = Account::register(&first).await;
+    let chat = account.chat(&first, false).await;
+    let mut owner = ChatSocket::joined(&first, chat, &account.token, JOIN).await;
+    let mut asker = ChatSocket::joined(&second, chat, &account.token, JOIN).await;
+    owner.say(Uuid::new_v4(), "First question").await;
+    owner.until(ANSWERED, TURN).await;
+    asker.until(ANSWERED, TURN).await;
+    deployment.revoke(first.name()).await;
+
+    asker.say(Uuid::new_v4(), "Second question").await;
+    let frames = ended(&mut asker).await;
+    let messages = account.messages(&second, chat).await;
+    deployment.retire(vec![first, second]).await;
+
+    assert!(
+        !frames.iter().any(|frame| frame.kind() == DENIED),
+        "the revoked replica's refusal reached the socket: {:?}",
+        texts(&frames)
+    );
+    assert_eq!(
+        ending(&frames).kind(),
+        ANSWERED,
+        "the replica the socket is on ran the send: {:?}",
+        texts(&frames)
+    );
+    assert_eq!(chunks(&frames), reply.text());
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["content"] == "Second question")
+            .count(),
+        1,
+        "the send was saved once: {messages:?}"
+    );
 }
