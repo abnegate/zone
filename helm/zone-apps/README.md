@@ -51,6 +51,8 @@ The following table lists the configurable parameters and their default values.
 
 `values-ha.yaml` is the supported HA topology: layer it over your values with `-f helm/zone-apps/values-ha.yaml`, and set `server.agentState.persistence.storageClass` to a ReadWriteMany class.
 
+[docs/HA.md](../../docs/HA.md) describes the whole topology: its requirements, sizing, failure modes, backups, upgrades and support boundary.
+
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `highAvailability.enabled` | Refuse a render whose replicas would not share one external Redis or Valkey: with `secrets.create`, `secrets.redisUrl` must name a host other than the in-cluster `valkey` service | `false` |

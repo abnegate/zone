@@ -48,6 +48,8 @@ the name the script printed: `docker volume rm <64-hex-name>`.
 
 ## Backup and restore
 
+This section covers the Compose stack. For the Kubernetes HA topology, see [Backup and restore in HA.md](HA.md#backup-and-restore).
+
 `make backup` archives nine named volumes into
 `backups/zone_backup_<date>-<process>.tar.gz`, where `<process>` is the ID of
 the shell running the backup: `zone_postgres_data` (the cluster, under

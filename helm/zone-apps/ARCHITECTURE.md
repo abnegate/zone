@@ -7,7 +7,8 @@ This document describes the architecture and design decisions of the Zone Helm c
 The Zone Helm chart deploys a production-ready, highly available platform consisting of:
 - **Server**: Rust-based backend API
 - **Manager**: React-based frontend application
-- **Migration Job**: Database schema migration (pre-install/upgrade hook)
+
+There is no migration job: zone-server applies database migrations itself when it starts.
 
 ## Architecture Diagram
 
@@ -74,23 +75,13 @@ The Zone Helm chart deploys a production-ready, highly available platform consis
 - Default: 250m CPU / 256Mi RAM requests
 - Limits: 500m CPU / 512Mi RAM
 
-### 3. Migration Job
+### 3. Migrations
 
-**Purpose**: Applies database schema migrations before deployments.
+**Purpose**: Keeps the database schema at the version the server image expects.
 
-**Key Features**:
-- Runs as a Helm hook (pre-install, pre-upgrade)
-- Ensures database schema is up-to-date before app deployment
-- Fails fast (backoffLimit: 0) to prevent deployments with migration issues
-- Direct database connection (bypasses connection poolers)
-- Automatic cleanup after completion
+zone-server runs its sqlx migrations at startup, not in a job. Every server pod that starts tries to migrate under a Postgres advisory lock held on one dedicated connection, so one pod applies the migrations while the others wait, find nothing left to do and carry on. A pod whose migration fails exits, and the rollout stops there, since `maxUnavailable` keeps the old pods serving. `zone-server --migrate-only` takes the same lock for a migration run on its own.
 
-**Execution**:
-1. Helm starts migration job
-2. Init container waits for database
-3. Migration runs
-4. If successful, deployment proceeds
-5. If failed, deployment is blocked
+The chart's `migration` values are unused: `migration.enabled: true` fails the render. A long migration needs a startup probe (`server.probes.startup`) so liveness does not restart the pod part way; the HA profile enables one. See [docs/HA.md](../../docs/HA.md#rolling-upgrades).
 
 ### 4. Service Account
 
@@ -141,6 +132,8 @@ The Zone Helm chart deploys a production-ready, highly available platform consis
 - Support for multiple ingress controllers (nginx, HAProxy, etc.)
 
 ## High Availability Design
+
+The supported multi-replica topology is the HA profile, `values-ha.yaml`, described in [docs/HA.md](../../docs/HA.md). The default values run several server replicas with per-pod state, which is not that topology.
 
 ### Replica Distribution
 
@@ -247,35 +240,32 @@ Default configuration: **Burstable** (allows some flexibility)
 2. ├─ Create namespace (if doesn't exist)
 3. ├─ Create ServiceAccount
 4. ├─ Create ConfigMap & Secret
-5. ├─ Run Migration Job (pre-install hook)
+5. ├─ Create Server Deployment
 6. │  ├─ Wait for database
-7. │  ├─ Apply migrations
-8. │  └─ Verify success
-9. ├─ Create Server Deployment
-10. │  ├─ Wait for database
-11. │  └─ Start server pods
-12. ├─ Create Manager Deployment
-13. │  └─ Start manager pods
-14. ├─ Create Services
-15. ├─ Create Ingress
-16. ├─ Create HPA
-17. └─ Create PDB
+7. │  └─ Start server pods, which apply migrations under an advisory lock
+8. ├─ Create Manager Deployment
+9. │  └─ Start manager pods
+10. ├─ Create Services
+11. ├─ Create Ingress
+12. ├─ Create HPA
+13. └─ Create PDB
 ```
 
 ### Upgrade Process
 
 ```
 1. helm upgrade zone zone-apps
-2. ├─ Run Migration Job (pre-upgrade hook)
-3. │  └─ Apply new migrations
-4. ├─ Update ConfigMap & Secret
-5. ├─ Rolling update Server Deployment
-6. │  ├─ Create new pod
-7. │  ├─ Wait for readiness
-8. │  ├─ Terminate old pod
-9. │  └─ Repeat (respecting PDB)
-10. └─ Rolling update Manager Deployment
+2. ├─ Update ConfigMap & Secret
+3. ├─ Rolling update Server Deployment
+4. │  ├─ Create new pod
+5. │  ├─ Apply new migrations at startup, under an advisory lock
+6. │  ├─ Wait for readiness
+7. │  ├─ Terminate old pod
+8. │  └─ Repeat (respecting PDB)
+9. └─ Rolling update Manager Deployment
 ```
+
+Old and new pods run side by side against the new schema during the rollout, so schema changes are expand and contract across releases.
 
 ## Configuration Patterns
 
@@ -301,9 +291,6 @@ server:
   enabled: true
 
 manager:
-  enabled: true
-
-migration:
   enabled: true
 
 ingress:
@@ -376,11 +363,13 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /ready
+    path: /health
     port: http
   initialDelaySeconds: 5
   periodSeconds: 5
 ```
+
+The HA profile reads readiness from `/health/ready`, which fails once a pod starts draining after SIGTERM, and adds a startup probe on `/health`.
 
 ## Best Practices Implemented
 
@@ -388,7 +377,7 @@ readinessProbe:
 2. **High Availability**: Multiple replicas, PDB, anti-affinity
 3. **Resource Efficiency**: Appropriate requests/limits
 4. **Zero Downtime**: Rolling updates with readiness checks
-5. **Fast Failure**: Migration job fails fast
+5. **Fast Failure**: A pod whose startup migration fails exits before it serves
 6. **Observability**: Health checks, Prometheus annotations
 7. **Flexibility**: Feature flags, environment overrides
 8. **Documentation**: Comprehensive README and examples

@@ -954,6 +954,8 @@ The server migration runner holds SQLx's existing advisory lock on one dedicated
 
 Use `zone-server --migrate-only` (or `make db-migrate` in the Compose environment) for standalone upgrades. It uses the same locked repair path as server startup and requires only `DATABASE_URL`. The Make target builds the current manager image before running it. Local builds before the schema exists use `SQLX_OFFLINE=true`. The dedicated migration session checks disconnected clients every second during active queries on supported PostgreSQL hosts; this covers process cancellation, not arbitrary network partitions.
 
+Running Zone itself as several replicas on Kubernetes, including rolling upgrades across them, is covered in [HA.md](HA.md).
+
 Task checkouts capture the default-base commit, the task branch and its starting commit before tools run. Retries resume the stored remote task branch, preserving prior commits and branch identity when the title changes. Publication includes commits made by task tools, pushes updates before returning an existing PR and creates a missing PR for outstanding branch commits after an interrupted publication. Pushes never force remote history; divergence, changed checkout identity or rewritten baseline history fails the run. Switching away from the prepared task branch also fails explicitly.
 
 Publication failure leaves the run `failed` and the task `blocked`, with the agent summary, tool-call count and publication error retained in run artifacts. Private checkouts are removed on failure as on success. Creator-null legacy tasks remain sandbox-only and record an explicit skipped publication result. An unchanged checkout needs no publication token, and branch preparation preserves existing PR status without marking a no-op as pending.
