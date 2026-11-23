@@ -8,7 +8,7 @@ use dashmap::mapref::entry::Entry;
 
 use crate::auth::client_address::key;
 use crate::cluster::Bus;
-use crate::services::limit::{Decision, Limiter, Scope};
+use crate::services::limit::{Decision, Limiter, Scope, open};
 
 pub const WINDOW: Duration = Duration::from_secs(60);
 
@@ -83,10 +83,6 @@ impl Throttle {
 
 pub fn bucket(address: Option<IpAddr>) -> IpAddr {
     address.map_or(UNKNOWN, key)
-}
-
-fn open(reset_at: Option<Instant>, now: Instant) -> bool {
-    reset_at.is_none_or(|reset_at| reset_at > now)
 }
 
 #[cfg(test)]

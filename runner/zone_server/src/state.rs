@@ -335,16 +335,21 @@ impl AppState {
         }
     }
 
-    /// Replaces the bus, and with it the Valkey the rate limit and the
-    /// sign-in throttle count in. It must be called before the state is
-    /// cloned, while nothing else can be holding the bus it replaces. The
-    /// replaced throttle shares its local state with the new one, so the
-    /// cleanup task still sweeps what is counted.
+    /// Replaces the bus, and with it the Valkey the rate limit, the
+    /// sign-in throttle and the SCIM limits count in. It must be called
+    /// before the state is cloned, while nothing else can be holding the bus
+    /// it replaces. The replaced throttle shares its local state with the
+    /// new one, so the cleanup task still sweeps what is counted.
     pub fn with_bus(mut self, bus: Bus) -> Self {
         let inner =
             Arc::get_mut(&mut self.inner).expect("the bus is replaced before the state is shared");
         inner.limiter = inner.limiter.with_bus(bus.clone());
         inner.sso_throttle = Arc::new(inner.sso_throttle.with_bus(bus.clone()));
+        let scim_limiter = read(&inner.scim_limiter).with_bus(bus.clone());
+        *inner
+            .scim_limiter
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(scim_limiter);
         inner.bus = bus;
         self
     }
@@ -485,7 +490,7 @@ impl AppState {
             window,
             limit::ADDRESS_FAILURES,
             limit::RELOAD,
-            Bus::loopback(&self.inner.master_key),
+            self.inner.bus.clone(),
         ));
     }
 
@@ -496,7 +501,7 @@ impl AppState {
             limit::WINDOW,
             failures,
             limit::RELOAD,
-            Bus::loopback(&self.inner.master_key),
+            self.inner.bus.clone(),
         ));
     }
 
@@ -954,6 +959,20 @@ mod tests {
         let state = state.with_bus(bus);
 
         assert!(!state.sso_throttle().check(client).await.allowed);
+    }
+
+    #[tokio::test]
+    async fn a_state_moved_to_another_bus_keeps_counting_scim_requests_where_it_left_off() {
+        let state = AppState::for_tests();
+        let organization = Uuid::new_v4();
+        for _ in 0..limit::REQUESTS {
+            assert!(state.scim_limiter().check(organization).await.allowed);
+        }
+        let bus = Bus::loopback(state.master_key());
+
+        let state = state.with_bus(bus);
+
+        assert!(!state.scim_limiter().check(organization).await.allowed);
     }
 
     #[tokio::test]

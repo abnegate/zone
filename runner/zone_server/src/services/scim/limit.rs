@@ -34,9 +34,9 @@ mod tests {
         let organization = uuid::Uuid::new_v4();
         assert_eq!(limiter.window(), Duration::from_secs(60));
         for _ in 0..REQUESTS {
-            assert!(limiter.check(organization).allowed);
+            assert!(limiter.check(organization).await.allowed);
         }
-        assert!(!limiter.check(organization).allowed);
+        assert!(!limiter.check(organization).await.allowed);
         for _ in 0..ADDRESS_FAILURES {
             assert_eq!(limiter.reject(None, "guess").await, None);
         }

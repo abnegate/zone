@@ -8,7 +8,7 @@ pub use window::Window;
 
 use std::fmt::Display;
 use std::hash::Hash;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use abnegate_http::{RateLimitConfig, RateLimiter};
 use redis::aio::ConnectionManager;
@@ -90,6 +90,12 @@ pub fn key(namespace: &Namespace, scope: Scope, subject: impl Display, window: u
     format!("{PREFIX}:{namespace}:{scope}:{subject}:{window}")
 }
 
+/// Whether a window that resets at `reset_at` is still open at `now`. A window too long for an
+/// [`Instant`] to represent its end never closes.
+pub fn open(reset_at: Option<Instant>, now: Instant) -> bool {
+    reset_at.is_none_or(|reset_at| reset_at > now)
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::IpAddr;
@@ -150,6 +156,50 @@ mod tests {
             key(&namespace, Scope::Sso, bucket, 29_000_000),
             format!("zone:{namespace}:sso:2001:db8:1:2:::29000000")
         );
+    }
+
+    #[test]
+    fn scim_failures_and_sign_ins_from_one_address_never_share_a_key() {
+        let namespace = Namespace::derive(&secret::derive(PASSPHRASE).unwrap());
+        let bucket: IpAddr = "198.51.100.7".parse().unwrap();
+
+        let sign_ins = key(&namespace, Scope::Sso, bucket, 29_000_000);
+        let failures = key(&namespace, Scope::ScimFailures, bucket, 29_000_000);
+
+        assert_ne!(sign_ins, failures);
+        assert_eq!(
+            failures,
+            format!("zone:{namespace}:scim-failures:198.51.100.7:29000000")
+        );
+    }
+
+    #[test]
+    fn scim_requests_count_apart_from_context_searches_by_the_same_id() {
+        let namespace = Namespace::derive(&secret::derive(PASSPHRASE).unwrap());
+        let subject = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+
+        assert_eq!(
+            key(&namespace, Scope::Scim, subject, 29_000_000),
+            format!("zone:{namespace}:scim:550e8400-e29b-41d4-a716-446655440000:29000000")
+        );
+    }
+
+    #[test]
+    fn every_scope_names_its_own_key_segment() {
+        let scopes = [Scope::Gather, Scope::Sso, Scope::Scim, Scope::ScimFailures];
+        let segments: std::collections::HashSet<&str> =
+            scopes.iter().map(|scope| scope.as_str()).collect();
+
+        assert_eq!(segments.len(), scopes.len());
+    }
+
+    #[test]
+    fn a_window_is_open_until_it_resets() {
+        let now = Instant::now();
+
+        assert!(open(Some(now + WINDOW), now));
+        assert!(!open(Some(now), now));
+        assert!(open(None, now + WINDOW));
     }
 
     #[tokio::test]

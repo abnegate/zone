@@ -567,23 +567,29 @@ the usual SSO rules from the start.
 
 ## Rate limit
 
-Each organization can make 600 SCIM requests a minute to each server
-replica, across all its tokens. Zone counts a request against the
-organization only after its token is accepted, so requests with a wrong
-token don't use up the budget.
+Each organization can make 600 SCIM requests a minute, across all its
+tokens. Zone counts a request against the organization only after its token
+is accepted, so requests with a wrong token don't use up the budget.
 
-Zone also limits each client address to 1,200 rejected tokens a minute per
-replica, whatever organization they name, so a flood of guessed tokens
-can't keep the database busy. Only a token Zone looks up and rejects counts;
-accepted requests and requests without a bearer token never do. Once an
-address is over that limit, Zone refuses its requests for the rest of the
-minute without looking their tokens up, except a request whose token is
-one of the active SCIM tokens: Zone keeps their hashes in memory, reloading
-them at most every 5 seconds while an address is refused, so an identity
-provider sharing an address with a flood, such as everyone behind one
-ingress, still gets through. The address is the connecting peer, or behind
-a proxy listed in `ZONE_TRUSTED_PROXIES` the client that proxy saw. IPv6
-clients are counted by their /64.
+Zone also limits each client address to 1,200 rejected tokens a minute,
+whatever organization they name, so a flood of guessed tokens can't keep the
+database busy. Only a token Zone looks up and rejects counts; accepted
+requests and requests without a bearer token never do. Once an address is
+over that limit, Zone refuses its requests for the rest of the minute
+without looking their tokens up, except a request whose token is one of the
+active SCIM tokens: Zone keeps their hashes in memory, reloading them at
+most every 5 seconds while an address is refused, so an identity provider
+sharing an address with a flood, such as everyone behind one ingress, still
+gets through. The address is the connecting peer, or behind a proxy listed
+in `ZONE_TRUSTED_PROXIES` the client that proxy saw. IPv6 clients are
+counted by their /64.
+
+With several server replicas and Valkey, both limits are counted once
+across every replica ([Shared limits](HA.md#shared-limits)). A replica that
+has not yet refused an address looks up one more of its tokens before it
+refuses the address too. Without Valkey, or while it is down, each replica
+counts on its own, so an organization or address can make up to the limit
+times the replica count.
 
 Over either limit, Zone answers 429 with `scimType` `tooMany` and a
 `Retry-After` header giving the seconds to wait. Okta and Entra slow down

@@ -6,6 +6,8 @@ use std::fmt;
 pub enum Scope {
     Gather,
     Sso,
+    Scim,
+    ScimFailures,
 }
 
 impl Scope {
@@ -13,6 +15,8 @@ impl Scope {
         match self {
             Self::Gather => "limit",
             Self::Sso => "sso",
+            Self::Scim => "scim",
+            Self::ScimFailures => "scim-failures",
         }
     }
 }
