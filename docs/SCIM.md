@@ -572,11 +572,18 @@ replica, across all its tokens. Zone counts a request against the
 organization only after its token is accepted, so requests with a wrong
 token don't use up the budget.
 
-Before it reads a token, Zone also limits each client address to 1,200 SCIM
-requests a minute per replica, whatever organization or token they name, so
-a flood of guessed tokens can't keep the database busy. The address is the
-connecting peer, or behind a proxy listed in `ZONE_TRUSTED_PROXIES` the
-client that proxy saw. IPv6 clients are counted by their /64.
+Zone also limits each client address to 1,200 rejected tokens a minute per
+replica, whatever organization they name, so a flood of guessed tokens
+can't keep the database busy. Only a token Zone looks up and rejects counts;
+accepted requests and requests without a bearer token never do. Once an
+address is over that limit, Zone refuses its requests for the rest of the
+minute without looking their tokens up, except a request whose token is
+one of the active SCIM tokens: Zone keeps their hashes in memory, reloading
+them at most every 5 seconds while an address is refused, so an identity
+provider sharing an address with a flood, such as everyone behind one
+ingress, still gets through. The address is the connecting peer, or behind
+a proxy listed in `ZONE_TRUSTED_PROXIES` the client that proxy saw. IPv6
+clients are counted by their /64.
 
 Over either limit, Zone answers 429 with `scimType` `tooMany` and a
 `Retry-After` header giving the seconds to wait. Okta and Entra slow down

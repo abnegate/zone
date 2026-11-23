@@ -11,6 +11,7 @@ pub mod record;
 pub mod remapped;
 pub mod remapping;
 pub mod resource;
+pub mod roster;
 pub mod secret;
 mod settled;
 pub mod slot;

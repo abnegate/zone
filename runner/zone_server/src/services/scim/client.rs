@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use axum::extract::{FromRef, FromRequestParts, Path};
 use axum::http::request::Parts;
@@ -43,15 +44,23 @@ where
         let state = AppState::from_ref(state);
         let organization_id = organization(parts, &state).await?;
         let limiter = state.scim_limiter();
-        let address = ClientAddress::of(parts, &state.config().trusted_proxies);
-        let screened = limiter.screen(address.0);
-        if !screened.allowed {
-            return Err(Failure::Flooded {
-                retry_after: limit::retry_after(screened.reset_at, throttle::WINDOW),
-            });
+        let ClientAddress(address) = ClientAddress::of(parts, &state.config().trusted_proxies);
+        let hash = secret::hash(bearer(&parts.headers).ok_or(Failure::Unauthenticated)?);
+        if let Some(reset_at) = limiter
+            .screen(address, &hash, || tokens::hashes(state.db()))
+            .await
+        {
+            return Err(flooded(reset_at));
         }
-        let secret = bearer(&parts.headers).ok_or(Failure::Unauthenticated)?;
-        let credential = authenticate(&state, organization_id, secret).await?;
+        let credential = match authenticate(&state, organization_id, &hash).await {
+            Err(Failure::Unauthenticated) => {
+                return Err(limiter
+                    .reject(address, &hash)
+                    .map_or(Failure::Unauthenticated, flooded));
+            }
+            authenticated => authenticated?,
+        };
+        limiter.accept(&hash);
 
         if let Err(error) = tokens::touch(state.db(), credential.id).await {
             tracing::warn!(%error, token_id = %credential.id, "Failed to record a SCIM token's use");
@@ -91,6 +100,12 @@ async fn organization(parts: &mut Parts, state: &AppState) -> Result<Uuid, Failu
         .ok_or(Failure::Protocol(Error::NotFound))
 }
 
+fn flooded(reset_at: Instant) -> Failure {
+    Failure::Flooded {
+        retry_after: limit::retry_after(Some(reset_at), throttle::WINDOW),
+    }
+}
+
 fn bearer(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, secret) = value.trim().split_once(' ')?;
@@ -101,13 +116,13 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 async fn authenticate(
     state: &AppState,
     organization_id: Uuid,
-    secret: &str,
+    hash: &str,
 ) -> Result<TokenCredential, Failure> {
     let credentials = tokens::active(state.db(), organization_id).await?;
     let matched = credentials
         .into_iter()
         .fold(None, |matched: Option<TokenCredential>, credential| {
-            let matches = secret::matches(&credential.token_hash, secret);
+            let matches = secret::matches_hash(&credential.token_hash, hash);
             match matched {
                 Some(found) => Some(found),
                 None if matches => Some(credential),

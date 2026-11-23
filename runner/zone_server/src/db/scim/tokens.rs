@@ -84,6 +84,12 @@ pub async fn active(
     .await
 }
 
+pub async fn hashes(executor: impl PgExecutor<'_>) -> DbResult<Vec<String>> {
+    sqlx::query_scalar("SELECT token_hash FROM scim_tokens WHERE revoked_at IS NULL")
+        .fetch_all(executor)
+        .await
+}
+
 pub async fn touch(executor: impl PgExecutor<'_>, id: Uuid) -> DbResult<bool> {
     let result = sqlx::query(
         "UPDATE scim_tokens SET last_used_at = now() \
