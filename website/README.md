@@ -1,13 +1,14 @@
 # Zone website
 
-The public site: home, pricing, licensing, the post-checkout thank-you page and a 404 page. It is plain HTML and CSS, rendered by a small Bun script that fills shared values into the templates. There is no client-side JavaScript, no cookies and no tracking.
+The public site: home, pricing, licensing, contact, the post-checkout thank-you page and a 404 page. It is plain HTML and CSS, rendered by a small Bun script that fills shared values into the templates. There is no client-side JavaScript, no cookies and no tracking.
 
 | Path | What |
 | --- | --- |
-| `config.ts` | Every value that may change: the Community member limit, each paid plan's monthly and yearly seat price and Polar checkout link, contact address, domain, repository |
+| `config.ts` | Every value that may change: the Community member limit, each paid plan's monthly and yearly seat price and Polar checkout link, contact address and form endpoint, domain, repository |
 | `templates/` | `layout.html` and one template per page; `{{ name }}` is a value from `config.ts` |
 | `static/` | Stylesheet, favicon and self-hosted fonts (SIL Open Font License) |
 | `generator/` | The build, a local preview server and their tests |
+| `contact/` | The Appwrite function the contact form posts to |
 | `dist/` | Build output, ignored by git |
 
 ## Working on it
@@ -16,7 +17,7 @@ The public site: home, pricing, licensing, the post-checkout thank-you page and 
 bun install --frozen-lockfile         # once, from the repository root
 bun website/generator/serve.ts        # build, then preview at http://127.0.0.1:4321
 bun website/generator/build.ts        # build into website/dist
-(cd website && bun test generator)    # tests
+(cd website && bun test generator contact)    # tests
 (cd website && bunx @biomejs/biome@2.5.12 check . && bunx tsc -p tsconfig.json)
 ```
 
@@ -29,6 +30,19 @@ A template that uses a value `config.ts` does not have fails the build.
 - **`plans`**: if a plan's price changes, change its Polar products too. The two must match. `memberLimit` must match the Community limit the server enforces.
 - **`contactEmail`**: a mailbox that someone reads.
 - **`domain`**: the custom domain configured for GitHub Pages. Deployed builds take canonical links from the base URL Pages reports (`SITE_BASE_URL`), so until the custom domain is live they point at `https://bitecodehq.github.io/zone/`. Local builds and the preview server fall back to `https://<domain>/`. Once it is final, set the success URL of both Polar checkout links to `https://<domain>/thanks/`.
+
+## Contact form
+
+The form on `/contact/` and `/pricing/` posts to `contactFormURL`, the `contact` function in the `bitecode` project on `appwrite.bitecode.ltd`, served at `contact.bitecode.ltd`. It checks the form, drops anything that fills the hidden `website` field, sends the message to `CONTACT_RECIPIENT` through Resend with the visitor as reply-to, and answers `303 See Other` to the `/contact/sent/` page it was posted from. It only redirects to origins listed in `CONTACT_ORIGINS`, so it cannot be used as an open redirect.
+
+| Variable | Value |
+| --- | --- |
+| `RESEND_API_KEY` | A Resend key with sending access to `bitecode.ltd`, marked secret |
+| `CONTACT_RECIPIENT` | `zone@bitecode.ltd` |
+| `CONTACT_SENDER` | `Bitecode website <contact@bitecode.ltd>` |
+| `CONTACT_ORIGINS` | `https://zone.bitecode.ltd,https://bitecodehq.github.io` |
+
+The function runs on the `node-25` runtime with `main.ts` as its entrypoint. Node runs the TypeScript directly, so there is no build command. To deploy, upload the `contact/` directory without its tests as a new deployment.
 
 ## Deploying
 

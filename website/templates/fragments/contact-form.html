@@ -1,0 +1,27 @@
+<form class="contact-form" action="{{ contactFormURL }}" method="post" accept-charset="utf-8">
+  <input type="hidden" name="redirect" value="{{ contactSentURL }}">
+  <div class="field">
+    <label for="contact-name">Name</label>
+    <input id="contact-name" name="name" type="text" autocomplete="name" maxlength="200" required>
+  </div>
+  <div class="field">
+    <label for="contact-email">Work email</label>
+    <input id="contact-email" name="email" type="email" autocomplete="email" maxlength="320" required>
+  </div>
+  <div class="field">
+    <label for="contact-company">Company <span class="optional">(optional)</span></label>
+    <input id="contact-company" name="company" type="text" autocomplete="organization" maxlength="200">
+  </div>
+  <div class="field field-wide">
+    <label for="contact-message">How can we help?</label>
+    <textarea id="contact-message" name="message" rows="6" maxlength="5000" required></textarea>
+  </div>
+  <div class="field field-trap" aria-hidden="true">
+    <label for="contact-website">Leave this empty</label>
+    <input id="contact-website" name="website" type="text" tabindex="-1" autocomplete="off">
+  </div>
+  <div class="contact-form-footer">
+    <button class="button button-primary" type="submit">Send message</button>
+    <p class="quiet">We reply from {{ contactEmail }}, usually within one working day.</p>
+  </div>
+</form>

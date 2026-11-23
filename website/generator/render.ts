@@ -80,7 +80,7 @@ export function siteValues(site: Site): Record<string, string> {
     communityMemberLimit: String(plans.community.memberLimit),
     currency,
     contactEmail: site.contactEmail,
-    contactHref: `mailto:${site.contactEmail}`,
+    contactFormURL: site.contactFormURL,
     repository: site.repository,
     domain: site.domain,
   };
@@ -104,6 +104,7 @@ export function renderPage(
   pages: ReadonlyArray<Page>,
   layout: string,
   template: string,
+  fragments: Readonly<Record<string, string>>,
   site: Site,
   baseURL: URL
 ): string {
@@ -111,14 +112,19 @@ export function renderPage(
   const values = {
     ...siteValues(site),
     root,
+    contactHref: `${root}contact/`,
+    contactSentURL: new URL('contact/sent/', baseURL).href,
     title: page.title,
     description: page.description,
     robots: page.indexed ? 'index, follow' : 'noindex',
   };
+  const filledFragments = Object.fromEntries(
+    Object.entries(fragments).map(([name, fragment]) => [name, fill(fragment, values)])
+  );
   const canonicalLink = page.indexed
     ? `<link rel="canonical" href="${escapeHTML(new URL(directoryOf(page.output), baseURL).href)}">`
     : '';
-  const content = fill(template, values);
+  const content = fill(template, values, filledFragments);
   return fill(layout, values, {
     content,
     canonicalLink,
