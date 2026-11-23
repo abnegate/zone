@@ -29,6 +29,7 @@ import '../features/enterprise/sso/components/SsoSection.css';
 import '../features/enterprise/policy/components/PolicySection.css';
 import '../features/enterprise/audit/components/AuditExportSection.css';
 import '../features/enterprise/roles/components/RolesSection.css';
+import '../features/enterprise/scim/components/ScimSection.css';
 import '../features/enterprise/spend/pages/SpendPage.css';
 import '../features/enterprise/fleet/components/RunnersSection.css';
 import '../features/enterprise/fleet/components/RunnerPlacementCard.css';

@@ -19,6 +19,7 @@ use std::time::Duration;
 use crate::common::context::{
     Harness, MODEL, Script, Socket, answer, calls, finish, next, ordinary, send, successful, tool,
 };
+use crate::common::seat::seat;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio_tungstenite::connect_async;
@@ -35,7 +36,7 @@ use zone_server::agent::memory::{
 use zone_server::db::memory::{
     self, MEMORY_CATEGORY_PREFIX, MemoryCategory, MemoryWrite, PREFERENCES_TITLE, PROFILE_TITLE,
 };
-use zone_server::db::workspace_members::{WorkspaceRole, add_member};
+use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::db::{chats, tasks, users};
 use zone_server::services::chat::session::{self, Mode};
 use zone_server::services::route::Route;
@@ -666,15 +667,13 @@ async fn a_second_member_sees_none_of_the_first_ones_memory() {
         .await;
 
     let (token, other) = register(&remembering.harness).await;
-    add_member(
+    seat(
         remembering.pool(),
         remembering.harness.workspace,
         other,
         WorkspaceRole::Member,
-        None,
     )
-    .await
-    .expect("the second person joins the workspace");
+    .await;
     let chat = chat_for(&remembering.harness, &token).await;
 
     remembering.script().push(calls(
@@ -1105,9 +1104,7 @@ async fn a_run_carries_the_memory_of_whoever_started_it_and_none_of_the_author_s
     .await
     .expect("a second person exists")
     .id;
-    add_member(&pool, workspace, starter, WorkspaceRole::Member, None)
-        .await
-        .expect("the second person joins the workspace");
+    seat(&pool, workspace, starter, WorkspaceRole::Member).await;
 
     for (user, profile, preferences) in [
         (author, AUTHOR_PROFILE, AUTHOR_PREFERENCES),

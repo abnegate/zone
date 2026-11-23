@@ -6,6 +6,7 @@ use zone_enterprise::sso::saml::{self, Refusal};
 use zone_enterprise::sso::{Error, Grant, Identity, Provider, Resolution, resolve};
 
 use super::callback::Callback;
+use super::claim::Claim;
 use super::configured::Configured;
 use super::console::{redirect_uri, service_provider};
 use super::handoff::{self, Handoff};
@@ -19,8 +20,8 @@ use crate::auth::hash_password;
 use crate::auth::password::PasswordError;
 use crate::db::audit::{actions, resources};
 use crate::db::sso::{Attempt, assertions, attempts, identities, providers};
-use crate::db::users::{self, UserRow};
-use crate::db::{refresh_tokens, sessions};
+use crate::db::users;
+use crate::db::{refresh_tokens, scim, sessions};
 use crate::routes::common::{AuditEvent, audit};
 use crate::services::account::{AuthResponse, Credential, provision, session};
 use crate::services::members;
@@ -246,15 +247,18 @@ async fn land(
     let by_subject = match &known {
         Some(known) => users::get_user_by_id(state.db(), known.user_id)
             .await?
-            .map(|user| user.account()),
+            .map(|user| user.account(false)),
         None => None,
     };
     let by_email = users::find_by_email_ignoring_case(state.db(), &identity.email).await?;
-    let linked = match by_email.as_slice() {
-        [user] if known.is_none() => identities::linked(state.db(), user.id).await?,
-        _ => false,
+    let (linked, pristine) = match by_email.as_slice() {
+        [user] if known.is_none() => (
+            identities::linked(state.db(), user.id).await?,
+            scim::users::pristine(state.db(), user.id).await?,
+        ),
+        _ => (false, false),
     };
-    let accounts: Vec<_> = by_email.iter().map(UserRow::account).collect();
+    let accounts: Vec<_> = by_email.iter().map(|user| user.account(pristine)).collect();
 
     match resolve(
         by_subject,
@@ -269,7 +273,14 @@ async fn land(
             Ok(Settlement::signed_in(user))
         }
         Resolution::Link { user, reclaim } => {
-            link(state, provider_id, identity, user, reclaim).await?;
+            let claim = if reclaim {
+                Claim::Reclaim
+            } else if pristine {
+                Claim::Pristine
+            } else {
+                Claim::Verified
+            };
+            link(state, provider_id, identity, user, claim).await?;
             Ok(Settlement::linked(user, reclaim))
         }
         Resolution::Provision => {
@@ -284,16 +295,21 @@ async fn link(
     provider_id: Uuid,
     identity: &Identity,
     user: Uuid,
-    reclaim: bool,
+    claim: Claim,
 ) -> Result<(), SignInFailure> {
-    let password_hash = if reclaim {
-        Some(unusable().await?)
-    } else {
-        None
+    let password_hash = match claim {
+        Claim::Reclaim => Some(unusable().await?),
+        Claim::Verified | Claim::Pristine => None,
     };
     let mut transaction = state.db().begin().await?;
     if let Some(password_hash) = &password_hash
         && !users::reclaim(&mut transaction, user, password_hash).await?
+    {
+        return Err(SignInFailure::Stale);
+    }
+    if claim == Claim::Pristine
+        && !(users::lock(&mut transaction, user).await?
+            && scim::users::pristine(&mut *transaction, user).await?)
     {
         return Err(SignInFailure::Stale);
     }
@@ -305,7 +321,7 @@ async fn link(
         &identity.email,
     )
     .await?;
-    if reclaim {
+    if claim == Claim::Reclaim {
         refresh_tokens::revoke_all_user_tokens(&mut *transaction, user).await?;
         sessions::revoke_all_user_sessions(&mut *transaction, user).await?;
     }

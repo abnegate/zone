@@ -10,6 +10,7 @@ import {
   Permission,
   RolesSection,
   RunnersSection,
+  ScimSection,
   SERVER_SCOPE,
   SpendPage,
   SsoSection,
@@ -145,6 +146,8 @@ function organizationContent(
       );
     case SettingsSection.Roles:
       return <RolesSection organizationId={organizationId} />;
+    case SettingsSection.Scim:
+      return <ScimSection organizationId={organizationId} />;
     case SettingsSection.GitHub:
       return (
         <GitHubSection

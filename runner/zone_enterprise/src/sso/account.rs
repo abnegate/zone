@@ -8,6 +8,7 @@ pub struct Account {
     pub active: bool,
     pub email_verified: bool,
     pub admin: bool,
+    pub pristine: bool,
 }
 
 #[cfg(test)]

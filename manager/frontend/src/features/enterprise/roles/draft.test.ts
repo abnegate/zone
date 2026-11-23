@@ -42,6 +42,7 @@ describe('choices', () => {
       Permission.OrganizationDelete,
       Permission.AdministratorsUpdate,
       Permission.RolesUpdate,
+      Permission.ScimUpdate,
     ]) {
       expect(offered).not.toContain(reserved);
     }

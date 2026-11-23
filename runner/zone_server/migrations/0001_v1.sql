@@ -718,6 +718,100 @@ CREATE TABLE audit_deliveries (
     CONSTRAINT audit_deliveries_batch_check CHECK (((batch_transaction_id IS NULL) = (batch_sequence IS NULL)))
 );
 
+CREATE TABLE organization_suspensions (
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role text NOT NULL,
+    custom_role_id uuid REFERENCES custom_roles(id) ON DELETE SET NULL,
+    suspended_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (organization_id, user_id),
+    CONSTRAINT organization_suspensions_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text])))
+);
+
+CREATE TABLE workspace_suspensions (
+    workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    role text NOT NULL,
+    custom_role_id uuid REFERENCES custom_roles(id) ON DELETE SET NULL,
+    suspended_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (workspace_id, user_id),
+    CONSTRAINT workspace_suspensions_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text, 'viewer'::text])))
+);
+CREATE INDEX workspace_suspensions_member_idx ON workspace_suspensions (organization_id, user_id);
+
+CREATE TABLE scim_tokens (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    name text NOT NULL,
+    token_hash text NOT NULL UNIQUE,
+    hint text NOT NULL,
+    created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    rotated_at timestamp with time zone,
+    last_used_at timestamp with time zone,
+    revoked_at timestamp with time zone,
+    CONSTRAINT scim_tokens_name_check CHECK ((length(btrim(name)) > 0))
+);
+CREATE INDEX scim_tokens_organization_idx ON scim_tokens (organization_id) WHERE (revoked_at IS NULL);
+
+CREATE TABLE scim_users (
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    external_id text,
+    user_name text NOT NULL,
+    display_name text,
+    given_name text,
+    family_name text,
+    email text,
+    provisioned_password text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (organization_id, user_id)
+);
+CREATE UNIQUE INDEX scim_users_external_id_key ON scim_users (organization_id, external_id) WHERE (external_id IS NOT NULL);
+CREATE UNIQUE INDEX scim_users_user_name_key ON scim_users (organization_id, lower(user_name));
+CREATE INDEX scim_users_provisioned_idx ON scim_users (user_id) WHERE (provisioned_password IS NOT NULL);
+
+CREATE TABLE scim_groups (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    external_id text,
+    display_name text NOT NULL,
+    role text,
+    custom_role_id uuid REFERENCES custom_roles(id) ON DELETE SET NULL,
+    mapped_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT scim_groups_display_name_check CHECK ((length(btrim(display_name)) > 0)),
+    CONSTRAINT scim_groups_role_check CHECK (((role IS NULL) OR (role = ANY (ARRAY['admin'::text, 'member'::text])))),
+    CONSTRAINT scim_groups_mapping_check CHECK (((role IS NULL) OR (custom_role_id IS NULL)))
+);
+CREATE UNIQUE INDEX scim_groups_display_name_key ON scim_groups (organization_id, lower(btrim(display_name)));
+CREATE UNIQUE INDEX scim_groups_external_id_key ON scim_groups (organization_id, external_id) WHERE (external_id IS NOT NULL);
+CREATE INDEX scim_groups_custom_role_idx ON scim_groups (custom_role_id) WHERE (custom_role_id IS NOT NULL);
+
+CREATE TABLE scim_group_members (
+    group_id uuid NOT NULL REFERENCES scim_groups(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (group_id, user_id)
+);
+CREATE INDEX scim_group_members_user_idx ON scim_group_members (user_id);
+
+CREATE TABLE scim_errors (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    token_id uuid REFERENCES scim_tokens(id) ON DELETE SET NULL,
+    method text NOT NULL,
+    path text NOT NULL,
+    status smallint NOT NULL,
+    scim_type text,
+    detail text NOT NULL,
+    occurred_at timestamp with time zone DEFAULT now() NOT NULL
+);
+CREATE INDEX scim_errors_organization_idx ON scim_errors (organization_id, occurred_at DESC);
+
 CREATE TABLE audit_logs (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     organization_id uuid REFERENCES organizations(id) ON DELETE SET NULL,
@@ -1825,6 +1919,13 @@ CREATE FUNCTION workspace_permits(p_user_id uuid, p_workspace_id uuid, p_permiss
     WHERE m.user_id = p_user_id
       AND m.workspace_id = p_workspace_id
       AND m.is_active
+      AND EXISTS (
+        SELECT 1
+        FROM organization_members o
+        WHERE o.organization_id = w.organization_id
+          AND o.user_id = m.user_id
+          AND o.is_active
+      )
       AND (
         (m.custom_role_id IS NULL
           AND EXISTS (SELECT 1 FROM workspace_role_permissions b WHERE b.role = m.role AND b.permission = p_permission))

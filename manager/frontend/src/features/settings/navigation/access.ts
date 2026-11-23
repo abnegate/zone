@@ -35,6 +35,7 @@ export const ORGANIZATION_FLOOR: Readonly<Record<OrganizationPermission, OrgRole
   [Permission.SpendRead]: 'admin',
   [Permission.SpendUpdate]: 'admin',
   [Permission.RolesUpdate]: 'admin',
+  [Permission.ScimUpdate]: 'owner',
 };
 
 export const WORKSPACE_FLOOR: Readonly<Record<WorkspacePermission, WorkspaceRole>> = {

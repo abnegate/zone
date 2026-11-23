@@ -12,6 +12,7 @@ use sqlx::{Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use super::DbResult;
+use super::scim::{GroupRecord, groups};
 use crate::auth::{Grant, Permission, Scope};
 
 pub const EXCEEDS: &str = "role_exceeds";
@@ -115,7 +116,10 @@ pub enum Update {
 
 #[derive(Debug)]
 pub enum Deletion {
-    Deleted(Box<CustomRoleRow>),
+    Deleted {
+        role: Box<CustomRoleRow>,
+        unmapped: Vec<GroupRecord>,
+    },
     Forbidden,
     InUse(i64),
     Missing,
@@ -385,6 +389,7 @@ pub async fn delete(
             .execute(&mut *transaction)
             .await?;
     }
+    let unmapped = groups::release(&mut *transaction, organization_id, role_id, editor).await?;
     sqlx::query("DELETE FROM custom_roles WHERE organization_id = $1 AND id = $2")
         .bind(organization_id)
         .bind(role_id)
@@ -392,7 +397,10 @@ pub async fn delete(
         .await?;
     transaction.commit().await?;
 
-    Ok(Deletion::Deleted(Box::new(role)))
+    Ok(Deletion::Deleted {
+        role: Box::new(role),
+        unmapped,
+    })
 }
 
 /// Holds the role steady while the caller's transaction assigns it: an edit or

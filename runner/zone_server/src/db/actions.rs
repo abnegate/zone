@@ -489,6 +489,7 @@ mod tests {
     use crate::db::reminders;
     use crate::db::reminders::Delivered;
     use crate::db::reminders::Sweep;
+    use crate::db::workspace_members::WorkspaceRole;
     use chrono::Duration;
     use chrono::Utc;
     use std::collections::BTreeSet;
@@ -520,14 +521,7 @@ mod tests {
         .unwrap();
         sqlx::query("INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, 'Actions test', $1::text)").bind(workspace).bind(organization).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $1::text, 'test-only', 'Alice')").bind(user).execute(&pool).await.unwrap();
-        sqlx::query(
-            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
-        )
-        .bind(workspace)
-        .bind(user)
-        .execute(&pool)
-        .await
-        .unwrap();
+        crate::db::testing::seat(&pool, workspace, user, WorkspaceRole::Member).await;
         sqlx::query("INSERT INTO chats (id, workspace_id, title, model_name) VALUES ($1, $2, 'Test', 'test')").bind(chat).bind(workspace).execute(&pool).await.unwrap();
         (pool, organization, workspace, user, chat)
     }
@@ -812,14 +806,7 @@ mod tests {
                 .is_err()
         );
         let (_, other_organization, other, other_user, other_chat) = fixture().await;
-        sqlx::query(
-            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
-        )
-        .bind(other)
-        .bind(user)
-        .execute(&pool)
-        .await
-        .unwrap();
+        crate::db::testing::seat(&pool, other, user, WorkspaceRole::Member).await;
         let update: Update =
             serde_json::from_value(json!({"task_id":task_id,"title":"stolen"})).unwrap();
         assert!(update_task(&pool, other, user, update).await.is_err());

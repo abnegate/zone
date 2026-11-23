@@ -4,7 +4,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
-use zone_server::db::workspace_members::{self, WorkspaceRole};
+use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::db::{migrations, tasks};
 
 use crate::common::{Database, TestClient, TestResponse, test_email, test_password};
@@ -83,9 +83,7 @@ impl Board {
     }
 
     async fn join(&self, tenant: &Tenant, user: Uuid, role: WorkspaceRole) {
-        workspace_members::add_member(&self.database.pool, tenant.workspace, user, role, None)
-            .await
-            .expect("the workspace takes the member");
+        crate::common::seat::seat(&self.database.pool, tenant.workspace, user, role).await;
     }
 
     async fn project(&self, owner: &Tenant) -> Uuid {

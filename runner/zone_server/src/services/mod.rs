@@ -38,6 +38,7 @@ pub mod provider;
 pub mod route;
 pub mod runner;
 pub mod schedule;
+pub mod scim;
 pub mod scratch;
 pub mod search;
 pub mod spend;

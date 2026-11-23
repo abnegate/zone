@@ -78,6 +78,7 @@ pub mod actions {
     pub const WORKSPACE_CREATED: &str = "workspace.created";
     pub const WORKSPACE_UPDATED: &str = "workspace.updated";
     pub const WORKSPACE_DELETED: &str = "workspace.deleted";
+    pub const WORKSPACE_OWNER_SEATED: &str = "workspace.owner_seated";
 
     pub const PROJECT_CREATED: &str = "project.created";
     pub const PROJECT_UPDATED: &str = "project.updated";
@@ -153,6 +154,22 @@ pub mod actions {
     pub const BUDGET_EXHAUSTED: &str = "budget.exhausted";
     pub const SPEND_EXPORT_DOWNLOADED: &str = "spend_export.downloaded";
 
+    pub const SCIM_TOKEN_CREATED: &str = "scim_token.created";
+    pub const SCIM_TOKEN_ROTATED: &str = "scim_token.rotated";
+    pub const SCIM_TOKEN_REVOKED: &str = "scim_token.revoked";
+
+    pub const SCIM_GROUP_MAPPED: &str = "scim_group.mapped";
+    pub const SCIM_GROUP_UNMAPPED: &str = "scim_group.unmapped";
+    pub const SCIM_GROUP_CREATED: &str = "scim_group.created";
+    pub const SCIM_GROUP_UPDATED: &str = "scim_group.updated";
+    pub const SCIM_GROUP_DELETED: &str = "scim_group.deleted";
+
+    pub const SCIM_USER_CREATED: &str = "scim_user.created";
+    pub const SCIM_USER_UPDATED: &str = "scim_user.updated";
+    pub const SCIM_USER_DEACTIVATED: &str = "scim_user.deactivated";
+    pub const SCIM_USER_REACTIVATED: &str = "scim_user.reactivated";
+    pub const SCIM_USER_DELETED: &str = "scim_user.deleted";
+
     pub const FLEET_POLICY_UPDATED: &str = "fleet_policy.updated";
     pub const RUNNER_REGISTERED: &str = "runner.registered";
     pub const RUNNER_UPDATED: &str = "runner.updated";
@@ -191,6 +208,8 @@ pub mod resources {
     pub const ROLE: &str = "role";
     pub const BUDGET: &str = "budget";
     pub const SPEND_EXPORT: &str = "spend_export";
+    pub const SCIM_TOKEN: &str = "scim_token";
+    pub const SCIM_GROUP: &str = "scim_group";
     pub const FLEET_POLICY: &str = "fleet_policy";
     pub const RUNNER: &str = "runner";
     pub const ORGANIZATION_RUNNER_LABELS: &str = "organization_runner_labels";

@@ -72,18 +72,22 @@ use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use abnegate_search::{SearchContext, SearchHit, SearxngClient, sanitize_query};
 
+mod access;
 mod audience;
 mod confinement;
 mod denial;
 mod ending;
 pub mod job;
 mod queue;
+mod registration;
 mod sent;
 
+use access::Access;
 pub use audience::Audience;
 use confinement::Confinement;
 use ending::Ending;
 use queue::{Finished, Interrupted, Queued, Started};
+use registration::Registration;
 pub use sent::Sent;
 
 /// WebSocket polling interval in milliseconds
@@ -164,8 +168,7 @@ const CHAT_STREAM_CAPACITY: usize = 256;
 
 /// Global cancellation broadcaster per (chat_id, message_id)
 /// Using composite key prevents race conditions when multiple streams run concurrently
-static CHAT_CANCELLATIONS: Lazy<DashMap<(Uuid, Uuid), broadcast::Sender<()>>> =
-    Lazy::new(DashMap::new);
+static CHAT_CANCELLATIONS: Lazy<DashMap<(Uuid, Uuid), Registration>> = Lazy::new(DashMap::new);
 /// Serialize full request lifecycles per chat. The protocol's chunk/status
 /// frames are intentionally compact and do not all carry correlation IDs.
 static CHAT_GENERATIONS: Lazy<DashMap<Uuid, Arc<Semaphore>>> = Lazy::new(DashMap::new);
@@ -249,6 +252,14 @@ async fn send_server(sender: &SharedSender, message: ServerMessage) -> bool {
         .send(message.to_ws_message())
         .await
         .is_ok()
+}
+
+async fn revoke(sender: &SharedSender) {
+    let revoked = ServerMessage::Error {
+        message: "Access revoked".to_string(),
+    };
+    let _ = send_server(sender, revoked).await;
+    let _ = sender.lock().await.close().await;
 }
 
 /// Frames already published for the turn in flight.
@@ -443,15 +454,31 @@ fn cancel_turns(chat_id: Uuid) {
         .iter()
         .filter(|entry| entry.key().0 == chat_id)
     {
-        let _ = entry.value().send(());
+        let _ = entry.value().sender.send(());
     }
     crate::agent::ApprovalPolicy::deny_chat(chat_id);
 }
 
+/// Cancels every turn `user_id` started in any of `workspaces`, waiting or
+/// running, and returns how many. A cancelled turn ends as a person's Stop
+/// ends it, dropping its agent's MCP lease on the way out.
+pub(crate) fn cancel_user_turns(user_id: Uuid, workspaces: &[Uuid]) -> usize {
+    let mut cancelled = 0;
+    for entry in CHAT_CANCELLATIONS.iter() {
+        let registration = entry.value();
+        if registration.author == user_id && workspaces.contains(&registration.workspace_id) {
+            let _ = registration.sender.send(());
+            cancelled += 1;
+        }
+    }
+    cancelled
+}
+
 /// Register the turn a message is starting under the queue's lock, so a Stop
 /// or Interrupt that takes the lock next cancels this turn and not one before it.
-fn begin(chat_id: Uuid, started: Started) -> (Queued, Generation) {
-    let generation = Generation::registered(chat_id, started.turn);
+fn begin(chat_id: Uuid, workspace_id: Uuid, started: Started) -> (Queued, Generation) {
+    let generation =
+        Generation::registered(chat_id, started.turn, started.message.author, workspace_id);
     (started.message, generation)
 }
 
@@ -495,7 +522,7 @@ fn drive(
         let draining = queue::drain(
             chat_id,
             running,
-            move |started| turn(begin(chat_id, started)),
+            move |started| turn(begin(chat_id, workspace_id, started)),
             move |started| {
                 let stream = teller.clone();
                 async move { announce(&stream, started).await }
@@ -530,13 +557,20 @@ struct Generation {
 }
 
 impl Generation {
-    fn new(chat_id: Uuid) -> Self {
-        Self::registered(chat_id, Uuid::new_v4())
+    fn new(chat_id: Uuid, author: Uuid, workspace_id: Uuid) -> Self {
+        Self::registered(chat_id, Uuid::new_v4(), author, workspace_id)
     }
 
-    fn registered(chat_id: Uuid, message_id: Uuid) -> Self {
+    fn registered(chat_id: Uuid, message_id: Uuid, author: Uuid, workspace_id: Uuid) -> Self {
         let (sender, cancel) = broadcast::channel(1);
-        CHAT_CANCELLATIONS.insert((chat_id, message_id), sender);
+        CHAT_CANCELLATIONS.insert(
+            (chat_id, message_id),
+            Registration {
+                sender,
+                author,
+                workspace_id,
+            },
+        );
         Self {
             chat_id,
             message_id,
@@ -556,7 +590,7 @@ impl Generation {
     fn cancellation(&self) -> broadcast::Sender<()> {
         CHAT_CANCELLATIONS
             .get(&(self.chat_id, self.message_id))
-            .map(|sender| sender.value().clone())
+            .map(|registration| registration.sender.clone())
             .expect("active generation cancellation remains registered")
     }
 
@@ -1627,7 +1661,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                 let started = queue::with(chat_id, |queue| {
                                     queue
                                         .submit(message, generating(chat_id))
-                                        .map(|started| begin(chat_id, started))
+                                        .map(|started| begin(chat_id, workspace_id, started))
                                 });
                                 match started {
                                     // A message that starts at once never showed in the
@@ -1652,7 +1686,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                             cancel_turns(chat_id);
                                             None
                                         }
-                                        Interrupted::Start(started) => Some(begin(chat_id, started)),
+                                        Interrupted::Start(started) => Some(begin(chat_id, workspace_id, started)),
                                         Interrupted::Missing => None,
                                     }
                                 });
@@ -1688,6 +1722,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                 tool_call_id,
                                 approved,
                             }) => {
+                                if !can_access_chat(&state, user_id, session_id, workspace_id)
+                                    .await
+                                    .unwrap_or(false)
+                                {
+                                    revoke(&sender).await;
+                                    return;
+                                }
                                 let decided = crate::agent::ApprovalPolicy::decide_chat(
                                     chat_id,
                                     &tool_call_id,
@@ -1736,11 +1777,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                             workspace_id,
                             chat_id
                         );
-                        let error_msg = ServerMessage::Error {
-                            message: "Access revoked".to_string(),
-                        };
-                        let _ = send_server(&sender, error_msg).await;
-                        let _ = sender.lock().await.close().await;
+                        revoke(&sender).await;
                         return;
                     }
                     Err(e) => {
@@ -2778,6 +2815,13 @@ async fn handle_send_message(
         .await;
         return Sent::Unsaved;
     }
+    let _access = Access::watch(
+        state.db().clone(),
+        workspace_id,
+        user_id,
+        AUTH_RECHECK_INTERVAL,
+        request.cancellation(),
+    );
     let mut session = match Session::acquire(state, chat_id, workspace_id, request.message_id).await
     {
         Ok(session) => session,
@@ -3043,7 +3087,7 @@ pub(crate) async fn run_turn_as(
     audience: Audience,
 ) -> Sent {
     let stream = ChatStream::of(chat_id);
-    let generation = Generation::registered(chat_id, message_id);
+    let generation = Generation::registered(chat_id, message_id, user_id, workspace_id);
     let sent = handle_send_message(
         state,
         &stream,
@@ -3057,7 +3101,7 @@ pub(crate) async fn run_turn_as(
     )
     .await;
     let released = queue::with(chat_id, |queue| match queue.release() {
-        Finished::Next(started) => Some(Some(begin(chat_id, started))),
+        Finished::Next(started) => Some(Some(begin(chat_id, workspace_id, started))),
         Finished::Held => Some(None),
         Finished::Idle => None,
     });
@@ -3074,8 +3118,8 @@ pub(crate) async fn run_turn_as(
 /// out, where dropping it part way would leave the queue held. A turn already
 /// over has nothing left to stop.
 pub(crate) fn cancel_turn(chat_id: Uuid, message_id: Uuid) {
-    if let Some(cancellation) = CHAT_CANCELLATIONS.get(&(chat_id, message_id)) {
-        let _ = cancellation.send(());
+    if let Some(registration) = CHAT_CANCELLATIONS.get(&(chat_id, message_id)) {
+        let _ = registration.sender.send(());
     }
 }
 
@@ -6183,15 +6227,13 @@ cat 'DIR/reply.jsonl'
                     .await
                     .expect("a user")
                     .id;
-                    db::workspace_members::add_member(
+                    db::testing::seat(
                         &organization.pool,
                         organization.workspace,
                         user,
                         WorkspaceRole::Member,
-                        None,
                     )
-                    .await
-                    .expect("a member of the workspace");
+                    .await;
                     Self {
                         organization,
                         state,
@@ -7995,15 +8037,13 @@ cat 'DIR/reply.jsonl'
         )
         .await
         .unwrap();
-        workspace_members::add_member(
+        crate::db::testing::seat(
             pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Owner,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let chat = chats::create_chat(
             pool,
             Some(workspace.id),
@@ -8125,12 +8165,17 @@ cat 'DIR/reply.jsonl'
         let chat_id = Uuid::new_v4();
         let stream = ChatStream::of(chat_id);
         let mut events = stream.events.subscribe();
-        let mut generation = Generation::new(chat_id);
+        let mut generation = Generation::new(chat_id, Uuid::new_v4(), Uuid::new_v4());
         let key = (chat_id, generation.message_id);
         assert!(CHAT_CANCELLATIONS.contains_key(&key));
         assert!(!generation.is_cancelled());
 
-        CHAT_CANCELLATIONS.get(&key).unwrap().send(()).unwrap();
+        CHAT_CANCELLATIONS
+            .get(&key)
+            .unwrap()
+            .sender
+            .send(())
+            .unwrap();
         assert!(generation.is_cancelled());
         generation.cancelled(&stream).await;
         assert!(matches!(
@@ -8146,6 +8191,49 @@ cat 'DIR/reply.jsonl'
         ));
         drop(generation);
         assert!(!CHAT_CANCELLATIONS.contains_key(&key));
+    }
+
+    #[test]
+    fn cancelling_a_members_turns_reaches_only_theirs_in_the_named_workspaces() {
+        let (member, colleague) = (Uuid::new_v4(), Uuid::new_v4());
+        let (inside, outside) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut waiting = Generation::new(Uuid::new_v4(), member, inside);
+        let mut running = Generation::registered(Uuid::new_v4(), Uuid::new_v4(), member, inside);
+        let mut elsewhere = Generation::new(Uuid::new_v4(), member, outside);
+        let mut theirs = Generation::new(Uuid::new_v4(), colleague, inside);
+
+        assert_eq!(cancel_user_turns(member, &[inside]), 2);
+
+        assert!(waiting.is_cancelled());
+        assert!(running.is_cancelled());
+        assert!(
+            !elsewhere.is_cancelled(),
+            "a turn in another organization's workspace was cancelled"
+        );
+        assert!(!theirs.is_cancelled(), "a colleague's turn was cancelled");
+    }
+
+    #[tokio::test]
+    async fn halting_a_member_cancels_the_turns_they_registered() {
+        let tenant = crate::db::testing::Tenant::new().await;
+        let member = tenant
+            .organization_member(crate::db::organization_members::OrgRole::Member)
+            .await;
+        tenant
+            .workspace_member(member, crate::db::workspace_members::WorkspaceRole::Member)
+            .await;
+        let state = AppState::new(crate::state::test_config(), tenant.pool.clone(), None);
+        state.disable_mcp();
+        let mut turn = Generation::new(Uuid::new_v4(), member, tenant.workspace);
+
+        let halted = crate::services::members::halt(&state, tenant.organization, member)
+            .await
+            .expect("the member is halted");
+
+        assert_eq!(halted.turns, 1);
+        assert!(turn.is_cancelled(), "the member's turn kept running");
+        drop(turn);
+        tenant.cleanup().await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -8348,7 +8436,7 @@ cat 'DIR/reply.jsonl'
         let chat = Uuid::new_v4();
         let active = crate::agent::ApprovalPolicy::required(crate::agent::ApprovalGate::new());
         crate::agent::ApprovalPolicy::register(chat, active.clone());
-        let queued = Generation::new(chat);
+        let queued = Generation::new(chat, Uuid::new_v4(), Uuid::new_v4());
         crate::agent::ApprovalPolicy::set_chat_auto(chat, true);
         assert!(active.is_auto());
         drop(queued);

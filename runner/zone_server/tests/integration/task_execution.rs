@@ -774,15 +774,13 @@ async fn run_scripted(script: Vec<Round>, plan_approval: bool) -> Parked {
 
     let pool = common::create_test_pool().await;
     let (organization, workspace, user) = common::setup_test_data(&pool).await;
-    workspace_members::add_member(
+    common::seat::seat(
         &pool,
         workspace,
         user,
         workspace_members::WorkspaceRole::Member,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
     let task = tasks::create_task_as(
         &pool,
         workspace,
@@ -1498,15 +1496,13 @@ async fn admit() -> Leased {
 
     let pool = common::create_test_pool().await;
     let (organization, workspace, user) = common::setup_test_data(&pool).await;
-    workspace_members::add_member(
+    common::seat::seat(
         &pool,
         workspace,
         user,
         workspace_members::WorkspaceRole::Member,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
     let task = tasks::create_task_as(
         &pool,
         workspace,

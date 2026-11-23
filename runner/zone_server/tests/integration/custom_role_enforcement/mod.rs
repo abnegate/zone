@@ -104,9 +104,7 @@ async fn seat_organization(pool: &PgPool, organization: Uuid, member: Uuid, role
 }
 
 async fn seat_workspace(pool: &PgPool, workspace: Uuid, member: Uuid, role: WorkspaceRole) {
-    workspace_members::add_member(pool, workspace, member, role, None)
-        .await
-        .expect("a workspace member is seated");
+    crate::common::seat::seat(pool, workspace, member, role).await;
 }
 
 /// A custom role of `scope` in `organization` holding `permissions` and its base.

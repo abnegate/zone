@@ -1561,15 +1561,13 @@ mod tests {
             )
             .await
             .unwrap();
-            workspace_members::add_member(
+            crate::db::testing::seat(
                 &pool,
                 workspace.id,
                 user.id,
                 workspace_members::WorkspaceRole::Member,
-                None,
             )
-            .await
-            .unwrap();
+            .await;
             let project = projects::create_project(&pool, "Repository", None, Some(workspace.id))
                 .await
                 .unwrap();

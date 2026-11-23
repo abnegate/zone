@@ -41,6 +41,7 @@ pub enum Permission {
     SpendRead,
     SpendUpdate,
     RolesUpdate,
+    ScimUpdate,
     WorkspaceRead,
     WorkspaceWrite,
     WorkspaceUpdate,
@@ -64,7 +65,7 @@ const REQUIREMENTS: [(Permission, Permission); 1] =
     [(Permission::SpendUpdate, Permission::SpendRead)];
 
 impl Permission {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 42] = [
         Self::ModelsCreate,
         Self::ModelsDelete,
         Self::PullRequestsUpdate,
@@ -93,6 +94,7 @@ impl Permission {
         Self::SpendRead,
         Self::SpendUpdate,
         Self::RolesUpdate,
+        Self::ScimUpdate,
         Self::WorkspaceRead,
         Self::WorkspaceWrite,
         Self::WorkspaceUpdate,
@@ -138,6 +140,7 @@ impl Permission {
             Self::SpendRead => "spend:read",
             Self::SpendUpdate => "spend:update",
             Self::RolesUpdate => "roles:update",
+            Self::ScimUpdate => "scim:update",
             Self::WorkspaceRead => "workspace:read",
             Self::WorkspaceWrite => "workspace:write",
             Self::WorkspaceUpdate => "workspace:update",
@@ -183,7 +186,8 @@ impl Permission {
             | Self::AuditUpdate
             | Self::SpendRead
             | Self::SpendUpdate
-            | Self::RolesUpdate => Scope::Organization,
+            | Self::RolesUpdate
+            | Self::ScimUpdate => Scope::Organization,
             Self::WorkspaceRead
             | Self::WorkspaceWrite
             | Self::WorkspaceUpdate
@@ -213,6 +217,7 @@ impl Permission {
                 | Self::OrganizationDelete
                 | Self::AdministratorsUpdate
                 | Self::RolesUpdate
+                | Self::ScimUpdate
                 | Self::WorkspaceRead
                 | Self::WorkspaceDelete
                 | Self::WorkspaceAdministratorsUpdate
@@ -281,7 +286,8 @@ impl Permission {
             | Self::AuditUpdate
             | Self::SpendRead
             | Self::SpendUpdate
-            | Self::RolesUpdate => format!(
+            | Self::RolesUpdate
+            | Self::ScimUpdate => format!(
                 "This needs the {} permission in this organization.",
                 self.name()
             ),

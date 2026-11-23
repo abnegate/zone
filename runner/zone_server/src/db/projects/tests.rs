@@ -7,7 +7,7 @@ use crate::db::actions::{self, StartTask};
 use crate::db::github_installations;
 use crate::db::sources::testing;
 use crate::db::tasks::Origin;
-use crate::db::workspace_members::{self, WorkspaceRole};
+use crate::db::workspace_members::WorkspaceRole;
 
 async fn pool() -> PgPool {
     PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
@@ -341,15 +341,13 @@ async fn a_task_a_member_added_marks_the_project_used_but_an_automated_one_does_
 #[tokio::test]
 async fn a_task_a_reminder_started_does_not_mark_the_project_used() {
     let fixture = fixture().await;
-    workspace_members::add_member(
+    crate::db::testing::seat(
         &fixture.pool,
         fixture.workspace,
         fixture.user,
         WorkspaceRole::Member,
-        None,
     )
-    .await
-    .expect("a member of the workspace");
+    .await;
     let reminded = fixture.project("Reminded").await;
     let worked = fixture.project("Worked").await;
 
@@ -411,14 +409,13 @@ async fn an_auto_project_goes_first_in_its_workspaces_order() {
     let fixture = fixture().await;
     fixture.project("Manual").await;
     fixture.project("Other").await;
-    sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
+    crate::db::testing::seat(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.user,
+        WorkspaceRole::Owner,
     )
-    .bind(fixture.workspace)
-    .bind(fixture.user)
-    .execute(&fixture.pool)
-    .await
-    .expect("an owner");
+    .await;
 
     crate::db::auto_projects::finalize(
         &fixture.pool,

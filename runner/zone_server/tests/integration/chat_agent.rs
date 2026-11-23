@@ -2418,13 +2418,13 @@ async fn fixture() -> Fixture {
             .fetch_one(&pool)
             .await
             .expect("a user");
-    sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)")
-        .bind(workspace)
-        .bind(user)
-        .bind("member")
-        .execute(&pool)
-        .await
-        .expect("the person belongs to the workspace");
+    crate::common::seat::seat(
+        &pool,
+        workspace,
+        user,
+        zone_server::db::workspace_members::WorkspaceRole::Member,
+    )
+    .await;
     let chat: Uuid = sqlx::query_scalar(
         "INSERT INTO chats (workspace_id, title, model_name, agent_enabled)
          VALUES ($1, $2, $3, TRUE) RETURNING id",

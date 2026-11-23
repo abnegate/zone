@@ -31,14 +31,13 @@ impl Fixture {
         let database = Database::new(PREFIX).await;
         migrations::run(&database.pool).await.unwrap();
         let (_, workspace, actor) = common::setup_test_data(&database.pool).await;
-        sqlx::query(
-            "INSERT INTO workspace_members(workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+        common::seat::seat(
+            &database.pool,
+            workspace,
+            actor,
+            zone_server::db::workspace_members::WorkspaceRole::Member,
         )
-        .bind(workspace)
-        .bind(actor)
-        .execute(&database.pool)
-        .await
-        .unwrap();
+        .await;
         let state = common::create_test_state(common::test_config(), database.pool.clone());
         Self {
             database,

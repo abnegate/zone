@@ -2288,15 +2288,13 @@ mod tests {
     async fn a_run_in_another_workspace_is_refused_to_one_of_its_own_members() {
         let fixture = Fixture::create().await;
         let foreign = fixture.workspace("foreign").await;
-        workspace_members::add_member(
+        crate::db::testing::seat(
             &fixture.pool,
             foreign,
             fixture.user,
             workspace_members::WorkspaceRole::Member,
-            None,
         )
-        .await
-        .expect("the caller joins the workspace that owns the run");
+        .await;
         let run = fixture.run(foreign).await;
 
         assert!(
@@ -2367,15 +2365,13 @@ mod tests {
             .await
             .unwrap()
             .id;
-            workspace_members::add_member(
+            crate::db::testing::seat(
                 &pool,
                 workspace,
                 user,
                 workspace_members::WorkspaceRole::Member,
-                None,
             )
-            .await
-            .unwrap();
+            .await;
             let state = AppState::new(test_config(), pool.clone(), None);
             Self {
                 pool,

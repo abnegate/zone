@@ -71,6 +71,7 @@ mock.module('../../enterprise', () => ({
   Permission,
   RolesSection: licensed('roles-section'),
   RunnersSection: licensed('runners-section'),
+  ScimSection: licensed('scim-section'),
   SERVER_SCOPE: { kind: 'server' },
   SpendPage: marker('spend-page'),
   SsoSection: marker('sso-section'),
@@ -420,6 +421,53 @@ describe('SettingsContent', () => {
         <SettingsContent
           group={SettingsGroup.Organization}
           section={SettingsSection.Roles}
+          access={access('admin', 'owner')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+  });
+
+  describe('organization SCIM provisioning', () => {
+    it('renders the SCIM provisioning of the current organization for an organization owner', () => {
+      renderSection(SettingsGroup.Organization, SettingsSection.Scim, access('member', 'owner'));
+      expect(propsOf('scim-section')).toEqual({ organizationId });
+    });
+
+    it.each([true, false])(
+      'tells SCIM provisioning whether the viewer administers the server (%p), so license notices link only where the License page is reachable',
+      (administersServer) => {
+        renderSection(SettingsGroup.Organization, SettingsSection.Scim, {
+          ...access('member', 'owner'),
+          administersServer,
+        });
+        expect(screen.getByTestId('scim-section')).toHaveAttribute(
+          'data-administers-server',
+          String(administersServer)
+        );
+      }
+    );
+
+    it.each(['admin', 'member'] as const)(
+      'renders no SCIM provisioning for an organization %s',
+      (organizationRole) => {
+        const { container } = render(
+          <SettingsContent
+            group={SettingsGroup.Organization}
+            section={SettingsSection.Scim}
+            access={access('admin', organizationRole)}
+          />
+        );
+        expect(container.innerHTML).toBe('');
+      }
+    );
+
+    it('renders no SCIM provisioning without a current organization', () => {
+      workspaceContext.currentOrganization = null;
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.Scim}
           access={access('admin', 'owner')}
         />
       );
@@ -849,6 +897,26 @@ describe('SettingsContent', () => {
         holding([...BASE, Permission.RolesUpdate], undefined)
       );
       expect(propsOf('roles-section')).toEqual({ organizationId });
+    });
+
+    it('renders the SCIM provisioning page only with scim:update', () => {
+      renderSection(
+        SettingsGroup.Organization,
+        SettingsSection.Scim,
+        holding([...BASE, Permission.ScimUpdate], undefined)
+      );
+      expect(propsOf('scim-section')).toEqual({ organizationId });
+    });
+
+    it('renders no SCIM provisioning page to an organization owner rank whose permissions lack scim:update', () => {
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.Scim}
+          access={{ ...holding(BASE, undefined), organizationRole: 'owner' }}
+        />
+      );
+      expect(container.innerHTML).toBe('');
     });
 
     it('renders no roles page to an organization admin rank whose permissions lack roles:update', () => {

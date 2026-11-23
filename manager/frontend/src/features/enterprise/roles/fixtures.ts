@@ -19,6 +19,7 @@ const RESERVED: ReadonlySet<PermissionName> = new Set([
   Permission.OrganizationDelete,
   Permission.AdministratorsUpdate,
   Permission.RolesUpdate,
+  Permission.ScimUpdate,
   Permission.WorkspaceRead,
   Permission.WorkspaceDelete,
   Permission.WorkspaceAdministratorsUpdate,

@@ -1,0 +1,22 @@
+{
+    "schemas": [
+        "urn:ietf:params:scim:schemas:core:2.0:User",
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"],
+    "externalId": "{{external_id}}",
+    "userName": "{{user_name}}",
+    "active": true,
+    "emails": [{
+        "primary": true,
+        "type": "work",
+        "value": "{{user_name}}"
+    }],
+    "meta": {
+        "resourceType": "User"
+    },
+    "name": {
+        "formatted": "givenName familyName",
+        "familyName": "familyName",
+        "givenName": "givenName"
+    },
+    "roles": []
+}

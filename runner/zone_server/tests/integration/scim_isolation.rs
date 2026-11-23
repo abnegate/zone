@@ -1,0 +1,862 @@
+use axum::http::{Method, StatusCode};
+use serde_json::{Value, json};
+use uuid::Uuid;
+use zone_server::auth::Permission;
+use zone_server::db::audit::actions;
+use zone_server::db::organization_members::{self, OrgRole};
+
+use crate::common::TestResponse;
+use crate::common::scim::{
+    self, Fixture, GROUP_SCHEMA, IssuedToken, PATCH_SCHEMA, USER_SCHEMA, assert_refused,
+    assert_scim, resource_id,
+};
+use crate::common::sso::{Account, Audit};
+use crate::common::test_email;
+
+const PREFIX: &str = "scim_isolation";
+const NEIGHBOUR_GROUP: &str = "Neighbours";
+const NEIGHBOUR_EXTERNAL_ID: &str = "00u-neighbour";
+
+struct Neighbour {
+    owner: Account,
+    organization: Uuid,
+    token: IssuedToken,
+    user: Uuid,
+    user_name: String,
+    member: Account,
+    group: Uuid,
+    role: Uuid,
+}
+
+fn patch(operations: Value) -> Value {
+    json!({ "schemas": [PATCH_SCHEMA], "Operations": operations })
+}
+
+fn user(user_name: &str, external_id: &str) -> Value {
+    json!({
+        "schemas": [USER_SCHEMA],
+        "userName": user_name,
+        "externalId": external_id,
+        "displayName": "Neighbour",
+        "emails": [{ "value": user_name, "type": "work", "primary": true }],
+        "active": true,
+    })
+}
+
+fn filtered(attribute: &str, value: &str) -> String {
+    format!("{attribute}%20eq%20%22{value}%22")
+}
+
+async fn neighbour(fixture: &Fixture) -> Neighbour {
+    let owner = fixture.stranger().await;
+    let organization = fixture.organization_of(&owner).await;
+    let token = fixture.token_for(organization).await;
+    let base = scim::base(organization);
+    let user_name = test_email();
+    let created = fixture
+        .scim(
+            Method::POST,
+            &format!("{base}/Users"),
+            &token.secret,
+            Some(&user(&user_name, NEIGHBOUR_EXTERNAL_ID)),
+        )
+        .await;
+    assert_scim(&created, StatusCode::CREATED);
+    let user = resource_id(&created);
+    let member = fixture.member_of(organization, OrgRole::Member).await;
+    let group = fixture
+        .scim(
+            Method::POST,
+            &format!("{base}/Groups"),
+            &token.secret,
+            Some(&json!({
+                "schemas": [GROUP_SCHEMA],
+                "displayName": NEIGHBOUR_GROUP,
+                "externalId": NEIGHBOUR_EXTERNAL_ID,
+                "members": [{ "value": user }],
+            })),
+        )
+        .await;
+    assert_scim(&group, StatusCode::CREATED);
+    let group = resource_id(&group);
+    let role = fixture
+        .custom_role(organization, "Neighbourly", &[Permission::AuditLogsRead])
+        .await;
+    fixture
+        .inner
+        .client
+        .put_json_auth(
+            &format!("/api/organizations/{organization}/scim/groups/{group}/mapping"),
+            &json!({ "custom_role_id": role }),
+            &owner.token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    Neighbour {
+        owner,
+        organization,
+        token,
+        user,
+        user_name,
+        member,
+        group,
+        role,
+    }
+}
+
+async fn held_in(
+    fixture: &Fixture,
+    organization: Uuid,
+    user: Uuid,
+) -> Option<(String, Option<Uuid>, bool)> {
+    sqlx::query_as(
+        "SELECT role, custom_role_id, is_active FROM organization_members \
+         WHERE organization_id = $1 AND user_id = $2",
+    )
+    .bind(organization)
+    .bind(user)
+    .fetch_optional(fixture.pool())
+    .await
+    .unwrap()
+}
+
+async fn account(fixture: &Fixture, user: Uuid) -> (String, Option<String>) {
+    sqlx::query_as("SELECT email, display_name FROM users WHERE id = $1")
+        .bind(user)
+        .fetch_one(fixture.pool())
+        .await
+        .unwrap()
+}
+
+async fn errors(fixture: &Fixture, organization: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM scim_errors WHERE organization_id = $1")
+        .bind(organization)
+        .fetch_one(fixture.pool())
+        .await
+        .unwrap()
+}
+
+fn invalid(response: &TestResponse) {
+    assert_refused(response, StatusCode::BAD_REQUEST, Some("invalidValue"));
+}
+
+#[tokio::test]
+async fn a_token_never_reaches_another_organizations_users_groups_or_roles() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    let ours = fixture.provision(&token.secret, &test_email()).await;
+    let created = fixture
+        .scim_post(
+            "/Groups",
+            &token.secret,
+            &json!({ "schemas": [GROUP_SCHEMA], "displayName": "Ours", "members": [{ "value": ours }] }),
+        )
+        .await;
+    assert_scim(&created, StatusCode::CREATED);
+    let group = resource_id(&created);
+    let neighbour = neighbour(&fixture).await;
+    let secret = token.secret.as_str();
+    let mut refusals = 0;
+
+    for theirs in [neighbour.user, neighbour.member.id, neighbour.owner.id] {
+        let path = format!("/Users/{theirs}");
+        assert_refused(
+            &fixture.scim_get(&path, secret).await,
+            StatusCode::NOT_FOUND,
+            None,
+        );
+        assert_refused(
+            &fixture
+                .scim_patch(
+                    &path,
+                    secret,
+                    &patch(json!([{ "op": "replace", "path": "active", "value": false }])),
+                )
+                .await,
+            StatusCode::NOT_FOUND,
+            None,
+        );
+        assert_refused(
+            &fixture
+                .scim_put(&path, secret, &user(&test_email(), "taken-over"))
+                .await,
+            StatusCode::NOT_FOUND,
+            None,
+        );
+        assert_refused(
+            &fixture.scim_delete(&path, secret).await,
+            StatusCode::NOT_FOUND,
+            None,
+        );
+        refusals += 4;
+    }
+
+    let theirs = format!("/Groups/{}", neighbour.group);
+    assert_refused(
+        &fixture.scim_get(&theirs, secret).await,
+        StatusCode::NOT_FOUND,
+        None,
+    );
+    assert_refused(
+        &fixture
+            .scim_patch(
+                &theirs,
+                secret,
+                &patch(json!([{ "op": "remove", "path": "members" }])),
+            )
+            .await,
+        StatusCode::NOT_FOUND,
+        None,
+    );
+    assert_refused(
+        &fixture
+            .scim_put(
+                &theirs,
+                secret,
+                &json!({ "schemas": [GROUP_SCHEMA], "displayName": "Taken", "members": [] }),
+            )
+            .await,
+        StatusCode::NOT_FOUND,
+        None,
+    );
+    assert_refused(
+        &fixture.scim_delete(&theirs, secret).await,
+        StatusCode::NOT_FOUND,
+        None,
+    );
+    refusals += 4;
+
+    let listed = fixture.scim_get("/Users", secret).await.json_value();
+    assert_eq!(listed["totalResults"], json!(2), "{listed}");
+    let listed: Vec<Value> = listed["Resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|resource| resource["id"].clone())
+        .collect();
+    assert_eq!(listed, vec![json!(fixture.owner.id), json!(ours)]);
+    let groups = fixture.scim_get("/Groups", secret).await.json_value();
+    assert_eq!(groups["totalResults"], json!(1));
+    assert_eq!(groups["Resources"][0]["id"], json!(group));
+
+    for lookup in [
+        format!(
+            "/Users?filter={}",
+            filtered("userName", &neighbour.user_name)
+        ),
+        format!(
+            "/Users?filter={}",
+            filtered("userName", &neighbour.member.email)
+        ),
+        format!(
+            "/Users?filter={}",
+            filtered("userName", &neighbour.owner.email)
+        ),
+        format!(
+            "/Users?filter={}",
+            filtered("id", &neighbour.user.to_string())
+        ),
+        format!(
+            "/Users?filter={}",
+            filtered("externalId", NEIGHBOUR_EXTERNAL_ID)
+        ),
+        format!("/Users?filter={}", filtered("displayName", "Neighbour")),
+        format!(
+            "/Groups?filter={}",
+            filtered("displayName", NEIGHBOUR_GROUP)
+        ),
+        format!(
+            "/Groups?filter={}",
+            filtered("externalId", NEIGHBOUR_EXTERNAL_ID)
+        ),
+        format!(
+            "/Groups?filter={}",
+            filtered("id", &neighbour.group.to_string())
+        ),
+        format!(
+            "/Groups?filter={}",
+            filtered("members", &neighbour.user.to_string())
+        ),
+    ] {
+        let found = fixture.scim_get(&lookup, secret).await;
+        assert_scim(&found, StatusCode::OK);
+        assert_eq!(found.json_value()["totalResults"], json!(0), "{lookup}");
+    }
+
+    let ours_path = format!("/Groups/{group}");
+    for theirs in [neighbour.user, neighbour.member.id] {
+        invalid(
+            &fixture
+                .scim_post(
+                    "/Groups",
+                    secret,
+                    &json!({
+                        "schemas": [GROUP_SCHEMA],
+                        "displayName": format!("Poached {theirs}"),
+                        "members": [{ "value": theirs }],
+                    }),
+                )
+                .await,
+        );
+        invalid(
+            &fixture
+                .scim_patch(
+                    &ours_path,
+                    secret,
+                    &patch(
+                        json!([{ "op": "add", "path": "members", "value": [{ "value": theirs }] }]),
+                    ),
+                )
+                .await,
+        );
+        invalid(
+            &fixture
+                .scim_patch(
+                    &ours_path,
+                    secret,
+                    &patch(json!([{
+                        "op": "replace",
+                        "path": "members",
+                        "value": [{ "value": ours }, { "value": theirs }],
+                    }])),
+                )
+                .await,
+        );
+        invalid(
+            &fixture
+                .scim_put(
+                    &ours_path,
+                    secret,
+                    &json!({
+                        "schemas": [GROUP_SCHEMA],
+                        "displayName": "Ours",
+                        "members": [{ "value": theirs }],
+                    }),
+                )
+                .await,
+        );
+        refusals += 4;
+        let removed = fixture
+            .scim_patch(
+                &ours_path,
+                secret,
+                &patch(
+                    json!([{ "op": "remove", "path": format!("members[value eq \"{theirs}\"]") }]),
+                ),
+            )
+            .await;
+        assert_scim(&removed, StatusCode::OK);
+    }
+    let roster = fixture.scim_get(&ours_path, secret).await.json_value();
+    assert_eq!(roster["members"][0]["value"], json!(ours.to_string()));
+    assert_eq!(roster["members"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        fixture.scim_get("/Groups", secret).await.json_value()["totalResults"],
+        json!(1),
+        "a refused group was created"
+    );
+
+    let borrowed = fixture
+        .map(group, &json!({ "custom_role_id": neighbour.role }))
+        .await;
+    borrowed.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(borrowed.json_value()["code"], json!("scim_role_not_found"));
+    assert_eq!(
+        fixture.holding(ours).await,
+        Some((OrgRole::Member.as_str().to_owned(), None, true))
+    );
+
+    for (owner, organization) in [
+        (&fixture.owner, neighbour.organization),
+        (&neighbour.owner, fixture.organization),
+    ] {
+        fixture
+            .inner
+            .client
+            .get_auth(
+                &format!("/api/organizations/{organization}/scim"),
+                &owner.token,
+            )
+            .await
+            .assert_status(StatusCode::FORBIDDEN);
+    }
+    fixture
+        .inner
+        .client
+        .put_json_auth(
+            &format!(
+                "/api/organizations/{}/scim/groups/{}/mapping",
+                neighbour.organization, neighbour.group
+            ),
+            &json!({ "role": "admin" }),
+            &fixture.owner.token,
+        )
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+
+    assert_eq!(
+        held_in(&fixture, neighbour.organization, neighbour.user).await,
+        Some((
+            OrgRole::Member.as_str().to_owned(),
+            Some(neighbour.role),
+            true
+        ))
+    );
+    assert_eq!(
+        held_in(&fixture, neighbour.organization, neighbour.member.id).await,
+        Some((OrgRole::Member.as_str().to_owned(), None, true))
+    );
+    assert!(fixture.signed_in(&neighbour.member.token).await);
+    let base = scim::base(neighbour.organization);
+    let roster = fixture
+        .scim(
+            Method::GET,
+            &format!("{base}/Groups/{}", neighbour.group),
+            &neighbour.token.secret,
+            None,
+        )
+        .await
+        .json_value();
+    assert_eq!(roster["displayName"], json!(NEIGHBOUR_GROUP));
+    assert_eq!(
+        roster["members"][0]["value"],
+        json!(neighbour.user.to_string())
+    );
+    let mapping: Option<Uuid> =
+        sqlx::query_scalar("SELECT custom_role_id FROM scim_groups WHERE id = $1")
+            .bind(neighbour.group)
+            .fetch_one(fixture.pool())
+            .await
+            .unwrap();
+    assert_eq!(mapping, Some(neighbour.role));
+
+    assert_eq!(errors(&fixture, fixture.organization).await, refusals);
+    assert_eq!(errors(&fixture, neighbour.organization).await, 0);
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn scim_renames_an_account_only_while_no_other_organization_shares_it() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    let neighbour = fixture.stranger().await;
+    let other = fixture.organization_of(&neighbour).await;
+    let shared = fixture.provision(&token.secret, &test_email()).await;
+    let departed = fixture.provision(&token.secret, &test_email()).await;
+    let alone = fixture.provision(&token.secret, &test_email()).await;
+    let returned = fixture.provision(&token.secret, &test_email()).await;
+    for user in [shared, departed, returned] {
+        organization_members::add_member(fixture.pool(), other, user, OrgRole::Member, None)
+            .await
+            .unwrap();
+    }
+    let theirs = fixture.token_for(other).await;
+    fixture
+        .scim(
+            Method::DELETE,
+            &format!("{}/Users/{returned}", scim::base(other)),
+            &theirs.secret,
+            None,
+        )
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    sqlx::query(
+        "UPDATE organization_members SET is_active = FALSE \
+         WHERE organization_id = $1 AND user_id = $2",
+    )
+    .bind(other)
+    .bind(departed)
+    .execute(fixture.pool())
+    .await
+    .unwrap();
+
+    for user in [shared, departed, alone, returned] {
+        let before = account(&fixture, user).await;
+        let email = test_email();
+        let renamed = fixture
+            .scim_patch(
+                &format!("/Users/{user}"),
+                &token.secret,
+                &patch(json!([
+                    { "op": "replace", "path": "displayName", "value": "Renamed" },
+                    { "op": "replace", "path": "emails[type eq \"work\"].value", "value": email },
+                ])),
+            )
+            .await;
+        assert_scim(&renamed, StatusCode::OK);
+        let body = renamed.json_value();
+        assert_eq!(body["displayName"], json!("Renamed"));
+        assert_eq!(body["emails"][0]["value"], json!(email));
+
+        let after = account(&fixture, user).await;
+        if user == alone || user == returned {
+            assert_eq!(after, (email, Some("Renamed".to_owned())));
+        } else {
+            assert_eq!(
+                after, before,
+                "an account another organization shares was renamed"
+            );
+        }
+    }
+
+    let read = fixture
+        .scim(
+            Method::GET,
+            &format!("{}/Users/{shared}", scim::base(other)),
+            &theirs.secret,
+            None,
+        )
+        .await;
+    assert_scim(&read, StatusCode::OK);
+    let (email, _) = account(&fixture, shared).await;
+    assert_eq!(read.json_value()["userName"], json!(email));
+    assert_eq!(read.json_value()["emails"][0]["value"], json!(email));
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn another_organizations_token_cannot_sign_out_its_members() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    let neighbour = neighbour(&fixture).await;
+    let only_ours = fixture.stranger().await;
+
+    for person in [&neighbour.member, &neighbour.owner, &only_ours] {
+        let joined = fixture
+            .scim_post(
+                "/Users",
+                &token.secret,
+                &user(&person.email, &Uuid::new_v4().to_string()),
+            )
+            .await;
+        assert_scim(&joined, StatusCode::CREATED);
+        let deactivated = fixture
+            .scim_patch(
+                &format!("/Users/{}", person.id),
+                &token.secret,
+                &patch(json!([{ "op": "replace", "value": { "active": false } }])),
+            )
+            .await;
+        assert_scim(&deactivated, StatusCode::OK);
+        assert_eq!(
+            held_in(&fixture, fixture.organization, person.id)
+                .await
+                .map(|(.., active)| active),
+            Some(false),
+            "the deactivation did not take this organization's access"
+        );
+        assert!(!fixture.admitted(fixture.organization, &person.token).await);
+    }
+    assert!(
+        fixture.signed_in(&neighbour.member.token).await,
+        "deactivating another organization's member signed them out"
+    );
+    assert!(
+        fixture.signed_in(&neighbour.owner.token).await,
+        "deactivating another organization's owner signed them out"
+    );
+    assert!(
+        fixture.signed_in(&only_ours.token).await,
+        "deactivating an account the organization adopted signed it out"
+    );
+    assert!(
+        fixture
+            .admitted(neighbour.organization, &neighbour.owner.token)
+            .await
+    );
+
+    fixture
+        .scim_delete(&format!("/Users/{}", neighbour.member.id), &token.secret)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert_eq!(
+        held_in(&fixture, fixture.organization, neighbour.member.id).await,
+        None
+    );
+    assert!(
+        fixture.signed_in(&neighbour.member.token).await,
+        "deleting another organization's member signed them out"
+    );
+    assert_eq!(
+        held_in(&fixture, neighbour.organization, neighbour.member.id).await,
+        Some((OrgRole::Member.as_str().to_owned(), None, true))
+    );
+
+    fixture.cleanup().await;
+}
+
+fn signed_out(audit: &Audit) -> &Value {
+    &audit.new_values.as_ref().unwrap()["signed_out"]
+}
+
+#[tokio::test]
+async fn adopting_an_existing_account_never_signs_it_out() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    let person = fixture.stranger().await;
+    let path = format!("/Users/{}", person.id);
+    let mut inactive = user(&person.email, "00u-adopted");
+    inactive["active"] = json!(false);
+
+    let adopted = fixture.scim_post("/Users", &token.secret, &inactive).await;
+    assert_scim(&adopted, StatusCode::CREATED);
+    assert_eq!(
+        resource_id(&adopted),
+        person.id,
+        "the account joins as itself"
+    );
+    assert_eq!(
+        held_in(&fixture, fixture.organization, person.id)
+            .await
+            .map(|(.., active)| active),
+        Some(false)
+    );
+    assert!(
+        fixture.signed_in(&person.token).await,
+        "adopting an account as inactive signed it out"
+    );
+    assert!(!fixture.admitted(fixture.organization, &person.token).await);
+
+    let deactivated = fixture
+        .scim_patch(
+            &path,
+            &token.secret,
+            &patch(json!([{ "op": "replace", "value": { "active": false } }])),
+        )
+        .await;
+    assert_scim(&deactivated, StatusCode::OK);
+    assert!(
+        fixture.signed_in(&person.token).await,
+        "deactivating an adopted account signed it out"
+    );
+    assert!(!fixture.admitted(fixture.organization, &person.token).await);
+
+    fixture
+        .scim_delete(&path, &token.secret)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert_eq!(
+        held_in(&fixture, fixture.organization, person.id).await,
+        None
+    );
+    assert!(
+        fixture.signed_in(&person.token).await,
+        "deleting an adopted account signed it out"
+    );
+    assert!(!fixture.admitted(fixture.organization, &person.token).await);
+    assert!(
+        fixture.refreshes(&person).await,
+        "deprovisioning an adopted account revoked its refresh token"
+    );
+
+    let created = fixture.audits(actions::SCIM_USER_CREATED).await;
+    assert_eq!(created.len(), 1);
+    assert_eq!(signed_out(&created[0]), &json!(false));
+    let deleted = fixture.audits(actions::SCIM_USER_DELETED).await;
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(signed_out(&deleted[0]), &json!(false));
+    assert!(
+        fixture
+            .audits(actions::SCIM_USER_DEACTIVATED)
+            .await
+            .is_empty(),
+        "deactivating an inactive member that kept its sessions was audited as a sign-out"
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_account_this_organization_created_is_signed_out_when_it_leaves() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    let neighbour = neighbour(&fixture).await;
+    let deactivated = fixture
+        .sign_in(fixture.provision(&token.secret, &test_email()).await)
+        .await;
+    let deleted = fixture
+        .sign_in(fixture.provision(&token.secret, &test_email()).await)
+        .await;
+    let shared = fixture
+        .sign_in(fixture.provision(&token.secret, &test_email()).await)
+        .await;
+    organization_members::add_member(
+        fixture.pool(),
+        neighbour.organization,
+        shared.id,
+        OrgRole::Member,
+        None,
+    )
+    .await
+    .unwrap();
+
+    for person in [&deactivated, &shared] {
+        assert_scim(
+            &fixture
+                .scim_patch(
+                    &format!("/Users/{}", person.id),
+                    &token.secret,
+                    &patch(json!([{ "op": "replace", "value": { "active": false } }])),
+                )
+                .await,
+            StatusCode::OK,
+        );
+    }
+    fixture
+        .scim_delete(&format!("/Users/{}", deleted.id), &token.secret)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    for person in [&deactivated, &deleted] {
+        assert!(
+            !fixture.signed_in(&person.token).await,
+            "an account this organization created stayed signed in"
+        );
+        assert!(
+            !fixture.refreshes(person).await,
+            "an account this organization created kept its refresh token"
+        );
+    }
+    assert!(
+        fixture.signed_in(&shared.token).await,
+        "an account another organization shares was signed out"
+    );
+    assert!(
+        fixture
+            .admitted(neighbour.organization, &shared.token)
+            .await
+    );
+    assert!(!fixture.admitted(fixture.organization, &shared.token).await);
+
+    let deactivations = fixture.audits(actions::SCIM_USER_DEACTIVATED).await;
+    for (person, expected) in [(&deactivated, true), (&shared, false)] {
+        let audit = deactivations
+            .iter()
+            .find(|audit| audit.resource_id == Some(person.id))
+            .unwrap();
+        assert_eq!(signed_out(audit), &json!(expected));
+    }
+    let deletions = fixture.audits(actions::SCIM_USER_DELETED).await;
+    assert_eq!(deletions.len(), 1);
+    assert_eq!(signed_out(&deletions[0]), &json!(true));
+
+    fixture.cleanup().await;
+}
+
+async fn claim(fixture: &Fixture, statement: &'static str, user: Uuid) {
+    sqlx::query(statement)
+        .bind(user)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+}
+
+async fn linked_email(fixture: &Fixture, user: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT email FROM scim_users WHERE organization_id = $1 AND user_id = $2")
+        .bind(fixture.organization)
+        .bind(user)
+        .fetch_one(fixture.pool())
+        .await
+        .unwrap()
+}
+
+async fn verified(fixture: &Fixture, user: Uuid) -> bool {
+    sqlx::query_scalar("SELECT email_verified FROM users WHERE id = $1")
+        .bind(user)
+        .fetch_one(fixture.pool())
+        .await
+        .unwrap()
+}
+
+fn readdressed(email: &str) -> Value {
+    patch(json!([
+        { "op": "replace", "path": "displayName", "value": "Taken Over" },
+        { "op": "replace", "path": "emails[type eq \"work\"].value", "value": email },
+    ]))
+}
+
+#[tokio::test]
+async fn a_claimed_account_keeps_its_email() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    let provider: Uuid = sqlx::query_scalar(
+        "INSERT INTO sso_providers (display_name, issuer, client_id, client_secret) \
+         VALUES ('Acme', 'https://idp.acme.test', 'zone', 'secret') RETURNING id",
+    )
+    .fetch_one(fixture.pool())
+    .await
+    .unwrap();
+    let claims = [
+        "UPDATE users SET last_login_at = NOW() WHERE id = $1",
+        "UPDATE users SET password_hash = 'reset by its owner' WHERE id = $1",
+        "UPDATE users SET is_admin = TRUE WHERE id = $1",
+    ];
+    let mut claimed = Vec::with_capacity(claims.len() + 1);
+    for statement in claims {
+        let user = fixture.provision(&token.secret, &test_email()).await;
+        claim(&fixture, statement, user).await;
+        claimed.push(user);
+    }
+    let linked = fixture.provision(&token.secret, &test_email()).await;
+    sqlx::query(
+        "INSERT INTO sso_identities (provider_id, user_id, subject, email) \
+         SELECT $1, id, 'subject', email FROM users WHERE id = $2",
+    )
+    .bind(provider)
+    .bind(linked)
+    .execute(fixture.pool())
+    .await
+    .unwrap();
+    claimed.push(linked);
+
+    for user in claimed {
+        let before = account(&fixture, user).await;
+        let email = test_email();
+        let renamed = fixture
+            .scim_patch(
+                &format!("/Users/{user}"),
+                &token.secret,
+                &readdressed(&email),
+            )
+            .await;
+        assert_scim(&renamed, StatusCode::OK);
+        assert_eq!(renamed.json_value()["emails"][0]["value"], json!(email));
+        assert_eq!(
+            account(&fixture, user).await,
+            before,
+            "SCIM rewrote the email of an account its owner already claimed"
+        );
+        assert_eq!(linked_email(&fixture, user).await, Some(email));
+    }
+
+    let untouched = fixture.provision(&token.secret, &test_email()).await;
+    claim(
+        &fixture,
+        "UPDATE users SET email_verified = TRUE WHERE id = $1",
+        untouched,
+    )
+    .await;
+    let email = test_email();
+    assert_scim(
+        &fixture
+            .scim_patch(
+                &format!("/Users/{untouched}"),
+                &token.secret,
+                &readdressed(&email),
+            )
+            .await,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        account(&fixture, untouched).await,
+        (email.to_lowercase(), Some("Taken Over".to_owned()))
+    );
+    assert!(
+        !verified(&fixture, untouched).await,
+        "a rewritten email kept the old address's verification"
+    );
+
+    fixture.cleanup().await;
+}

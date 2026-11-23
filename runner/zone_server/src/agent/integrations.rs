@@ -4851,15 +4851,13 @@ mod tests {
         };
         let denied = tool.run(json!({"source_id":source.id})).await.unwrap_err();
         assert!(denied.contains("cannot read"));
-        workspace_members::add_member(
+        crate::db::testing::seat(
             &pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Viewer,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let allowed = tool.run(json!({"source_id":source.id})).await.unwrap_err();
         assert!(allowed.contains("configuration is invalid"));
         let foreign_result = tool.run(json!({"source_id":other.id})).await.unwrap_err();

@@ -33,6 +33,7 @@ pub struct Account {
     pub id: Uuid,
     pub email: String,
     pub token: String,
+    pub refresh: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -100,6 +101,7 @@ impl Fixture {
             id: body["user"]["id"].as_str().unwrap().parse().unwrap(),
             email,
             token: body["access_token"].as_str().unwrap().to_owned(),
+            refresh: body["refresh_token"].as_str().unwrap().to_owned(),
         }
     }
 

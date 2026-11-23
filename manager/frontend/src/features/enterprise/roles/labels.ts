@@ -103,6 +103,11 @@ export const PERMISSION_LABELS: Readonly<Record<PermissionName, PermissionLabel>
     label: 'Manage roles',
     description: 'Create, edit and delete custom roles. Only owners and admins can do this.',
   },
+  [Permission.ScimUpdate]: {
+    label: 'Set up SCIM provisioning',
+    description:
+      'Issue and revoke SCIM tokens and map pushed groups to roles. Only owners can do this.',
+  },
   [Permission.WorkspaceRead]: {
     label: 'See the workspace',
     description: 'Open the workspace and read its chats, files and sources. Every role has this.',

@@ -97,7 +97,11 @@ async fn seat_workspace(
     custom_role: Option<Uuid>,
 ) {
     sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, user_id, role, custom_role_id) \
+        "WITH joined AS ( \
+           INSERT INTO organization_members (organization_id, user_id, role) \
+           SELECT organization_id, $2, 'member' FROM workspaces WHERE id = $1 \
+           ON CONFLICT DO NOTHING) \
+         INSERT INTO workspace_members (workspace_id, user_id, role, custom_role_id) \
          VALUES ($1, $2, $3, $4)",
     )
     .bind(workspace)
@@ -444,7 +448,11 @@ async fn workspace_permits_ignores_a_stored_name_no_custom_role_may_carry() {
             .expect("a stored permission past the check");
     }
     sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, user_id, role, custom_role_id) \
+        "WITH joined AS ( \
+           INSERT INTO organization_members (organization_id, user_id, role) \
+           SELECT organization_id, $2, 'member' FROM workspaces WHERE id = $1 \
+           ON CONFLICT DO NOTHING) \
+         INSERT INTO workspace_members (workspace_id, user_id, role, custom_role_id) \
          VALUES ($1, $2, $3, $4)",
     )
     .bind(workspace)
@@ -969,7 +977,7 @@ async fn a_role_someone_holds_cannot_be_deleted() {
         .await
         .expect("the delete is answered");
     assert!(
-        matches!(outcome, Deletion::Deleted(ref deleted) if deleted.id == role),
+        matches!(outcome, Deletion::Deleted { role: ref deleted, .. } if deleted.id == role),
         "{outcome:?}"
     );
 
@@ -1006,7 +1014,7 @@ async fn delete_lets_go_of_inactive_references_before_it_deletes() {
     let outcome = custom_roles::delete(&pool, organization, role, admin)
         .await
         .expect("the delete is answered");
-    assert!(matches!(outcome, Deletion::Deleted(_)), "{outcome:?}");
+    assert!(matches!(outcome, Deletion::Deleted { .. }), "{outcome:?}");
     assert_eq!(
         custom_role_of_organization_member(&pool, organization, member).await,
         None

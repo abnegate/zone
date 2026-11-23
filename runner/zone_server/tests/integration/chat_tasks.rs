@@ -12,7 +12,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use zone_server::agent::{ChatTools, WorkspaceScope};
 use zone_server::db::actions::{self, StartTask};
-use zone_server::db::workspace_members::{self, WorkspaceRole};
+use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::state::AppState;
 
 struct Registered {
@@ -111,9 +111,7 @@ impl Workspace {
 
     async fn join(&self, role: WorkspaceRole) -> Registered {
         let joined = register(&self.client).await;
-        workspace_members::add_member(self.state.db(), self.workspace, joined.user, role, None)
-            .await
-            .expect("a member");
+        crate::common::seat::seat(self.state.db(), self.workspace, joined.user, role).await;
         joined
     }
 }

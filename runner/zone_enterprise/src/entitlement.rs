@@ -15,6 +15,7 @@ pub enum Feature {
     AuditRetention,
     CustomRoles,
     Spend,
+    Scim,
     /// Uncapped membership: without it a server admits at most the Community member cap.
     Members,
     /// Runner fleet policy: cordoning and revoking runners, a minimum runner version, and the
@@ -25,7 +26,7 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Sso,
         Self::Policy,
         Self::AuditExport,
@@ -33,6 +34,7 @@ impl Feature {
         Self::AuditRetention,
         Self::CustomRoles,
         Self::Spend,
+        Self::Scim,
         Self::Members,
         Self::FleetPolicy,
         Self::Distribution,
@@ -47,6 +49,7 @@ impl Feature {
             | Self::AuditStreaming
             | Self::AuditRetention
             | Self::CustomRoles
+            | Self::Scim
             | Self::FleetPolicy
             | Self::Distribution => Plan::Enterprise,
         }
@@ -95,6 +98,7 @@ mod tests {
         let listed: HashSet<Feature> = Feature::ALL.into_iter().collect();
         assert_eq!(listed.len(), Feature::ALL.len());
         assert!(listed.contains(&Feature::CustomRoles));
+        assert!(listed.contains(&Feature::Scim));
         assert!(listed.contains(&Feature::FleetPolicy));
         assert!(listed.contains(&Feature::Distribution));
     }

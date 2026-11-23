@@ -33,6 +33,7 @@ export const Permission = {
   SpendRead: 'spend:read',
   SpendUpdate: 'spend:update',
   RolesUpdate: 'roles:update',
+  ScimUpdate: 'scim:update',
   WorkspaceRead: 'workspace:read',
   WorkspaceWrite: 'workspace:write',
   WorkspaceUpdate: 'workspace:update',
@@ -92,6 +93,7 @@ export const ORGANIZATION_PERMISSIONS = [
   Permission.SpendRead,
   Permission.SpendUpdate,
   Permission.RolesUpdate,
+  Permission.ScimUpdate,
 ] as const;
 
 export const WORKSPACE_PERMISSIONS = [

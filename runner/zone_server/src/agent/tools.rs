@@ -495,6 +495,19 @@ impl ChatTools {
             .map_or(Origin::Member, |scope| scope.origin)
     }
 
+    /// Whether whoever these tools act for may still write to their
+    /// workspace. Only the database saying no withdraws them; a recheck that
+    /// fails to reach it does not.
+    pub(crate) async fn permitted(&self) -> bool {
+        let Some(scope) = &self.scope else {
+            return true;
+        };
+        !matches!(
+            workspace_members::can_write(scope.state.db(), scope.workspace_id, scope.user_id).await,
+            Ok(false)
+        )
+    }
+
     /// No tools at all, for a chat that answers from the server's own context.
     ///
     /// Built directly rather than through `assemble`, which would
@@ -3275,15 +3288,13 @@ mod tests {
         )
         .await
         .unwrap();
-        workspace_members::add_member(
+        crate::db::testing::seat(
             &pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Member,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let state = AppState::new(test_config(), pool.clone(), None);
         state.disable_mcp();
 
@@ -3839,15 +3850,13 @@ mod tests {
         )
         .await
         .unwrap();
-        workspace_members::add_member(
+        crate::db::testing::seat(
             &pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Viewer,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let chat: Uuid = sqlx::query_scalar("INSERT INTO chats (workspace_id, title, model_name) VALUES ($1, 'Scope tests', 'test') RETURNING id").bind(workspace.id).fetch_one(&pool).await.unwrap();
         let state = AppState::new(test_config(), pool.clone(), None);
         state.disable_mcp();

@@ -81,25 +81,33 @@ pub async fn verify_sources_in_workspace(
     Ok(count == source_ids.len() as i64)
 }
 
-pub async fn in_organization(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<bool> {
-    sqlx::query_scalar(
+/// Whether the user is an active member of the workspace's active
+/// organization, share-locking that membership for the rest of the
+/// transaction: a suspension or removal of the member waits for a seat being
+/// written beside it, or the seat waits for them and finds the member gone.
+pub async fn in_organization(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<bool> {
+    let held: Option<i32> = sqlx::query_scalar(
         r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM workspaces w
-            JOIN organizations o ON o.id = w.organization_id
-            JOIN organization_members m ON m.organization_id = o.id
-            WHERE w.id = $1
-              AND m.user_id = $2
-              AND m.is_active
-              AND o.is_active IS NOT FALSE
-        )
+        SELECT 1
+        FROM workspaces w
+        JOIN organizations o ON o.id = w.organization_id
+        JOIN organization_members m ON m.organization_id = o.id
+        WHERE w.id = $1
+          AND m.user_id = $2
+          AND m.is_active
+          AND o.is_active IS NOT FALSE
+        FOR SHARE OF m
         "#,
     )
     .bind(workspace_id)
     .bind(user_id)
-    .fetch_one(pool)
-    .await
+    .fetch_optional(connection)
+    .await?;
+    Ok(held.is_some())
 }
 
 /// Add a user to a workspace with a specific role
@@ -272,7 +280,7 @@ pub struct WorkspaceMemberRow {
 
 /// Get a workspace member by workspace and user ID
 pub async fn get_member(
-    pool: &PgPool,
+    executor: impl Executor<'_, Database = Postgres>,
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> DbResult<Option<WorkspaceMemberRow>> {
@@ -286,7 +294,7 @@ pub async fn get_member(
         workspace_id,
         user_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(row.map(|r| {
@@ -586,6 +594,12 @@ pub async fn membership(
         INNER JOIN workspaces w ON w.id = wm.workspace_id
         {join}
         WHERE wm.workspace_id = $1 AND wm.user_id = $2 AND wm.is_active = TRUE
+          AND EXISTS (
+            SELECT 1 FROM organization_members om
+            WHERE om.organization_id = w.organization_id
+              AND om.user_id = wm.user_id
+              AND om.is_active
+          )
         "#
     )))
     .bind(workspace_id)
@@ -632,6 +646,9 @@ impl Lock {
                 "SELECT wm.role, wm.custom_role_id, w.organization_id \
                  FROM workspace_members wm INNER JOIN workspaces w ON w.id = wm.workspace_id \
                  WHERE wm.workspace_id = $1 AND wm.user_id = $2 AND wm.is_active = TRUE \
+                 AND EXISTS (SELECT 1 FROM organization_members om \
+                   WHERE om.organization_id = w.organization_id AND om.user_id = wm.user_id \
+                   AND om.is_active) \
                  FOR SHARE OF wm"
             }
             Self::Update => {
@@ -701,7 +718,7 @@ struct MembershipRow {
 /// The workspace's active admins and owners, held for the length of a
 /// transaction so a count taken from them still describes the table when the
 /// update lands.
-struct Privileged {
+pub(crate) struct Privileged {
     all: Vec<Uuid>,
     owners: Vec<Uuid>,
 }
@@ -761,8 +778,8 @@ fn outranked(caller: &Grant, target: &Membership<WorkspaceRole>) -> bool {
     target.role >= WorkspaceRole::Admin && !caller.allows(Permission::WorkspaceAdministratorsUpdate)
 }
 
-async fn lock_privileged(
-    transaction: &mut sqlx::Transaction<'_, Postgres>,
+pub(crate) async fn lock_privileged(
+    connection: &mut PgConnection,
     workspace_id: Uuid,
 ) -> DbResult<Privileged> {
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
@@ -775,7 +792,7 @@ async fn lock_privileged(
         "#,
     )
     .bind(workspace_id)
-    .fetch_all(&mut **transaction)
+    .fetch_all(connection)
     .await?;
 
     Ok(Privileged {
@@ -786,6 +803,76 @@ async fn lock_privileged(
             .collect(),
         all: rows.into_iter().map(|(user_id, _)| user_id).collect(),
     })
+}
+
+pub async fn seat_successor(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+) -> DbResult<Option<Uuid>> {
+    sqlx::query(
+        r#"
+        SELECT owner.id
+        FROM organization_members AS owner
+        JOIN workspaces AS workspace ON workspace.organization_id = owner.organization_id
+        WHERE workspace.id = $1 AND owner.role = 'owner' AND owner.is_active
+        FOR UPDATE OF owner
+        "#,
+    )
+    .bind(workspace_id)
+    .execute(&mut *connection)
+    .await?;
+    lock_privileged(connection, workspace_id).await?;
+
+    let candidate: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT candidate.id
+        FROM workspace_members AS candidate
+        JOIN workspaces AS workspace ON workspace.id = candidate.workspace_id
+        WHERE candidate.workspace_id = $1
+          AND candidate.is_active
+          AND workspace.is_active
+          AND EXISTS (
+              SELECT 1
+              FROM organization_members AS membership
+              WHERE membership.organization_id = workspace.organization_id
+                AND membership.user_id = candidate.user_id
+                AND membership.is_active
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM workspace_members AS existing
+              WHERE existing.workspace_id = candidate.workspace_id
+                AND existing.is_active
+                AND existing.role = 'owner'
+          )
+        ORDER BY
+            (candidate.invited_by IS NULL) DESC,
+            CASE candidate.role
+                WHEN 'admin' THEN 0
+                WHEN 'member' THEN 1
+                WHEN 'viewer' THEN 2
+                ELSE 3
+            END,
+            candidate.created_at,
+            candidate.id
+        LIMIT 1
+        FOR UPDATE OF candidate
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(candidate) = candidate else {
+        return Ok(None);
+    };
+
+    sqlx::query_scalar(
+        "UPDATE workspace_members SET role = 'owner', custom_role_id = NULL, updated_at = NOW() \
+         WHERE id = $1 RETURNING user_id",
+    )
+    .bind(candidate)
+    .fetch_optional(connection)
+    .await
 }
 
 /// A role change as it landed: the updated row, and what it holds as read
@@ -930,6 +1017,8 @@ pub async fn change_role(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::organization_members;
+    use crate::db::organization_members::OrgRole;
     use crate::db::organizations;
     use crate::db::users;
     use crate::db::workspaces;
@@ -947,8 +1036,7 @@ mod tests {
     }
 
     async fn setup_test_data(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
-        // Create organization
-        let org_id = organizations::create_organization(
+        let organization_id = organizations::create_organization(
             pool,
             &format!("Test Org {}", Uuid::new_v4()),
             &format!("test-org-{}", Uuid::new_v4()),
@@ -958,10 +1046,9 @@ mod tests {
         .expect("Failed to create organization")
         .id;
 
-        // Create workspace
         let workspace_id = workspaces::create_workspace(
             pool,
-            org_id,
+            organization_id,
             &format!("Test Workspace {}", Uuid::new_v4()),
             &format!("test-ws-{}", Uuid::new_v4()),
             None,
@@ -970,7 +1057,6 @@ mod tests {
         .expect("Failed to create workspace")
         .id;
 
-        // Create user
         let user_email = format!("test-{}@example.com", Uuid::new_v4());
         let user_id =
             users::create_user(pool, &user_email, "password_hash", Some("Test User"), false)
@@ -978,7 +1064,11 @@ mod tests {
                 .expect("Failed to create user")
                 .id;
 
-        (org_id, workspace_id, user_id)
+        organization_members::add_member(pool, organization_id, user_id, OrgRole::Member, None)
+            .await
+            .expect("Failed to add organization member");
+
+        (organization_id, workspace_id, user_id)
     }
 
     #[tokio::test]
@@ -988,14 +1078,12 @@ mod tests {
     )]
     async fn test_is_member_returns_true_for_active_member() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
-        // Add user as member
         add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
             .await
             .expect("Failed to add member");
 
-        // Check membership
         let is_member_result = is_member(&pool, user_id, workspace_id)
             .await
             .expect("Failed to check membership");
@@ -1010,7 +1098,7 @@ mod tests {
     )]
     async fn test_list_members_with_users_carries_email_and_name() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
         add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
             .await
@@ -1040,9 +1128,8 @@ mod tests {
     )]
     async fn test_is_member_returns_false_for_non_member() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, _user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, _user_id) = setup_test_data(&pool).await;
 
-        // Create another user who is not a member
         let non_member_email = format!("non-member-{}@example.com", Uuid::new_v4());
         let non_member_id = users::create_user(
             &pool,
@@ -1055,7 +1142,6 @@ mod tests {
         .expect("Failed to create user")
         .id;
 
-        // Check membership
         let is_member_result = is_member(&pool, non_member_id, workspace_id)
             .await
             .expect("Failed to check membership");
@@ -1070,19 +1156,16 @@ mod tests {
     )]
     async fn test_is_member_returns_false_for_inactive_member() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
-        // Add user as member
         add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
             .await
             .expect("Failed to add member");
 
-        // Remove member (set inactive)
         remove_member(&pool, workspace_id, user_id)
             .await
             .expect("Failed to remove member");
 
-        // Check membership
         let is_member_result = is_member(&pool, user_id, workspace_id)
             .await
             .expect("Failed to check membership");
@@ -1100,7 +1183,7 @@ mod tests {
     )]
     async fn test_membership_returns_correct_role() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
         add_member(&pool, workspace_id, user_id, WorkspaceRole::Admin, None)
             .await
@@ -1121,9 +1204,8 @@ mod tests {
     )]
     async fn test_membership_returns_none_for_non_member() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, _user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, _user_id) = setup_test_data(&pool).await;
 
-        // Create another user who is not a member
         let non_member_email = format!("non-member-{}@example.com", Uuid::new_v4());
         let non_member_id = users::create_user(
             &pool,
@@ -1150,7 +1232,7 @@ mod tests {
     )]
     async fn test_permits_follows_the_built_in_admin_set() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
         add_member(&pool, workspace_id, user_id, WorkspaceRole::Admin, None)
             .await
@@ -1191,7 +1273,7 @@ mod tests {
     )]
     async fn test_verify_sources_in_workspace_returns_true_for_empty_list() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, _user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, _user_id) = setup_test_data(&pool).await;
 
         let result = verify_sources_in_workspace(&pool, workspace_id, &[])
             .await
@@ -1207,7 +1289,7 @@ mod tests {
     )]
     async fn test_add_member_creates_membership() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
         let result = add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
             .await
@@ -1215,7 +1297,6 @@ mod tests {
 
         assert_ne!(result, Uuid::nil(), "Should return valid UUID");
 
-        // Verify membership was created
         assert!(
             is_member(&pool, user_id, workspace_id)
                 .await
@@ -1231,21 +1312,18 @@ mod tests {
     )]
     async fn test_remove_member_deactivates_membership() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
-        // Add member
         add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
             .await
             .expect("Failed to add member");
 
-        // Remove member
         let removed = remove_member(&pool, workspace_id, user_id)
             .await
             .expect("Failed to remove member");
 
         assert!(removed, "Should successfully remove member");
 
-        // Verify membership is inactive
         assert!(
             !is_member(&pool, user_id, workspace_id)
                 .await

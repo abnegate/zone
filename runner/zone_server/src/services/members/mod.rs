@@ -1,5 +1,10 @@
 mod admission_error;
 mod cap;
+mod deprovision;
+mod deprovisioned;
+mod halt;
+mod halted;
+mod sign_out;
 
 use std::time::Duration;
 
@@ -13,6 +18,11 @@ use crate::state::AppState;
 
 pub use admission_error::AdmissionError;
 pub use cap::Cap;
+pub use deprovision::deprovision;
+pub use deprovisioned::Deprovisioned;
+pub use halt::halt;
+pub use halted::Halted;
+pub use sign_out::SignOut;
 
 /// The transaction-scoped advisory lock ("zoneSEAT") every capped admission, and every sign-up
 /// that finds the server empty, holds from its count until it commits.
