@@ -254,7 +254,7 @@ describe('visibleSections', () => {
     );
   });
 
-  it('shows all twenty-four sections to a server admin who owns the organization and administers the workspace', () => {
+  it('shows all twenty-five sections to a server admin who owns the organization and administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -265,7 +265,7 @@ describe('visibleSections', () => {
       administersServer: true,
     });
 
-    expect(visible).toHaveLength(24);
+    expect(visible).toHaveLength(25);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 
