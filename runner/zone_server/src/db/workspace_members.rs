@@ -1017,6 +1017,8 @@ pub async fn change_role(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::organization_members;
+    use crate::db::organization_members::OrgRole;
     use crate::db::organizations;
     use crate::db::users;
     use crate::db::workspaces;
@@ -1034,8 +1036,7 @@ mod tests {
     }
 
     async fn setup_test_data(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
-        // Create organization
-        let org_id = organizations::create_organization(
+        let organization_id = organizations::create_organization(
             pool,
             &format!("Test Org {}", Uuid::new_v4()),
             &format!("test-org-{}", Uuid::new_v4()),
@@ -1045,10 +1046,9 @@ mod tests {
         .expect("Failed to create organization")
         .id;
 
-        // Create workspace
         let workspace_id = workspaces::create_workspace(
             pool,
-            org_id,
+            organization_id,
             &format!("Test Workspace {}", Uuid::new_v4()),
             &format!("test-ws-{}", Uuid::new_v4()),
             None,
@@ -1057,7 +1057,6 @@ mod tests {
         .expect("Failed to create workspace")
         .id;
 
-        // Create user
         let user_email = format!("test-{}@example.com", Uuid::new_v4());
         let user_id =
             users::create_user(pool, &user_email, "password_hash", Some("Test User"), false)
@@ -1065,7 +1064,11 @@ mod tests {
                 .expect("Failed to create user")
                 .id;
 
-        (org_id, workspace_id, user_id)
+        organization_members::add_member(pool, organization_id, user_id, OrgRole::Member, None)
+            .await
+            .expect("Failed to add organization member");
+
+        (organization_id, workspace_id, user_id)
     }
 
     #[tokio::test]
@@ -1075,14 +1078,12 @@ mod tests {
     )]
     async fn test_is_member_returns_true_for_active_member() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
-        // Add user as member
         add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
             .await
             .expect("Failed to add member");
 
-        // Check membership
         let is_member_result = is_member(&pool, user_id, workspace_id)
             .await
             .expect("Failed to check membership");
@@ -1097,7 +1098,7 @@ mod tests {
     )]
     async fn test_list_members_with_users_carries_email_and_name() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
         add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
             .await
@@ -1127,9 +1128,8 @@ mod tests {
     )]
     async fn test_is_member_returns_false_for_non_member() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, _user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, _user_id) = setup_test_data(&pool).await;
 
-        // Create another user who is not a member
         let non_member_email = format!("non-member-{}@example.com", Uuid::new_v4());
         let non_member_id = users::create_user(
             &pool,
@@ -1142,7 +1142,6 @@ mod tests {
         .expect("Failed to create user")
         .id;
 
-        // Check membership
         let is_member_result = is_member(&pool, non_member_id, workspace_id)
             .await
             .expect("Failed to check membership");
@@ -1157,19 +1156,16 @@ mod tests {
     )]
     async fn test_is_member_returns_false_for_inactive_member() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
-        // Add user as member
         add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
             .await
             .expect("Failed to add member");
 
-        // Remove member (set inactive)
         remove_member(&pool, workspace_id, user_id)
             .await
             .expect("Failed to remove member");
 
-        // Check membership
         let is_member_result = is_member(&pool, user_id, workspace_id)
             .await
             .expect("Failed to check membership");
@@ -1187,7 +1183,7 @@ mod tests {
     )]
     async fn test_membership_returns_correct_role() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
         add_member(&pool, workspace_id, user_id, WorkspaceRole::Admin, None)
             .await
@@ -1208,9 +1204,8 @@ mod tests {
     )]
     async fn test_membership_returns_none_for_non_member() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, _user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, _user_id) = setup_test_data(&pool).await;
 
-        // Create another user who is not a member
         let non_member_email = format!("non-member-{}@example.com", Uuid::new_v4());
         let non_member_id = users::create_user(
             &pool,
@@ -1237,7 +1232,7 @@ mod tests {
     )]
     async fn test_permits_follows_the_built_in_admin_set() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
         add_member(&pool, workspace_id, user_id, WorkspaceRole::Admin, None)
             .await
@@ -1278,7 +1273,7 @@ mod tests {
     )]
     async fn test_verify_sources_in_workspace_returns_true_for_empty_list() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, _user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, _user_id) = setup_test_data(&pool).await;
 
         let result = verify_sources_in_workspace(&pool, workspace_id, &[])
             .await
@@ -1294,7 +1289,7 @@ mod tests {
     )]
     async fn test_add_member_creates_membership() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
         let result = add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
             .await
@@ -1302,7 +1297,6 @@ mod tests {
 
         assert_ne!(result, Uuid::nil(), "Should return valid UUID");
 
-        // Verify membership was created
         assert!(
             is_member(&pool, user_id, workspace_id)
                 .await
@@ -1318,21 +1312,18 @@ mod tests {
     )]
     async fn test_remove_member_deactivates_membership() {
         let pool = create_test_pool().await;
-        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let (_organization_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
-        // Add member
         add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
             .await
             .expect("Failed to add member");
 
-        // Remove member
         let removed = remove_member(&pool, workspace_id, user_id)
             .await
             .expect("Failed to remove member");
 
         assert!(removed, "Should successfully remove member");
 
-        // Verify membership is inactive
         assert!(
             !is_member(&pool, user_id, workspace_id)
                 .await
