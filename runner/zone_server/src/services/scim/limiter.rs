@@ -120,8 +120,8 @@ mod tests {
         limiter.screen(address, hash, unloaded).await.is_some()
     }
 
-    #[test]
-    fn only_the_first_refusal_in_a_window_is_recorded() {
+    #[tokio::test]
+    async fn only_the_first_refusal_in_a_window_is_recorded() {
         let limiter = limiter(1, 10);
         let organization = Uuid::new_v4();
         let neighbour = Uuid::new_v4();
@@ -141,8 +141,8 @@ mod tests {
         assert!(limiter.records(neighbour, &refused));
     }
 
-    #[test]
-    fn a_new_window_records_again() {
+    #[tokio::test]
+    async fn a_new_window_records_again() {
         let limiter = limiter(1, 10);
         let organization = Uuid::new_v4();
         let now = Instant::now();
