@@ -12,7 +12,8 @@ const FALLBACK_PREFIX: &str = "zone-";
 const FALLBACK_LENGTH: usize = 8;
 
 /// What this server process registers as a runner with. Its name carries the runner's state
-/// across restarts, so it should be unique to the server and stable.
+/// across restarts, so it should be stable and unique to one live process: of the live processes
+/// sharing a name, only the newest holds its runner row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     pub name: String,

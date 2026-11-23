@@ -14,7 +14,9 @@ use crate::services::fleet::refusal;
 use crate::state::AppState;
 
 /// Registers this process as its runner, or refreshes the registration, and remembers the
-/// runner on `state`. A name registering for the first time is audited at server scope.
+/// runner on `state`. A process whose name a newer live process holds leaves the row to it, and
+/// under fleet policy claims no work until it holds the row again. A name registering for the
+/// first time is audited at server scope.
 pub async fn register(state: &AppState) -> DbResult<Uuid> {
     let identity = state.identity();
     let first = state.runner().is_none();
@@ -22,19 +24,28 @@ pub async fn register(state: &AppState) -> DbResult<Uuid> {
         state.db(),
         &identity.name,
         state.instance(),
+        state.started(),
         &identity.version,
         &identity.labels,
     )
     .await?;
     let runner = registered.runner;
     state.set_runner(runner.id);
+    if registered.held {
+        state.set_started(runner.started_at);
+    }
     if registered.created {
         audit(state.db(), &runner).await;
     }
-    if registered.contested {
+    if !registered.held {
         tracing::warn!(
             runner = %runner.name,
-            "Another Zone server process held this runner's name within the last minute. A fast restart is expected to trigger this once, as the new process takes the name over from the old one. If it repeats, two servers share the name and so share its state: give each its own {NAME}"
+            "A newer Zone server process holds this runner's name, so this process takes no new work while fleet policy is enforced, and finishes only the work it holds. A process draining after a restart or rollout logs this until it exits. If it lasts, two live servers share the name: give each its own {NAME}"
+        );
+    } else if registered.contested {
+        tracing::warn!(
+            runner = %runner.name,
+            "This process took its runner's name over from another Zone server process seen within the last minute, as a restart or rollout does. If that process is still running, it takes no new work while fleet policy is enforced: give each server its own {NAME}"
         );
     }
     if first {

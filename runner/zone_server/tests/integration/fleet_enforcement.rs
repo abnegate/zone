@@ -9,13 +9,14 @@ use std::time::Duration;
 
 use abnegate_vcs::PullRequestService;
 use axum::http::StatusCode;
+use chrono::TimeDelta;
 use dashmap::DashMap;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message as SocketMessage;
 use uuid::Uuid;
 use zone_enterprise::fleet::{
-    Labels, NO_RUNNER, RUNNER_OUTDATED, RUNNER_REVOKED, Refusal, Version,
+    Labels, NO_RUNNER, RUNNER_OUTDATED, RUNNER_REVOKED, RUNNER_UNREGISTERED, Refusal, Version,
 };
 use zone_server::config::AutoProjectConfig;
 use zone_server::db::audit::{actions, resources};
@@ -28,7 +29,7 @@ use zone_server::db::fleet::{policy, runners};
 use zone_server::db::reminders::{self, Reminder, Sweep};
 use zone_server::db::tasks::{self, Origin};
 use zone_server::services::chat::session::Session;
-use zone_server::services::fleet::{self, identity::version};
+use zone_server::services::fleet::{self, identity::version, registration};
 use zone_server::state::AppState;
 use zone_server::workers::auto_project::driver::{Admission, Drive};
 use zone_server::workers::auto_project::{self, CLAIM_LEASE, PROJECTS_PER_TICK, Services, lease};
@@ -53,6 +54,7 @@ const IDLE_FOR: Duration = Duration::from_secs(1);
 const POLL: Duration = Duration::from_millis(50);
 const RENEWAL: Duration = Duration::from_millis(100);
 const STAGGERS: usize = 25;
+const HEARTBEATS: usize = 3;
 
 /// How long race `race` holds back its claim, so across the races some claims land before the
 /// revoke and some after it.
@@ -281,6 +283,15 @@ async fn until_planned(fleet: &Fleet, chat: Uuid) -> Vec<(String, String)> {
     }
 }
 
+/// The process that holds `runner`'s row.
+async fn holder(fleet: &Fleet, runner: Uuid) -> Uuid {
+    runners::get(fleet.pool(), runner)
+        .await
+        .unwrap()
+        .expect("the runner")
+        .instance
+}
+
 /// Revokes `runner` as a revoke on another server process does: committed there, with no stop
 /// signal reaching the process that runs the work.
 async fn revoke_elsewhere(fleet: &Fleet, runner: Uuid) {
@@ -472,6 +483,77 @@ async fn a_process_sharing_a_runners_name_is_judged_on_its_own_labels() {
     );
     assert_eq!(ran, COMPLETED, "the labelled process takes the run it left");
     assert_eq!(ran_on, Some(unlabelled.id));
+}
+
+#[tokio::test]
+async fn the_newest_process_sharing_a_name_keeps_its_row_until_it_goes_quiet() {
+    let fleet = Fleet::new(PREFIX, &[Spec::CURRENT]).await;
+    fleet.license(&active()).await;
+    let older = fleet.runner(0).clone();
+    let newer = fleet.twin(0, Spec::CURRENT).await;
+
+    let mut rounds = Vec::new();
+    for round in 0..HEARTBEATS {
+        registration::register(&older.state).await.unwrap();
+        let holder = holder(&fleet, older.id).await;
+        let served = fleet
+            .post_message(&newer, &format!("Round {round}"))
+            .await
+            .status;
+        let refused = fleet.post_message(&older.state, "Refused").await;
+        rounds.push((holder, served, refused.status, refused.json_value()));
+        registration::register(&newer).await.unwrap();
+    }
+    registration::register(&older.state).await.unwrap();
+    let run = fleet.admit_in(fleet.workspace).await;
+    fleet.execute(&newer, &run).await;
+    let ran = (
+        fleet.run(run.id).await.status,
+        fleet.claimed(run.id).await.1,
+    );
+    sqlx::query("UPDATE fleet_runners SET last_seen_at = now() - $2 WHERE id = $1")
+        .bind(older.id)
+        .bind(runners::CONNECTED + TimeDelta::seconds(1))
+        .execute(fleet.pool())
+        .await
+        .unwrap();
+    registration::register(&older.state).await.unwrap();
+    let taken_over = holder(&fleet, older.id).await;
+    let resumed = fleet.post_message(&older.state, "Resumed").await.status;
+    fleet.cleanup().await;
+
+    let unregistered = Refusal::Unregistered;
+    for (round, (holder, served, refused, body)) in rounds.into_iter().enumerate() {
+        assert_eq!(
+            holder,
+            newer.instance(),
+            "round {round}: the older process's heartbeat took the row back"
+        );
+        assert_eq!(
+            served,
+            StatusCode::CREATED,
+            "round {round}: the newer process was refused its chat"
+        );
+        assert_eq!(
+            (refused, body),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error": unregistered.message(), "code": RUNNER_UNREGISTERED})
+            ),
+            "round {round}: the older process claimed on the newer one's registration"
+        );
+    }
+    assert_eq!(
+        ran,
+        (COMPLETED.to_string(), Some(older.id)),
+        "the newer process claims unattended work on the shared row"
+    );
+    assert_eq!(
+        taken_over,
+        older.state.instance(),
+        "the older process takes over the row once the newer one goes quiet"
+    );
+    assert_eq!(resumed, StatusCode::CREATED);
 }
 
 #[tokio::test]

@@ -322,6 +322,7 @@ impl Server {
             &self.database.pool,
             &format!("seeded-{}", Uuid::new_v4().simple()),
             Uuid::new_v4(),
+            None,
             &Version::parse(version).unwrap(),
             &Labels::default(),
         )

@@ -91,6 +91,7 @@ impl Fleet {
             self.pool(),
             &format!("runner-{}", Uuid::new_v4().simple()),
             INSTANCE,
+            None,
             &Version::parse(version).unwrap(),
             &Labels::parse_list(carried).unwrap(),
         )
@@ -107,8 +108,8 @@ impl Fleet {
         runner
     }
 
-    /// Registers another process under `runner`'s name, on `version` and carrying `carried`, so
-    /// the runner's row holds that process's registration until this one's next.
+    /// Registers a newer process under `runner`'s name, on `version` and carrying `carried`, so
+    /// the runner's row holds that process's registration.
     async fn take_over(&self, runner: Uuid, version: &str, carried: &str) {
         let name: String = sqlx::query_scalar("SELECT name FROM fleet_runners WHERE id = $1")
             .bind(runner)
@@ -119,6 +120,7 @@ impl Fleet {
             self.pool(),
             &name,
             Uuid::new_v4(),
+            None,
             &Version::parse(version).unwrap(),
             &Labels::parse_list(carried).unwrap(),
         )

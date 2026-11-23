@@ -61,31 +61,59 @@ Refusing to start: ZONE_RUNNER_LABELS is invalid (fleet_label_invalid).
 ### Names carry state
 
 State belongs to the name, not the process. A cordoned or revoked name stays
-cordoned or revoked when its process restarts, and a new process registering
-under the name takes over its row: the row's instance ID, version and labels
-become the new process's, and `started_at` restarts.
+cordoned or revoked when its process restarts. One process at a time holds
+the name's row, and the row carries that process's instance ID, version and
+labels, with `started_at` set to when it started.
+
+**The newest process holds the row.** A process that starts takes its name's
+row over at once, even from a process that is still running: the row's
+instance ID, version and labels become its own. Zone orders processes by
+when each first registered, by the database's clock, and a process registers
+at boot before it starts any worker, so the hosts' clocks needn't agree. An
+older process's heartbeats never take the row back while the newer one
+keeps heartbeating.
+
+**A process that doesn't hold its name's row** keeps heartbeating, without
+touching the row, and finishes the work it already holds: its task runs keep
+their heartbeats and its chat turns keep their leases. Under enforcement it
+claims nothing new: every task run, chat turn, reminder turn and auto-project
+drive it would claim is refused with `fleet_runner_unregistered`, a task run
+it admits is left for the process that holds the row, and it picks up no
+runs. Without enforcement, nothing is refused.
+
+**A holder that goes quiet is taken over.** Once the holder hasn't
+heartbeated for 60 seconds, so it no longer counts as connected, the next
+heartbeat of another live process with the name takes the row over.
+
+So a restart or rollout that starts the new process before the old one
+exits hands the name over at once. The new process takes work from its
+first registration, and the old one drains what it holds.
 
 That has consequences for how names are chosen:
 
-- **Names should be unique.** The default host name is unique per container
-  or pod. If two live processes share a name, they share its state, and the
-  row shows whichever registered last. Sharing a name never bypasses
-  placement: under enforcement a claim needs the row to hold the claiming
-  process's own instance ID, so a process whose name another took over is
-  refused until its next heartbeat (every 15 seconds) registers it again,
-  and is then judged on its own version and labels.
+- **A name must be unique to one live process.** The default host name is
+  unique per container or pod. Two live processes sharing a name share its
+  state, and under enforcement only the newer one takes work. Sharing a
+  name never bypasses placement: a claim needs the row to hold the claiming
+  process's own instance ID, so each process is judged on its own version
+  and labels or not at all.
 - **A Kubernetes Deployment mints new pod names on every rollout.** The new
   pods register as new runners, and a cordon or revoke on an old pod's name
   doesn't carry over to them. The old names go offline and, unless revoked,
-  are [forgotten](#removing-runners-and-retention) after 7 days. Set
-  `ZONE_RUNNER_NAME` when you want a stable name.
+  are [forgotten](#removing-runners-and-retention) after 7 days. Never give
+  a Deployment's replicas one `ZONE_RUNNER_NAME`: under enforcement only the
+  newest replica would take work. For a name that stays the same for each
+  pod, run Zone as a StatefulSet, whose pods keep their host names (`zone-0`,
+  `zone-1`, …) across restarts, and keep the default name.
 - **Without a host name**, the random `zone-…` name changes on every start,
   so state never carries over.
 
-When a runner registers under a name that another process held within the
-last 60 seconds, Zone logs a warning. A fast restart triggers it once, as the
-new process takes the name over from the old one, and that is expected. If it
-repeats, two servers share the name: give each its own `ZONE_RUNNER_NAME`.
+A process that takes its name over from another process seen in the last 60
+seconds logs a warning once, which a restart or rollout does, as expected. A
+process whose name a newer process holds logs a warning on every heartbeat.
+An old process draining after a restart or rollout logs it until it exits;
+if it lasts, two live servers share the name: give each its own
+`ZONE_RUNNER_NAME`.
 
 ## Licensing
 
@@ -453,7 +481,7 @@ appears only when it applies.
 
 | Code | Message |
 |---|---|
-| `fleet_runner_unregistered` | This Zone server hasn't registered as a runner in its fleet, so it takes no work until it does. |
+| `fleet_runner_unregistered` | This Zone server isn't taking work as a runner in its fleet right now: it may be restarting, or another server may share its runner name. Reload the page to reach another server. |
 | `fleet_runner_cordoned` | This runner is cordoned, so it takes no new unattended work. |
 | `fleet_runner_revoked` | This Zone server was revoked from its fleet, so it can't run chats. Reload the page to reach another server. |
 | `fleet_runner_outdated` | This Zone server runs Zone {version}, below its fleet's minimum of {minimum}, so it can't run chats. Reload the page to reach another server. |

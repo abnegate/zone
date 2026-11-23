@@ -15,7 +15,7 @@ pub use runner::Runner;
 pub(crate) use runner::{COLUMNS, undecodable};
 pub use updated::Updated;
 
-use chrono::TimeDelta;
+use chrono::{DateTime, TimeDelta, Utc};
 use sqlx::{AssertSqlSafe, PgExecutor, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 use zone_enterprise::fleet::{Labels, Version};
@@ -51,21 +51,28 @@ fn idle() -> String {
     )
 }
 
-/// Registers the process `instance` under `name`, or refreshes the row that already holds the
-/// name, keeping its state. `started_at` restarts only when another process takes the name over.
+/// Registers the process `instance` under `name`, keeping the row's state. `started` is when the
+/// process first registered, `None` on that first registration, which starts it now.
+///
+/// The newest live process holds the name's row: a process takes the row over when it started
+/// later than the one holding it, or when that one went unseen for [`CONNECTED`]. Otherwise the
+/// row is left untouched, so an older process's heartbeat never takes it back from a newer one or
+/// keeps a quiet holder connected, and the row is answered as the holder registered it.
 pub async fn upsert(
-    executor: impl PgExecutor<'_>,
+    pool: &PgPool,
     name: &str,
     instance: Uuid,
+    started: Option<DateTime<Utc>>,
     version: &Version,
     labels: &Labels,
 ) -> DbResult<Registered> {
-    sqlx::query_as(AssertSqlSafe(format!(
+    let taken: Option<Registered> = sqlx::query_as(AssertSqlSafe(format!(
         "WITH previous AS ( \
              SELECT instance_id, last_seen_at FROM fleet_runners WHERE name = $1 \
          ) \
-         INSERT INTO fleet_runners AS runner (name, instance_id, version, version_key, labels) \
-         VALUES ($1, $2, $3, $4, $5) \
+         INSERT INTO fleet_runners AS runner \
+             (name, instance_id, version, version_key, labels, started_at) \
+         VALUES ($1, $2, $3, $4, $5, COALESCE($7, now())) \
          ON CONFLICT (name) DO UPDATE SET \
              instance_id = EXCLUDED.instance_id, \
              version = EXCLUDED.version, \
@@ -73,12 +80,16 @@ pub async fn upsert(
              labels = EXCLUDED.labels, \
              last_seen_at = now(), \
              started_at = CASE WHEN runner.instance_id = EXCLUDED.instance_id \
-                 THEN runner.started_at ELSE now() END \
+                 THEN runner.started_at ELSE EXCLUDED.started_at END \
+         WHERE runner.instance_id = EXCLUDED.instance_id \
+            OR runner.started_at < EXCLUDED.started_at \
+            OR runner.last_seen_at <= now() - $6 \
          RETURNING {COLUMNS}, (runner.xmax = 0) AS created, \
              EXISTS ( \
                  SELECT 1 FROM previous \
                  WHERE previous.instance_id <> $2 AND previous.last_seen_at > now() - $6 \
-             ) AS contested"
+             ) AS contested, \
+             true AS held"
     )))
     .bind(name)
     .bind(instance)
@@ -86,6 +97,31 @@ pub async fn upsert(
     .bind(version.key().to_vec())
     .bind(labels.to_vec())
     .bind(CONNECTED)
+    .bind(started)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(taken) = taken {
+        return Ok(taken);
+    }
+    sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT {COLUMNS}, false AS created, runner.last_seen_at > now() - $2 AS contested, \
+             false AS held \
+         FROM fleet_runners runner WHERE runner.name = $1"
+    )))
+    .bind(name)
+    .bind(CONNECTED)
+    .fetch_one(pool)
+    .await
+}
+
+/// Whether process `instance` holds runner `id`'s row, which [`upsert`] leaves to the newest live
+/// process registered under the runner's name.
+pub async fn holds(executor: impl PgExecutor<'_>, id: Uuid, instance: Uuid) -> DbResult<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM fleet_runners WHERE id = $1 AND instance_id = $2)",
+    )
+    .bind(id)
+    .bind(instance)
     .fetch_one(executor)
     .await
 }

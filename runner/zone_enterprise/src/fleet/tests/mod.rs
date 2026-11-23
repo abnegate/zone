@@ -264,6 +264,10 @@ fn a_chat_refusal_sends_the_reader_to_another_server() {
         .message(),
         "This Zone server runs Zone 1.3.2, below its fleet's minimum of 1.4.0, so it can't run chats. Reload the page to reach another server."
     );
+    assert_eq!(
+        Refusal::Unregistered.message(),
+        "This Zone server isn't taking work as a runner in its fleet right now: it may be restarting, or another server may share its runner name. Reload the page to reach another server."
+    );
 }
 
 #[test]
@@ -295,10 +299,6 @@ fn a_run_without_a_runner_says_what_it_needs() {
 
 #[test]
 fn operator_refusals_are_pinned() {
-    assert_eq!(
-        Refusal::Unregistered.message(),
-        "This Zone server hasn't registered as a runner in its fleet, so it takes no work until it does."
-    );
     assert_eq!(
         Refusal::Cordoned.message(),
         "This runner is cordoned, so it takes no new unattended work."

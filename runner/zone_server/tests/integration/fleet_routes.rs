@@ -231,6 +231,7 @@ impl Fleet {
             pool,
             &seed.name,
             Uuid::new_v4(),
+            None,
             &Version::parse(seed.version).unwrap(),
             &Labels::parse_list(seed.labels).unwrap(),
         )

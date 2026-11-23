@@ -123,8 +123,8 @@ pub async fn shortfall(
 /// process registering under the runner's name waits for the claim. Every claim takes it first,
 /// before any other lock, and only under fleet policy, where it is
 /// [`Unregistered`](Shortfall::Unregistered) without a runner row of this process's own: one
-/// that was removed, or that another live process sharing the name registered last, whose
-/// labels and version the row now carries.
+/// that was removed, or that a newer live process sharing the name holds, whose labels and
+/// version the row carries.
 pub async fn hold(
     connection: &mut PgConnection,
     claimant: Claimant,
