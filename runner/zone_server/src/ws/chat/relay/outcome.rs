@@ -9,4 +9,7 @@ pub enum Outcome {
     Duplicate,
     /// The user may no longer write to the chat.
     Refused,
+    /// The request reached its deadline before it could be applied, so it
+    /// never will be.
+    Expired,
 }

@@ -28,8 +28,12 @@ const PAUSE: Duration = Duration::from_millis(100);
 const LEASE: Duration = Duration::from_secs(30);
 const STOPPED: &str =
     "The server running this reply stopped; any queued messages were dropped. Send again.";
+const BUSY: &str = "This chat is busy with a reply on another server. Try again in a moment.";
 /// How long a socket may wait for `init` on a replica that is not running the chat.
 const INIT: Duration = Duration::from_secs(2);
+/// How long a replica waits for the one running a chat to answer a forwarded command
+/// (`ANSWER_TIMEOUT`).
+const ANSWER: Duration = Duration::from_secs(2);
 
 /// One test's database, LiteLLM stand-in and the environment its replicas share.
 struct Deployment {
@@ -462,6 +466,69 @@ async fn a_socket_joining_an_idle_chat_on_another_replica_gets_init_at_once() {
     assert!(
         joining.during(QUIET).await.is_empty(),
         "an idle chat has nothing to replay"
+    );
+    deployment.retire(vec![first, second]).await;
+}
+
+#[tokio::test]
+async fn a_send_the_owner_answers_late_is_never_reported_busy_and_runs_once() {
+    let deployment = Deployment::new().await;
+    let first = deployment.replica().await;
+    let second = deployment.replica().await;
+    let account = Account::register(&first).await;
+    let chat = account.chat(&first, false).await;
+    let reply = Reply::counted(80, PAUSE);
+    let next = Reply::new(["Second answer"], Duration::ZERO);
+    deployment.litellm.queue(reply.clone());
+    deployment.litellm.queue(next.clone());
+    let mut owner = ChatSocket::joined(&first, chat, &account.token, JOIN).await;
+    let mut mirror = ChatSocket::joined(&second, chat, &account.token, JOIN).await;
+    owner.say(Uuid::new_v4(), "First question").await;
+    chunked(&mut mirror, 2).await;
+
+    let mut stall = deployment
+        .database
+        .pool
+        .begin()
+        .await
+        .expect("a transaction");
+    sqlx::query("LOCK TABLE workspace_members IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *stall)
+        .await
+        .expect("the owner's access check is stalled");
+    mirror.say(Uuid::new_v4(), "Second question").await;
+    tokio::time::sleep(ANSWER + Duration::from_millis(400)).await;
+    stall.rollback().await.expect("the stall ends");
+
+    let mut frames = ended_with(&mut mirror, &next.text()).await;
+    frames.extend(mirror.during(QUIET).await);
+
+    let busy: Vec<&Value> = errors(&frames)
+        .into_iter()
+        .filter(|error| error["message"] == BUSY)
+        .collect();
+    assert!(
+        busy.is_empty(),
+        "a send the owner went on to run was reported busy: {:?}",
+        kinds(&frames)
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.kind() == "message_saved"
+                && frame.frame["content"] == "Second question")
+            .count(),
+        1,
+        "the late send ran once: {:?}",
+        kinds(&frames)
+    );
+    let messages = account.messages(&first, chat).await;
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["content"] == "Second question")
+            .count(),
+        1
     );
     deployment.retire(vec![first, second]).await;
 }
