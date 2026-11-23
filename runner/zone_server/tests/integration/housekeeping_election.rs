@@ -62,6 +62,10 @@ fn eager() -> Timing {
     }
 }
 
+fn elect(options: PgConnectOptions, timing: Timing) -> Leadership {
+    Leadership::start(options, timing).expect("the test timing is safe")
+}
+
 fn options(database: &Database) -> PgConnectOptions {
     (*database.admin.connect_options())
         .clone()
@@ -189,14 +193,8 @@ fn assert_never_overlapped(tally: &Tally) {
 async fn cluster_sweeps_run_on_one_replica_and_replica_sweeps_on_both() {
     let database = Database::new(PREFIX).await;
     let tally = Arc::new(Tally::default());
-    let first = Replica::start(
-        counted(0, &tally),
-        Leadership::start(options(&database), timing()),
-    );
-    let second = Replica::start(
-        counted(1, &tally),
-        Leadership::start(options(&database), timing()),
-    );
+    let first = Replica::start(counted(0, &tally), elect(options(&database), timing()));
+    let second = Replica::start(counted(1, &tally), elect(options(&database), timing()));
 
     assert!(until(Duration::from_secs(5), || first.leads() || second.leads()).await);
     tokio::time::sleep(Duration::from_secs(6)).await;
@@ -245,15 +243,9 @@ async fn cluster_sweeps_run_on_one_replica_and_replica_sweeps_on_both() {
 async fn terminating_the_leaders_session_moves_leadership_without_overlap() {
     let database = Database::new(PREFIX).await;
     let tally = Arc::new(Tally::default());
-    let old = Replica::start(
-        counted(0, &tally),
-        Leadership::start(options(&database), timing()),
-    );
+    let old = Replica::start(counted(0, &tally), elect(options(&database), timing()));
     assert!(until(Duration::from_secs(5), || old.leads()).await);
-    let new = Replica::start(
-        counted(1, &tally),
-        Leadership::start(options(&database), eager()),
-    );
+    let new = Replica::start(counted(1, &tally), elect(options(&database), eager()));
     assert!(until(Duration::from_secs(5), || tally.passes_by(0).len() >= 2).await);
 
     assert_eq!(terminate_leader(&database).await, 1);
@@ -286,9 +278,9 @@ async fn a_partitioned_leader_demotes_before_its_successor_starts() {
     let proxy = Blackhole::start(direct.get_host().to_string(), direct.get_port()).await;
     let routed = options(&database).host("127.0.0.1").port(proxy.port());
     let tally = Arc::new(Tally::default());
-    let old = Replica::start(counted(0, &tally), Leadership::start(routed, timing()));
+    let old = Replica::start(counted(0, &tally), elect(routed, timing()));
     assert!(until(Duration::from_secs(5), || old.leads()).await);
-    let new = Replica::start(counted(1, &tally), Leadership::start(direct, eager()));
+    let new = Replica::start(counted(1, &tally), elect(direct, eager()));
     assert!(until(Duration::from_secs(5), || tally.passes_by(0).len() >= 2).await);
 
     let silenced = Instant::now();
@@ -345,7 +337,7 @@ async fn a_paused_leader_stops_leading_while_it_still_holds_the_lock() {
             .build()
             .expect("the paused process has a runtime");
         runtime.block_on(async move {
-            let leadership = Leadership::start(paused, timing());
+            let leadership = elect(paused, timing());
             sender
                 .send(leadership.clone())
                 .expect("the test is listening");
@@ -490,7 +482,7 @@ async fn a_digest_goes_out_once_per_slot_while_leadership_changes() {
     let start = |replica: usize, timing: Timing| {
         Replica::start(
             reportable(replica, state(&database), &settings, &clock, &deliveries),
-            Leadership::start(options(&database), timing),
+            elect(options(&database), timing),
         )
     };
     let mut replicas = vec![start(0, timing()), start(1, timing())];
@@ -757,11 +749,11 @@ async fn a_regression_is_alerted_once_across_a_leader_change_and_old_alerts_are_
     let mut replicas = vec![
         Replica::start(
             watching(0, state(&database), &clock, &deliveries, &tally),
-            Leadership::start(options(&database), timing()),
+            elect(options(&database), timing()),
         ),
         Replica::start(
             watching(1, state(&database), &clock, &deliveries, &tally),
-            Leadership::start(options(&database), timing()),
+            elect(options(&database), timing()),
         ),
     ];
     assert!(
