@@ -28,6 +28,12 @@ const PAUSE: Duration = Duration::from_millis(100);
 const LEASE: Duration = Duration::from_secs(30);
 const STOPPED: &str =
     "The server running this reply stopped; any queued messages were dropped. Send again.";
+const BUSY: &str = "This chat is busy with a reply on another server. Try again in a moment.";
+/// How long a socket may wait for `init` on a replica that is not running the chat.
+const INIT: Duration = Duration::from_secs(2);
+/// How long a replica waits for the one running a chat to answer a forwarded command
+/// (`ANSWER_TIMEOUT`).
+const ANSWER: Duration = Duration::from_secs(2);
 
 /// One test's database, LiteLLM stand-in and the environment its replicas share.
 struct Deployment {
@@ -142,6 +148,48 @@ async fn ended_with(socket: &mut ChatSocket, content: &str) -> Vec<Received> {
             return received;
         }
     }
+}
+
+/// Reads until a queue frame `matches` accepts, and returns that frame.
+async fn queue_where(socket: &mut ChatSocket, matches: impl Fn(&Value) -> bool) -> Value {
+    loop {
+        let frames = socket.until("queue", TURN).await;
+        let queue = &frames.last().expect("a queue frame").frame;
+        if matches(queue) {
+            return queue.clone();
+        }
+    }
+}
+
+fn queued_ids(queue: &Value) -> Vec<String> {
+    queue["messages"]
+        .as_array()
+        .map(|messages| {
+            messages
+                .iter()
+                .map(|message| message["id"].as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Reads until a user message with each of `contents` is saved, then until
+/// the reply to the last of them ends.
+async fn ran(socket: &mut ChatSocket, contents: &[&str]) -> Vec<Received> {
+    let mut pending = contents.to_vec();
+    let mut received = Vec::new();
+    while !pending.is_empty() {
+        let frames = socket.until("message_saved", TURN).await;
+        let content = frames
+            .last()
+            .and_then(|frame| frame.frame["content"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        pending.retain(|wanted| *wanted != content);
+        received.extend(frames);
+    }
+    received.extend(socket.until("message_end", TURN).await);
+    received
 }
 
 async fn valkey() -> SocketAddr {
@@ -451,15 +499,126 @@ async fn a_socket_joining_an_idle_chat_on_another_replica_gets_init_at_once() {
     let mut joining = ChatSocket::connect(&second, chat, &account.token).await;
     let asked = Instant::now();
     let init = joining
-        .next(Duration::from_millis(500))
+        .next(INIT)
         .await
-        .expect("init arrives within 500 ms");
+        .unwrap_or_else(|| panic!("init arrives within {INIT:?}"));
 
     assert_eq!(init.kind(), "init");
-    assert!(asked.elapsed() <= Duration::from_millis(500));
+    assert!(asked.elapsed() <= INIT);
     assert!(
         joining.during(QUIET).await.is_empty(),
         "an idle chat has nothing to replay"
     );
+    deployment.retire(vec![first, second]).await;
+}
+
+#[tokio::test]
+async fn a_send_the_owner_answers_late_is_never_reported_busy_and_runs_once() {
+    let deployment = Deployment::new().await;
+    let first = deployment.replica().await;
+    let second = deployment.replica().await;
+    let account = Account::register(&first).await;
+    let chat = account.chat(&first, false).await;
+    let reply = Reply::counted(80, PAUSE);
+    let next = Reply::new(["Second answer"], Duration::ZERO);
+    deployment.litellm.queue(reply.clone());
+    deployment.litellm.queue(next.clone());
+    let mut owner = ChatSocket::joined(&first, chat, &account.token, JOIN).await;
+    let mut mirror = ChatSocket::joined(&second, chat, &account.token, JOIN).await;
+    owner.say(Uuid::new_v4(), "First question").await;
+    chunked(&mut mirror, 2).await;
+
+    let mut stall = deployment
+        .database
+        .pool
+        .begin()
+        .await
+        .expect("a transaction");
+    sqlx::query("LOCK TABLE workspace_members IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *stall)
+        .await
+        .expect("the owner's access check is stalled");
+    mirror.say(Uuid::new_v4(), "Second question").await;
+    tokio::time::sleep(ANSWER + Duration::from_millis(400)).await;
+    stall.rollback().await.expect("the stall ends");
+
+    let mut frames = ended_with(&mut mirror, &next.text()).await;
+    frames.extend(mirror.during(QUIET).await);
+
+    let busy: Vec<&Value> = errors(&frames)
+        .into_iter()
+        .filter(|error| error["message"] == BUSY)
+        .collect();
+    assert!(
+        busy.is_empty(),
+        "a send the owner went on to run was reported busy: {:?}",
+        kinds(&frames)
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.kind() == "message_saved"
+                && frame.frame["content"] == "Second question")
+            .count(),
+        1,
+        "the late send ran once: {:?}",
+        kinds(&frames)
+    );
+    let messages = account.messages(&first, chat).await;
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["content"] == "Second question")
+            .count(),
+        1
+    );
+    deployment.retire(vec![first, second]).await;
+}
+
+#[tokio::test]
+async fn a_queue_held_on_one_replica_shows_on_another_and_runs_from_a_send_there() {
+    let deployment = Deployment::new().await;
+    let first = deployment.replica().await;
+    let second = deployment.replica().await;
+    let account = Account::register(&first).await;
+    let chat = account.chat(&first, false).await;
+    deployment.litellm.queue(Reply::counted(200, PAUSE));
+    deployment
+        .litellm
+        .fall_back_to(Reply::new(["Later answer"], Duration::ZERO));
+    let mut owner = ChatSocket::joined(&first, chat, &account.token, JOIN).await;
+    owner.say(Uuid::new_v4(), "Opening question").await;
+    chunked(&mut owner, 2).await;
+    let held = [Uuid::new_v4(), Uuid::new_v4()];
+    owner.say(held[0], "Held one").await;
+    owner.say(held[1], "Held two").await;
+    queue_where(&mut owner, |queue| queued_ids(queue).len() == 2).await;
+    owner.send(json!({"type": "cancel"})).await;
+    queue_where(&mut owner, |queue| queue["held"] == true).await;
+    let expected: Vec<String> = held.iter().map(Uuid::to_string).collect();
+
+    let mut joining = ChatSocket::joined(&second, chat, &account.token, JOIN).await;
+    let shown = joining.until("queue", JOIN).await;
+    let queue = &shown.last().expect("the held queue").frame;
+    assert_eq!(queued_ids(queue), expected, "{queue}");
+    assert_eq!(queue["held"], true, "{queue}");
+
+    joining.say(Uuid::new_v4(), "Fresh question").await;
+    let contents = ["Held one", "Held two", "Fresh question"];
+    let mut frames = ran(&mut joining, &contents).await;
+    frames.extend(joining.during(QUIET).await);
+
+    assert!(errors(&frames).is_empty(), "{:?}", errors(&frames));
+    let messages = account.messages(&first, chat).await;
+    for content in contents {
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["content"] == content)
+                .count(),
+            1,
+            "{content} ran once: {messages:?}"
+        );
+    }
     deployment.retire(vec![first, second]).await;
 }

@@ -5,9 +5,12 @@
 //! own (a mirror) forwards those bytes to them, keeps no log of the turn, and
 //! asks the owner for a replay when a socket joins or when frames go missing.
 //! Commands a mirror's sockets send reach the owner as requests on the chat's
-//! control topic, which only the replica holding the chat answers.
+//! control topic, which only the replica holding the chat answers. The
+//! replica answering a chat says so under the chat's serving key, so the
+//! others find it even while it holds a queue and no lease.
 
 mod acknowledgement;
+mod beacon;
 mod command;
 mod floor;
 mod header;
@@ -19,13 +22,17 @@ mod replay;
 mod request;
 mod reservation;
 mod route;
+mod seen;
+mod serving;
+mod shown;
 mod watch;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use chrono::{DateTime, TimeDelta, Utc};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use once_cell::sync::Lazy;
@@ -47,14 +54,29 @@ pub(super) use route::Route;
 pub(super) use watch::Watch;
 
 use acknowledgement::Acknowledgement;
+use beacon::Beacon;
 use header::Header;
 use holding::Holding;
 use outcome::Outcome;
 use replay::Replay;
 use request::Request;
+use seen::Seen;
+use serving::Serving;
 
 /// How long a replica waits for the owner to answer a command or a replay.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long before the asking replica stops waiting the owner stops applying
+/// a command: time for the acknowledgement to arrive, and for the clocks of
+/// the two replicas to disagree.
+const ANSWER_MARGIN: Duration = Duration::from_millis(500);
+
+/// How many times a replica asks the owner to apply one command before it
+/// gives up on an answer.
+const ATTEMPTS: usize = 2;
+
+/// How many forwarded messages an answering task remembers having taken.
+const SEEN_CAPACITY: usize = 1024;
 
 /// How long the owner keeps answering after its last turn and queued message.
 const GRACE: Duration = Duration::from_secs(5);
@@ -65,7 +87,8 @@ const IDLE_CHECK: Duration = Duration::from_millis(500);
 /// How often a mirror reads the lease of a turn it has not seen end.
 const WATCHDOG: Duration = Duration::from_secs(5);
 
-/// Told to a socket whose command the replica holding the chat did not answer.
+/// Told to a socket whose command the replica holding the chat did not apply
+/// by the command's deadline, and so never will.
 pub(super) const BUSY: &str =
     "This chat is busy with a reply on another server. Try again in a moment.";
 
@@ -226,17 +249,27 @@ pub(super) async fn settle(stream: &ChatStream) {
     }
 }
 
-/// The turn in flight on another replica, for a socket joining it. None when
-/// this replica runs the chat or no lease is live, so there is nothing to
-/// wait for. A live lease nobody answers for still arms the watchdog.
+/// The turn in flight on another replica and the queue it holds, for a socket
+/// joining. None when this replica runs the chat, or when no lease is live
+/// and no other replica holds the chat, so there is nothing to wait for. A
+/// live lease nobody answers for still arms the watchdog.
 pub(super) async fn replay(state: &AppState, stream: &ChatStream) -> Option<(Vec<String>, Floor)> {
     let chat = stream.chat_id;
     if !reaches_peers(state) || super::owns(chat) {
         return None;
     }
-    let holding = Holding::live(state.db(), chat).await?;
+    let holding = Holding::live(state.db(), chat).await;
+    if holding.is_none()
+        && !Serving::elsewhere(state.bus(), chat)
+            .await
+            .is_some_and(|serving| serving.holding)
+    {
+        return None;
+    }
     let replay = ask(state, chat).await;
-    stream.watch.lock().await.arm(holding.fence);
+    if let Some(holding) = holding {
+        stream.watch.lock().await.arm(holding.fence);
+    }
     replay.map(|replay| (replay.frames, replay.floor))
 }
 
@@ -258,9 +291,13 @@ async fn ask(state: &AppState, chat: Uuid) -> Option<Replay> {
     })
 }
 
-/// Sends a socket's command to the replica running the chat's turn, or says
-/// this replica should apply it. With no answer, the lease decides: a lease
-/// that lapsed leaves the chat to this replica, and a live one means busy.
+/// Sends a socket's command to the replica serving the chat, or says this
+/// replica should apply it. A command is forwarded while another replica
+/// holds the chat's lease or says it serves the chat, and asked again, as
+/// itself, when the first try goes unanswered. Each try carries a deadline
+/// the owner applies it by or never, so once every try is unanswered the
+/// lease alone decides: a lease that lapsed leaves the chat to this replica,
+/// and a live one means busy.
 pub(super) async fn route(
     state: &AppState,
     chat: Uuid,
@@ -268,29 +305,64 @@ pub(super) async fn route(
     session: Uuid,
     command: &Command,
 ) -> Route {
-    if !reaches_peers(state) || super::owns(chat) || Holding::live(state.db(), chat).await.is_none()
+    if !reaches_peers(state) || super::owns(chat) {
+        return Route::Local;
+    }
+    if Holding::live(state.db(), chat).await.is_none()
+        && Serving::elsewhere(state.bus(), chat).await.is_none()
     {
         return Route::Local;
     }
-    let request = Request::Control {
-        user,
-        session,
-        command: command.clone(),
-    };
-    if let Some(envelope) = state
-        .bus()
-        .request(Topic::ChatControl(chat), &request, ANSWER_TIMEOUT)
-        .await
-    {
-        match envelope.payload::<Acknowledgement>() {
-            Ok(acknowledgement) => return Route::Forwarded(acknowledgement),
-            Err(error) => tracing::warn!(%chat, %error, "Dropped an unreadable acknowledgement"),
+    for _ in 0..ATTEMPTS {
+        let Some(acknowledgement) = attempt(state, chat, user, session, command).await else {
+            continue;
+        };
+        match acknowledgement.outcome {
+            Outcome::Applied | Outcome::Duplicate | Outcome::Refused => {
+                return Route::Forwarded(acknowledgement.frames);
+            }
+            Outcome::Expired => {}
         }
     }
     match Holding::live(state.db(), chat).await {
         Some(_) => Route::Busy,
         None => Route::Local,
     }
+}
+
+/// Asks the replica serving the chat to apply `command` once.
+async fn attempt(
+    state: &AppState,
+    chat: Uuid,
+    user: Uuid,
+    session: Uuid,
+    command: &Command,
+) -> Option<Acknowledgement> {
+    let request = Request::Control {
+        user,
+        session,
+        deadline: deadline(Utc::now()),
+        command: command.clone(),
+    };
+    let envelope = state
+        .bus()
+        .request(Topic::ChatControl(chat), &request, ANSWER_TIMEOUT)
+        .await?;
+    envelope
+        .payload()
+        .inspect_err(|error| tracing::warn!(%chat, %error, "Dropped an unreadable acknowledgement"))
+        .ok()
+}
+
+/// When the owner must have applied a command asked at `asked`, for its
+/// answer to reach the asking replica before that stops waiting.
+fn deadline(asked: DateTime<Utc>) -> DateTime<Utc> {
+    let window = ANSWER_TIMEOUT.saturating_sub(ANSWER_MARGIN);
+    asked + TimeDelta::from_std(window).unwrap_or(TimeDelta::zero())
+}
+
+fn expired(deadline: DateTime<Utc>) -> bool {
+    Utc::now() > deadline
 }
 
 /// Answers the chat's control topic while this replica runs or queues a turn
@@ -323,7 +395,8 @@ async fn answering(
     id: Uuid,
 ) {
     let chat = stream.chat_id;
-    let mut seen = HashSet::new();
+    let mut seen = Seen::new(SEEN_CAPACITY);
+    let mut beacon = Beacon::new(state.bus().clone(), chat, id);
     let mut idle_since: Option<Instant> = None;
     let mut check = tokio::time::interval(IDLE_CHECK);
     loop {
@@ -336,7 +409,13 @@ async fn answering(
                 Err(RecvError::Closed) => break,
             },
             _ = check.tick() => {
-                if super::owns(chat) {
+                let holding = super::owns(chat);
+                if state.drain().is_draining() {
+                    beacon.hide().await;
+                } else {
+                    beacon.show(holding).await;
+                }
+                if holding {
                     idle_since = None;
                     continue;
                 }
@@ -352,17 +431,19 @@ async fn answering(
         }
     }
     SERVING.remove_if(&chat, |_, serving| *serving == id);
+    beacon.hide().await;
 }
 
 /// Applies one forwarded request, answering only as the replica holding the
-/// chat. A replica in its grace period holds nothing, so it takes a forwarded
-/// Send only by taking the chat's lease first, and stays silent when another
-/// replica has it or fleet policy refuses this runner the chat.
+/// chat or the one that already took the Send. A replica in its grace period
+/// holds nothing, so it takes a forwarded Send only by taking the chat's lease
+/// first, and stays silent when another replica has it or fleet policy refuses
+/// this runner the chat. Nothing is applied past the request's deadline.
 async fn answer(
     state: &AppState,
     stream: &Arc<ChatStream>,
     workspace: Uuid,
-    seen: &mut HashSet<Uuid>,
+    seen: &mut Seen,
     envelope: &Envelope,
 ) {
     let chat = stream.chat_id;
@@ -373,7 +454,7 @@ async fn answer(
             return;
         }
     };
-    let (user, session, command) = match request {
+    let (user, session, deadline, command) = match request {
         Request::Replay => {
             if super::owns(chat) {
                 let (frames, sequence) = stream.snapshot().await;
@@ -384,25 +465,30 @@ async fn answer(
         Request::Control {
             user,
             session,
+            deadline,
             command,
-        } => (user, session, command),
+        } => (user, session, deadline, command),
     };
+    let sent = match &command {
+        Command::Send { id, .. } => Some(*id),
+        _ => None,
+    };
+    if sent.is_some_and(|id| seen.contains(&id)) {
+        acknowledge(state, envelope, Outcome::Duplicate, stream.sequence(), &[]);
+        return;
+    }
     if state.drain().is_draining()
         && matches!(command, Command::Send { .. } | Command::Interrupt { .. })
     {
         return;
     }
     let holder = super::owns(chat);
-    let sent = match &command {
-        Command::Send { id, .. } => Some(*id),
-        _ => None,
-    };
     if !holder && sent.is_none() {
         return;
     }
-    if sent.is_some_and(|id| seen.contains(&id)) {
+    if expired(deadline) {
         if holder {
-            acknowledge(state, envelope, Outcome::Duplicate, stream.sequence(), &[]);
+            acknowledge(state, envelope, Outcome::Expired, stream.sequence(), &[]);
         }
         return;
     }
@@ -434,6 +520,14 @@ async fn answer(
             stream.sequence(),
             &[refusal],
         );
+        return;
+    }
+    if expired(deadline) {
+        if reserved {
+            drop(Reservation::claim(chat));
+        } else {
+            acknowledge(state, envelope, Outcome::Expired, stream.sequence(), &[]);
+        }
         return;
     }
     let handled = super::control(state, stream, workspace, user, command).await;
@@ -552,6 +646,7 @@ mod tests {
         let request = Request::Control {
             user: Uuid::new_v4(),
             session: Uuid::new_v4(),
+            deadline: deadline(Utc::now()),
             command: Command::Send {
                 id: Uuid::new_v4(),
                 content: "Hello".to_string(),
@@ -579,5 +674,20 @@ mod tests {
             serde_json::from_slice::<Request>(&replay).unwrap(),
             Request::Replay
         );
+    }
+
+    #[test]
+    fn the_owner_stops_applying_a_command_before_the_asker_stops_waiting() {
+        let asked = Utc::now();
+
+        let due = deadline(asked);
+
+        assert!(due > asked);
+        assert_eq!(
+            (asked + TimeDelta::from_std(ANSWER_TIMEOUT).unwrap()) - due,
+            TimeDelta::from_std(ANSWER_MARGIN).unwrap()
+        );
+        assert!(!expired(Utc::now() + TimeDelta::seconds(1)));
+        assert!(expired(Utc::now() - TimeDelta::seconds(1)));
     }
 }

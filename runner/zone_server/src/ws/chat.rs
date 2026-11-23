@@ -705,8 +705,7 @@ async fn dispatch(
                     .map(ServerMessage::to_ws_message)
                     .collect()
             }
-            relay::Route::Forwarded(acknowledgement) => acknowledgement
-                .frames
+            relay::Route::Forwarded(frames) => frames
                 .into_iter()
                 .map(|frame| Message::Text(frame.into()))
                 .collect(),
