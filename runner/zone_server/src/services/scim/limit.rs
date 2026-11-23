@@ -3,11 +3,12 @@ use std::time::{Duration, Instant};
 use super::limiter::Limiter;
 
 pub const REQUESTS: u32 = 600;
-pub const ADDRESS_REQUESTS: u32 = 1200;
+pub const ADDRESS_FAILURES: u32 = 1200;
 pub const WINDOW: Duration = Duration::from_secs(60);
+pub const RELOAD: Duration = Duration::from_secs(5);
 
 pub fn limiter() -> Limiter {
-    Limiter::new(REQUESTS, WINDOW, ADDRESS_REQUESTS)
+    Limiter::new(REQUESTS, WINDOW, ADDRESS_FAILURES, RELOAD)
 }
 
 pub fn retry_after(reset_at: Option<Instant>, window: Duration) -> u64 {
@@ -23,7 +24,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_organization_gets_six_hundred_requests_a_minute_and_an_address_twice_that() {
+    fn an_organization_gets_six_hundred_requests_a_minute_and_an_address_twice_that_in_failures() {
         let limiter = limiter();
         let organization = uuid::Uuid::new_v4();
         assert_eq!(limiter.window(), Duration::from_secs(60));
@@ -31,11 +32,12 @@ mod tests {
             assert!(limiter.check(organization).allowed);
         }
         assert!(!limiter.check(organization).allowed);
-        for _ in 0..ADDRESS_REQUESTS {
-            assert!(limiter.screen(None).allowed);
+        for _ in 0..ADDRESS_FAILURES {
+            assert_eq!(limiter.reject(None, "guess"), None);
         }
-        assert!(!limiter.screen(None).allowed);
-        assert_eq!((REQUESTS, ADDRESS_REQUESTS), (600, 1200));
+        assert!(limiter.reject(None, "guess").is_some());
+        assert_eq!((REQUESTS, ADDRESS_FAILURES), (600, 1200));
+        assert_eq!(RELOAD, Duration::from_secs(5));
     }
 
     #[test]

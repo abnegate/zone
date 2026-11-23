@@ -20,7 +20,11 @@ pub fn hint(secret: &str) -> String {
 }
 
 pub fn matches(stored_hash: &str, secret: &str) -> bool {
-    hash(secret).as_bytes().ct_eq(stored_hash.as_bytes()).into()
+    matches_hash(stored_hash, &hash(secret))
+}
+
+pub fn matches_hash(stored_hash: &str, hash: &str) -> bool {
+    hash.as_bytes().ct_eq(stored_hash.as_bytes()).into()
 }
 
 #[cfg(test)]

@@ -123,22 +123,67 @@ async fn a_flood_from_one_network_is_refused_before_any_token_is_read() {
     let token = fixture.token().await;
     fixture.state().limit_scim_addresses(2);
 
+    for _ in 0..5 {
+        assert_scim(
+            &fixture.scim_get("/Users", &token.secret).await,
+            StatusCode::OK,
+        );
+    }
+    for _ in 0..2 {
+        assert_refused(
+            &fixture.scim_get("/Users", "zscim_wrong").await,
+            StatusCode::UNAUTHORIZED,
+            None,
+        );
+    }
+
+    for _ in 0..5 {
+        throttled(&fixture.scim_get("/Users", "zscim_wrong").await, WINDOW);
+        throttled(&fixture.scim_get("/Users", "zscim_guessed").await, WINDOW);
+    }
     assert_scim(
         &fixture.scim_get("/Users", &token.secret).await,
         StatusCode::OK,
     );
-    assert_refused(
-        &fixture.scim_get("/Users", "zscim_wrong").await,
-        StatusCode::UNAUTHORIZED,
-        None,
-    );
-
-    throttled(&fixture.scim_get("/Users", "zscim_wrong").await, WINDOW);
-    throttled(&fixture.scim_get("/Users", &token.secret).await, WINDOW);
     assert_eq!(
         statuses(&fixture, fixture.organization).await,
         Vec::<i16>::new(),
         "a refusal before any token is read records nothing"
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_valid_token_still_deprovisions_from_a_network_refused_for_failures() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    fixture.state().limit_scim_addresses(2);
+
+    for _ in 0..2 {
+        assert_refused(
+            &fixture.scim_get("/Users", "zscim_wrong").await,
+            StatusCode::UNAUTHORIZED,
+            None,
+        );
+    }
+    throttled(&fixture.scim_get("/Users", "zscim_wrong").await, WINDOW);
+
+    assert_scim(
+        &fixture.scim_get("/Users", &token.secret).await,
+        StatusCode::OK,
+    );
+    let user = fixture.provision(&token.secret, &test_email()).await;
+    fixture
+        .scim_delete(&format!("/Users/{user}"), &token.secret)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert_eq!(fixture.holding(user).await, None);
+
+    throttled(&fixture.scim_get("/Users", "zscim_wrong").await, WINDOW);
+    assert_eq!(
+        statuses(&fixture, fixture.organization).await,
+        Vec::<i16>::new()
     );
 
     fixture.cleanup().await;

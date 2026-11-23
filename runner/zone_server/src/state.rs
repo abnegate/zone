@@ -381,12 +381,22 @@ impl AppState {
 
     #[cfg(any(test, feature = "testing"))]
     pub fn limit_scim(&self, requests: u32, window: Duration) {
-        self.replace_scim_limiter(Limiter::new(requests, window, limit::ADDRESS_REQUESTS));
+        self.replace_scim_limiter(Limiter::new(
+            requests,
+            window,
+            limit::ADDRESS_FAILURES,
+            limit::RELOAD,
+        ));
     }
 
     #[cfg(any(test, feature = "testing"))]
-    pub fn limit_scim_addresses(&self, requests: u32) {
-        self.replace_scim_limiter(Limiter::new(limit::REQUESTS, limit::WINDOW, requests));
+    pub fn limit_scim_addresses(&self, failures: u32) {
+        self.replace_scim_limiter(Limiter::new(
+            limit::REQUESTS,
+            limit::WINDOW,
+            failures,
+            limit::RELOAD,
+        ));
     }
 
     #[cfg(any(test, feature = "testing"))]
