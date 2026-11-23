@@ -22,6 +22,6 @@ mod tests {
         let second = unusable().await.unwrap();
         assert!(first.starts_with("$argon2"), "{first}");
         assert_ne!(first, second);
-        assert!(!verify_password("", &first).unwrap());
+        assert!(!verify_password(&generate_token(), &first).unwrap());
     }
 }
