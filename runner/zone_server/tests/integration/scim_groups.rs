@@ -1,7 +1,3 @@
-//! The SCIM `/Groups` endpoints as an identity provider calls them: pushing groups and their
-//! members, reading, filtering and paging them, the member-change styles Okta and Entra send, and
-//! the organization roles a mapped group settles.
-
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -518,6 +514,51 @@ async fn a_mapped_group_settles_its_members_roles() {
     assert_eq!(
         deleted[0].new_values.as_ref().unwrap()["roles"],
         json!([{ "user_id": ada, "role": "member", "custom_role": null }])
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_retried_group_removal_still_drops_the_role() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    let ada = fixture.provision(&token.secret, &address()).await;
+    let group_id = create(&fixture, &token.secret, "Administrators", &[ada]).await;
+    fixture
+        .map(group_id, &json!({ "role": "admin" }))
+        .await
+        .assert_status(StatusCode::OK);
+    assert_eq!(
+        fixture.holding(ada).await.unwrap().0,
+        OrgRole::Admin.as_str()
+    );
+
+    sqlx::query("DELETE FROM scim_group_members WHERE group_id = $1 AND user_id = $2")
+        .bind(group_id)
+        .bind(ada)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.holding(ada).await.unwrap().0,
+        OrgRole::Admin.as_str(),
+        "a removal whose role change never landed"
+    );
+
+    fixture
+        .scim_patch(
+            &format!("/Groups/{group_id}"),
+            &token.secret,
+            &patch(json!([{ "op": "remove", "path": format!("members[value eq \"{ada}\"]") }])),
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    assert_eq!(
+        fixture.holding(ada).await.unwrap().0,
+        OrgRole::Member.as_str(),
+        "the retry settles the role the first attempt left behind"
     );
 
     fixture.cleanup().await;

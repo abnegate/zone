@@ -24,6 +24,22 @@ pub async fn list(executor: impl PgExecutor<'_>, group_id: Uuid) -> DbResult<Vec
     .await
 }
 
+pub async fn users(
+    executor: impl PgExecutor<'_>,
+    organization_id: Uuid,
+    group_id: Uuid,
+) -> DbResult<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT m.user_id FROM scim_group_members m \
+         INNER JOIN scim_groups g ON g.id = m.group_id \
+         WHERE g.organization_id = $1 AND g.id = $2 ORDER BY m.user_id",
+    )
+    .bind(organization_id)
+    .bind(group_id)
+    .fetch_all(executor)
+    .await
+}
+
 pub async fn add(
     connection: &mut PgConnection,
     organization_id: Uuid,

@@ -1,8 +1,3 @@
-//! Who the SCIM routes let in: only a live bearer token issued for the organization in the URL.
-//! A missing header, another scheme, a session token, a wrong, revoked or rotated-out secret,
-//! another organization's token and a deactivated organization are all challenged with 401, none
-//! of them is recorded as the organization's error, and no secret is ever stored in plain text.
-
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use serde_json::{Value, json};
@@ -109,7 +104,6 @@ async fn errors(fixture: &Fixture) -> i64 {
         .unwrap()
 }
 
-/// Every row of every table in the database, as text.
 async fn everything(fixture: &Fixture) -> String {
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT quote_ident(table_name) FROM information_schema.tables \

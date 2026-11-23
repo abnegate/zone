@@ -44,6 +44,7 @@ use crate::services::mcp_servers::hubs::Hubs;
 use crate::services::mcp_servers::status::Policy;
 use crate::services::network_denial::NetworkDenial;
 use crate::services::scim::limit;
+use crate::services::scim::limiter::Limiter;
 use crate::services::sso::throttle::Throttle;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
@@ -60,7 +61,7 @@ const MAX_CONCURRENT_FRAME_EXTRACT: usize = 4;
 /// Without a sweep, every client the rate limiter has ever seen stays in it.
 const RATE_LIMITER_CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
 
-fn read(limiter: &RwLock<Arc<RateLimiter<Uuid>>>) -> Arc<RateLimiter<Uuid>> {
+fn read(limiter: &RwLock<Arc<Limiter>>) -> Arc<Limiter> {
     Arc::clone(&limiter.read().unwrap_or_else(PoisonError::into_inner))
 }
 
@@ -125,7 +126,7 @@ struct AppStateInner {
     pub context_service: Option<Arc<ContextService>>,
     pub mail: Option<Arc<AccountMail>>,
     pub rate_limiter: Arc<RateLimiter<Uuid>>,
-    pub scim_limiter: Arc<RwLock<Arc<RateLimiter<Uuid>>>>,
+    pub scim_limiter: Arc<RwLock<Arc<Limiter>>>,
     pub sso_throttle: Arc<Throttle>,
     pub sync_registry: SyncRegistry,
     pub pull_registry: PullRegistry,
@@ -374,18 +375,27 @@ impl AppState {
         &self.inner.rate_limiter
     }
 
-    pub fn scim_limiter(&self) -> Arc<RateLimiter<Uuid>> {
+    pub fn scim_limiter(&self) -> Arc<Limiter> {
         read(&self.inner.scim_limiter)
     }
 
     #[cfg(any(test, feature = "testing"))]
     pub fn limit_scim(&self, requests: u32, window: Duration) {
-        let limiter = Arc::new(RateLimiter::new(RateLimitConfig::new(requests, window)));
+        self.replace_scim_limiter(Limiter::new(requests, window, limit::ADDRESS_REQUESTS));
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn limit_scim_addresses(&self, requests: u32) {
+        self.replace_scim_limiter(Limiter::new(limit::REQUESTS, limit::WINDOW, requests));
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    fn replace_scim_limiter(&self, limiter: Limiter) {
         *self
             .inner
             .scim_limiter
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = limiter;
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(limiter);
     }
 
     /// The per-address limit on single sign-on starts and SAML posts.

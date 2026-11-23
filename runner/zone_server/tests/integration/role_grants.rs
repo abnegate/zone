@@ -977,7 +977,7 @@ async fn a_role_someone_holds_cannot_be_deleted() {
         .await
         .expect("the delete is answered");
     assert!(
-        matches!(outcome, Deletion::Deleted(ref deleted) if deleted.id == role),
+        matches!(outcome, Deletion::Deleted { role: ref deleted, .. } if deleted.id == role),
         "{outcome:?}"
     );
 
@@ -1014,7 +1014,7 @@ async fn delete_lets_go_of_inactive_references_before_it_deletes() {
     let outcome = custom_roles::delete(&pool, organization, role, admin)
         .await
         .expect("the delete is answered");
-    assert!(matches!(outcome, Deletion::Deleted(_)), "{outcome:?}");
+    assert!(matches!(outcome, Deletion::Deleted { .. }), "{outcome:?}");
     assert_eq!(
         custom_role_of_organization_member(&pool, organization, member).await,
         None

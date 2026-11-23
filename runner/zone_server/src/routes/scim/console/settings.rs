@@ -28,7 +28,6 @@ pub struct SettingsResponse {
     pub errors: Vec<FailureResponse>,
 }
 
-/// GET /api/organizations/{org_id}/scim
 pub async fn get(
     State(state): State<AppState>,
     OrganizationPermit(member): OrganizationPermit<{ Permission::ScimUpdate.index() }>,

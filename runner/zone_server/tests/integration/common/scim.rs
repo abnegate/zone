@@ -1,8 +1,3 @@
-//! An Enterprise server with one organization, created through the API by the server admin who
-//! owns it, and helpers for issuing SCIM tokens and calling the SCIM endpoints as an identity
-//! provider would, replaying the requests Okta and Entra ID send. Every fixture has a database of
-//! its own, because the license is server-wide.
-
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use serde_json::{Value, json};
@@ -39,8 +34,6 @@ pub struct IssuedToken {
     pub secret: String,
 }
 
-/// The values a recorded request names, put in place of its `{{user}}`, `{{user_name}}`,
-/// `{{external_id}}` and `{{group}}`.
 #[derive(Debug, Clone, Default)]
 pub struct Placeholders {
     pub user: Option<Uuid>,
@@ -50,7 +43,6 @@ pub struct Placeholders {
 }
 
 impl Placeholders {
-    /// Fills every placeholder in `text`, failing the test if one is left without a value.
     pub fn substitute(&self, text: &str) -> String {
         let values = [
             ("{{user}}", self.user.map(|user| user.to_string())),
@@ -72,20 +64,16 @@ impl Placeholders {
     }
 }
 
-/// A recorded file, such as `okta/create_user.json`, as it is on disk.
 pub fn recording(fixture: &str) -> String {
     let path = format!("{FIXTURES}/{fixture}");
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"))
 }
 
-/// A recorded request body, such as `okta/create_user`, with its placeholders filled.
 pub fn replay(fixture: &str, placeholders: &Placeholders) -> Value {
     let text = placeholders.substitute(&recording(&format!("{fixture}.json")));
     serde_json::from_str(&text).unwrap_or_else(|error| panic!("{fixture}: {error}"))
 }
 
-/// Line `line`, counted from 1, of Entra's recorded lookups, filled and encoded as a path relative
-/// to the organization's base.
 pub fn entra_lookup(line: usize, placeholders: &Placeholders) -> String {
     let recorded = recording(ENTRA_LOOKUPS);
     let lookup = recorded
@@ -109,7 +97,6 @@ pub fn assert_scim(response: &TestResponse, status: StatusCode) {
     );
 }
 
-/// A refusal in the SCIM error format: the status as a string, and `scimType` only when given.
 pub fn assert_refused(response: &TestResponse, status: StatusCode, scim_type: Option<&str>) {
     assert_scim(response, status);
     let body = response.json_value();
@@ -140,7 +127,6 @@ impl Fixture {
         Self::licensed(sso::Fixture::new(prefix).await).await
     }
 
-    /// As [`Fixture::new`], with the Community member cap in force.
     pub async fn capped(prefix: &'static str) -> Self {
         Self::licensed(sso::Fixture::capped(prefix).await).await
     }
@@ -229,13 +215,10 @@ impl Fixture {
         create_organization(&self.inner, &self.owner).await
     }
 
-    /// An organization that `owner` creates, so that this fixture's owner isn't a member of it.
     pub async fn organization_of(&self, owner: &Account) -> Uuid {
         create_organization(&self.inner, owner).await
     }
 
-    /// An organization-scope custom role holding the scope's base and `permissions`, created by an
-    /// owner of `organization`.
     pub async fn custom_role(
         &self,
         organization: Uuid,
@@ -273,7 +256,6 @@ impl Fixture {
         }
     }
 
-    /// Maps a pushed group in the console, as the organization's owner.
     pub async fn map(&self, group: Uuid, mapping: &Value) -> TestResponse {
         self.inner
             .client
@@ -288,7 +270,6 @@ impl Fixture {
             .await
     }
 
-    /// Whether `token` still opens a session.
     pub async fn signed_in(&self, token: &str) -> bool {
         let response = self
             .inner
@@ -330,8 +311,6 @@ impl Fixture {
             .await
     }
 
-    /// Sends a SCIM request to `uri` as it is, for a request aimed at another organization's
-    /// base or carrying no body where one is expected.
     pub async fn scim(
         &self,
         method: Method,
@@ -402,8 +381,6 @@ impl Fixture {
         self.inner.audits(action).await
     }
 
-    /// The actions of every audit row a SCIM request wrote, sorted, failing the test if any of
-    /// them names an actor.
     pub async fn scim_actions(&self) -> Vec<String> {
         let rows: Vec<(String, Option<Uuid>)> = sqlx::query_as(
             "SELECT action, actor_id FROM audit_logs WHERE new_values ? 'scim_token_id'",

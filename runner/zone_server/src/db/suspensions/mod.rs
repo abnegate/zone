@@ -1,6 +1,3 @@
-//! Memberships taken away from a member who left an organization, kept with
-//! the roles they held so a returning member can be given them back.
-//!
 //! The `release_custom_role` trigger clears a custom role the moment a row is
 //! deactivated, so a suspension records it first.
 //!
@@ -25,19 +22,13 @@ use super::organization_members::{self, OrgRole};
 use super::workspace_members;
 use crate::auth::Scope;
 use record::Record;
-use seat::Seat;
 use workspace_record::WorkspaceRecord;
 
 pub use resumed::Resumed;
+pub use seat::Seat;
 pub use successor::Successor;
 pub use suspension::Suspension;
 
-/// Deactivates a member's organization membership and every workspace
-/// membership they hold in it, recording the role and custom role of each,
-/// and seats an owner in each workspace they leave without one.
-///
-/// A workspace nobody is left to own stays without an owner: leaving an
-/// organization is never refused for it.
 pub async fn suspend(
     transaction: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
@@ -122,15 +113,6 @@ pub async fn suspend(
     Ok(suspension)
 }
 
-/// Reactivates a suspended member with the roles they held.
-///
-/// A recorded custom role comes back only while it still belongs to the
-/// organization at the scope it was held at; otherwise the organization
-/// membership falls back to Member and a workspace membership to the role
-/// the custom role was pinned to. A workspace membership comes back only
-/// while its row still exists, beside whoever was seated in the meantime, so
-/// a returning owner may share the workspace with a successor. A member
-/// with no record comes back as Member.
 pub async fn resume(
     transaction: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
@@ -207,8 +189,6 @@ pub async fn resume(
     })
 }
 
-/// Drops every suspension record of a member in an organization, so a
-/// member who comes back another way does not get their old access with it.
 pub async fn forget<'a, E>(executor: E, organization_id: Uuid, user_id: Uuid) -> DbResult<u64>
 where
     E: Executor<'a, Database = Postgres>,
@@ -235,9 +215,6 @@ where
     Ok(u64::try_from(forgotten).unwrap_or_default())
 }
 
-/// Deletes a member's organization membership, every workspace membership
-/// they hold in it and their suspension records, seating an owner in each
-/// workspace they were active in and leave without one.
 pub async fn remove(
     transaction: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
@@ -279,7 +256,6 @@ pub async fn remove(
     Ok(successors)
 }
 
-/// The organization role a returning member is given back.
 async fn organization_role(
     connection: &mut PgConnection,
     organization_id: Uuid,
@@ -304,8 +280,6 @@ async fn organization_role(
     }
 }
 
-/// The organization's workspaces the member has a row in, active or not, by
-/// ascending id.
 async fn workspaces(
     connection: &mut PgConnection,
     organization_id: Uuid,

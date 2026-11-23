@@ -159,7 +159,6 @@ pub async fn get(
     row.map(Row::record).transpose()
 }
 
-/// The group, locked `FOR UPDATE` until the caller's transaction ends.
 pub async fn lock(
     connection: &mut PgConnection,
     organization_id: Uuid,
@@ -288,4 +287,22 @@ pub async fn map(
     .fetch_optional(executor)
     .await?;
     row.map(Row::record).transpose()
+}
+
+pub async fn release(
+    executor: impl PgExecutor<'_>,
+    organization_id: Uuid,
+    custom_role_id: Uuid,
+    released_by: Uuid,
+) -> DbResult<Vec<GroupRecord>> {
+    let rows: Vec<Row> = sqlx::query_as(sqlx::AssertSqlSafe(written(
+        "UPDATE scim_groups SET custom_role_id = NULL, mapped_by = $3, updated_at = now() \
+         WHERE organization_id = $1 AND custom_role_id = $2",
+    )))
+    .bind(organization_id)
+    .bind(custom_role_id)
+    .bind(released_by)
+    .fetch_all(executor)
+    .await?;
+    rows.into_iter().map(Row::record).collect()
 }

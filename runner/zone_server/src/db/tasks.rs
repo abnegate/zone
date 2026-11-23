@@ -1770,9 +1770,6 @@ pub async fn stop_task_run_authorized(
         .map(Mutation::Applied)
 }
 
-/// Cancel a live run and pause its task as [`stop_task_run_authorized`]
-/// does, on nobody's behalf: for a run whose actor no longer has the access
-/// that run needs.
 pub async fn stop_task_run(pool: &PgPool, run_id: Uuid) -> DbResult<Mutation<Stop>> {
     let mut transaction = pool.begin().await?;
     let task_id: Option<Uuid> = sqlx::query_scalar("SELECT task_id FROM task_runs WHERE id = $1")
@@ -1794,7 +1791,6 @@ pub async fn stop_task_run(pool: &PgPool, run_id: Uuid) -> DbResult<Mutation<Sto
         .map(Mutation::Applied)
 }
 
-/// The live runs `user_id` triggered in any of `workspaces`.
 pub async fn live_runs_triggered_by(
     pool: &PgPool,
     user_id: Uuid,

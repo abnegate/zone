@@ -1,6 +1,3 @@
-//! SCIM 2.0 provisioning: the bearer secrets identity providers present, and the services the SCIM
-//! and console routes share.
-
 pub mod client;
 pub mod console;
 pub mod entitlement;
@@ -8,12 +5,14 @@ pub mod failure;
 pub mod groups;
 pub mod issued;
 pub mod limit;
+pub mod limiter;
 pub mod password;
 pub mod record;
 pub mod remapped;
 pub mod remapping;
 pub mod resource;
 pub mod secret;
+mod settled;
 pub mod slot;
 pub mod users;
 pub mod writer;
@@ -22,6 +21,7 @@ pub use client::ScimClient;
 pub use entitlement::Entitlement;
 pub use failure::Failure;
 pub use issued::Issued;
+pub use limiter::Limiter;
 pub use remapped::Remapped;
 pub use remapping::Remapping;
 pub use slot::Slot;

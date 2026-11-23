@@ -1,8 +1,3 @@
-//! One organization's SCIM token reaches only that organization. It never reads or changes
-//! another organization's users, groups, members or custom roles, its filters never match them,
-//! it can't put them in its own groups, its owner can't open the other's SCIM settings, and it
-//! never renames an account that another organization shares.
-
 use axum::http::{Method, StatusCode};
 use serde_json::{Value, json};
 use uuid::Uuid;

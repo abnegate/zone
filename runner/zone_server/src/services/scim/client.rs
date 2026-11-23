@@ -11,8 +11,10 @@ use super::entitlement::Entitlement;
 use super::failure::Failure;
 use super::slot::Slot;
 use super::{limit, secret};
+use crate::auth::client_address::ClientAddress;
 use crate::db::organizations;
 use crate::db::scim::{TokenCredential, tokens};
+use crate::services::sso::throttle;
 use crate::state::AppState;
 
 pub const ORGANIZATION_PARAMETER: &str = "org_id";
@@ -40,6 +42,14 @@ where
         }
         let state = AppState::from_ref(state);
         let organization_id = organization(parts, &state).await?;
+        let limiter = state.scim_limiter();
+        let address = ClientAddress::of(parts, &state.config().trusted_proxies);
+        let screened = limiter.screen(address.0);
+        if !screened.allowed {
+            return Err(Failure::Flooded {
+                retry_after: limit::retry_after(screened.reset_at, throttle::WINDOW),
+            });
+        }
         let secret = bearer(&parts.headers).ok_or(Failure::Unauthenticated)?;
         let credential = authenticate(&state, organization_id, secret).await?;
 
@@ -54,15 +64,15 @@ where
             token_name: credential.name,
             entitlement: Entitlement::of(license.as_ref(), Utc::now()),
         };
-        if let Some(slot) = parts.extensions.get::<Slot>() {
+        let decision = limiter.check(organization_id);
+        if (decision.allowed || limiter.records(organization_id, &decision))
+            && let Some(slot) = parts.extensions.get::<Slot>()
+        {
             slot.fill(&client);
         }
-
-        let limiter = state.scim_limiter();
-        let decision = limiter.check_rate_limit(organization_id);
         if !decision.allowed {
             return Err(Failure::Throttled {
-                retry_after: limit::retry_after(decision.reset_at, limiter.config().window),
+                retry_after: limit::retry_after(decision.reset_at, limiter.window()),
             });
         }
 

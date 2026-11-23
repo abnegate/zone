@@ -3,7 +3,7 @@ use serde::Serialize;
 use super::token_response::TokenResponse;
 use crate::services::scim::Issued;
 
-/// The only answer that carries a token's secret. It has no `Debug`, so it can't be logged.
+/// Has no `Debug`, so the secret it carries can't be logged.
 #[derive(Serialize)]
 pub struct IssuedResponse {
     pub token: TokenResponse,

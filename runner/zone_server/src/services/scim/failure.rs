@@ -41,6 +41,8 @@ pub enum Failure {
     TooLarge,
     #[error("Too many SCIM requests for this organization. Try again in {retry_after} seconds.")]
     Throttled { retry_after: u64 },
+    #[error("Too many SCIM requests from your network. Try again in {retry_after} seconds.")]
+    Flooded { retry_after: u64 },
     #[error("{0}")]
     Busy(String),
     #[error(transparent)]
@@ -77,7 +79,7 @@ impl Failure {
             Self::Unentitled | Self::Forbidden(_) => FORBIDDEN,
             Self::LastOwner => scim::CONFLICT,
             Self::TooLarge => PAYLOAD_TOO_LARGE,
-            Self::Throttled { .. } => TOO_MANY_REQUESTS,
+            Self::Throttled { .. } | Self::Flooded { .. } => TOO_MANY_REQUESTS,
             Self::Busy(_) => SERVICE_UNAVAILABLE,
             Self::Storage(_) | Self::Internal(_) => INTERNAL_SERVER_ERROR,
         }
@@ -86,7 +88,7 @@ impl Failure {
     pub fn scim_type(&self) -> Option<ScimType> {
         match self {
             Self::Protocol(error) => error.scim_type(),
-            Self::Throttled { .. } => Some(ScimType::TooMany),
+            Self::Throttled { .. } | Self::Flooded { .. } => Some(ScimType::TooMany),
             Self::Unauthenticated
             | Self::Unentitled
             | Self::Forbidden(_)
@@ -145,6 +147,11 @@ mod tests {
             (Failure::TooLarge, 413, None),
             (
                 Failure::Throttled { retry_after: 3 },
+                429,
+                Some(ScimType::TooMany),
+            ),
+            (
+                Failure::Flooded { retry_after: 3 },
                 429,
                 Some(ScimType::TooMany),
             ),

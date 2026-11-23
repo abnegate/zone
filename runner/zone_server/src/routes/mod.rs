@@ -163,8 +163,6 @@ pub fn create_router(state: AppState) -> Router {
             SETUP_CALLBACK_PATH,
             get(github::callbacks::setup).head(github::callbacks::refuse),
         )
-        // SCIM provisioning (public - a SCIM bearer token of the organization in
-        // the path, checked by the ScimClient extractor)
         .nest(scim::BASE_PATH, scim::router(state.clone()));
 
     // Protected routes (auth required)

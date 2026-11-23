@@ -1,12 +1,3 @@
-//! A member who leaves an organization leaves its workspaces with it.
-//!
-//! Removal suspends every workspace membership the member held in the
-//! organization, recording the roles so a suspension can be resumed, and seats
-//! an owner in each workspace they leave without one. It also stops what they
-//! have running there: chat turns (reminder and automation turns included,
-//! since those register under the member too), task runs they triggered, and
-//! invitations still waiting on their email.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -120,8 +111,6 @@ async fn remove(client: &TestClient, owner: &Account, organization: Uuid, member
         .assert_status(StatusCode::NO_CONTENT);
 }
 
-/// Makes `member` the workspace's only owner: the creator leaves the
-/// workspace, though not the organization.
 async fn hand_over(pool: &PgPool, workspace: Uuid, creator: &Account, member: &Account) {
     sqlx::query("DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2")
         .bind(workspace)
@@ -779,9 +768,6 @@ async fn deprovisioning_answers_the_members_token_with_unauthorized() {
         .assert_status(StatusCode::OK);
 }
 
-/// A workspace removal holding the workspace's admin and owner rows makes a
-/// suspension of the workspace's owner wait for it, and the suspension then
-/// seats an owner from what the removal left, without either deadlocking.
 #[tokio::test]
 async fn a_suspension_waits_for_a_workspace_removal_and_still_seats_an_owner() {
     let client = TestClient::with_db().await;

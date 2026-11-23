@@ -4,8 +4,7 @@ use uuid::Uuid;
 
 use crate::db::scim::ErrorRecord;
 
-/// A SCIM request Zone refused, as the console lists it. `path` is the route template, so it
-/// never carries an ID or a filter value.
+/// `path` is the route template, so it never carries an ID or a filter value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FailureResponse {
     pub id: Uuid,

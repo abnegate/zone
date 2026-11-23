@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::scim::flag::Flag;
 
@@ -7,6 +7,7 @@ pub const WORK: &str = "work";
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Email {
+    #[serde(deserialize_with = "blank_when_null")]
     pub value: String,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
@@ -41,4 +42,8 @@ impl Email {
             .as_deref()
             .is_some_and(|kind| kind.eq_ignore_ascii_case(WORK))
     }
+}
+
+fn blank_when_null<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Option::unwrap_or_default)
 }

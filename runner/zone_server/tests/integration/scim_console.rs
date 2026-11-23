@@ -1,7 +1,3 @@
-//! Setting up SCIM provisioning from the console: the settings an owner reads, issuing, rotating
-//! and revoking tokens whose secret is shown once, and mapping pushed groups to organization
-//! roles. Only owners reach any of it, and a lapsed license leaves only reading and revoking.
-
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -10,7 +6,9 @@ use zone_server::auth::{Grant, OrganizationMember, Permission, Scope};
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::custom_roles::{self, Assignment, Creation, Definition, Summary};
 use zone_server::db::organization_members::OrgRole;
-use zone_server::db::scim::{Link, NewError, errors, group_members, groups, tokens, users};
+use zone_server::db::scim::{
+    Link, Mapping, NewError, errors, group_members, groups, tokens, users,
+};
 use zone_server::routes::scim::console::refusal::{
     GROUP_NOT_FOUND, MAPPING_INVALID, OWNER_UNMAPPABLE, ROLE_NOT_FOUND, TOKEN_NAME_INVALID,
     TOKEN_NOT_FOUND,
@@ -108,7 +106,6 @@ async fn unmap(fixture: &Fixture, token: &str, group: impl std::fmt::Display) ->
         .await
 }
 
-/// Issues a token through the console and returns its ID and secret.
 async fn issued(fixture: &Fixture, name: &str) -> (Uuid, String) {
     let response = create(fixture, &fixture.owner.token, &json!({ "name": name })).await;
     response.assert_status(StatusCode::CREATED);
@@ -119,7 +116,6 @@ async fn issued(fixture: &Fixture, name: &str) -> (Uuid, String) {
     )
 }
 
-/// Whether `secret` is one an identity provider could authenticate with right now.
 async fn authenticates(fixture: &Fixture, secret: &str) -> bool {
     tokens::active(fixture.pool(), fixture.organization)
         .await
@@ -136,7 +132,6 @@ async fn stored_tokens(fixture: &Fixture) -> String {
         .join("\n")
 }
 
-/// A member SCIM has linked, so group mappings govern their role.
 async fn linked(fixture: &Fixture, role: OrgRole) -> Account {
     let account = fixture.member(role).await;
     users::upsert(
@@ -185,7 +180,6 @@ async fn custom_role(fixture: &Fixture, organization: Uuid, name: &str, scope: S
     }
 }
 
-/// The member's stored role and custom role.
 async fn held(fixture: &Fixture, user: Uuid) -> (String, Option<Uuid>) {
     sqlx::query_as(
         "SELECT role, custom_role_id FROM organization_members \
@@ -703,6 +697,96 @@ async fn a_member_keeps_the_role_of_another_mapped_group_when_one_is_unmapped() 
 
     assert_eq!(held(&fixture, both.id).await, ("admin".to_owned(), None));
     assert_eq!(held(&fixture, only.id).await, ("member".to_owned(), None));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn deleting_a_mapped_custom_role_audits_the_unmapping_and_settles_its_members() {
+    let fixture = Fixture::new(PREFIX).await;
+    let drifted = linked(&fixture, OrgRole::Member).await;
+    let auditors = group(&fixture, fixture.organization, "Auditors", &[drifted.id]).await;
+    let administrators = group(
+        &fixture,
+        fixture.organization,
+        "Administrators",
+        &[drifted.id],
+    )
+    .await;
+    let auditor = custom_role(
+        &fixture,
+        fixture.organization,
+        "Auditor",
+        Scope::Organization,
+    )
+    .await;
+    map(
+        &fixture,
+        &fixture.owner.token,
+        auditors,
+        &json!({ "custom_role_id": auditor.id }),
+    )
+    .await
+    .assert_status(StatusCode::OK);
+    map(
+        &fixture,
+        &fixture.owner.token,
+        administrators,
+        &json!({ "role": "admin" }),
+    )
+    .await
+    .assert_status(StatusCode::OK);
+    sqlx::query(
+        "UPDATE organization_members SET role = 'member' \
+         WHERE organization_id = $1 AND user_id = $2",
+    )
+    .bind(fixture.organization)
+    .bind(drifted.id)
+    .execute(fixture.pool())
+    .await
+    .unwrap();
+
+    fixture
+        .inner
+        .client
+        .delete_auth(
+            &format!(
+                "/api/organizations/{}/roles/{}",
+                fixture.organization, auditor.id
+            ),
+            &fixture.owner.token,
+        )
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    assert_eq!(
+        groups::get(fixture.pool(), fixture.organization, auditors)
+            .await
+            .unwrap()
+            .unwrap()
+            .mapping,
+        Mapping::Unmapped
+    );
+    assert_eq!(
+        held(&fixture, drifted.id).await,
+        ("admin".to_owned(), None),
+        "the members of the unmapped group are settled again"
+    );
+    let audits = fixture.audits(actions::SCIM_GROUP_UNMAPPED).await;
+    assert_eq!(audits.len(), 1, "the unmapping is audited");
+    assert_eq!(audits[0].resource_id, Some(auditors));
+    assert_eq!(audits[0].actor_id, Some(fixture.owner.id));
+    assert_eq!(
+        audits[0].old_values,
+        Some(json!({ "role": null, "custom_role": { "id": auditor.id, "name": "Auditor" } }))
+    );
+    assert_eq!(
+        audits[0].new_values,
+        Some(json!({
+            "role": null,
+            "custom_role": null,
+            "changed": [{ "user_id": drifted.id, "role": "admin", "custom_role": null }],
+        }))
+    );
     fixture.cleanup().await;
 }
 

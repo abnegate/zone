@@ -350,6 +350,8 @@ A role that any active member holds can't be deleted. Zone refuses with 409
 `role_in_use` and the number of holders; give them another role first.
 Deactivating a member clears their custom role, so a role held only by former
 members can be deleted. Deleting an organization deletes its roles with it.
+Deleting a role that [SCIM groups](SCIM.md#group-to-role-mapping) map to unmaps
+them, audits each unmapping and works out their members' roles again.
 
 ## What people see in the console
 

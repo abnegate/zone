@@ -3,6 +3,7 @@ import { scimApi } from '../api';
 import { ScimRefusal } from '../ScimRefusal';
 import type { IssuedResponse } from '../types';
 import { cacheTokens, refreshScim } from './cache';
+import { IssuedSecrets } from './IssuedSecrets';
 
 export interface CreateScimTokenState {
   create(name: string, onIssued: (issued: IssuedResponse) => void): void;
@@ -17,8 +18,10 @@ export function useCreateScimToken(organizationId: string): CreateScimTokenState
 
   const { mutate, isPending, error, reset } = useMutation({
     mutationFn: (name: string) => scimApi.createToken(organizationId, name),
-    onSuccess: ({ token }) =>
-      cacheTokens(queryClient, organizationId, (tokens) => [...tokens, token]),
+    onSuccess: (issued) => {
+      IssuedSecrets.of(queryClient).keep(organizationId, issued);
+      cacheTokens(queryClient, organizationId, (tokens) => [...tokens, issued.token]);
+    },
     onSettled: () => refreshScim(queryClient, organizationId),
     gcTime: 0,
   });

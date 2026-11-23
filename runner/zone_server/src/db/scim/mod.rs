@@ -1,7 +1,3 @@
-//! What SCIM provisioning stores per organization: the tokens identity providers authenticate
-//! with, the users and groups they pushed, the roles those groups map to, and the recent
-//! failures an owner reads in the console. Every query is scoped by organization.
-
 pub mod accounts;
 pub mod admission;
 pub mod applied;
