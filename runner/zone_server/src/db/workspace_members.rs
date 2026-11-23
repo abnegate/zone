@@ -646,6 +646,9 @@ impl Lock {
                 "SELECT wm.role, wm.custom_role_id, w.organization_id \
                  FROM workspace_members wm INNER JOIN workspaces w ON w.id = wm.workspace_id \
                  WHERE wm.workspace_id = $1 AND wm.user_id = $2 AND wm.is_active = TRUE \
+                 AND EXISTS (SELECT 1 FROM organization_members om \
+                   WHERE om.organization_id = w.organization_id AND om.user_id = wm.user_id \
+                   AND om.is_active) \
                  FOR SHARE OF wm"
             }
             Self::Update => {

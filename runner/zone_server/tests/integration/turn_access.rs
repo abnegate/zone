@@ -87,6 +87,14 @@ async fn suspend(harness: &Harness, user: Uuid) {
     transaction.commit().await.unwrap();
 }
 
+async fn messages(harness: &Harness) -> Vec<String> {
+    sqlx::query_scalar("SELECT role FROM messages WHERE chat_id = $1 ORDER BY created_at, id")
+        .bind(harness.chat)
+        .fetch_all(&harness.pool)
+        .await
+        .unwrap()
+}
+
 /// The suspension lands without halting anything here, as it does when
 /// another replica handles it, and the turn still ends on its own.
 #[tokio::test]
@@ -116,4 +124,42 @@ async fn a_turn_whose_author_is_suspended_elsewhere_ends() {
         .await
         .expect("a suspended member's turn kept generating")
         .expect("the ended turn did not panic");
+}
+
+/// A recurring reminder delivers as its author, so one whose author no longer
+/// belongs to the organization stops, even where a workspace seat outlived the
+/// organization membership.
+#[tokio::test]
+async fn a_recurring_reminder_of_a_departed_member_stops_firing() {
+    let harness = Harness::new(Some(32_768), false, Vec::new()).await;
+    let user = owner(&harness).await;
+    let reminder = schedule(&harness, user, None, Some("FREQ=DAILY")).await;
+    sqlx::query(
+        "UPDATE organization_members SET is_active = FALSE \
+         WHERE organization_id = $1 AND user_id = $2",
+    )
+    .bind(organization(&harness).await)
+    .bind(user)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        reminders::deliver_next(&harness.pool, Sweep::Workspace(harness.workspace))
+            .await
+            .unwrap(),
+        Delivered::Settled
+    );
+
+    assert_eq!(
+        messages(&harness).await,
+        Vec::<String>::new(),
+        "the departed member's reminder was delivered"
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM reminders WHERE id = $1")
+        .bind(reminder)
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "cancelled", "the schedule kept going");
 }
