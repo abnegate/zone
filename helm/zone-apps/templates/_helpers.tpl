@@ -163,6 +163,41 @@ app.kubernetes.io/component: manager
 {{- end }}
 
 {{/*
+Under highAvailability, a scheduling term's label selector also matches the
+release, so two releases in one namespace never count each other's pods. A
+term without a selector matches no pods and is left alone.
+*/}}
+{{- define "zone-apps.releaseSelector" -}}
+{{- if kindIs "map" .term.labelSelector }}
+{{- $labels := default (dict) .term.labelSelector.matchLabels }}
+{{- $_ := set .term.labelSelector "matchLabels" (merge (dict "app.kubernetes.io/instance" .context.Release.Name) $labels) }}
+{{- end }}
+{{- end }}
+
+{{- define "zone-apps.topologySpreadConstraints" -}}
+{{- $constraints := deepCopy .constraints }}
+{{- if .context.Values.highAvailability.enabled }}
+{{- range $constraints }}
+{{- include "zone-apps.releaseSelector" (dict "term" . "context" $.context) }}
+{{- end }}
+{{- end }}
+{{- toYaml $constraints }}
+{{- end }}
+
+{{- define "zone-apps.podAntiAffinity" -}}
+{{- $affinity := deepCopy .affinity }}
+{{- if .context.Values.highAvailability.enabled }}
+{{- range $affinity.preferredDuringSchedulingIgnoredDuringExecution }}
+{{- include "zone-apps.releaseSelector" (dict "term" (dig "podAffinityTerm" (dict) .) "context" $.context) }}
+{{- end }}
+{{- range $affinity.requiredDuringSchedulingIgnoredDuringExecution }}
+{{- include "zone-apps.releaseSelector" (dict "term" . "context" $.context) }}
+{{- end }}
+{{- end }}
+{{- toYaml $affinity }}
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "zone-apps.serviceAccountName" -}}

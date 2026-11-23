@@ -11,7 +11,7 @@ encryption_key=fedcba9876543210fedcba9876543210
 render() {
     chart=$1
     shift
-    helm template "$chart" "$root/helm/$chart" --namespace zone "$@"
+    helm template "$root/helm/$chart" --name-template "$chart" --namespace zone "$@"
 }
 
 render_ha() {
@@ -85,6 +85,13 @@ apps_server='select(.kind == "Deployment" and .metadata.name == "zone-apps-serve
 apps_manager='select(.kind == "Deployment" and .metadata.name == "zone-apps-manager")'
 apps_container="$apps_server | .spec.template.spec.containers[] | select(.name == \"server\")"
 apps_egress='select(.kind == "NetworkPolicy" and .metadata.name == "zone-apps-server-egress") | .spec.egress[]'
+apps_selectors='select(.kind == "Deployment") | .spec.template.spec | ((.topologySpreadConstraints[]?.labelSelector), (.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[]?.podAffinityTerm.labelSelector))'
+apps_spread_policy='(.maxSkew | tostring) + " " + .whenUnsatisfiable + " " + .nodeTaintsPolicy + " " + ((.matchLabelKeys // []) | join(","))'
+apps_labels='.matchLabels | to_entries | map(.key + "=" + .value) | join(",")'
+
+release_selectors() {
+    printf '%s,%s,%s,%s,%s' "$1" "$1" "$1" "$1" "$1"
+}
 
 render_apps_ha() {
     render_ha zone-apps --set "server.agentState.persistence.storageClass=$storage_class" "$@"
@@ -124,12 +131,20 @@ check_apps_ha() {
 
     expect 'the server prefers spreading across hostnames' kubernetes.io/hostname "$rendered" \
         "$apps_server | .spec.template.spec.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].podAffinityTerm.topologyKey"
-    expect 'the server spreads by hostname, refusing to schedule past a skew of 1' '1 DoNotSchedule Honor' "$rendered" \
-        "$apps_server | .spec.template.spec.topologySpreadConstraints[] | select(.topologyKey == \"kubernetes.io/hostname\") | (.maxSkew | tostring) + \" \" + .whenUnsatisfiable + \" \" + .nodeTaintsPolicy"
-    expect 'the server spreads by zone on a best-effort basis' '1 ScheduleAnyway Honor' "$rendered" \
-        "$apps_server | .spec.template.spec.topologySpreadConstraints[] | select(.topologyKey == \"topology.kubernetes.io/zone\") | (.maxSkew | tostring) + \" \" + .whenUnsatisfiable + \" \" + .nodeTaintsPolicy"
+    expect 'the server spreads each rollout by hostname, refusing to schedule past a skew of 1' '1 DoNotSchedule Honor pod-template-hash' "$rendered" \
+        "$apps_server | .spec.template.spec.topologySpreadConstraints[] | select(.topologyKey == \"kubernetes.io/hostname\") | $apps_spread_policy"
+    expect 'the server spreads each rollout by zone on a best-effort basis' '1 ScheduleAnyway Honor pod-template-hash' "$rendered" \
+        "$apps_server | .spec.template.spec.topologySpreadConstraints[] | select(.topologyKey == \"topology.kubernetes.io/zone\") | $apps_spread_policy"
+    expect 'the console spreads each rollout by hostname on a best-effort basis' '1 ScheduleAnyway Honor pod-template-hash' "$rendered" \
+        "$apps_manager | .spec.template.spec.topologySpreadConstraints[] | select(.topologyKey == \"kubernetes.io/hostname\") | $apps_spread_policy"
     expect 'every topology spread constraint ignores tainted and cordoned nodes' 0 "$rendered" \
         '[select(.kind == "Deployment") | .spec.template.spec.topologySpreadConstraints[] | select(.nodeTaintsPolicy != "Honor")] | length'
+    expect 'every topology spread constraint counts only its own rollout revision' '3 0' "$rendered" \
+        '[select(.kind == "Deployment") | .spec.template.spec.topologySpreadConstraints[]] | (length | tostring) + " " + ([.[] | select((.matchLabelKeys // []) | contains(["pod-template-hash"]) | not)] | length | tostring)'
+    expect 'every spread and anti-affinity selector counts only this release' "$(release_selectors zone-apps)" "$rendered" \
+        "[$apps_selectors | .matchLabels[\"app.kubernetes.io/instance\"]] | join(\",\")"
+    expect 'every spread and anti-affinity selector keeps its component' manager,manager,server,server,server "$rendered" \
+        "[$apps_selectors | .matchLabels[\"app.kubernetes.io/component\"]] | join(\",\")"
     expect 'a surge pod with maxUnavailable 0 never waits on required anti-affinity' 0 "$rendered" \
         '[select(.kind == "Deployment" and .spec.strategy.rollingUpdate.maxUnavailable == 0) | .spec.template.spec.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[]?] | length'
     expect 'neither the server nor the console requires anti-affinity' 0 "$rendered" \
@@ -171,6 +186,29 @@ check_apps_ha() {
         '[.. | select(tag == "!!map" and .name == "REDIS_URL")] | map(.valueFrom.secretKeyRef.key // "plain") | join(",")'
     expect 'no env var named REDIS_URL carries a plain value' 0 "$rendered" \
         '[.. | select(tag == "!!map" and .name == "REDIS_URL" and has("value"))] | length'
+}
+
+check_apps_ha_release() {
+    rendered=$(rendered_or_fail 'the zone-apps HA profile renders as another release' \
+        render_apps_ha_vouched --name-template other) || return 0
+    expect 'every spread and anti-affinity selector names its own release' "$(release_selectors other)" "$rendered" \
+        "[$apps_selectors | .matchLabels[\"app.kubernetes.io/instance\"]] | join(\",\")"
+}
+
+check_apps_ha_selector_override() {
+    rendered=$(rendered_or_fail 'the zone-apps HA profile renders with custom server spread selectors' \
+        render_apps_ha_vouched --set-json 'server.topologySpreadConstraints=[
+            {"maxSkew": 1, "topologyKey": "kubernetes.io/hostname", "whenUnsatisfiable": "DoNotSchedule", "matchLabelKeys": ["pod-template-hash"],
+             "labelSelector": {"matchLabels": {"app.kubernetes.io/component": "server", "tier": "api"}}},
+            {"maxSkew": 1, "topologyKey": "topology.kubernetes.io/zone", "whenUnsatisfiable": "ScheduleAnyway",
+             "labelSelector": {"matchExpressions": [{"key": "tier", "operator": "In", "values": ["api"]}]}}
+        ]') || return 0
+    expect 'a custom spread selector keeps its labels and gains the release' \
+        app.kubernetes.io/component=server,app.kubernetes.io/instance=zone-apps,tier=api "$rendered" \
+        "$apps_server | .spec.template.spec.topologySpreadConstraints[] | select(.topologyKey == \"kubernetes.io/hostname\") | .labelSelector | $apps_labels"
+    expect 'a spread selector of only expressions keeps them and gains the release' \
+        'tier In api|app.kubernetes.io/instance=zone-apps' "$rendered" \
+        "$apps_server | .spec.template.spec.topologySpreadConstraints[] | select(.topologyKey == \"topology.kubernetes.io/zone\") | .labelSelector | (.matchExpressions | map(.key + \" \" + .operator + \" \" + (.values | join(\",\"))) | join(\",\")) + \"|\" + ($apps_labels)"
 }
 
 check_apps_ha_secret() {
@@ -232,6 +270,10 @@ check_apps_default() {
     expect 'the default server is ready on /health' /health "$rendered" "$apps_container | .readinessProbe.httpGet.path"
     expect 'the default render has no ReadWriteMany claim' 0 "$rendered" \
         '[select(.kind == "PersistentVolumeClaim") | .spec.accessModes[] | select(. == "ReadWriteMany")] | length'
+    expect 'the default spread and anti-affinity selectors name no release' 0 "$rendered" \
+        "[$apps_selectors | select(.matchLabels | has(\"app.kubernetes.io/instance\"))] | length"
+    expect 'the default spread constraints count every rollout revision' 0 "$rendered" \
+        '[select(.kind == "Deployment") | .spec.template.spec.topologySpreadConstraints[] | select(has("matchLabelKeys"))] | length'
     expect 'the default server keeps its own termination grace' null "$rendered" \
         "$apps_server | .spec.template.spec.terminationGracePeriodSeconds"
     expect 'the default server egress reaches the in-cluster valkey pods' 1 "$(render zone-apps --set networkPolicy.enabled=true)" \
@@ -359,6 +401,8 @@ check_ai_ha() {
 
 check_apps_default
 check_apps_ha
+check_apps_ha_release
+check_apps_ha_selector_override
 check_apps_ha_secret
 check_apps_ha_refusals
 check_apps_ha_network_policy

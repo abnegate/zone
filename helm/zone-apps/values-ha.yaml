@@ -5,7 +5,7 @@
 #     --set server.agentState.persistence.storageClass=<ReadWriteMany class> \
 #     --set highAvailability.externalValkey=true
 #
-# It needs Kubernetes 1.26 or later, at least 3 schedulable nodes, a
+# It needs Kubernetes 1.27 or later, at least 3 schedulable nodes, a
 # ReadWriteMany storage class (NFSv4.1+, EFS, Filestore, Azure Files NFS or
 # CephFS) and an external, managed Redis or Valkey with failover. Either set
 # highAvailability.externalValkey once secrets.existingSecret's redisUrl key
@@ -83,11 +83,17 @@ server:
 
   # nodeTaintsPolicy Honor keeps tainted and cordoned nodes out of the skew,
   # or they count as empty domains and deadlock rollouts and the HPA.
+  # matchLabelKeys pod-template-hash spreads each rollout revision on its own:
+  # counting the old ReplicaSet's pods stacks new pods on one node. Under
+  # highAvailability the chart adds app.kubernetes.io/instance to every spread
+  # and anti-affinity selector.
   topologySpreadConstraints:
     - maxSkew: 1
       topologyKey: kubernetes.io/hostname
       whenUnsatisfiable: DoNotSchedule
       nodeTaintsPolicy: Honor
+      matchLabelKeys:
+        - pod-template-hash
       labelSelector:
         matchLabels:
           app.kubernetes.io/component: server
@@ -95,6 +101,8 @@ server:
       topologyKey: topology.kubernetes.io/zone
       whenUnsatisfiable: ScheduleAnyway
       nodeTaintsPolicy: Honor
+      matchLabelKeys:
+        - pod-template-hash
       labelSelector:
         matchLabels:
           app.kubernetes.io/component: server
@@ -123,6 +131,8 @@ manager:
       topologyKey: kubernetes.io/hostname
       whenUnsatisfiable: ScheduleAnyway
       nodeTaintsPolicy: Honor
+      matchLabelKeys:
+        - pod-template-hash
       labelSelector:
         matchLabels:
           app.kubernetes.io/component: manager

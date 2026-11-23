@@ -51,6 +51,8 @@ The following table lists the configurable parameters and their default values.
 
 `values-ha.yaml` is the supported HA topology: layer it over your values with `-f helm/zone-apps/values-ha.yaml`, and set `server.agentState.persistence.storageClass` to a ReadWriteMany class.
 
+It needs Kubernetes 1.27 or later. Its topology spread constraints set `matchLabelKeys: [pod-template-hash]`, so each rollout revision spreads across nodes on its own rather than counting the old ReplicaSet's pods, and `nodeTaintsPolicy: Honor`. With `highAvailability.enabled`, the chart adds `app.kubernetes.io/instance: <release>` to every spread and pod anti-affinity label selector, merged into the labels you set, so two releases in one namespace never count each other's pods.
+
 [docs/HA.md](../../docs/HA.md) describes the whole topology: its requirements, sizing, failure modes, backups, upgrades and support boundary.
 
 | Parameter | Description | Default |
