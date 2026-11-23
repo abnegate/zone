@@ -4,6 +4,7 @@
 mod bus;
 mod channel;
 mod command;
+mod ended;
 mod envelope;
 mod kind;
 mod loopback;
