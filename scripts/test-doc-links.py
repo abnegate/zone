@@ -14,7 +14,7 @@ from urllib.parse import unquote, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / 'docs'
 
-PENDING = frozenset({Path('docs/HA.md')})
+PENDING: frozenset[Path] = frozenset()
 
 FENCE = re.compile(r'^\s*(`{3,}|~{3,})')
 HEADING = re.compile(r'^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$')
