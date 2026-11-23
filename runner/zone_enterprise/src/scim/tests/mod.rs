@@ -1513,6 +1513,38 @@ fn keys_that_differ_only_in_case_apply_in_document_order() {
 }
 
 #[test]
+fn folding_a_huge_value_object_takes_linear_time() {
+    const DISTINCT: usize = 200_000;
+    const REPEATED: usize = 100_000;
+    let keys = (0..DISTINCT)
+        .map(|index| format!(r#""k{index}":0"#))
+        .chain((0..REPEATED).map(|index| format!(r#""K{index}":1"#)))
+        .collect::<Vec<_>>()
+        .join(",");
+    let body = format!(r#"{{"Operations":[{{"op":"add","value":{{{keys}}}}}]}}"#);
+
+    let started = std::time::Instant::now();
+    let request: PatchRequest = serde_json::from_str(&body).expect("a patch request");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "folding {} keys took {elapsed:?}",
+        DISTINCT + REPEATED
+    );
+    let object = request.operations[0]
+        .value
+        .as_ref()
+        .and_then(Value::as_object)
+        .expect("an object value");
+    assert_eq!(object.len(), DISTINCT);
+    assert_eq!(object.get("K0"), Some(&json!(1)));
+    assert_eq!(object.get(&format!("K{}", REPEATED - 1)), Some(&json!(1)));
+    assert_eq!(object.get("k0"), None);
+    assert_eq!(object.get(&format!("k{REPEATED}")), Some(&json!(0)));
+}
+
+#[test]
 fn an_empty_path_is_an_invalid_path() {
     for path in ["", " "] {
         let error = user_patch(operations(
