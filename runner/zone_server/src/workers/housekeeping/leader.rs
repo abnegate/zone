@@ -113,9 +113,11 @@ impl Leadership {
         }
     }
 
-    /// Stop campaigning, and give the lock back if this process holds it.
+    /// Stop leading at once, then stop campaigning and give the lock back if
+    /// this process holds it.
     pub async fn release(&self) {
         self.stop.cancel();
+        self.tenure.send_replace(None);
         let task = self
             .task
             .lock()
@@ -363,6 +365,25 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(1), lost)
             .await
             .expect("demotion is noticed at once")
+            .expect("the waiter does not panic");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn releasing_stops_leading_before_the_lock_is_given_back() {
+        let leadership = Leadership::manual(timing());
+        leadership.promote(Instant::now());
+        tokio::time::advance(Duration::from_secs(20)).await;
+        leadership.confirm(Instant::now());
+        assert!(leadership.leads());
+        let watching = leadership.clone();
+        let lost = tokio::spawn(async move { watching.lost().await });
+
+        leadership.release().await;
+
+        assert!(!leadership.leads());
+        tokio::time::timeout(Duration::from_millis(1), lost)
+            .await
+            .expect("releasing is noticed at once")
             .expect("the waiter does not panic");
     }
 

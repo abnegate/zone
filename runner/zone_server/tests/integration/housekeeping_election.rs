@@ -21,6 +21,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 use zone_server::db::migrations;
 use zone_server::state::AppState;
+use zone_server::workers::housekeeping;
 use zone_server::workers::housekeeping::{
     Catchup, Failure, LEADER_KEY, Leadership, Registry, Schedule, Scope, Sweep, Timing, Warmup,
 };
@@ -384,6 +385,32 @@ async fn a_paused_leader_stops_leading_while_it_still_holds_the_lock() {
         .expect("the join does not panic")
         .expect("the paused process does not panic");
     assert_eq!(holders(&database).await, 0, "release gives the lock back");
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_draining_leader_hands_leadership_over_at_once() {
+    let database = Database::new(PREFIX).await;
+    let state = state(&database);
+    let leadership = Leadership::start(options(&database), timing());
+    let worker = housekeeping::spawn(state.clone(), leadership.clone());
+    assert!(until(Duration::from_secs(5), || leadership.leads()).await);
+    let successor = Leadership::start(options(&database), eager());
+
+    state.drain().begin();
+
+    assert!(
+        until(SLACK, || !leadership.leads()).await,
+        "a draining replica kept dispatching cluster sweeps"
+    );
+    assert!(
+        until(Duration::from_secs(5), || successor.tenure().is_some()).await,
+        "no other replica could take the lock while this one drained"
+    );
+    worker.abort();
+    let _ = worker.await;
+    leadership.release().await;
+    successor.release().await;
     database.cleanup().await;
 }
 

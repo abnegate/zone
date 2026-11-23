@@ -35,7 +35,7 @@ use sqlx::PgPool;
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, OnceCell, Semaphore, broadcast, mpsc};
@@ -532,10 +532,18 @@ fn generating(chat_id: Uuid) -> bool {
         .is_some_and(|generation| generation.available_permits() == 0)
 }
 
-/// This replica runs a turn of the chat or holds messages queued for one, so
-/// the chat's commands are its own to apply.
+/// A turn of the chat is registered here, including one still waiting for the
+/// chat's generation permit.
+fn registered(chat_id: Uuid) -> bool {
+    CHAT_CANCELLATIONS
+        .iter()
+        .any(|entry| entry.key().0 == chat_id)
+}
+
+/// This replica runs a turn of the chat, has one registered to start, or
+/// holds messages queued for one, so the chat's commands are its own to apply.
 fn owns(chat_id: Uuid) -> bool {
-    generating(chat_id) || queue::active(chat_id)
+    generating(chat_id) || registered(chat_id) || queue::active(chat_id)
 }
 
 /// Applies a socket's command to this replica's queue and turn.
@@ -778,18 +786,29 @@ pub fn hold_queues() {
 }
 
 /// Stops every turn this replica runs the way a person's Stop does: the reply
-/// so far is kept, and the chat's lease is released for another replica.
+/// so far is kept, and the chat's lease is released for another replica. Each
+/// turn is marked drained first, so an owed turn ends [`Sent::Stopped`].
 pub fn stop_turns() {
     let chats: HashSet<Uuid> = CHAT_CANCELLATIONS
         .iter()
         .map(|entry| entry.key().0)
         .collect();
     for chat_id in chats {
-        queue::with(chat_id, |queue| {
-            queue.stop(generating(chat_id));
-            cancel_turns(chat_id);
-        });
+        drain_turns(chat_id);
     }
+}
+
+fn drain_turns(chat_id: Uuid) {
+    for entry in CHAT_CANCELLATIONS
+        .iter()
+        .filter(|entry| entry.key().0 == chat_id)
+    {
+        entry.value().drained.store(true, Ordering::SeqCst);
+    }
+    queue::with(chat_id, |queue| {
+        queue.stop(generating(chat_id));
+        cancel_turns(chat_id);
+    });
 }
 
 /// Resolves once no turn runs here. A turn leaves only after it has closed
@@ -895,6 +914,7 @@ struct Generation {
     chat_id: Uuid,
     message_id: Uuid,
     cancel: broadcast::Receiver<()>,
+    drained: Arc<AtomicBool>,
     approvals: crate::agent::ApprovalPolicy,
     started: bool,
 }
@@ -906,18 +926,21 @@ impl Generation {
 
     fn registered(chat_id: Uuid, message_id: Uuid, author: Uuid, workspace_id: Uuid) -> Self {
         let (sender, cancel) = broadcast::channel(1);
+        let drained = Arc::new(AtomicBool::new(false));
         CHAT_CANCELLATIONS.insert(
             (chat_id, message_id),
             Registration {
                 sender,
                 author,
                 workspace_id,
+                drained: Arc::clone(&drained),
             },
         );
         Self {
             chat_id,
             message_id,
             cancel,
+            drained,
             approvals: crate::agent::ApprovalPolicy::required(crate::agent::ApprovalGate::new()),
             started: false,
         }
@@ -3424,8 +3447,13 @@ pub(crate) async fn run_turn(
 /// [`run_turn`] with its answer's id chosen by the caller, so the caller can
 /// stop this turn and no other through [`cancel_turn`] while it runs. Says
 /// what became of the message, [`Sent::Refused`] when fleet policy refused this
-/// runner the chat, so the caller of an owed turn can leave it owed rather than
-/// count it run.
+/// runner the chat and [`Sent::Stopped`] when this replica's shutdown stopped
+/// the turn, so the caller of an owed turn can leave it owed rather than count
+/// it run.
+///
+/// The turn is registered before the chat's control topic is served, so an
+/// answering task left over from an earlier turn sees this replica own the
+/// chat and keeps answering rather than leaving in its grace period.
 pub(crate) async fn run_turn_as(
     state: &AppState,
     message_id: Uuid,
@@ -3437,8 +3465,9 @@ pub(crate) async fn run_turn_as(
     audience: Audience,
 ) -> Sent {
     let stream = ChatStream::on(state, chat_id);
-    relay::serve(state, &stream, workspace_id).await;
     let generation = Generation::registered(chat_id, message_id, user_id, workspace_id);
+    let drained = Arc::clone(&generation.drained);
+    relay::serve(state, &stream, workspace_id).await;
     let sent = handle_send_message(
         state,
         &stream,
@@ -3460,6 +3489,9 @@ pub(crate) async fn run_turn_as(
         Some(Some(started)) => drive(state.clone(), stream, chat_id, workspace_id, started, true),
         Some(None) => announce(&stream, None).await,
         None => {}
+    }
+    if sent != Sent::Refused && drained.load(Ordering::SeqCst) {
+        return Sent::Stopped;
     }
     sent
 }
@@ -8571,6 +8603,35 @@ cat 'DIR/reply.jsonl'
             "a turn in another organization's workspace was cancelled"
         );
         assert!(!theirs.is_cancelled(), "a colleague's turn was cancelled");
+    }
+
+    #[test]
+    fn a_turn_registered_to_start_owns_its_chat_before_it_takes_the_permit() {
+        let chat = Uuid::new_v4();
+        assert!(!owns(chat));
+
+        let turn = Generation::registered(chat, Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+
+        assert!(
+            owns(chat),
+            "an answering task in its grace would leave a registered turn with nobody answering"
+        );
+        drop(turn);
+        assert!(!owns(chat));
+    }
+
+    #[test]
+    fn draining_a_chat_stops_its_turns_as_drained_and_leaves_others_running() {
+        let (chat, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut drained = Generation::new(chat, Uuid::new_v4(), Uuid::new_v4());
+        let mut running = Generation::new(other, Uuid::new_v4(), Uuid::new_v4());
+
+        drain_turns(chat);
+
+        assert!(drained.is_cancelled());
+        assert!(drained.drained.load(Ordering::SeqCst));
+        assert!(!running.is_cancelled());
+        assert!(!running.drained.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

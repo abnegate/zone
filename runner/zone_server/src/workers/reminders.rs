@@ -33,6 +33,12 @@ const LEASE: Duration = Duration::from_secs(5 * 60);
 /// so a slow or failed round trip to the database does not cost the claim.
 const RENEWAL: Duration = Duration::from_secs(30);
 
+/// Logged when fleet policy refuses this runner a claimed firing's chat.
+const REFUSED: &str = "Fleet policy refused this runner the reminder's chat";
+
+/// Logged when a claimed firing is given back because this replica is shutting down.
+const DRAINING: &str = "This replica is shutting down";
+
 /// Stops a turn's renewals when the turn is over, however it ended -- a turn
 /// that panicked must not leave its claim renewed for ever, or its firing is
 /// never offered again.
@@ -188,8 +194,9 @@ fn watching(prompt: &str, baseline: Option<&str>) -> String {
 
 /// Runs one claimed firing's turn in its chat, keeping the claim as `claimant`
 /// for as long as the turn runs, and marks it done. A turn fleet policy refuses
-/// the chat gives the claim back without counting the attempt, and the firing
-/// stays owed.
+/// the chat, and one this replica's shutdown stops or keeps from starting,
+/// gives the claim back without counting the attempt, and the firing stays
+/// owed for a replica that stays up.
 pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease, claimant: Claimant) {
     // A watch is the same turn with the last firing's answer composed in. Read
     // here rather than at claim time so two firings that queued up behind a
@@ -215,6 +222,10 @@ pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease, claimant: Cl
         Some(last) => watching(&turn.prompt, last.as_deref()),
         None => turn.prompt.clone(),
     };
+    if state.drain().is_draining() {
+        give_back(state, &turn, DRAINING).await;
+        return;
+    }
     let pool = state.db().clone();
     let (id, attempts, chat_id) = (turn.id, turn.attempts, turn.chat_id);
     let message_id = Uuid::new_v4();
@@ -246,20 +257,16 @@ pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease, claimant: Cl
         ),
     )
     .await;
-    if sent == Sent::Refused {
-        match reminders::release_turn(state.db(), turn.id, turn.attempts).await {
-            Ok(_) => tracing::info!(
-                reminder_id = %turn.reminder_id,
-                "Fleet policy refused this runner the reminder's chat; the firing stays owed"
-            ),
-            Err(error) => tracing::warn!(
-                %error,
-                reminder_id = %turn.reminder_id,
-                "Fleet policy refused this runner the reminder's chat and its claim could not \
-                 be given back; it will be offered again once the claim expires"
-            ),
+    match sent {
+        Sent::Refused => {
+            give_back(state, &turn, REFUSED).await;
+            return;
         }
-        return;
+        Sent::Stopped => {
+            give_back(state, &turn, DRAINING).await;
+            return;
+        }
+        Sent::Saved | Sent::Unsaved => {}
     }
     // A turn stopped for losing its claim may not have delivered its firing:
     // whichever claim takes the firing next runs it, so it stays owed and its
@@ -310,6 +317,26 @@ pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease, claimant: Cl
     }
 }
 
+/// Gives a claimed firing back unrun, still owed and with no attempt counted.
+async fn give_back(state: &AppState, turn: &PendingTurn, why: &str) {
+    match reminders::release_turn(state.db(), turn.id, turn.attempts).await {
+        Ok(_) => tracing::info!(
+            reminder_id = %turn.reminder_id,
+            "{why}; the reminder's firing stays owed"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            reminder_id = %turn.reminder_id,
+            "{why}, and the reminder's claim could not be given back; it will be offered again \
+             once the claim expires"
+        ),
+    }
+}
+
+/// Delivers due reminders and runs the turns they owe until this replica
+/// starts draining, from when it takes no more: a replica that stays up does.
+/// Each turn runs as background work, so a shutdown waits for a stopped turn
+/// to give its firing back.
 pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
     let lease = Lease::default();
     tokio::spawn(async move {
@@ -317,6 +344,10 @@ pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            if state.drain().is_draining() {
+                tracing::info!("Reminder dispatch stopped; this replica is shutting down");
+                return;
+            }
             // Every reminder whose time has come is claimed first. A claim
             // stores a message, or writes down a turn that is still owed, and
             // either way the schedule moves on within the same transaction.
@@ -333,7 +364,7 @@ pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
             // Then whatever the claims left owing, which is also where a turn
             // abandoned by a restart is picked back up.
             let claimant = fleet::claimant(&state).await;
-            loop {
+            while !state.drain().is_draining() {
                 match reminders::claim_turn(state.db(), sweep, lease.duration, claimant).await {
                     Ok(None) => break,
                     Ok(Some(turn)) => {
@@ -343,7 +374,8 @@ pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
                         // own semaphore already serialises this turn against
                         // anything the person is typing there.
                         let state = state.clone();
-                        tokio::spawn(async move { run(&state, turn, lease, claimant).await });
+                        let background = state.background().clone();
+                        background.spawn(async move { run(&state, turn, lease, claimant).await });
                     }
                     Err(error) => {
                         tracing::warn!(%error, "Reminder turn claim failed; retrying next interval");
@@ -558,27 +590,7 @@ mod tests {
         let server = Server::new(Some(Plan::Enterprise)).await;
         let pool = server.database.pool.clone();
         let (workspace, user, chat) = member_chat(&pool).await;
-        let reminder: Uuid = sqlx::query_scalar(
-            "INSERT INTO reminders (workspace_id, chat_id, created_by, content, due_at, prompt) \
-             VALUES ($1, $2, $3, 'Check', NOW(), 'Check the build') RETURNING id",
-        )
-        .bind(workspace)
-        .bind(chat)
-        .bind(user)
-        .fetch_one(&pool)
-        .await
-        .expect("a reminder");
-        sqlx::query(
-            "INSERT INTO reminder_turns (reminder_id, workspace_id, chat_id, created_by, prompt) \
-             VALUES ($1, $2, $3, $4, 'Check the build')",
-        )
-        .bind(reminder)
-        .bind(workspace)
-        .bind(chat)
-        .bind(user)
-        .execute(&pool)
-        .await
-        .expect("an owed turn");
+        owed_turn(&pool, workspace, user, chat).await;
         let claimant = fleet::claimant(&server.state).await;
         let runner = claimant.runner.expect("the server registers to claim");
         let turn = reminders::claim_turn(&pool, Sweep::All, LEASE, claimant)
@@ -621,6 +633,76 @@ mod tests {
             "the refused firing is owed again with no attempt counted"
         );
         assert_eq!(messages, 0, "nothing reached the chat");
+    }
+
+    /// A replica that starts draining after claiming a firing gives it back
+    /// unrun and spends none of its attempts, so a replica that stays up runs
+    /// it at once rather than after the claim's lease runs out.
+    #[tokio::test]
+    async fn a_draining_replica_gives_a_claimed_turn_back_without_running_it() {
+        let server = Server::new(Some(Plan::Enterprise)).await;
+        let pool = server.database.pool.clone();
+        let (workspace, user, chat) = member_chat(&pool).await;
+        let turn = owed_turn(&pool, workspace, user, chat).await;
+        let claimant = fleet::claimant(&server.state).await;
+        let claimed = reminders::claim_turn(&pool, Sweep::All, LEASE, claimant)
+            .await
+            .expect("the claim")
+            .expect("an active runner claims the turn");
+        assert_eq!(claimed.id, turn);
+        server.state.drain().begin();
+
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            run(&server.state, claimed.clone(), Lease::default(), claimant),
+        )
+        .await
+        .expect("the turn is given back");
+        let owed: Option<(i32, bool)> = sqlx::query_as(
+            "SELECT attempts, claimed_at IS NOT NULL FROM reminder_turns WHERE id = $1",
+        )
+        .bind(turn)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
+            .bind(chat)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        server.remove().await;
+
+        assert_eq!(
+            owed,
+            Some((0, false)),
+            "the firing is owed again, unclaimed and with no attempt counted"
+        );
+        assert_eq!(messages, 0, "nothing reached the chat");
+    }
+
+    /// A one-shot reminder in `chat` and the turn its firing owes.
+    async fn owed_turn(pool: &PgPool, workspace: Uuid, user: Uuid, chat: Uuid) -> Uuid {
+        let reminder: Uuid = sqlx::query_scalar(
+            "INSERT INTO reminders (workspace_id, chat_id, created_by, content, due_at, prompt) \
+             VALUES ($1, $2, $3, 'Check', NOW(), 'Check the build') RETURNING id",
+        )
+        .bind(workspace)
+        .bind(chat)
+        .bind(user)
+        .fetch_one(pool)
+        .await
+        .expect("a reminder");
+        sqlx::query_scalar(
+            "INSERT INTO reminder_turns (reminder_id, workspace_id, chat_id, created_by, prompt) \
+             VALUES ($1, $2, $3, $4, 'Check the build') RETURNING id",
+        )
+        .bind(reminder)
+        .bind(workspace)
+        .bind(chat)
+        .bind(user)
+        .fetch_one(pool)
+        .await
+        .expect("an owed turn")
     }
 
     /// A workspace with one member who may write in it, and a chat there.

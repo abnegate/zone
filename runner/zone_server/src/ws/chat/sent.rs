@@ -6,6 +6,9 @@ pub enum Sent {
     /// Fleet policy refused this runner the chat's lease, so nothing reached the chat. An owed
     /// turn is still owed.
     Refused,
+    /// This replica began shutting down and stopped the turn, whatever it had saved. An owed turn
+    /// is still owed, for a replica that stays up.
+    Stopped,
 }
 
 impl Sent {

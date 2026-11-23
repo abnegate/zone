@@ -20,8 +20,16 @@ use super::scope::Scope;
 use super::slot::Slot;
 use crate::state::AppState;
 
-/// Start the housekeeping worker for this server.
+/// Start the housekeeping worker for this server. A server that starts
+/// draining gives leadership up at once, so another replica takes the cluster
+/// sweeps over while this one finishes what it serves.
 pub fn spawn(state: AppState, leadership: Leadership) -> JoinHandle<()> {
+    let drain = state.drain().clone();
+    let resigning = leadership.clone();
+    tokio::spawn(async move {
+        drain.draining().await;
+        resigning.release().await;
+    });
     Worker::new(periodic(state), leadership).spawn()
 }
 
