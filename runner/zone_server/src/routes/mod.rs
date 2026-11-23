@@ -14,6 +14,7 @@ pub mod connect;
 pub mod context;
 pub mod devices;
 pub mod error;
+pub mod fleet;
 pub mod github;
 pub mod health;
 pub mod host_mounts;
@@ -275,6 +276,15 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/license",
             get(license::get).put(license::set).delete(license::remove),
+        )
+        .route(
+            "/api/fleet-policy",
+            get(fleet::policy::get).patch(fleet::policy::update),
+        )
+        .route("/api/runners", get(fleet::runners::list))
+        .route(
+            "/api/runners/{runner_id}",
+            patch(fleet::runners::update).delete(fleet::runners::remove),
         )
         .route("/api/sso", get(sso::settings::get))
         .route("/api/sso/providers", post(sso::providers::create))
@@ -592,6 +602,14 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/organizations/{org_id}/workspaces/{ws_id}/agent-policy",
             get(policy::workspace::get).patch(policy::workspace::update),
+        )
+        .route(
+            "/api/organizations/{org_id}/runner-labels",
+            get(fleet::labels::organization).patch(fleet::labels::update_organization),
+        )
+        .route(
+            "/api/organizations/{org_id}/workspaces/{ws_id}/runner-labels",
+            get(fleet::labels::workspace).patch(fleet::labels::update_workspace),
         )
         .route(
             "/api/organizations/{org_id}/roles",

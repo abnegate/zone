@@ -129,6 +129,7 @@ mod tests {
             (Feature::CustomRoles, ENTERPRISE_MESSAGE),
             (Feature::Spend, TEAM_MESSAGE),
             (Feature::Members, TEAM_MESSAGE),
+            (Feature::FleetPolicy, ENTERPRISE_MESSAGE),
             (Feature::Distribution, ENTERPRISE_MESSAGE),
         ];
         assert_eq!(cases.len(), Feature::ALL.len());

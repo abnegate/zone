@@ -57,6 +57,7 @@ use crate::agent::wait::Waited;
 use crate::agent::wait::Waiting;
 use crate::config::ModelBackend;
 use crate::db::audit::actions;
+use crate::db::fleet::claim::Outcome;
 use crate::db::task_tool_calls;
 use crate::db::tasks;
 use crate::db::workspace_members;
@@ -66,6 +67,7 @@ use crate::services::chat::session;
 use crate::services::chat::session::RunContext;
 use crate::services::endpoint::Endpoint;
 use crate::services::failure::unreachable;
+use crate::services::fleet;
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router;
 use crate::services::policy;
@@ -89,8 +91,10 @@ use crate::workers::pr::create_pr_for_task;
 use zone_context::context::SearchResultWithAnalysis;
 
 mod halt;
+pub(crate) mod handoff;
 mod handover;
 mod meter;
+mod queue;
 mod seat;
 pub(crate) mod stop;
 mod unprepared;
@@ -173,10 +177,28 @@ fn get_semaphore() -> &'static Arc<Semaphore> {
     TASK_SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_TASKS)))
 }
 
+/// How many more task runs this process should take on: a slot for each free
+/// one, and a queue as deep as the slots less the executions already queued.
+/// A run claimed while every slot is busy waits for one, heartbeating.
+pub(crate) fn capacity() -> usize {
+    (get_semaphore().available_permits() + MAX_CONCURRENT_TASKS).saturating_sub(queue::queued())
+}
+
 /// Serializes every test that takes execution permits out of the shared
 /// semaphore, so none of them measures another's capacity as its own.
 #[cfg(test)]
-static EXECUTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static EXECUTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Every execution slot, for a test that holds [`EXECUTION`] and needs this
+/// process saturated.
+#[cfg(test)]
+pub(crate) async fn saturate() -> OwnedSemaphorePermit {
+    get_semaphore()
+        .clone()
+        .acquire_many_owned(MAX_CONCURRENT_TASKS as u32)
+        .await
+        .expect("the execution semaphore is never closed")
+}
 
 /// One execution slot out of [`MAX_CONCURRENT_TASKS`], given back while the run
 /// it belongs to is parked on a question.
@@ -188,7 +210,7 @@ struct Permit(std::sync::Mutex<Option<OwnedSemaphorePermit>>);
 
 impl Permit {
     async fn acquire() -> Result<Self, AcquireError> {
-        let permit = get_semaphore().clone().acquire_owned().await?;
+        let permit = queue::waiting(get_semaphore().clone().acquire_owned()).await?;
         Ok(Self(std::sync::Mutex::new(Some(permit))))
     }
 
@@ -200,7 +222,7 @@ impl Permit {
     async fn yielded<T>(&self, waiting: impl Future<Output = T>) -> Result<T, AcquireError> {
         drop(self.held().take());
         let value = waiting.await;
-        let reacquired = get_semaphore().clone().acquire_owned().await?;
+        let reacquired = queue::waiting(get_semaphore().clone().acquire_owned()).await?;
         *self.held() = Some(reacquired);
         Ok(value)
     }
@@ -973,11 +995,19 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         }
     }
     let signal = stop::register(run_id);
-    if !matches!(
-        tasks::claim_task_run(state.db(), run.id, owner).await,
-        Ok(true)
-    ) {
-        return;
+    let claimant = fleet::claimant(state).await;
+    match tasks::claim_task_run(state.db(), run.id, owner, claimant).await {
+        Ok(Outcome::Claimed) => {}
+        Ok(Outcome::Unavailable) => return,
+        Ok(Outcome::Refused(shortfall)) => {
+            drop(signal);
+            handoff::hand_off(state, &run, claimant, shortfall).await;
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%run_id, %error, "Could not claim the task run");
+            return;
+        }
     }
     let execution = tasks::Execution {
         task: task_id,
@@ -5246,6 +5276,33 @@ mod retry_tests {
     }
 
     #[tokio::test]
+    async fn a_saturated_runner_still_takes_a_queue_as_deep_as_its_slots() {
+        let _execution = EXECUTION.lock().await;
+        let slots = saturate().await;
+        assert_eq!(capacity(), MAX_CONCURRENT_TASKS);
+
+        let waiting: Vec<_> = (0..MAX_CONCURRENT_TASKS)
+            .map(|_| tokio::spawn(Permit::acquire()))
+            .collect();
+        while queue::queued() < MAX_CONCURRENT_TASKS {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(capacity(), 0, "a full queue takes nothing more");
+
+        for execution in waiting {
+            execution.abort();
+            let _ = execution.await;
+        }
+        assert_eq!(
+            queue::queued(),
+            0,
+            "an execution dropped while queued leaves the queue"
+        );
+        drop(slots);
+        assert_eq!(capacity(), 2 * MAX_CONCURRENT_TASKS);
+    }
+
+    #[tokio::test]
     async fn database_callback_targets_its_own_run() {
         let pool = PgPool::connect_lazy("postgres://localhost/test").unwrap();
         let run_id = Uuid::new_v4();
@@ -6517,6 +6574,7 @@ mod retry_tests {
 #[cfg(test)]
 mod watchdog_tests {
     use super::*;
+    use crate::db::fleet::claimant::Claimant;
     use abnegate_agent::chat::NewEntry;
     use abnegate_llm::Role as LlmRole;
     use std::sync::Mutex;
@@ -6802,7 +6860,12 @@ mod watchdog_tests {
         .unwrap();
         let run = tasks::create_task_run(&pool, task.id).await.unwrap();
         let owner = Uuid::new_v4();
-        assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
+        assert!(
+            tasks::claim_task_run(&pool, run.id, owner, Claimant::UNENFORCED)
+                .await
+                .unwrap()
+                .claimed()
+        );
         let state = AppState::new(crate::state::test_config(), pool.clone(), None);
         (pool, observed, state, run.id, owner)
     }
@@ -8364,6 +8427,7 @@ mod cli_tests {
     use crate::config::{AgentConfig, Config, ModelBackend};
     use crate::db::agent_logins::{self, Insert};
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
+    use crate::db::fleet::claimant::Claimant;
     use crate::db::{organizations, users, workspace_members, workspaces};
     use crate::services::agent::home::CLAUDE_CODE_OAUTH_TOKEN;
     use crate::services::login::claude::Sealed;
@@ -8877,9 +8941,10 @@ mod cli_tests {
         async fn claim(&self) -> Uuid {
             let owner = Uuid::new_v4();
             assert!(
-                tasks::claim_task_run(&self.pool, self.run, owner)
+                tasks::claim_task_run(&self.pool, self.run, owner, Claimant::UNENFORCED)
                     .await
                     .unwrap()
+                    .claimed()
             );
             owner
         }

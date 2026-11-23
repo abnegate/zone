@@ -5,13 +5,13 @@ use abnegate_agent::McpHub;
 use abnegate_exec::Niceness;
 use abnegate_http::{RateLimitConfig, RateLimiter};
 use abnegate_secret::MasterKey;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use sqlx::PgPool;
 use std::num::NonZeroUsize;
 #[cfg(any(test, feature = "testing"))]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 use tokio::sync::OnceCell;
 use tokio::sync::Semaphore;
@@ -35,6 +35,7 @@ use crate::config::{Config, ModelBackend};
 use crate::db::DbResult;
 use crate::pull::PullRegistry;
 use crate::services::chat::pull_request::StatusCache;
+use crate::services::fleet::{Flight, Identity};
 use crate::services::github::snapshots::Snapshots;
 use crate::services::github_app::Provider;
 use crate::services::license::renewal;
@@ -158,6 +159,11 @@ struct AppStateInner {
     pub pull_request_statuses: StatusCache,
     pub github_snapshots: Snapshots,
     pub background: TaskTracker,
+    pub instance: Uuid,
+    pub runner: RwLock<Option<Uuid>>,
+    pub started: OnceLock<DateTime<Utc>>,
+    pub identity: OnceLock<Identity>,
+    pub registration: Flight,
     /// Whether the Community member cap applies, which a test build leaves off
     /// until a test opts in with [`AppState::cap_members`].
     #[cfg(any(test, feature = "testing"))]
@@ -297,6 +303,11 @@ impl AppState {
                 pull_request_statuses: StatusCache::default(),
                 github_snapshots,
                 background: TaskTracker::new(),
+                instance: Uuid::new_v4(),
+                runner: RwLock::new(None),
+                started: OnceLock::new(),
+                identity: OnceLock::new(),
+                registration: Flight::default(),
                 #[cfg(any(test, feature = "testing"))]
                 capped: AtomicBool::new(false),
             }),
@@ -307,6 +318,60 @@ impl AppState {
     /// for when it stops serving.
     pub fn background(&self) -> &TaskTracker {
         &self.inner.background
+    }
+
+    /// This process's own id, fresh for each state, which tells its runner row apart from a
+    /// restarted or rival process registered under the same name.
+    pub fn instance(&self) -> Uuid {
+        self.inner.instance
+    }
+
+    /// The runner this process registered as, once it has.
+    pub fn runner(&self) -> Option<Uuid> {
+        *self
+            .inner
+            .runner
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub fn set_runner(&self, runner: Uuid) {
+        *self
+            .inner
+            .runner
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(runner);
+    }
+
+    /// When this process first registered as a runner, by the database's clock: the start the
+    /// fleet orders the processes sharing a runner name by. A process registers at boot, before
+    /// any worker starts, so it is the process's start without the hosts' clocks having to agree.
+    pub fn started(&self) -> Option<DateTime<Utc>> {
+        self.inner.started.get().copied()
+    }
+
+    /// Keeps the first start recorded.
+    pub fn set_started(&self, started: DateTime<Utc>) {
+        let _ = self.inner.started.set(started);
+    }
+
+    /// The one lazy registration as a runner that concurrent claims share.
+    pub fn registration(&self) -> &Flight {
+        &self.inner.registration
+    }
+
+    /// What this process registers as a runner with: [`Identity::detected`] unless
+    /// [`Self::set_identity`] ran first.
+    pub fn identity(&self) -> &Identity {
+        self.inner.identity.get_or_init(Identity::detected)
+    }
+
+    /// Panics if the identity was already read or set.
+    pub fn set_identity(&self, identity: Identity) {
+        assert!(
+            self.inner.identity.set(identity).is_ok(),
+            "set_identity must run before the first identity() call"
+        );
     }
 
     /// What GitHub last said of each pull request a chat opened.
@@ -780,6 +845,42 @@ mod tests {
             state.licenses().keyring(),
             clone.licenses().keyring()
         ));
+    }
+
+    #[tokio::test]
+    async fn every_state_is_its_own_process_instance() {
+        let state = AppState::for_tests();
+        assert_eq!(state.instance(), state.clone().instance());
+        assert_ne!(state.instance(), AppState::for_tests().instance());
+    }
+
+    #[tokio::test]
+    async fn a_state_has_no_runner_until_it_registers() {
+        let state = AppState::for_tests();
+        assert_eq!(state.runner(), None);
+        let runner = Uuid::new_v4();
+        state.clone().set_runner(runner);
+        assert_eq!(state.runner(), Some(runner));
+    }
+
+    #[tokio::test]
+    async fn a_set_identity_replaces_the_detected_one() {
+        let state = AppState::for_tests();
+        let identity = Identity {
+            name: "eu-1".into(),
+            ..Identity::detected()
+        };
+        state.set_identity(identity.clone());
+        assert_eq!(state.identity(), &identity);
+        assert_eq!(state.clone().identity(), &identity);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "set_identity must run before the first identity() call")]
+    async fn an_identity_is_fixed_once_read() {
+        let state = AppState::for_tests();
+        let detected = state.identity().clone();
+        state.set_identity(detected);
     }
 
     #[tokio::test]

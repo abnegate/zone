@@ -10,9 +10,9 @@ use std::time::Duration;
 use uuid::Uuid;
 use zone_server::db::chats;
 use zone_server::db::context::{Error, Lease, Store};
+use zone_server::db::fleet::claimant::Claimant;
 
 const LIFETIME: Duration = Duration::from_secs(30);
-
 async fn fixture() -> (PgPool, Store, Uuid, Uuid) {
     let address = common::context_database_url();
     let pool = PgPool::connect(&address).await.unwrap();
@@ -42,7 +42,7 @@ async fn seed(pool: PgPool) -> (Store, Uuid, Uuid) {
         .await
         .unwrap();
     (
-        Store::new(pool, chat.id, Some(workspace)),
+        Store::new(pool, chat.id, Some(workspace)).claiming(Claimant::UNENFORCED),
         chat.id,
         workspace,
     )
@@ -253,8 +253,8 @@ async fn independent_app_states_cannot_save_competing_user_turns() {
     let (pool, store, chat, workspace) = fixture().await;
     let first = common::create_test_state(common::test_config(), pool.clone());
     let second = common::create_test_state(common::test_config(), pool.clone());
-    let a = Store::new(first.db().clone(), chat, Some(workspace));
-    let b = Store::new(second.db().clone(), chat, Some(workspace));
+    let a = Store::new(first.db().clone(), chat, Some(workspace)).claiming(Claimant::UNENFORCED);
+    let b = Store::new(second.db().clone(), chat, Some(workspace)).claiming(Claimant::UNENFORCED);
     let (left, right) = tokio::join!(
         a.acquire(Uuid::new_v4(), LIFETIME),
         b.acquire(Uuid::new_v4(), LIFETIME)

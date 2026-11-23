@@ -19,6 +19,9 @@ use uuid::Uuid;
 
 use super::DbResult;
 use super::actions::invalid;
+use super::fleet::claimant::Claimant;
+use super::fleet::eligibility::{self, UNATTENDED};
+use super::fleet::state::State;
 use super::tasks::{self, Create, MutationError, Origin};
 
 /// The project-level switch and everything the driver needs to run it.
@@ -130,50 +133,81 @@ pub struct Claim {
 /// new owner the running drive can neither renew nor release, and the instance
 /// would not start a second drive for it, so the project would sit claimed by
 /// no one until that lease lapsed too.
+///
+/// Each claim records `claimant`'s runner, so revoking that runner ends the
+/// drive. Under fleet policy only projects the claimant's own runner may drive
+/// as unattended work are claimed, judged on the labels of the project's own
+/// workspace (a project without one is judged on the runner's state and
+/// version alone), and the runner is [held](eligibility::hold) until the
+/// claims commit.
 pub async fn claim_due(
     pool: &PgPool,
     lease: Duration,
     limit: i64,
     driving: &[Uuid],
+    claimant: Claimant,
 ) -> DbResult<Vec<Claim>> {
     let seconds = lease.as_secs_f64();
     let mut transaction = pool.begin().await?;
-    let due: Vec<Uuid> = sqlx::query_scalar(
+    if eligibility::hold(&mut transaction, claimant)
+        .await?
+        .is_some()
+    {
+        return Ok(Vec::new());
+    }
+    let due: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT id FROM projects WHERE auto AND status = 'active' \
            AND auto_paused_reason IS NULL AND auto_completed_at IS NULL \
            AND (auto_claimed_at IS NULL OR auto_claimed_at < NOW() - make_interval(secs => $1)) \
            AND id <> ALL($3) \
-         ORDER BY auto_driven_at NULLS FIRST, id LIMIT $2 FOR UPDATE SKIP LOCKED",
-    )
+           AND (NOT $4 OR EXISTS ( \
+             SELECT 1 FROM fleet_runners runner CROSS JOIN fleet_policy policy \
+             LEFT JOIN workspaces w ON w.id = projects.workspace_id \
+             LEFT JOIN organization_runner_labels ol ON ol.organization_id = w.organization_id \
+             LEFT JOIN workspace_runner_labels wl ON wl.workspace_id = w.id \
+             WHERE runner.id = $5 AND {UNATTENDED})) \
+         ORDER BY auto_driven_at NULLS FIRST, id LIMIT $2 FOR UPDATE SKIP LOCKED"
+    )))
     .bind(seconds)
     .bind(limit)
     .bind(driving)
+    .bind(claimant.enforced)
+    .bind(claimant.runner)
     .fetch_all(&mut *transaction)
     .await?;
-    let claims =
-        match due.is_empty() {
-            true => Vec::new(),
-            false => sqlx::query_as::<_, Claim>(
-                "UPDATE projects SET auto_claimed_at = NOW(), auto_claim_id = gen_random_uuid() \
-                 WHERE id = ANY($1) RETURNING id AS project_id, auto_claim_id AS owner",
-            )
-            .bind(&due)
-            .fetch_all(&mut *transaction)
-            .await?,
-        };
+    let claims = if due.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, Claim>(
+            "UPDATE projects \
+             SET auto_claimed_at = NOW(), auto_claim_id = gen_random_uuid(), \
+                 auto_claim_runner_id = (SELECT id FROM fleet_runners WHERE id = $2) \
+             WHERE id = ANY($1) \
+             RETURNING id AS project_id, auto_claim_id AS owner",
+        )
+        .bind(&due)
+        .bind(claimant.runner)
+        .fetch_all(&mut *transaction)
+        .await?
+    };
     transaction.commit().await?;
     Ok(claims)
 }
 
 /// Restart a claim's lease while its drive runs, and say whether `claim`
-/// still holds the project.
-pub async fn renew(pool: &PgPool, claim: Claim) -> DbResult<bool> {
+/// still holds the project. Under fleet policy a revoked runner renews
+/// nothing, so its drive stops.
+pub async fn renew(pool: &PgPool, claim: Claim, claimant: Claimant) -> DbResult<bool> {
     Ok(sqlx::query(
         "UPDATE projects SET auto_claimed_at = statement_timestamp() \
-         WHERE id = $1 AND auto_claim_id = $2",
+         WHERE id = $1 AND auto_claim_id = $2 \
+           AND (NOT $3 OR EXISTS (SELECT 1 FROM fleet_runners WHERE id = $4 AND state <> $5))",
     )
     .bind(claim.project_id)
     .bind(claim.owner)
+    .bind(claimant.enforced)
+    .bind(claimant.runner)
+    .bind(State::Revoked.as_str())
     .execute(pool)
     .await?
     .rows_affected()

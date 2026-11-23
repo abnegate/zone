@@ -1,7 +1,7 @@
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { pullRequestKey } from '../src/features/pull-requests/utils/identity';
 import { expect, test } from './fixtures';
-import { fontsLoaded } from './helpers/screenshots';
+import { animationsSettled, fontsLoaded } from './helpers/screenshots';
 import {
   githubNow,
   mockTasks,
@@ -44,8 +44,18 @@ async function openTasks(page: Page, populated: boolean): Promise<void> {
   await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
 }
 
+// Clicking while the page's entrance animation still runs lets Playwright's
+// scroll-into-view shift the page body, so the backdrop differs run to run.
+async function openDialog(trigger: Locator): Promise<void> {
+  await expect(trigger).toBeVisible();
+  await animationsSettled(trigger.page());
+  await trigger.click();
+}
+
 async function chooseCardAction(page: Page, title: string, action: CardAction): Promise<void> {
   const trigger = page.getByRole('button', { name: `Actions for ${title}`, exact: true });
+  await expect(trigger).toBeVisible();
+  await animationsSettled(page);
   await trigger.hover();
   await trigger.click();
   await page.getByRole('menuitem', { name: action, exact: true }).click();
@@ -76,17 +86,7 @@ async function capturePage(page: Page, options: Parameters<Page['screenshot']>[0
   if (options?.path?.includes('modal-')) {
     await expect(page.getByRole('dialog')).toBeVisible();
     await expect(page.getByRole('dialog')).toHaveCSS('opacity', '1');
-    await page.waitForFunction(() =>
-      document
-        .getAnimations()
-        .every(
-          (animation) =>
-            animation.playState !== 'running' ||
-            !Number.isFinite(
-              animation.effect?.getComputedTiming().endTime ?? Number.POSITIVE_INFINITY
-            )
-        )
-    );
+    await animationsSettled(page);
   }
   await fontsLoaded(page);
   await page.screenshot({ ...options, animations: 'disabled', style: SETTLED_FILE_BUTTONS });
@@ -901,11 +901,7 @@ describeScreenshots('Screenshots - Modals', () => {
     await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
 
-    // Click new project button
-    const newProjectBtn = page.locator('button').filter({ hasText: /New Project/i });
-    await expect(newProjectBtn).toBeVisible();
-    await newProjectBtn.click();
-    await page.waitForTimeout(300);
+    await openDialog(page.locator('button').filter({ hasText: /New Project/i }));
     await capturePage(page, {
       path: 'screenshots/modal-new-project.png',
       fullPage: true,
@@ -916,10 +912,7 @@ describeScreenshots('Screenshots - Modals', () => {
     await openTasks(page, true);
     await expect(page.locator(TASK_CARD).first()).toBeVisible();
 
-    const newTask = page.locator('button').filter({ hasText: /New Task/i });
-    await expect(newTask).toBeVisible();
-    await newTask.click();
-    await page.waitForTimeout(300);
+    await openDialog(page.locator('button').filter({ hasText: /New Task/i }));
     await capturePage(page, {
       path: 'screenshots/modal-new-task.png',
       fullPage: true,
@@ -949,12 +942,11 @@ describeScreenshots('Screenshots - Modals', () => {
     await page.waitForLoadState('domcontentloaded');
     await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
 
-    const addSource = page
-      .locator('.sources-section .section-row-actions')
-      .getByRole('button', { name: 'Add source' });
-    await expect(addSource).toBeVisible();
-    await addSource.click();
-    await page.waitForTimeout(300);
+    await openDialog(
+      page
+        .locator('.sources-section .section-row-actions')
+        .getByRole('button', { name: 'Add source' })
+    );
     await capturePage(page, {
       path: 'screenshots/modal-add-source.png',
       fullPage: true,
@@ -971,11 +963,7 @@ describeScreenshots('Screenshots - Modals', () => {
     await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
 
-    // Click add knowledge button
-    const addKnowledgeBtn = page.locator('button').filter({ hasText: /Add Knowledge/i });
-    await expect(addKnowledgeBtn).toBeVisible();
-    await addKnowledgeBtn.click();
-    await page.waitForTimeout(300);
+    await openDialog(page.locator('button').filter({ hasText: /Add Knowledge/i }));
     await capturePage(page, {
       path: 'screenshots/modal-add-knowledge.png',
       fullPage: true,
@@ -992,17 +980,12 @@ describeScreenshots('Screenshots - Modals', () => {
     await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
 
-    // Enable dark mode
     await page.evaluate(() => {
       document.documentElement.setAttribute('data-theme', 'dark');
     });
     await page.waitForTimeout(100);
 
-    // Click new project button
-    const newProjectBtn = page.locator('button').filter({ hasText: /New Project/i });
-    await expect(newProjectBtn).toBeVisible();
-    await newProjectBtn.click();
-    await page.waitForTimeout(300);
+    await openDialog(page.locator('button').filter({ hasText: /New Project/i }));
     await capturePage(page, {
       path: 'screenshots/dark-modal-new-project.png',
       fullPage: true,
@@ -1068,7 +1051,7 @@ describeScreenshots('Screenshots - Pull Requests and Releases', () => {
 
   test('Merge pull request modal', async ({ page }) => {
     await openGitHubPage(page, `/pull-requests?id=${pullRequestKey(readyPullRequest)}`, true);
-    await page.getByRole('button', { name: 'Merge', exact: true }).click();
+    await openDialog(page.getByRole('button', { name: 'Merge', exact: true }));
     await capturePage(page, { path: 'screenshots/modal-merge-pull-request.png', fullPage: true });
   });
 
@@ -1095,7 +1078,7 @@ describeScreenshots('Screenshots - Pull Requests and Releases', () => {
 
   test('New release modal', async ({ page }) => {
     await openGitHubPage(page, '/releases', true);
-    await page.getByRole('button', { name: 'New release', exact: true }).click();
+    await openDialog(page.getByRole('button', { name: 'New release', exact: true }));
     await expect(page.getByRole('dialog').getByLabel('Tag', { exact: true })).toBeVisible();
     await capturePage(page, { path: 'screenshots/modal-new-release.png', fullPage: true });
   });

@@ -2,6 +2,18 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import {
+  COMMUNITY_WORKSPACE_LABELS,
+  UNVERIFIED_WORKSPACE_LABELS,
+  WORKSPACE_LABELS,
+} from '../../fleet/fixtures';
+import {
+  ORGANIZATION_REQUIRED_LABEL,
+  PLACEMENT_TITLE,
+  PLACEMENT_UNVERIFIED,
+  WORKSPACE_REQUIRED_LABEL,
+} from '../../fleet/messages';
+import { fromWorkspace, workspacePlacement } from '../../fleet/placement';
 import { Edition, LicenseStatus } from '../../schemas';
 import { OPEN_RULES } from '../draft';
 import {
@@ -9,6 +21,7 @@ import {
   ACTIVE_WORKSPACE_OVERRIDDEN,
   ORGANIZATION_ID,
   ORGANIZATION_RULES,
+  UNVERIFIED_WORKSPACE,
   WORKSPACE_ID,
 } from '../fixtures';
 import {
@@ -17,6 +30,7 @@ import {
   ORGANIZATION_SUMMARY,
   SAVE_LABEL,
   SOURCE_LABELS,
+  UNVERIFIED_NOTICE,
   UPGRADE_NOTICE,
 } from '../labels';
 import { NOT_ALLOWED } from '../messages';
@@ -30,8 +44,14 @@ import { ORGANIZATION_POLICY_LINK } from './WorkspacePolicySection';
 const workspace = mock();
 const updateWorkspace = mock();
 
+const runnerLabels = mock(async () => fromWorkspace(COMMUNITY_WORKSPACE_LABELS));
+
 mock.module('../api', () => ({
   policyApi: { organization: mock(), updateOrganization: mock(), workspace, updateWorkspace },
+}));
+
+mock.module('../../fleet/api', () => ({
+  fleetApi: { labels: runnerLabels, updateLabels: mock() },
 }));
 
 let WorkspacePolicySection: typeof import('./WorkspacePolicySection').WorkspacePolicySection;
@@ -120,6 +140,37 @@ describe('WorkspacePolicySection', () => {
 
     expect(screen.getByText(UPGRADE_NOTICE)).toBeInTheDocument();
     expect(screen.queryByRole('group', { name: 'Providers' })).not.toBeInTheDocument();
+  });
+
+  it('shows the policy and runner placement of a key that no longer verifies read-only', async () => {
+    runnerLabels.mockResolvedValueOnce(fromWorkspace(UNVERIFIED_WORKSPACE_LABELS));
+    await loaded(UNVERIFIED_WORKSPACE);
+
+    expect(screen.getByRole('status')).toHaveTextContent(UNVERIFIED_NOTICE);
+    expect(screen.queryByText(UPGRADE_NOTICE)).not.toBeInTheDocument();
+    expect(
+      within(field('Providers')).getByRole('checkbox', { name: 'Local models' })
+    ).toBeDisabled();
+    expect(screen.queryByRole('button', { name: SAVE_LABEL })).not.toBeInTheDocument();
+    const placement = await screen.findByRole('region', { name: PLACEMENT_TITLE });
+    expect(within(placement).getByText(PLACEMENT_UNVERIFIED)).toBeInTheDocument();
+    expect(
+      within(placement).getByRole('list', { name: WORKSPACE_REQUIRED_LABEL })
+    ).toHaveTextContent('gpu');
+  });
+
+  it('places the runner labels of the workspace below its agent policy, with what it inherits', async () => {
+    runnerLabels.mockResolvedValueOnce(fromWorkspace(WORKSPACE_LABELS));
+    await loaded(ACTIVE_WORKSPACE_INHERITED);
+
+    const placement = await screen.findByRole('region', { name: PLACEMENT_TITLE });
+    expect(
+      within(placement).getByRole('list', { name: ORGANIZATION_REQUIRED_LABEL })
+    ).toHaveTextContent('region=eu');
+    expect(
+      within(placement).getByRole('list', { name: WORKSPACE_REQUIRED_LABEL })
+    ).toHaveTextContent('gpu');
+    expect(runnerLabels).toHaveBeenCalledWith(workspacePlacement(ORGANIZATION_ID, WORKSPACE_ID));
   });
 
   it('marks inherited and unrestricted fields and shows the organization and effective values', async () => {

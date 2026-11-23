@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 use zone_enterprise::policy::{Effective, Patch, Rules};
-use zone_enterprise::{Edition, Status};
+use zone_enterprise::{Edition, Feature, Status};
 
 use super::access::{self, Access};
 use super::refusal::Refusal;
@@ -95,7 +95,7 @@ async fn read(
     let outer = policies::organization(&mut *transaction, organization).await?;
     let stored = policies::workspace(&mut *transaction, workspace).await?;
     transaction.commit().await?;
-    let standing = Standing::of(&state.stored_license().await?, Utc::now());
+    let standing = Standing::of(&state.stored_license().await?, Utc::now(), Feature::Policy);
     Ok(WorkspaceResponse::new(
         standing,
         access,
@@ -119,7 +119,7 @@ async fn write(
     let mut transaction = state.db().begin().await?;
     let access = access::workspace(&mut transaction, organization, workspace, user).await?;
     access.write(NEEDED)?;
-    let standing = Standing::of(&license?, Utc::now());
+    let standing = Standing::of(&license?, Utc::now(), Feature::Policy);
     standing.require()?;
     let Json(patch) = body.map_err(Refusal::Body)?;
     let outer = rules(

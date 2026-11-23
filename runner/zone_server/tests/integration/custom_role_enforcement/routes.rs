@@ -39,6 +39,9 @@ const EXPORTED_RANGE: &str = "start_date=2020-01-01&end_date=2020-12-31";
 
 const BUDGET_LIMIT: i64 = 50_000_000;
 
+/// A runner label the label routes save, so each admitted call writes a requirement.
+const PLACED: &str = "region=eu";
+
 /// What a guard tells someone it turns away as outside the tenant.
 const TURNED_AWAY: [&str; 3] = [
     "Organization not found",
@@ -58,6 +61,7 @@ enum Route {
     ListRepositories,
     ListMcpServers,
     ReadOrganizationPolicy,
+    ReadOrganizationRunnerLabels,
     ListAgents,
     ListRoles,
     UpdateOrganization,
@@ -87,6 +91,7 @@ enum Route {
     SignOutAgent,
     SignOutAgentLogin,
     UpdateOrganizationPolicy,
+    UpdateOrganizationRunnerLabels,
     ListAuditLogs,
     ExportAuditLogs,
     ReadAuditLog,
@@ -114,6 +119,7 @@ enum Route {
     ReadWorkspaceAiSettings,
     ReadWorkspaceMcpServers,
     ReadWorkspacePolicy,
+    ReadWorkspaceRunnerLabels,
     UpdateHostDirectories,
     UpdateTheme,
     ClearTheme,
@@ -128,11 +134,12 @@ enum Route {
     ClearWorkspaceAiSettings,
     UpdateWorkspaceMcpServers,
     UpdateWorkspacePolicy,
+    UpdateWorkspaceRunnerLabels,
     DeleteProjectSync,
     RotateProjectSyncSecret,
 }
 
-const ORGANIZATION_ROUTES: [Route; 52] = [
+const ORGANIZATION_ROUTES: [Route; 54] = [
     Route::ReadOrganization,
     Route::ListMembers,
     Route::ListWorkspaces,
@@ -140,6 +147,7 @@ const ORGANIZATION_ROUTES: [Route; 52] = [
     Route::ListRepositories,
     Route::ListMcpServers,
     Route::ReadOrganizationPolicy,
+    Route::ReadOrganizationRunnerLabels,
     Route::ListAgents,
     Route::ListRoles,
     Route::UpdateOrganization,
@@ -169,6 +177,7 @@ const ORGANIZATION_ROUTES: [Route; 52] = [
     Route::SignOutAgent,
     Route::SignOutAgentLogin,
     Route::UpdateOrganizationPolicy,
+    Route::UpdateOrganizationRunnerLabels,
     Route::ListAuditLogs,
     Route::ExportAuditLogs,
     Route::ReadAuditLog,
@@ -187,7 +196,7 @@ const ORGANIZATION_ROUTES: [Route; 52] = [
     Route::CreateRole,
 ];
 
-const WORKSPACE_ROUTES: [Route; 27] = [
+const WORKSPACE_ROUTES: [Route; 29] = [
     Route::ReadWorkspace,
     Route::ListWorkspaceMembers,
     Route::ReadHostDirectories,
@@ -199,6 +208,7 @@ const WORKSPACE_ROUTES: [Route; 27] = [
     Route::ReadWorkspaceAiSettings,
     Route::ReadWorkspaceMcpServers,
     Route::ReadWorkspacePolicy,
+    Route::ReadWorkspaceRunnerLabels,
     Route::UpdateHostDirectories,
     Route::UpdateTheme,
     Route::ClearTheme,
@@ -213,6 +223,7 @@ const WORKSPACE_ROUTES: [Route; 27] = [
     Route::ClearWorkspaceAiSettings,
     Route::UpdateWorkspaceMcpServers,
     Route::UpdateWorkspacePolicy,
+    Route::UpdateWorkspaceRunnerLabels,
     Route::DeleteProjectSync,
     Route::RotateProjectSyncSecret,
 ];
@@ -227,6 +238,7 @@ impl Route {
             | Self::ListRepositories
             | Self::ListMcpServers
             | Self::ReadOrganizationPolicy
+            | Self::ReadOrganizationRunnerLabels
             | Self::ListAgents
             | Self::ListRoles => Permission::OrganizationRead,
             Self::UpdateOrganization => Permission::OrganizationUpdate,
@@ -251,7 +263,9 @@ impl Route {
             Self::ReadAiSettings => Permission::AiSettingsRead,
             Self::UpdateAiSettings | Self::ClearAiSettings => Permission::AiSettingsUpdate,
             Self::SignOutAgent | Self::SignOutAgentLogin => Permission::AgentLoginsUpdate,
-            Self::UpdateOrganizationPolicy => Permission::PoliciesUpdate,
+            Self::UpdateOrganizationPolicy | Self::UpdateOrganizationRunnerLabels => {
+                Permission::PoliciesUpdate
+            }
             Self::ListAuditLogs | Self::ExportAuditLogs | Self::ReadAuditLog => {
                 Permission::AuditLogsRead
             }
@@ -274,7 +288,8 @@ impl Route {
             | Self::ListTasks
             | Self::ReadWorkspaceAiSettings
             | Self::ReadWorkspaceMcpServers
-            | Self::ReadWorkspacePolicy => Permission::WorkspaceRead,
+            | Self::ReadWorkspacePolicy
+            | Self::ReadWorkspaceRunnerLabels => Permission::WorkspaceRead,
             Self::UpdateHostDirectories
             | Self::UpdateTheme
             | Self::ClearTheme
@@ -289,7 +304,9 @@ impl Route {
                 Permission::WorkspaceAiSettingsUpdate
             }
             Self::UpdateWorkspaceMcpServers => Permission::WorkspaceMcpServersUpdate,
-            Self::UpdateWorkspacePolicy => Permission::WorkspacePoliciesUpdate,
+            Self::UpdateWorkspacePolicy | Self::UpdateWorkspaceRunnerLabels => {
+                Permission::WorkspacePoliciesUpdate
+            }
             Self::DeleteProjectSync | Self::RotateProjectSyncSecret => {
                 Permission::ProjectSyncsUpdate
             }
@@ -343,6 +360,7 @@ impl Route {
             | Self::ListRepositories
             | Self::ListMcpServers
             | Self::ReadOrganizationPolicy
+            | Self::ReadOrganizationRunnerLabels
             | Self::ListAgents
             | Self::ListRoles
             | Self::UpdateOrganization
@@ -355,6 +373,7 @@ impl Route {
             | Self::ReadAiSettings
             | Self::UpdateAiSettings
             | Self::UpdateOrganizationPolicy
+            | Self::UpdateOrganizationRunnerLabels
             | Self::ListAuditLogs
             | Self::ExportAuditLogs
             | Self::ListAuditDestinations
@@ -375,13 +394,15 @@ impl Route {
             | Self::ReadWorkspaceAiSettings
             | Self::ReadWorkspaceMcpServers
             | Self::ReadWorkspacePolicy
+            | Self::ReadWorkspaceRunnerLabels
             | Self::UpdateHostDirectories
             | Self::UpdateTheme
             | Self::UpdateWorkspace
             | Self::ChangeWorkspaceMember
             | Self::UpdateWorkspaceAiSettings
             | Self::UpdateWorkspaceMcpServers
-            | Self::UpdateWorkspacePolicy => StatusCode::OK,
+            | Self::UpdateWorkspacePolicy
+            | Self::UpdateWorkspaceRunnerLabels => StatusCode::OK,
         }
     }
 
@@ -399,6 +420,9 @@ impl Route {
             Self::ListRepositories => Call::get(format!("{organization}/github/repositories")),
             Self::ListMcpServers => Call::get(format!("{organization}/mcp-servers")),
             Self::ReadOrganizationPolicy => Call::get(format!("{organization}/agent-policy")),
+            Self::ReadOrganizationRunnerLabels => {
+                Call::get(format!("{organization}/runner-labels"))
+            }
             Self::ListAgents => Call::get(format!("{organization}/agents")),
             Self::ListRoles => Call::get(format!("{organization}/roles")),
             Self::UpdateOrganization => Call::patch(
@@ -482,6 +506,10 @@ impl Route {
                 format!("{organization}/agent-policy"),
                 json!({ "agents": [] }),
             ),
+            Self::UpdateOrganizationRunnerLabels => Call::patch(
+                format!("{organization}/runner-labels"),
+                json!({ "labels": [PLACED] }),
+            ),
             Self::ListAuditLogs => Call::get(format!("{organization}/audit-logs")),
             Self::ExportAuditLogs => {
                 Call::get(format!("{organization}/audit-logs/export?{EXPORTED_RANGE}"))
@@ -534,6 +562,7 @@ impl Route {
             Self::ReadWorkspaceAiSettings => Call::get(format!("{nested}/settings/ai")),
             Self::ReadWorkspaceMcpServers => Call::get(format!("{nested}/mcp-servers")),
             Self::ReadWorkspacePolicy => Call::get(format!("{nested}/agent-policy")),
+            Self::ReadWorkspaceRunnerLabels => Call::get(format!("{nested}/runner-labels")),
             Self::UpdateHostDirectories => Call::put(
                 format!("{workspace}/host-directories"),
                 json!({ "directories": [] }),
@@ -590,6 +619,10 @@ impl Route {
             Self::UpdateWorkspacePolicy => {
                 Call::patch(format!("{nested}/agent-policy"), json!({ "agents": [] }))
             }
+            Self::UpdateWorkspaceRunnerLabels => Call::patch(
+                format!("{nested}/runner-labels"),
+                json!({ "labels": [PLACED] }),
+            ),
             Self::DeleteProjectSync => {
                 Call::delete(format!("/api/projects/{project}/sync/{absent}"))
             }

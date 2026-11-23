@@ -1196,6 +1196,7 @@ pub(crate) mod hold {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::fleet::claimant::Claimant;
 
     fn url(source: &str) -> RepositoryUrl {
         RepositoryUrl::parse(source).unwrap()
@@ -1460,9 +1461,10 @@ mod tests {
             .unwrap();
         let owner = Uuid::new_v4();
         assert!(
-            crate::db::tasks::claim_task_run(pool, run.id, owner)
+            crate::db::tasks::claim_task_run(pool, run.id, owner, Claimant::UNENFORCED)
                 .await
                 .unwrap()
+                .claimed()
         );
         let mut checkout = Checkout::create(root, run.id, owner).unwrap();
         checkout.worktree = Some(worktree::add(base, checkout.path(), "origin/HEAD").unwrap());
@@ -1929,9 +1931,10 @@ mod tests {
                 .unwrap();
             let owner = Uuid::new_v4();
             assert!(
-                crate::db::tasks::claim_task_run(&pool, run.id, owner)
+                crate::db::tasks::claim_task_run(&pool, run.id, owner, Claimant::UNENFORCED)
                     .await
                     .unwrap()
+                    .claimed()
             );
             let checkout = Checkout::create(&root, run.id, owner).unwrap();
             std::fs::write(checkout.scratch().path().join("left"), "x").unwrap();
@@ -2024,9 +2027,10 @@ mod tests {
             .unwrap();
         let owner = Uuid::new_v4();
         assert!(
-            crate::db::tasks::claim_task_run(&pool, run.id, owner)
+            crate::db::tasks::claim_task_run(&pool, run.id, owner, Claimant::UNENFORCED)
                 .await
                 .unwrap()
+                .claimed()
         );
         let checkout = Checkout::create(&Checkout::root(&pool), run.id, owner).unwrap();
         let path = checkout.path().to_path_buf();
@@ -2152,9 +2156,10 @@ mod tests {
                 .unwrap();
             let owner = Uuid::new_v4();
             assert!(
-                crate::db::tasks::claim_task_run(&pool, run.id, owner)
+                crate::db::tasks::claim_task_run(&pool, run.id, owner, Claimant::UNENFORCED)
                     .await
                     .unwrap()
+                    .claimed()
             );
             let mut checkout = Checkout::create(&root, run.id, owner).unwrap();
             checkout.worktree = Some(worktree::add(&base, checkout.path(), "origin/HEAD").unwrap());
@@ -2259,9 +2264,10 @@ mod tests {
             .unwrap();
         let owner = Uuid::new_v4();
         assert!(
-            crate::db::tasks::claim_task_run(&pool, run.id, owner)
+            crate::db::tasks::claim_task_run(&pool, run.id, owner, Claimant::UNENFORCED)
                 .await
                 .unwrap()
+                .claimed()
         );
         let (_holder, root) = private_root();
         let base = base_clone(&root);
@@ -2298,9 +2304,15 @@ mod tests {
             .unwrap();
         let second_owner = Uuid::new_v4();
         assert!(
-            crate::db::tasks::claim_task_run(&pool, unrecorded.id, second_owner)
-                .await
-                .unwrap()
+            crate::db::tasks::claim_task_run(
+                &pool,
+                unrecorded.id,
+                second_owner,
+                Claimant::UNENFORCED
+            )
+            .await
+            .unwrap()
+            .claimed()
         );
         let mut second = Checkout::create(&root, unrecorded.id, second_owner).unwrap();
         second.worktree = Some(worktree::add(&base, second.path(), "origin/HEAD").unwrap());
@@ -2377,7 +2389,12 @@ mod tests {
         .unwrap();
         let run = tasks::create_task_run(&pool, task.id).await.unwrap();
         let owner = Uuid::new_v4();
-        assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
+        assert!(
+            tasks::claim_task_run(&pool, run.id, owner, Claimant::UNENFORCED)
+                .await
+                .unwrap()
+                .claimed()
+        );
         let key = std::sync::Arc::new(abnegate_secret::MasterKey::generate().unwrap());
         let checkout = Checkout::prepare(
             &pool,

@@ -28,6 +28,7 @@ use zone_server::services::embedding::create_embedding_service;
 use zone_server::services::embedding::default_embedding_model;
 use zone_server::services::embedding::embedding_engine_from_env;
 use zone_server::services::embedding::embedding_host;
+use zone_server::services::fleet::Identity;
 use zone_server::services::login;
 use zone_server::services::mail;
 use zone_server::services::mail::AccountMail;
@@ -73,6 +74,7 @@ async fn main() {
 
     // Load config
     let config = Config::from_env().expect("Failed to load configuration");
+    let identity = Identity::from_env().unwrap_or_else(|misconfigured| panic!("{misconfigured}"));
 
     // Connect to database with ANN session knobs on every checkout.
     let db = zone_server::db::DbPool::connect(&config.database_url)
@@ -205,7 +207,9 @@ async fn main() {
     } else {
         AppState::new_with_mail(config.clone(), db, Some(cache), mail)
     };
+    state.set_identity(identity);
     state.prepare().await;
+    zone_server::workers::fleet::heartbeat(&state).await;
 
     zone_server::workers::housekeeping::spawn(state.clone());
     zone_server::workers::reminders::spawn(state.clone(), Sweep::All);
@@ -220,6 +224,7 @@ async fn main() {
         zone_server::workers::auto_project::spawn(state.clone());
     }
     let recovery = zone_server::workers::task::spawn_recovery(state.clone());
+    zone_server::workers::fleet::spawn(state.clone());
     let training = tokio::spawn(zone_server::train_jobs::recover(
         state.config().comfyui.clone(),
         state.train_jobs().clone(),

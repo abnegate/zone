@@ -13,6 +13,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use zone_server::agent::wait::{KIND_TASK_RUN, Waiting};
+use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::tasks::{self, Mutation, RunMutation};
 use zone_server::db::workspace_members::{self, WorkspaceRole};
 use zone_server::services::task_progress::{ProgressMessage, TaskProgressBroadcaster};
@@ -943,9 +944,10 @@ async fn claimed(pool: &sqlx::PgPool, task_id: uuid::Uuid) -> (uuid::Uuid, uuid:
         .id;
     let owner = uuid::Uuid::new_v4();
     assert!(
-        tasks::claim_task_run(pool, run, owner)
+        tasks::claim_task_run(pool, run, owner, Claimant::UNENFORCED)
             .await
             .expect("the run is claimable")
+            .claimed()
     );
     (run, owner)
 }

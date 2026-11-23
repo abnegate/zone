@@ -6,6 +6,18 @@ import { ApiError } from '../../../../api/ApiError';
 import { AdministersServerProvider } from '../../components/AdministersServer';
 import { ASK_FOR_RENEWAL } from '../../components/LapsedNotice';
 import { ASK_FOR_LICENSE, LICENSE_LINK } from '../../components/UpgradeNotice';
+import {
+  COMMUNITY_ORGANIZATION_LABELS,
+  ORGANIZATION_LABELS,
+  UNVERIFIED_ORGANIZATION_LABELS,
+} from '../../fleet/fixtures';
+import {
+  CHATS_IGNORE_LABELS,
+  PLACEMENT_TITLE,
+  PLACEMENT_UNVERIFIED,
+  REQUIRED_LABEL,
+} from '../../fleet/messages';
+import { fromOrganization, organizationPlacement } from '../../fleet/placement';
 import { LICENSE_PATH } from '../../licensePath';
 import {
   ACTIVE_ORGANIZATION,
@@ -14,8 +26,15 @@ import {
   ORGANIZATION_ID,
   TEAM_LAPSED_ORGANIZATION,
   TEAM_ORGANIZATION,
+  UNVERIFIED_ORGANIZATION,
 } from '../fixtures';
-import { DISCARD_LABEL, LAPSED_NOTICE, SAVE_LABEL, UPGRADE_NOTICE } from '../labels';
+import {
+  DISCARD_LABEL,
+  LAPSED_NOTICE,
+  SAVE_LABEL,
+  UNVERIFIED_NOTICE,
+  UPGRADE_NOTICE,
+} from '../labels';
 import { NOTHING_ALLOWED_WARNING, refusalMessage, unrestrictedText } from '../messages';
 import { PolicyRefusal } from '../PolicyRefusal';
 import { PolicyCode, PolicyField } from '../schemas';
@@ -25,8 +44,14 @@ import { ORGANIZATION_READ_ONLY } from './OrganizationPolicy';
 const organization = mock();
 const updateOrganization = mock();
 
+const runnerLabels = mock(async () => fromOrganization(COMMUNITY_ORGANIZATION_LABELS));
+
 mock.module('../api', () => ({
   policyApi: { organization, updateOrganization, workspace: mock(), updateWorkspace: mock() },
+}));
+
+mock.module('../../fleet/api', () => ({
+  fleetApi: { labels: runnerLabels, updateLabels: mock() },
 }));
 
 let OrganizationPolicySection: typeof import('./OrganizationPolicySection').OrganizationPolicySection;
@@ -184,6 +209,45 @@ describe('OrganizationPolicySection', () => {
         screen.queryByRole('checkbox', { name: 'Restrict Providers' })
       ).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: SAVE_LABEL })).not.toBeInTheDocument();
+    });
+  });
+
+  describe('runner placement', () => {
+    it('places the runner labels of the organization below its agent policy', async () => {
+      runnerLabels.mockResolvedValueOnce(fromOrganization(ORGANIZATION_LABELS));
+      await loaded(ACTIVE_ORGANIZATION);
+
+      const placement = await screen.findByRole('region', { name: PLACEMENT_TITLE });
+      expect(within(placement).getByText(CHATS_IGNORE_LABELS)).toBeInTheDocument();
+      expect(within(placement).getByText('region=eu')).toBeInTheDocument();
+      expect(runnerLabels).toHaveBeenCalledWith(organizationPlacement(ORGANIZATION_ID));
+    });
+
+    it('shows the policy and runner placement of a key that no longer verifies read-only', async () => {
+      runnerLabels.mockResolvedValueOnce(fromOrganization(UNVERIFIED_ORGANIZATION_LABELS));
+      await loaded(UNVERIFIED_ORGANIZATION);
+
+      const warning = screen.getByRole('status');
+      expect(warning).toHaveClass('alert-warning');
+      expect(warning).toHaveTextContent(UNVERIFIED_NOTICE);
+      expect(within(warning).getByRole('link')).toHaveAttribute('href', LICENSE_PATH);
+      expect(screen.queryByText(UPGRADE_NOTICE)).not.toBeInTheDocument();
+      expect(
+        within(field('Providers')).getByRole('checkbox', { name: 'Local models' })
+      ).toBeDisabled();
+      expect(screen.queryByRole('button', { name: SAVE_LABEL })).not.toBeInTheDocument();
+
+      const placement = await screen.findByRole('region', { name: PLACEMENT_TITLE });
+      expect(within(placement).getByText(PLACEMENT_UNVERIFIED)).toBeInTheDocument();
+      expect(within(placement).getByRole('group', { name: REQUIRED_LABEL })).toHaveTextContent(
+        'region=eu'
+      );
+    });
+
+    it('leaves runner placement to the upgrade notice on Community', async () => {
+      await loaded(COMMUNITY_ORGANIZATION);
+
+      expect(screen.queryByRole('region', { name: PLACEMENT_TITLE })).not.toBeInTheDocument();
     });
   });
 

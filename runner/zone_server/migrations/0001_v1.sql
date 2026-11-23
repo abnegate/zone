@@ -1852,6 +1852,56 @@ CREATE FUNCTION check_workspace_membership(p_user_id uuid, p_workspace_id uuid) 
   SELECT workspace_permits(p_user_id, p_workspace_id, 'workspace:read');
 $$;
 
+CREATE TABLE fleet_policy (
+    id boolean DEFAULT true NOT NULL PRIMARY KEY,
+    minimum_version text,
+    minimum_version_key integer[],
+    updated_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    updated_at timestamp with time zone,
+    CONSTRAINT fleet_policy_singleton CHECK (id),
+    CONSTRAINT fleet_policy_minimum_check CHECK (((minimum_version IS NULL) = (minimum_version_key IS NULL)))
+);
+INSERT INTO fleet_policy (id) VALUES (true);
+
+CREATE TABLE fleet_runners (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    name text NOT NULL UNIQUE,
+    instance_id uuid NOT NULL,
+    version text NOT NULL,
+    version_key integer[] NOT NULL,
+    labels text[] DEFAULT '{}'::text[] NOT NULL,
+    state text DEFAULT 'active'::text NOT NULL,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    state_changed_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    state_changed_at timestamp with time zone,
+    CONSTRAINT fleet_runners_state_check CHECK ((state = ANY (ARRAY['active'::text, 'cordoned'::text, 'revoked'::text]))),
+    CONSTRAINT fleet_runners_version_key_check CHECK ((cardinality(version_key) = 4))
+);
+CREATE INDEX idx_fleet_runners_last_seen ON fleet_runners (last_seen_at);
+
+CREATE TABLE organization_runner_labels (
+    organization_id uuid NOT NULL PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+    labels text[] DEFAULT '{}'::text[] NOT NULL,
+    updated_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+CREATE TABLE workspace_runner_labels (
+    workspace_id uuid NOT NULL PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+    labels text[] DEFAULT '{}'::text[] NOT NULL,
+    updated_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE task_runs ADD COLUMN runner_id uuid REFERENCES fleet_runners(id) ON DELETE SET NULL;
+CREATE INDEX idx_task_runs_runner ON task_runs (runner_id);
+ALTER TABLE chat_leases ADD COLUMN runner_id uuid REFERENCES fleet_runners(id) ON DELETE SET NULL;
+CREATE INDEX idx_chat_leases_runner ON chat_leases (runner_id);
+ALTER TABLE projects ADD COLUMN auto_claim_runner_id uuid REFERENCES fleet_runners(id) ON DELETE SET NULL;
+CREATE INDEX idx_projects_auto_claim_runner ON projects (auto_claim_runner_id);
+
 INSERT INTO source_types (name, category, description, config_schema) VALUES
   ('github', 'file', 'GitHub repository', '{"type":"object","required":["owner","repo"],"properties":{"owner":{"type":"string"},"repo":{"type":"string"},"branch":{"type":"string","default":"main"},"base_path":{"type":"string","default":""}}}'),
   ('gitlab', 'file', 'GitLab repository', '{"type":"object","required":["project_id"],"properties":{"project_id":{"type":"string"},"host":{"type":"string","default":"https://gitlab.com"},"branch":{"type":"string","default":"main"},"base_path":{"type":"string","default":""}}}'),

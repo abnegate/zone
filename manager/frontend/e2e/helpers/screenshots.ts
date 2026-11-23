@@ -19,6 +19,20 @@ export async function fontsLoaded(page: Page): Promise<void> {
   }, BODY_FONT);
 }
 
+export async function animationsSettled(page: Page): Promise<void> {
+  await page.waitForFunction(() =>
+    document
+      .getAnimations()
+      .every(
+        (animation) =>
+          animation.playState !== 'running' ||
+          !Number.isFinite(
+            animation.effect?.getComputedTiming().endTime ?? Number.POSITIVE_INFINITY
+          )
+      )
+  );
+}
+
 export async function expectNoSidewaysScroll(page: Page, scrollers: string): Promise<void> {
   const overflow = await page.evaluate(
     (selector) =>

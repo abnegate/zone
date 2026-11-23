@@ -78,6 +78,7 @@ mod tests {
     use super::*;
     use crate::db::chats::{create_chat, create_message};
     use crate::db::context::Store;
+    use crate::db::fleet::claimant::Claimant;
     use crate::db::{organizations, workspaces};
 
     async fn pool() -> PgPool {
@@ -142,14 +143,16 @@ mod tests {
         let live = chat(&pool, workspace_id).await;
         let lapsed = chat(&pool, workspace_id).await;
 
-        let held = Store::new(pool.clone(), live, Some(workspace_id));
+        let held =
+            Store::new(pool.clone(), live, Some(workspace_id)).claiming(Claimant::UNENFORCED);
         let _lease = held
             .acquire(Uuid::new_v4(), Duration::from_secs(30))
             .await
             .expect("a lease");
         // Releasing a lease expires it where it stands, which is the row a
         // turn that has already ended leaves behind.
-        let dropped = Store::new(pool.clone(), lapsed, Some(workspace_id));
+        let dropped =
+            Store::new(pool.clone(), lapsed, Some(workspace_id)).claiming(Claimant::UNENFORCED);
         let expired = dropped
             .acquire(Uuid::new_v4(), Duration::from_secs(30))
             .await

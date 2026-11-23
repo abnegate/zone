@@ -1,6 +1,9 @@
 //! Durable reminders delivered atomically to their originating chat, and the
 //! recurring automations they become when one carries a rule for its own next
 //! firing.
+use super::fleet::claimant::Claimant;
+use super::fleet::eligibility::{self, UNATTENDED};
+use super::fleet::state::State;
 use super::{DbResult, actions, users};
 use crate::services::schedule::{self, MAX_LIFETIME, Recurrence};
 use crate::services::time_zone::{self, TimeZone};
@@ -596,13 +599,22 @@ const MAX_TURN_ATTEMPTS: i32 = 3;
 /// again. A turn has no length limit, so the lease does not measure the turn —
 /// the worker running it renews the claim with `renew_turn` for as long as it
 /// is alive, and the lease only has to outlast a missed renewal or two.
+///
+/// Under fleet policy only a firing `claimant`'s own runner may take as
+/// unattended work is offered, judged on the labels of the firing's own
+/// workspace, and the runner is [held](eligibility::hold) until the claim
+/// commits. That hold comes before the advisory lock, so a claim waiting on a
+/// revoke of its runner waits holding nothing that every other runner's claim
+/// needs.
 pub async fn claim_turn(
     pool: &PgPool,
     sweep: Sweep,
     lease: Duration,
+    claimant: Claimant,
 ) -> DbResult<Option<PendingTurn>> {
     let seconds = lease.as_secs_f64();
     let mut transaction = pool.begin().await?;
+    let held = eligibility::hold(&mut transaction, claimant).await?;
     // One claim at a time across the fleet, released when this transaction
     // ends. The claim below refuses a firing whose schedule already has one in
     // flight, and that refusal is only sound if no other worker is deciding the
@@ -638,6 +650,10 @@ pub async fn claim_turn(
              the chat"
         );
     }
+    if held.is_some() {
+        transaction.commit().await?;
+        return Ok(None);
+    }
     // The attempt bound is repeated here so the rows this can claim and the
     // rows the delete above takes are disjoint sets. Without it a worker could
     // hold a row another worker's delete is waiting on while waiting on a row
@@ -660,7 +676,7 @@ pub async fn claim_turn(
     // though nothing held the schedule at all. The bound belongs on the row
     // being taken, which is a different question from whether another one is
     // already out.
-    let claimed = sqlx::query_as::<_, PendingTurn>(
+    let claimed = sqlx::query_as::<_, PendingTurn>(sqlx::AssertSqlSafe(format!(
         "UPDATE reminder_turns SET attempts = attempts + 1, claimed_at = statement_timestamp() \
          WHERE id = ( \
          SELECT owed.id FROM reminder_turns AS owed WHERE owed.attempts < $1 \
@@ -672,13 +688,21 @@ pub async fn claim_turn(
            WHERE ahead.reminder_id = owed.reminder_id AND ahead.id <> owed.id \
            AND ahead.claimed_at IS NOT NULL \
            AND ahead.claimed_at > statement_timestamp() - make_interval(secs => $2)) \
+         AND (NOT $4 OR EXISTS ( \
+           SELECT 1 FROM fleet_runners runner CROSS JOIN fleet_policy policy \
+           JOIN workspaces w ON w.id = owed.workspace_id \
+           LEFT JOIN organization_runner_labels ol ON ol.organization_id = w.organization_id \
+           LEFT JOIN workspace_runner_labels wl ON wl.workspace_id = w.id \
+           WHERE runner.id = $5 AND {UNATTENDED})) \
          ORDER BY owed.created_at, owed.id LIMIT 1 FOR UPDATE SKIP LOCKED) \
          RETURNING id, reminder_id, workspace_id, chat_id, created_by AS user_id, prompt, \
-         attempts",
-    )
+         attempts"
+    )))
     .bind(MAX_TURN_ATTEMPTS)
     .bind(seconds)
     .bind(sweep.workspace())
+    .bind(claimant.enforced)
+    .bind(claimant.runner)
     .fetch_optional(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -696,11 +720,15 @@ pub async fn claim_turn(
 /// treats as gone, and may have let a later firing of the same schedule start
 /// on the strength of it. Reviving it would put two of that schedule's
 /// firings in flight at once.
+///
+/// Under fleet policy a revoked runner renews nothing, so its claim lapses and
+/// the firing is offered to another runner.
 pub async fn renew_turn(
     pool: &PgPool,
     turn_id: Uuid,
     attempts: i32,
     lease: Duration,
+    claimant: Claimant,
 ) -> DbResult<bool> {
     let mut transaction = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -713,15 +741,37 @@ pub async fn renew_turn(
     let renewed = sqlx::query(
         "UPDATE reminder_turns SET claimed_at = statement_timestamp() \
          WHERE id = $1 AND attempts = $2 \
-         AND claimed_at > statement_timestamp() - make_interval(secs => $3)",
+         AND claimed_at > statement_timestamp() - make_interval(secs => $3) \
+         AND (NOT $4 OR EXISTS (SELECT 1 FROM fleet_runners WHERE id = $5 AND state <> $6))",
     )
     .bind(turn_id)
     .bind(attempts)
     .bind(lease.as_secs_f64())
+    .bind(claimant.enforced)
+    .bind(claimant.runner)
+    .bind(State::Revoked.as_str())
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
     Ok(renewed.rows_affected() > 0)
+}
+
+/// Gives a claimed firing back untried, for a turn fleet policy refused before
+/// it reached the chat: the attempt is not counted, so refusals can't spend
+/// the attempts a firing has, and the firing is offered again at once.
+///
+/// Fenced on the claim's `attempts` like `finish_turn`.
+pub async fn release_turn(pool: &PgPool, turn_id: Uuid, attempts: i32) -> DbResult<bool> {
+    Ok(sqlx::query(
+        "UPDATE reminder_turns SET attempts = attempts - 1, claimed_at = NULL \
+         WHERE id = $1 AND attempts = $2",
+    )
+    .bind(turn_id)
+    .bind(attempts)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 /// Marks one firing's turn as run, whatever the turn made of it.

@@ -1,7 +1,8 @@
 # Audit export, streaming and retention
 
 Zone records security-relevant actions in an audit log: sign-ins, membership
-and role changes, settings, licenses, SSO, agent policy and more. With a Zone
+and role changes, settings, licenses, SSO, agent policy, the
+[runner fleet](FLEET.md#audit-log) and more. With a Zone
 Enterprise license you can also:
 
 - download the audit log for a date range as NDJSON or CSV;
@@ -14,7 +15,7 @@ Each organization has its own destinations, retention period and downloads,
 managed by holders of `audit:update`, which organization owners and admins
 hold and a custom role can include (see [ROLES.md](ROLES.md)), under
 **Settings → Organization → Audit export**. Events that belong to no organization, such as sign-ins, license
-changes and SSO changes, form the server scope, which server admins manage
+changes, SSO changes and runner fleet changes, form the server scope, which server admins manage
 under **Settings → This server → Audit export**.
 
 The audit log itself is in every edition. Community keeps **Settings →
