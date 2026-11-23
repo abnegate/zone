@@ -2,6 +2,9 @@ use std::fmt;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use hkdf::Hkdf;
+use sha2::Sha256;
+use zeroize::Zeroizing;
 use zone_enterprise::{Keyring, Payload, SigningKey};
 
 use crate::private_key::PrivateKey;
@@ -27,6 +30,14 @@ impl Signer {
 
     pub fn public(&self) -> [u8; 32] {
         self.key.verifying_key().to_bytes()
+    }
+
+    pub(crate) fn derive(&self, info: &[u8]) -> Zeroizing<[u8; 32]> {
+        let mut derived = Zeroizing::new([0; 32]);
+        Hkdf::<Sha256>::new(None, self.key.as_bytes())
+            .expand(info, &mut *derived)
+            .expect("32 bytes is within HKDF-SHA256's output limit");
+        derived
     }
 
     pub fn sign(&self, terms: &Terms) -> Result<String, zone_enterprise::Error> {
@@ -281,6 +292,19 @@ mod tests {
             shown.contains(&STANDARD.encode(signer().public())),
             "{shown}"
         );
+    }
+
+    #[test]
+    fn derivation_is_deterministic_and_bound_to_info_and_seed() {
+        let signer = signer();
+        let derived = signer.derive(b"info");
+        assert_eq!(*derived, *signer.derive(b"info"));
+        assert_ne!(*derived, *signer.derive(b"other"));
+        assert_ne!(
+            *derived,
+            *Signer::new(PrivateKey::new([4; 32]), KEY_ID).derive(b"info")
+        );
+        assert_ne!(*derived, SEED);
     }
 
     #[test]

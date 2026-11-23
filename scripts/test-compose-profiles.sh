@@ -4,6 +4,9 @@ set -eu
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 script=$root/scripts/compose.sh
 envfile=$root/.env.example
+ZONE_ENV_FILE=$envfile
+export ZONE_ENV_FILE
+unset ZONE_LTS_VERSION ZONE_LTS_REGISTRY ZONE_TRUSTED_PROXIES
 
 compose() {
     docker compose --env-file "$envfile" "$@"
@@ -535,6 +538,127 @@ if stale:
     raise SystemExit(f"SERVER_DEFAULTS lists settings that are passed or no longer read: {stale}")
 
 print("Compose profile combination checks passed")
+PY
+
+release=$directory/release
+mkdir -p "$release/scripts" "$release/traefik" "$release/bin"
+cp "$script" "$root/scripts/env-file.sh" "$root/scripts/configure-model-proxy.sh" "$release/scripts/"
+printf '#!/bin/sh\n' > "$release/traefik/generate-local-cert.sh"
+cat > "$release/bin/docker" <<'DOCKER'
+#!/bin/sh
+if [ "$*" = 'compose version' ]; then
+    exit 0
+fi
+printf '%s\n' "$*" > "$DOCKER_ARGUMENTS"
+DOCKER
+chmod +x "$release/bin/docker"
+: > "$release/docker-compose.yml"
+: > "$release/docker-compose.dev.yml"
+: > "$release/docker-compose.vpn.yml"
+grep -v '^[[:space:]]*ZONE_LTS_VERSION=' "$envfile" > "$release/source.env"
+cp "$release/source.env" "$release/.env"
+release_script=$release/scripts/compose.sh
+DOCKER_ARGUMENTS=$release/arguments
+export DOCKER_ARGUMENTS
+
+release_flags() {
+    trim "$(ZONE_ENV_FILE=$release/.env "$release_script" flags "$1")"
+}
+
+release_compose() {
+    rm -f "$DOCKER_ARGUMENTS"
+    PATH="$release/bin:$PATH" "$release_script" --env-file "$release/.env" "$@"
+    cat "$DOCKER_ARGUMENTS"
+}
+
+release_persisted() {
+    cp "$release/source.env" "$release/persisted.env"
+    "$release_script" persist --env-file "$release/persisted.env" "$1" >/dev/null
+    sed -n 's/^COMPOSE_FILE=//p' "$release/persisted.env"
+}
+
+assert_eq "$(release_flags '')" '-f docker-compose.yml' 'no release overlays without their files'
+assert_eq "$(release_compose --replace-profiles= config)" \
+    "compose -f docker-compose.yml --env-file $release/.env config" \
+    'run_compose omits absent release overlays'
+assert_eq "$(release_persisted '')" '' 'persist without release overlays removes COMPOSE_FILE'
+
+: > "$release/docker-compose.lts.yml"
+assert_eq "$(release_flags '')" '-f docker-compose.yml' 'the LTS overlay waits for ZONE_LTS_VERSION'
+assert_eq "$(release_persisted '')" '' 'persist leaves an unselected LTS overlay out of COMPOSE_FILE'
+
+printf '%s\n' 'ZONE_LTS_VERSION=1.4-lts' >> "$release/source.env"
+cp "$release/source.env" "$release/.env"
+assert_eq "$(release_flags '')" '-f docker-compose.yml -f docker-compose.lts.yml' \
+    'ZONE_LTS_VERSION in .env selects the LTS overlay'
+assert_eq "$(release_compose --replace-profiles= config)" \
+    "compose -f docker-compose.yml -f docker-compose.lts.yml --env-file $release/.env config" \
+    'run_compose passes the LTS overlay'
+assert_eq "$(release_persisted '')" 'docker-compose.yml:docker-compose.lts.yml' \
+    'persist keeps the LTS overlay in COMPOSE_FILE without profiles'
+
+grep -v '^[[:space:]]*ZONE_LTS_VERSION=' "$release/source.env" > "$release/.env"
+assert_eq "$(ZONE_LTS_VERSION=1.4-lts release_flags '')" '-f docker-compose.yml -f docker-compose.lts.yml' \
+    'ZONE_LTS_VERSION in the environment selects the LTS overlay'
+cp "$release/source.env" "$release/.env"
+
+: > "$release/docker-compose.airgap.yml"
+: > "$release/docker-compose.override.yml"
+assert_eq "$(release_flags '')" \
+    '-f docker-compose.yml -f docker-compose.lts.yml -f docker-compose.airgap.yml -f docker-compose.override.yml' \
+    'release overlays come before the override file'
+assert_eq "$(release_flags 'monitoring,vpn,dev')" \
+    '-f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.vpn.yml -f docker-compose.lts.yml -f docker-compose.airgap.yml -f docker-compose.override.yml --profile dev --profile vpn --profile monitoring' \
+    'release overlays follow the profile overlays'
+assert_eq "$(release_compose --replace-profiles=vpn up -d)" \
+    "compose --profile vpn -f docker-compose.yml -f docker-compose.vpn.yml -f docker-compose.lts.yml -f docker-compose.airgap.yml -f docker-compose.override.yml --env-file $release/.env up -d" \
+    'run_compose passes every release overlay in order'
+assert_eq "$(release_persisted '')" \
+    'docker-compose.yml:docker-compose.lts.yml:docker-compose.airgap.yml:docker-compose.override.yml' \
+    'persist keeps the release overlays in COMPOSE_FILE without profiles'
+assert_eq "$(release_persisted dev)" \
+    'docker-compose.yml:docker-compose.dev.yml:docker-compose.lts.yml:docker-compose.airgap.yml:docker-compose.override.yml' \
+    'persist keeps the release overlays in COMPOSE_FILE with profiles'
+
+rm "$release/docker-compose.lts.yml"
+assert_eq "$(release_flags '')" '-f docker-compose.yml -f docker-compose.airgap.yml -f docker-compose.override.yml' \
+    'the air-gapped overlay needs only its file'
+assert_eq "$(release_compose --replace-profiles= config)" \
+    "compose -f docker-compose.yml -f docker-compose.airgap.yml -f docker-compose.override.yml --env-file $release/.env config" \
+    'run_compose omits a missing LTS overlay'
+
+lts_environment=$directory/lts.env
+cp "$envfile" "$lts_environment"
+printf '%s\n' 'ZONE_LTS_VERSION=1.4-lts' >> "$lts_environment"
+lts_render=$directory/lts.json
+# shellcheck disable=SC2046
+docker compose --env-file "$lts_environment" $(ZONE_ENV_FILE=$lts_environment "$script" flags '') \
+    config --format json > "$lts_render"
+python3 - "$lts_render" <<'PY'
+import json
+import sys
+
+services = json.load(open(sys.argv[1], encoding="utf-8"))["services"]
+for name, repository in (
+    ("manager", "zone/server"),
+    ("console", "zone/manager"),
+    ("litellm", "zone/litellm"),
+):
+    service = services[name]
+    if service.get("build") is not None:
+        raise SystemExit(f"LTS {name} must not build from source, got {service['build']!r}")
+    if service.get("pull_policy") != "always":
+        raise SystemExit(f"LTS {name} must always pull, got {service.get('pull_policy')!r}")
+    expected = f"registry.bitecode.ltd/{repository}:1.4-lts"
+    if service.get("image") != expected:
+        raise SystemExit(f"LTS {name} must run {expected}, got {service.get('image')!r}")
+trusted = services["manager"].get("environment", {}).get("ZONE_TRUSTED_PROXIES")
+if trusted != "172.31.0.250":
+    raise SystemExit(f"LTS manager must trust 172.31.0.250, got {trusted!r}")
+address = (services["traefik"].get("networks", {}).get("edge") or {}).get("ipv4_address")
+if address != "172.31.0.250":
+    raise SystemExit(f"LTS traefik must stay pinned to 172.31.0.250 on edge, got {address!r}")
+print("Compose LTS overlay checks passed")
 PY
 
 printf '%s\n' 'Compose profile checks passed'

@@ -1,0 +1,192 @@
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+
+use axum::Json;
+use axum::extract::rejection::{ExtensionRejection, PathRejection};
+use axum::extract::{ConnectInfo, Path, State};
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
+use tracing::field;
+use uuid::Uuid;
+
+use crate::bundle::{ACCESS_DENIED, Architecture, BundleVersion, Object, Presence, StorageError};
+use crate::gate::{Denial, Limited};
+use crate::http::bundle_outcome::BundleOutcome;
+use crate::http::bundle_response::BundleResponse;
+use crate::http::context::Context;
+use crate::http::distributor::Distributor;
+
+pub async fn respond(
+    State(context): State<Arc<Context>>,
+    peer: Result<ConnectInfo<SocketAddr>, ExtensionRejection>,
+    path: Result<Path<(String, String)>, PathRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(distributor) = &context.distributor else {
+        let outcome = BundleOutcome::Disabled;
+        tracing::info!(%outcome, "Refused a bundle because bundles are off");
+        return outcome.status().into_response();
+    };
+    let peer = peer.ok().map(|ConnectInfo(peer)| peer);
+    let address = match distributor.gate.client(peer, &headers) {
+        Ok(address) => address,
+        Err(unaddressable) => {
+            let outcome = BundleOutcome::Unaddressable;
+            tracing::error!(
+                %outcome,
+                "Refused a bundle with no peer address; the server must be run with connect info"
+            );
+            return unaddressable.respond();
+        }
+    };
+    if let Err(limited) = distributor.throttle.check_address(address) {
+        return throttled(limited, None, address);
+    }
+    let license = match distributor.gate.admit(&headers) {
+        Ok(license) => license.id(),
+        Err(denial) => return denied(denial, address),
+    };
+    if let Err(limited) = distributor.throttle.check_key(license) {
+        return throttled(limited, Some(license), address);
+    }
+    let (version, architecture) = match path {
+        Ok(Path((version, architecture))) => (
+            BundleVersion::parse(&version),
+            Architecture::parse(&architecture),
+        ),
+        Err(_) => (None, None),
+    };
+    let (Some(version), Some(architecture)) = (version, architecture) else {
+        let outcome = BundleOutcome::Unknown;
+        tracing::info!(
+            %outcome,
+            %license,
+            %address,
+            version = version.map(field::display),
+            architecture = architecture.map(field::display),
+            "Refused a bundle for a version or architecture that doesn't exist"
+        );
+        return outcome.status().into_response();
+    };
+    distribute(distributor, license, address, version, architecture).await
+}
+
+async fn distribute(
+    distributor: &Distributor,
+    license: Uuid,
+    address: IpAddr,
+    version: BundleVersion,
+    architecture: Architecture,
+) -> Response {
+    let marker = Object::marker(version, architecture);
+    match distributor.presigner.probe(&marker).await {
+        Ok(Presence::Present) => {
+            let body = BundleResponse::presign(&distributor.presigner, version, architecture);
+            let outcome = BundleOutcome::Issued;
+            tracing::info!(
+                %outcome,
+                %license,
+                %address,
+                %version,
+                %architecture,
+                "Issued bundle download links"
+            );
+            (outcome.status(), Json(body)).into_response()
+        }
+        Ok(Presence::Absent { code }) if code.as_deref() == Some(ACCESS_DENIED) => {
+            let outcome = BundleOutcome::Unknown;
+            tracing::warn!(
+                %outcome,
+                %license,
+                %address,
+                %version,
+                %architecture,
+                code = ACCESS_DENIED,
+                "Refused a bundle the storage denied; if it is published, check the presigner's policy"
+            );
+            outcome.status().into_response()
+        }
+        Ok(Presence::Absent { code }) => {
+            let outcome = BundleOutcome::Unknown;
+            tracing::info!(
+                %outcome,
+                %license,
+                %address,
+                %version,
+                %architecture,
+                code = code.as_deref(),
+                "Refused a bundle that isn't in storage"
+            );
+            outcome.status().into_response()
+        }
+        Err(error) => unavailable(&error, license, address, version, architecture),
+    }
+}
+
+fn unavailable(
+    error: &StorageError,
+    license: Uuid,
+    address: IpAddr,
+    version: BundleVersion,
+    architecture: Architecture,
+) -> Response {
+    let outcome = BundleOutcome::Unavailable;
+    match error {
+        StorageError::Unreachable => tracing::warn!(
+            %outcome,
+            %license,
+            %address,
+            %version,
+            %architecture,
+            cause = %error,
+            "Could not reach the bundle storage"
+        ),
+        StorageError::Refused { code } => tracing::error!(
+            %outcome,
+            %license,
+            %address,
+            %version,
+            %architecture,
+            code = code.as_str(),
+            "The bundle storage refused the probe; check the presigner's key and policy"
+        ),
+        StorageError::Unexpected { .. } => tracing::error!(
+            %outcome,
+            %license,
+            %address,
+            %version,
+            %architecture,
+            cause = %error,
+            "The bundle storage answered the probe with an unexpected status"
+        ),
+    }
+    outcome.status().into_response()
+}
+
+fn throttled(limited: Limited, license: Option<Uuid>, address: IpAddr) -> Response {
+    let outcome = BundleOutcome::Limited;
+    tracing::info!(
+        %outcome,
+        license = license.map(field::display),
+        %address,
+        retry_after = limited.retry_after(),
+        "Refused a bundle over a rate limit"
+    );
+    limited.respond()
+}
+
+fn denied(denial: Denial, address: IpAddr) -> Response {
+    tracing::info!(
+        outcome = %denial.refusal,
+        license = denial.license.map(field::display),
+        %address,
+        plan = denial.plan.map(field::display),
+        status = denial.status.map(field::display),
+        error = denial.error,
+        "Refused a bundle at the license gate"
+    );
+    denial.respond()
+}
+
+#[cfg(test)]
+mod tests;

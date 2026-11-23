@@ -1,0 +1,13 @@
+services:
+  manager:
+    image: ${ZONE_LTS_REGISTRY:-registry.bitecode.ltd}/zone/server:${ZONE_LTS_VERSION:?set ZONE_LTS_VERSION to an LTS tag such as 1.4-lts, see docs/LTS.md}
+    build: !reset null
+    pull_policy: always
+  console:
+    image: ${ZONE_LTS_REGISTRY:-registry.bitecode.ltd}/zone/manager:${ZONE_LTS_VERSION:?set ZONE_LTS_VERSION to an LTS tag such as 1.4-lts, see docs/LTS.md}
+    build: !reset null
+    pull_policy: always
+  litellm:
+    image: ${ZONE_LTS_REGISTRY:-registry.bitecode.ltd}/zone/litellm:${ZONE_LTS_VERSION:?set ZONE_LTS_VERSION to an LTS tag such as 1.4-lts, see docs/LTS.md}
+    build: !reset null
+    pull_policy: always

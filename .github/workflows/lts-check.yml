@@ -1,0 +1,87 @@
+name: LTS Check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/lts-version.sh'
+      - 'scripts/test-lts-version.sh'
+      - 'scripts/lts-tag.sh'
+      - 'scripts/test-lts-tag.sh'
+      - 'scripts/compose.sh'
+      - 'scripts/env-file.sh'
+      - 'scripts/configure-model-proxy.sh'
+      - 'scripts/test-compose-profiles.sh'
+      - 'docker-compose*.yml'
+      - '.env.example'
+      - '.github/workflows/lts.yml'
+      - '.github/workflows/lts-check.yml'
+  pull_request:
+    paths:
+      - 'scripts/lts-version.sh'
+      - 'scripts/test-lts-version.sh'
+      - 'scripts/lts-tag.sh'
+      - 'scripts/test-lts-tag.sh'
+      - 'scripts/compose.sh'
+      - 'scripts/env-file.sh'
+      - 'scripts/configure-model-proxy.sh'
+      - 'scripts/test-compose-profiles.sh'
+      - 'docker-compose*.yml'
+      - '.env.example'
+      - '.github/workflows/lts.yml'
+      - '.github/workflows/lts-check.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: LTS version, moving tag and Compose overlay
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify the LTS tag rules, under dash and bash
+        run: |
+          sh scripts/test-lts-version.sh
+          bash scripts/test-lts-version.sh
+
+      - name: Verify the moving X.Y-lts tag only moves forward, under dash and bash
+        run: |
+          sh scripts/test-lts-tag.sh
+          bash scripts/test-lts-tag.sh
+
+      - name: Verify profile and release overlay selection against real Compose
+        run: |
+          docker compose version
+          sh scripts/test-compose-profiles.sh
+
+      - name: Verify the LTS overlay pulls every Zone image instead of building it
+        run: |
+          set -euo pipefail
+          render=$RUNNER_TEMP/lts.json
+          ZONE_LTS_VERSION=1.4-lts docker compose -f docker-compose.yml -f docker-compose.lts.yml \
+            config --format json 2>/dev/null > "$render"
+          for entry in manager=zone/server console=zone/manager litellm=zone/litellm; do
+            service=${entry%%=*}
+            image=registry.bitecode.ltd/${entry#*=}:1.4-lts
+            if ! jq --exit-status --arg service "$service" --arg image "$image" \
+              '.services[$service] | .build == null and .pull_policy == "always" and .image == $image' \
+              "$render" > /dev/null; then
+              echo "::error file=docker-compose.lts.yml::$service must run $image with pull_policy always and no build"
+              jq --arg service "$service" '.services[$service] | {image, build, pull_policy}' "$render"
+              exit 1
+            fi
+            echo "$service runs $image"
+          done
+          if docker compose -f docker-compose.yml -f docker-compose.lts.yml config --quiet 2>/dev/null; then
+            echo "::error file=docker-compose.lts.yml::the LTS overlay must refuse to render without ZONE_LTS_VERSION"
+            exit 1
+          fi

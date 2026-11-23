@@ -18,10 +18,12 @@ pub enum Feature {
     Scim,
     /// Uncapped membership: without it a server admits at most the Community member cap.
     Members,
+    /// LTS images, the air-gapped bundle and support, all served against a license.
+    Distribution,
 }
 
 impl Feature {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Sso,
         Self::Policy,
         Self::AuditExport,
@@ -31,6 +33,7 @@ impl Feature {
         Self::Spend,
         Self::Scim,
         Self::Members,
+        Self::Distribution,
     ];
 
     pub fn plan(self) -> Plan {
@@ -42,7 +45,8 @@ impl Feature {
             | Self::AuditStreaming
             | Self::AuditRetention
             | Self::CustomRoles
-            | Self::Scim => Plan::Enterprise,
+            | Self::Scim
+            | Self::Distribution => Plan::Enterprise,
         }
     }
 
@@ -90,6 +94,14 @@ mod tests {
         assert_eq!(listed.len(), Feature::ALL.len());
         assert!(listed.contains(&Feature::CustomRoles));
         assert!(listed.contains(&Feature::Scim));
+        assert!(listed.contains(&Feature::Distribution));
+    }
+
+    #[test]
+    fn distribution_needs_enterprise() {
+        assert_eq!(Feature::Distribution.plan(), Plan::Enterprise);
+        assert!(Plan::Enterprise.includes(Feature::Distribution));
+        assert!(!Plan::Team.includes(Feature::Distribution));
     }
 
     #[test]
