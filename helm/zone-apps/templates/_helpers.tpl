@@ -124,8 +124,9 @@ secrets.redisUrl, refused unless its scheme is redis or rediss.
 
 {{/*
 Fails a highAvailability.enabled render whose replicas would not share one
-external, managed Redis or Valkey. helm template cannot read an existing
-secret, so without secrets.create the operator vouches for it with
+external, managed Redis or Valkey, or that leaves the server's trusted proxies
+unset. helm template cannot read an existing secret, so without secrets.create
+the operator vouches for the Redis or Valkey with
 highAvailability.externalValkey.
 */}}
 {{- define "zone-apps.highAvailability.validate" -}}
@@ -143,6 +144,24 @@ highAvailability.externalValkey.
 {{- end -}}
 {{- else if not .Values.highAvailability.externalValkey -}}
 {{- fail (printf "highAvailability.enabled needs an external Redis or Valkey: point key %s of secrets.existingSecret at it and set highAvailability.externalValkey=true, or set secrets.create with secrets.redisUrl" (include "zone-apps.secretKey" (dict "root" . "name" "redisUrl" "default" "valkey-url"))) -}}
+{{- end -}}
+{{- if not (include "zone-apps.server.trustedProxies" .) -}}
+{{- fail "highAvailability.enabled needs server.trustedProxies, or zone-server sees every client at the ingress controller's address and throttles their single sign-on as one: set it to your ingress controller's pod CIDR, such as 10.244.0.0/16 on kind, or to 127.0.0.1/32,::1/128 to trust loopback only (escape the comma as \\, in --set)" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Fails a render that gives more than one zone-server replica one
+ZONE_RUNNER_NAME: of the live servers sharing a runner name, only the newest
+takes work under an Enterprise license.
+*/}}
+{{- define "zone-apps.server.runnerName.validate" -}}
+{{- if or .Values.highAvailability.enabled .Values.server.autoscaling.enabled (gt (int .Values.server.replicaCount) 1) -}}
+{{- range $source, $env := dict "commonEnv" .Values.commonEnv "server.env" .Values.server.env -}}
+{{- if get (default dict $env) "ZONE_RUNNER_NAME" | default "" | toString | trim -}}
+{{- fail (printf "%s.ZONE_RUNNER_NAME gives every zone-server replica one runner name, so under an Enterprise license only the newest replica takes work: unset it and each pod registers under its own pod name" $source) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 
@@ -227,8 +246,12 @@ Image name helper
 Common environment variables for all containers
 */}}
 {{- define "zone-apps.commonEnv" -}}
+{{- $skipped := list "APP_BASE_URL" "REDIS_URL" -}}
+{{- if .Values.highAvailability.enabled -}}
+{{- $skipped = append $skipped "ZONE_RUNNER_NAME" -}}
+{{- end -}}
 {{- range $key, $value := .Values.commonEnv }}
-{{- if not (has $key (list "APP_BASE_URL" "REDIS_URL")) }}
+{{- if not (has $key $skipped) }}
 - name: {{ $key }}
   value: {{ $value | quote }}
 {{- end }}

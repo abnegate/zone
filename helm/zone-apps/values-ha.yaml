@@ -3,6 +3,7 @@
 #
 #   helm upgrade --install zone-apps helm/zone-apps -f helm/zone-apps/values-ha.yaml \
 #     --set server.agentState.persistence.storageClass=<ReadWriteMany class> \
+#     --set server.trustedProxies=<ingress controller pod CIDR> \
 #     --set highAvailability.externalValkey=true
 #
 # It needs Kubernetes 1.27 or later, at least 3 schedulable nodes, a
@@ -10,6 +11,10 @@
 # CephFS) and an external, managed Redis or Valkey with failover. Either set
 # highAvailability.externalValkey once secrets.existingSecret's redisUrl key
 # points at it, or set secrets.create with secrets.redisUrl.
+#
+# server.trustedProxies is required: the render fails without it. Each server
+# pod registers as a fleet runner named after its pod, so the render also
+# fails when server.env or commonEnv sets one ZONE_RUNNER_NAME for them all.
 
 highAvailability:
   enabled: true
@@ -52,6 +57,11 @@ server:
       failureThreshold: 2
 
   terminationGracePeriodSeconds: 60
+
+  # Required. Your ingress controller's pod CIDR, such as 10.244.0.0/16 on
+  # kind, so zone-server reads each client's address from X-Forwarded-For.
+  # Never a range your clients use. 127.0.0.1/32,::1/128 trusts loopback only.
+  trustedProxies: ""
 
   env:
     ZONE_SHUTDOWN_DELAY_SECONDS: "10"
