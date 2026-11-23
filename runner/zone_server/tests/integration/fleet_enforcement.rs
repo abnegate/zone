@@ -35,13 +35,15 @@ use zone_server::workers::auto_project::{self, CLAIM_LEASE, PROJECTS_PER_TICK, S
 
 use crate::common::context::{Socket, successful};
 use crate::common::fleet::{
-    ANSWER, COMPLETED, FAILED, Fleet, RUNNING, Spec, WAITING, refused_with,
+    ANSWER, CHAT_MODEL, COMPLETED, FAILED, Fleet, RUNNING, Spec, WAITING, refused_with,
 };
 use crate::common::sso::{active, lapsed, team};
+use crate::common::{TestClient, TestResponse};
 
 const PREFIX: &str = "fleet_enforcement";
 const RACES: usize = 50;
 const PROMPT: &str = "Report any dependency PR that has been red for a week.";
+const BRIEF: &str = "Plan a small landing page for the fleet.";
 const OUTDATED: &str = "0.0.1";
 const UNREACHABLE: &str = "9.0.0";
 const LIVE: Duration = Duration::from_secs(3);
@@ -233,6 +235,50 @@ async fn frames_within(socket: &mut Socket, window: Duration) -> Vec<Value> {
         }
     }
     frames
+}
+
+/// Starts an auto project in the fixture's workspace through `server`'s route, as the admin.
+async fn start_auto_project(fleet: &Fleet, server: &AppState) -> TestResponse {
+    TestClient::with_state(server.clone())
+        .post_json_auth(
+            &format!("/api/workspaces/{}/projects/auto", fleet.workspace),
+            &json!({"brief": BRIEF, "model_name": CHAT_MODEL}),
+            &fleet.admin.token,
+        )
+        .await
+}
+
+/// The planner chats in the fixture's workspace.
+async fn planners(fleet: &Fleet) -> Vec<Uuid> {
+    sqlx::query_scalar(
+        "SELECT id FROM chats WHERE workspace_id = $1 AND purpose = 'project_planner'",
+    )
+    .bind(fleet.workspace)
+    .fetch_all(fleet.pool())
+    .await
+    .unwrap()
+}
+
+/// Waits for planner chat `chat` to hold the brief and an answer to it.
+async fn until_planned(fleet: &Fleet, chat: Uuid) -> Vec<(String, String)> {
+    let deadline = tokio::time::Instant::now() + SETTLES_WITHIN;
+    loop {
+        let messages: Vec<(String, String)> = sqlx::query_as(
+            "SELECT role, content FROM messages WHERE chat_id = $1 ORDER BY created_at, id",
+        )
+        .bind(chat)
+        .fetch_all(fleet.pool())
+        .await
+        .unwrap();
+        if messages.iter().any(|(role, _)| role == "assistant") {
+            return messages;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the planner never answered the brief: {messages:?}"
+        );
+        tokio::time::sleep(POLL).await;
+    }
 }
 
 /// Revokes `runner` as a revoke on another server process does: committed there, with no stop
@@ -1042,6 +1088,45 @@ async fn a_cordoned_runner_still_serves_chat_turns() {
         refused,
         (None, None),
         "the cordoned runner still takes no unattended work"
+    );
+}
+
+#[tokio::test]
+async fn an_auto_project_is_refused_up_front_on_a_revoked_runner_and_starts_on_an_active_one() {
+    let fleet = Fleet::new(PREFIX, &[Spec::CURRENT, Spec::CURRENT]).await;
+    fleet.license(&active()).await;
+    let (a, b) = (fleet.runner(0).clone(), fleet.runner(1).clone());
+    fleet.set_state(a.id, State::Revoked).await;
+
+    let refused = start_auto_project(&fleet, &a.state).await;
+    let left_behind = planners(&fleet).await;
+    let started = start_auto_project(&fleet, &b.state).await;
+    let planned = match started.status {
+        StatusCode::ACCEPTED => {
+            let chat = started.json_value()["chat_id"]
+                .as_str()
+                .and_then(|chat| chat.parse().ok())
+                .expect("the planner chat");
+            until_planned(&fleet, chat).await
+        }
+        _ => Vec::new(),
+    };
+    fleet.cleanup().await;
+
+    refused.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        refused.json_value(),
+        json!({"error": Refusal::Revoked.message(), "code": RUNNER_REVOKED})
+    );
+    assert!(
+        left_behind.is_empty(),
+        "a refused auto project leaves no empty planner chat: {left_behind:?}"
+    );
+    started.assert_status(StatusCode::ACCEPTED);
+    assert_eq!(
+        planned.first(),
+        Some(&("user".to_string(), BRIEF.to_string())),
+        "an active runner keeps the brief as the planner's first message: {planned:?}"
     );
 }
 

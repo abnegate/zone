@@ -416,7 +416,7 @@ as `active`.** To keep a revoked name out, leave its row in place.
 
 | Where | What happens |
 |---|---|
-| Chat | On a revoked, outdated or unregistered runner the turn doesn't start, and the chat shows the refusal's message. Over the WebSocket this is a `denied` frame, `{"type": "denied", "message": "…", "code": "fleet_runner_revoked"}`, whose `code` is `fleet_runner_revoked`, `fleet_runner_outdated` or `fleet_runner_unregistered`; a REST request that writes a chat message gets 503 with `{"error": "…", "code": "…"}` and the same codes. Reloading the page reaches another server. |
+| Chat | On a revoked, outdated or unregistered runner the turn doesn't start, and the chat shows the refusal's message. Over the WebSocket this is a `denied` frame, `{"type": "denied", "message": "…", "code": "fleet_runner_revoked"}`, whose `code` is `fleet_runner_revoked`, `fleet_runner_outdated` or `fleet_runner_unregistered`; a REST request that writes a chat message gets 503 with `{"error": "…", "code": "…"}` and the same codes. Starting an auto project gets the same 503 and opens no planner chat; a runner refused after that check sends the planner chat the `denied` frame instead. Reloading the page reaches another server. |
 | Task runs | A run no runner can take fails with the `fleet_no_runner` message. A revoked runner's run is cancelled with "The runner this task was running on was revoked from the fleet." |
 | Reminders and auto projects | Work no runner can take waits, with no message. |
 | Runners page | The minimum version, and each runner's name, version with an **Outdated** badge, labels, state, **Serving** or why it isn't, **Connected** or when it was last seen, its live runs, and a **This server** badge on the runner that served the page. |
