@@ -3,6 +3,7 @@ use crate::common::context::{Harness, answer};
 use crate::reminder_turn::{make_due, until_requests};
 use std::time::Duration;
 use uuid::Uuid;
+use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::reminders::{self, Delivered, PendingTurn, Reminder, Sweep};
 use zone_server::db::suspensions;
 use zone_server::workers::reminders::{Lease, run};
@@ -66,10 +67,15 @@ async fn claimed(harness: &Harness, reminder: Uuid) -> PendingTurn {
         reminders::deliver_next(&harness.pool, sweep).await.unwrap(),
         Delivered::Settled
     );
-    let turn = reminders::claim_turn(&harness.pool, sweep, UNLAPSING.duration)
-        .await
-        .unwrap()
-        .expect("the owed firing is offered");
+    let turn = reminders::claim_turn(
+        &harness.pool,
+        sweep,
+        UNLAPSING.duration,
+        Claimant::UNENFORCED,
+    )
+    .await
+    .unwrap()
+    .expect("the owed firing is offered");
     assert_eq!(turn.reminder_id, reminder);
     turn
 }
@@ -108,7 +114,8 @@ async fn a_turn_whose_author_is_suspended_elsewhere_ends() {
     .await;
     let turn = claimed(&harness, reminder).await;
     let state = common::create_test_state(harness.config.clone(), harness.pool.clone());
-    let running = tokio::spawn(async move { run(&state, turn, UNLAPSING).await });
+    let running =
+        tokio::spawn(async move { run(&state, turn, UNLAPSING, Claimant::UNENFORCED).await });
     until_requests(&harness, 1).await;
 
     suspend(&harness, user).await;

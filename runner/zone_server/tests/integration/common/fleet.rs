@@ -687,6 +687,7 @@ async fn register(client: &TestClient) -> Account {
         id: body["user"]["id"].as_str().unwrap().parse().unwrap(),
         email,
         token: body["access_token"].as_str().unwrap().to_owned(),
+        refresh: body["refresh_token"].as_str().unwrap().to_owned(),
     }
 }
 
