@@ -49,7 +49,9 @@ The following table lists the configurable parameters and their default values.
 
 ### High Availability
 
-`values-ha.yaml` is the supported HA topology: layer it over your values with `-f helm/zone-apps/values-ha.yaml`, and set `server.agentState.persistence.storageClass` to a ReadWriteMany class.
+`values-ha.yaml` is the supported HA topology: layer it over your values with `-f helm/zone-apps/values-ha.yaml`, set `server.agentState.persistence.storageClass` to a ReadWriteMany class, and set `server.trustedProxies` to your ingress controller's pod CIDR. An HA render without `server.trustedProxies` fails; `127.0.0.1/32,::1/128` trusts loopback only on purpose (see [Client Addresses](#client-addresses)).
+
+Each server pod registers in the runner fleet under its own name: the HA render sets `ZONE_RUNNER_NAME` from the pod's `metadata.name`. The chart refuses `ZONE_RUNNER_NAME` in `server.env` or `commonEnv` with `highAvailability.enabled`, `server.autoscaling.enabled` or `server.replicaCount` above 1, because replicas sharing a name share one runner and only the newest takes work.
 
 It needs Kubernetes 1.27 or later. Its topology spread constraints set `matchLabelKeys: [pod-template-hash]`, so each rollout revision spreads across nodes on its own rather than counting the old ReplicaSet's pods, and `nodeTaintsPolicy: Honor`. With `highAvailability.enabled`, the chart adds `app.kubernetes.io/instance: <release>` to every spread and pod anti-affinity label selector, merged into the labels you set, so two releases in one namespace never count each other's pods.
 
@@ -109,7 +111,7 @@ It needs Kubernetes 1.27 or later. Its topology spread constraints set `matchLab
 | `server.env.ZONE_REPORT_DAY_OF_MONTH` | Day of the month, `1` to `31`, a monthly digest is owed; moved to the last day in shorter months | unset (`1`) |
 | `server.env.ZONE_LICENSE_RENEWAL` | Renew a paid license that carries a Polar subscription by posting only its key to the license server once a day from 14 days before expiry, and install the key it returns: `true`, `1`, `yes` or `on` turns it on, `false`, `0`, `no` or `off` off, in any case, and any other value logs a warning and keeps it on. Turn it off for an air-gapped install; see [docs/LICENSING.md](../../docs/LICENSING.md#automatic-renewal) | unset (`true`) |
 | `server.env.ZONE_LICENSE_RENEWAL_URL` | Where the license key is posted for renewal: an `http` or `https` URL with no user name or password that doesn't name a link-local or cloud metadata address. Plain `http` is accepted only for a loopback or private network host; see [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md#zone_license_renewal_url) for the list. A URL that breaks a rule stops zone-server at startup | unset (`https://licenses.bitecode.ltd/licenses/renew`) |
-| `server.trustedProxies` | Comma-separated CIDRs of the peers whose `X-Forwarded-For` zone-server believes, passed as `ZONE_TRUSTED_PROXIES`. Set it to your ingress controller's pod CIDR, never a range your clients use; see [Client Addresses](#client-addresses). `server.env.ZONE_TRUSTED_PROXIES` does the same and wins | `""` (unset: loopback only, so every client shares one single sign-on limit) |
+| `server.trustedProxies` | Comma-separated CIDRs of the peers whose `X-Forwarded-For` zone-server believes, passed as `ZONE_TRUSTED_PROXIES`. Set it to your ingress controller's pod CIDR, never a range your clients use; see [Client Addresses](#client-addresses). `server.env.ZONE_TRUSTED_PROXIES` does the same and wins. Required with `highAvailability.enabled` | `""` (unset: loopback only, so every client shares one single sign-on limit) |
 
 ### Manager Configuration
 
@@ -296,7 +298,9 @@ GitHub keeps the addresses an App was registered with, so settle the origin befo
 
 ## Client Addresses
 
-zone-server decides which address a request came from for its single sign-on throttle and for the address it records on sessions and devices. It believes `X-Forwarded-For` only from the peers `server.trustedProxies` lists. The chart leaves the list empty, so zone-server trusts loopback only: every request through the ingress arrives from the ingress controller's pod, every client shares that pod's single sign-on limit (per zone-server replica), and the devices list shows the controller's address. That fails closed, and the install notes warn about it.
+zone-server decides which address a request came from for its single sign-on throttle and for the address it records on sessions and devices. It believes `X-Forwarded-For` only from the peers `server.trustedProxies` lists. The chart leaves the list empty, so zone-server trusts loopback only: every request through the ingress arrives from the ingress controller's pod, every client shares that pod's single sign-on limit, and the devices list shows the controller's address. That fails closed, and the install notes warn about it.
+
+The single sign-on limit is counted in Valkey across every zone-server replica while the cluster bus is connected, and by each replica on its own while it is not. See [docs/HA.md](../../docs/HA.md#shared-limits).
 
 Set it to your ingress controller's pod CIDR, never a range your clients use:
 

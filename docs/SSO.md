@@ -882,10 +882,11 @@ browser that started it.
 Starting a sign-in and posting a SAML response need no account, so Zone
 limits both per client address: `ZONE_SSO_REQUESTS_PER_MINUTE` (120 by
 default) starts and posts together, per address, in each one-minute window.
-With `REDIS_URL` set, every replica counts into one shared count in Valkey,
-so the limit holds however a load balancer spreads requests. A single node,
-or a replica that can't reach Valkey, counts in its own memory, and the limit
-then applies per replica.
+With `REDIS_URL` set, every replica counts into Valkey, so the limit holds
+across replicas. Without it, or while Valkey is down or slow to answer, each
+server process counts on its own: behind a load balancer spreading requests
+over three replicas, one address can then make up to three times as many.
+See [HA.md](HA.md#shared-limits).
 Without the limit, one client could start sign-ins in a loop and post large
 responses until every SAML response check was taken, and everyone else's
 sign-ins would fail with `sso_sign_in_failed`. The limit applies to
@@ -904,7 +905,7 @@ provider issued.
   without a `state` only to a browser that has a sign-in in progress.
 - The server logs the first refusal of an address in each window as a
   warning, naming the address, and the rest at debug, so a flood leaves one
-  line per address per minute.
+  line per address per minute on each replica it reaches.
 
 The client address is the TCP peer, unless that peer is a trusted proxy
 listed in `ZONE_TRUSTED_PROXIES`. Then Zone reads `X-Forwarded-For` from the
