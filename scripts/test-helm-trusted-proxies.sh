@@ -62,10 +62,29 @@ assert_quiet() {
     esac
 }
 
+assert_loopback() {
+    message=$1
+    shift
+    rendered=$(notes "$@")
+    case "$rendered" in
+        *'trusts no proxy'*)
+            printf '%s\n the notes say the server trusts no proxy\n' "$message" >&2
+            exit 1
+            ;;
+        *loopback*) ;;
+        *)
+            printf '%s\n the notes do not say the server trusts loopback\n' "$message" >&2
+            exit 1
+            ;;
+    esac
+}
+
 assert_trusted '' \
     'by default the server is not told to trust any proxy, so it trusts loopback only'
 
-assert_warned 'an install that trusts no proxy is warned about it'
+assert_warned 'an install that trusts only loopback is warned about it'
+
+assert_loopback 'the warning says the server trusts loopback, not that it trusts no proxy'
 
 assert_trusted '10.244.0.0/16' \
     'server.trustedProxies is passed to the server' \
