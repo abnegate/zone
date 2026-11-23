@@ -226,6 +226,7 @@ mod tests {
 
     use super::*;
     use crate::db::reminders;
+    use crate::services::members::SEATS_LOCK;
     use crate::services::spend;
     use crate::workers::housekeeping::LEADER_KEY;
 
@@ -238,6 +239,7 @@ mod tests {
             spend::ingest::SPEND_LOCK,
             spend::sweep::NOTICE_LOCK,
             LEADER_KEY,
+            SEATS_LOCK,
         ];
 
         assert_eq!(
