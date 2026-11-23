@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_enterprise::{GRACE_DAYS, Keyring, Payload, Plan, SigningKey, TrustedKey, sign};
+use zone_server::config::Config;
 use zone_server::db::{licenses, migrations};
 use zone_server::services::mail::AccountMail;
 use zone_server::state::AppState;
@@ -53,11 +54,15 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn new(prefix: &'static str) -> Self {
+        Self::configured(prefix, test_config()).await
+    }
+
+    pub async fn configured(prefix: &'static str, config: Config) -> Self {
         let database = Database::new(prefix).await;
         migrations::run(&database.pool).await.unwrap();
         let mail = Arc::new(Recording::default());
         let state = AppState::new_with_mail(
-            test_config(),
+            config,
             database.pool.clone(),
             None,
             Some(Arc::new(AccountMail::new(mail.clone()))),

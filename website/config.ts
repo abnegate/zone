@@ -5,6 +5,7 @@ export const site: Site = {
   domain: 'zone.bitecode.ltd',
   repository: 'https://github.com/bitecodehq/zone',
   contactEmail: 'zone@bitecode.ltd',
+  contactFormURL: 'https://contact.bitecode.ltd/',
   currency: 'USD',
   plans: {
     community: {

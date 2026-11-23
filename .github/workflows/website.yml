@@ -50,7 +50,7 @@ jobs:
 
       - name: Test
         working-directory: website
-        run: bun test generator
+        run: bun test generator contact
 
   build:
     name: Build

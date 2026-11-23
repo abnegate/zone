@@ -5,6 +5,7 @@ export interface Site {
   readonly domain: string;
   readonly repository: string;
   readonly contactEmail: string;
+  readonly contactFormURL: string;
   readonly currency: string;
   readonly plans: Plans;
 }

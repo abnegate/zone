@@ -13,7 +13,7 @@ use sqlx::{PgConnection, Postgres, Transaction};
 use uuid::Uuid;
 use zone_enterprise::{Members, period_start};
 
-use crate::db::seats;
+use crate::db::{seats, users};
 use crate::state::AppState;
 
 pub use admission_error::AdmissionError;
@@ -24,8 +24,8 @@ pub use halt::halt;
 pub use halted::Halted;
 pub use sign_out::SignOut;
 
-/// The transaction-scoped advisory lock ("zoneSEAT") every capped admission holds from its count
-/// until its membership commits.
+/// The transaction-scoped advisory lock ("zoneSEAT") every capped admission, and every sign-up
+/// that finds the server empty, holds from its count until it commits.
 pub const SEATS_LOCK: i64 = 0x7A6F_6E65_5345_4154;
 
 /// How long an admission waits for [`SEATS_LOCK`] unless configured otherwise.
@@ -79,6 +79,22 @@ pub async fn admit(
     let connection = &mut **transaction;
     lock(connection, cap.wait).await?;
     room(connection, limit, user).await
+}
+
+/// Whether the account `transaction` is about to insert is the server's first, and so its admin.
+/// A server that looks empty is counted again holding [`SEATS_LOCK`], capped or not, so of the
+/// sign-ups racing on an empty server only one finds it empty. `transaction` must meet the
+/// conditions [`admit`] sets.
+pub async fn first(
+    transaction: &mut Transaction<'_, Postgres>,
+    cap: Cap,
+) -> Result<bool, AdmissionError> {
+    let connection = &mut **transaction;
+    if users::count_users(&mut *connection).await? > 0 {
+        return Ok(false);
+    }
+    lock(connection, cap.wait).await?;
+    Ok(users::count_users(connection).await? == 0)
 }
 
 /// Admits everyone that activating `organization` would make a member again, holding

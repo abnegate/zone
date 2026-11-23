@@ -105,10 +105,9 @@ pub struct UserWithPermissions {
     pub permissions: Vec<String>,
 }
 
-/// Count total users
-pub async fn count_users(pool: &PgPool) -> DbResult<i64> {
+pub async fn count_users(executor: impl PgExecutor<'_>) -> DbResult<i64> {
     let result = sqlx::query_scalar!("SELECT COUNT(*) FROM users")
-        .fetch_one(pool)
+        .fetch_one(executor)
         .await?;
 
     Ok(result.unwrap_or(0))
