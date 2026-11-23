@@ -3,6 +3,8 @@ set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 storage_class=test-rwx
+trusted_proxies=10.244.0.0/16
+loopback='127.0.0.1/32,::1/128'
 failures=0
 
 jwt_secret=0123456789abcdef0123456789abcdef
@@ -88,13 +90,17 @@ apps_egress='select(.kind == "NetworkPolicy" and .metadata.name == "zone-apps-se
 apps_selectors='select(.kind == "Deployment") | .spec.template.spec | ((.topologySpreadConstraints[]?.labelSelector), (.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[]?.podAffinityTerm.labelSelector))'
 apps_spread_policy='(.maxSkew | tostring) + " " + .whenUnsatisfiable + " " + .nodeTaintsPolicy + " " + ((.matchLabelKeys // []) | join(","))'
 apps_labels='.matchLabels | to_entries | map(.key + "=" + .value) | join(",")'
+apps_runner_names='[.. | select(tag == "!!map" and .name == "ZONE_RUNNER_NAME")] | map(.valueFrom.fieldRef.fieldPath // .value) | join(",")'
 
 release_selectors() {
     printf '%s,%s,%s,%s,%s' "$1" "$1" "$1" "$1" "$1"
 }
 
 render_apps_ha() {
-    render_ha zone-apps --set "server.agentState.persistence.storageClass=$storage_class" "$@"
+    render_ha zone-apps \
+        --set "server.agentState.persistence.storageClass=$storage_class" \
+        --set "server.trustedProxies=$trusted_proxies" \
+        "$@"
 }
 
 render_apps_ha_vouched() {
@@ -186,6 +192,26 @@ check_apps_ha() {
         '[.. | select(tag == "!!map" and .name == "REDIS_URL")] | map(.valueFrom.secretKeyRef.key // "plain") | join(",")'
     expect 'no env var named REDIS_URL carries a plain value' 0 "$rendered" \
         '[.. | select(tag == "!!map" and .name == "REDIS_URL" and has("value"))] | length'
+
+    expect 'the server trusts the given proxies' "$trusted_proxies" "$rendered" \
+        "$apps_container | .env[] | select(.name == \"ZONE_TRUSTED_PROXIES\") | .value"
+    expect 'each server pod registers as a runner named after itself, once' metadata.name "$rendered" "$apps_runner_names"
+}
+
+check_apps_ha_trusted_proxies() {
+    rendered=$(rendered_or_fail 'the zone-apps HA profile renders trusting loopback only' \
+        render_apps_ha_vouched --set-string 'server.trustedProxies=127.0.0.1/32\,::1/128') || return 0
+    expect 'the explicit loopback opt-out reaches the server' "$loopback" "$rendered" \
+        "$apps_container | .env[] | select(.name == \"ZONE_TRUSTED_PROXIES\") | .value"
+
+    expect_renders 'server.env.ZONE_TRUSTED_PROXIES satisfies the HA profile on its own' \
+        render_apps_ha_vouched --set server.trustedProxies= --set server.env.ZONE_TRUSTED_PROXIES=10.42.0.0/16
+}
+
+check_apps_ha_runner_name() {
+    rendered=$(rendered_or_fail 'the zone-apps HA profile renders with a blank server.env.ZONE_RUNNER_NAME' \
+        render_apps_ha_vouched --set-string server.env.ZONE_RUNNER_NAME= --set-string commonEnv.ZONE_RUNNER_NAME=) || return 0
+    expect 'a blank ZONE_RUNNER_NAME leaves the pod name as the only runner name' metadata.name "$rendered" "$apps_runner_names"
 }
 
 check_apps_ha_release() {
@@ -245,7 +271,17 @@ check_apps_ha_refusals() {
     expect_refused 'the template refuses a secrets.redisUrl scheme other than redis or rediss' 'must start with redis:// or rediss://' \
         render_apps_ha_created --skip-schema-validation --set-string secrets.redisUrl=http://redis.example.com:6379
     expect_refused 'a ReadWriteMany claim with no storage class is refused' 'storageClass must name a ReadWriteMany storage class' \
-        render_ha zone-apps --set highAvailability.externalValkey=true
+        render_ha zone-apps --set highAvailability.externalValkey=true --set "server.trustedProxies=$trusted_proxies"
+    for reason in server.trustedProxies "$trusted_proxies" "$loopback"; do
+        expect_refused "HA without trusted proxies is refused, naming $reason" "$reason" \
+            render_apps_ha_vouched --set server.trustedProxies=
+    done
+    expect_refused 'HA with a blank server.trustedProxies is refused' server.trustedProxies \
+        render_apps_ha_vouched --set-string 'server.trustedProxies= '
+    expect_refused 'HA with one ZONE_RUNNER_NAME in server.env is refused' server.env.ZONE_RUNNER_NAME \
+        render_apps_ha_vouched --set server.env.ZONE_RUNNER_NAME=zone
+    expect_refused 'HA with one ZONE_RUNNER_NAME in commonEnv is refused' commonEnv.ZONE_RUNNER_NAME \
+        render_apps_ha_vouched --set commonEnv.ZONE_RUNNER_NAME=zone
     expect_refused 'HA network policy without the external Valkey CIDR is refused' 'networkPolicy.externalValkeyCIDR is required' \
         render_apps_ha_vouched --set networkPolicy.enabled=true --set networkPolicy.externalValkeyPort=6379
     expect_refused 'HA network policy without the external Valkey port is refused' 'networkPolicy.externalValkeyPort is required' \
@@ -278,6 +314,16 @@ check_apps_default() {
         "$apps_server | .spec.template.spec.terminationGracePeriodSeconds"
     expect 'the default server egress reaches the in-cluster valkey pods' 1 "$(render zone-apps --set networkPolicy.enabled=true)" \
         "[$apps_egress | select(.to[0].podSelector.matchLabels[\"app.kubernetes.io/name\"] == \"valkey\")] | length"
+
+    expect 'the default render sets no runner name' '' "$rendered" "$apps_runner_names"
+
+    expect_refused 'two fixed replicas sharing server.env.ZONE_RUNNER_NAME are refused' server.env.ZONE_RUNNER_NAME \
+        render zone-apps --set server.autoscaling.enabled=false --set server.replicaCount=2 --set server.env.ZONE_RUNNER_NAME=zone
+    expect_refused 'autoscaled replicas sharing commonEnv.ZONE_RUNNER_NAME are refused' commonEnv.ZONE_RUNNER_NAME \
+        render zone-apps --set server.autoscaling.enabled=true --set commonEnv.ZONE_RUNNER_NAME=zone
+    rendered=$(rendered_or_fail 'one replica with its own ZONE_RUNNER_NAME renders' \
+        render zone-apps --set server.autoscaling.enabled=false --set server.replicaCount=1 --set server.env.ZONE_RUNNER_NAME=zone) || return 0
+    expect 'one replica keeps its server.env.ZONE_RUNNER_NAME' zone "$rendered" "$apps_runner_names"
 
     rendered=$(rendered_or_fail 'a plain commonEnv.REDIS_URL renders' \
         render zone-apps --set-string commonEnv.REDIS_URL=redis://plain.example.com:6379) || return 0
@@ -404,6 +450,8 @@ check_apps_ha
 check_apps_ha_release
 check_apps_ha_selector_override
 check_apps_ha_secret
+check_apps_ha_trusted_proxies
+check_apps_ha_runner_name
 check_apps_ha_refusals
 check_apps_ha_network_policy
 check_infra_default

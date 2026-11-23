@@ -1,4 +1,5 @@
 {{- if .Values.server.enabled }}
+{{- include "zone-apps.server.runnerName.validate" . }}
 {{- $agentStateClaim := include "zone-apps.server.agentStateClaim" . }}
 {{- $sharedState := and $agentStateClaim (include "zone-apps.server.sharedState" .) }}
 {{- $probes := .Values.server.probes }}
@@ -114,8 +115,16 @@ spec:
             - name: ZONE_TRUSTED_PROXIES
               value: {{ . | quote }}
             {{- end }}
+            {{- $skipped := list "APP_BASE_URL" "REDIS_URL" "ZONE_TRUSTED_PROXIES" }}
+            {{- if .Values.highAvailability.enabled }}
+            {{- $skipped = append $skipped "ZONE_RUNNER_NAME" }}
+            - name: ZONE_RUNNER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- end }}
             {{- range $key, $value := .Values.server.env }}
-            {{- if not (has $key (list "APP_BASE_URL" "REDIS_URL" "ZONE_TRUSTED_PROXIES")) }}
+            {{- if not (has $key $skipped) }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}

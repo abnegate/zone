@@ -97,8 +97,8 @@ and any work left in them, at the same moments.
 {{- end }}
 {{- if not (include "zone-apps.server.trustedProxies" .) }}
 
-WARNING: server.trustedProxies is empty, so zone-server trusts no proxy's
-X-Forwarded-For. Every request reaches it from the ingress controller's pod,
+WARNING: server.trustedProxies is empty, so zone-server trusts X-Forwarded-For
+only from loopback. Every request reaches it from the ingress controller's pod,
 so every client shares one single sign-on throttle bucket per zone-server pod
 and the devices list shows the ingress controller's address. Set
 server.trustedProxies to your ingress controller's pod CIDR, never a range
