@@ -532,10 +532,18 @@ fn generating(chat_id: Uuid) -> bool {
         .is_some_and(|generation| generation.available_permits() == 0)
 }
 
-/// This replica runs a turn of the chat or holds messages queued for one, so
-/// the chat's commands are its own to apply.
+/// A turn of the chat is registered here, including one still waiting for the
+/// chat's generation permit.
+fn registered(chat_id: Uuid) -> bool {
+    CHAT_CANCELLATIONS
+        .iter()
+        .any(|entry| entry.key().0 == chat_id)
+}
+
+/// This replica runs a turn of the chat, has one registered to start, or
+/// holds messages queued for one, so the chat's commands are its own to apply.
 fn owns(chat_id: Uuid) -> bool {
-    generating(chat_id) || queue::active(chat_id)
+    generating(chat_id) || registered(chat_id) || queue::active(chat_id)
 }
 
 /// Applies a socket's command to this replica's queue and turn.
@@ -3442,6 +3450,10 @@ pub(crate) async fn run_turn(
 /// runner the chat and [`Sent::Stopped`] when this replica's shutdown stopped
 /// the turn, so the caller of an owed turn can leave it owed rather than count
 /// it run.
+///
+/// The turn is registered before the chat's control topic is served, so an
+/// answering task left over from an earlier turn sees this replica own the
+/// chat and keeps answering rather than leaving in its grace period.
 pub(crate) async fn run_turn_as(
     state: &AppState,
     message_id: Uuid,
@@ -3453,9 +3465,9 @@ pub(crate) async fn run_turn_as(
     audience: Audience,
 ) -> Sent {
     let stream = ChatStream::on(state, chat_id);
-    relay::serve(state, &stream, workspace_id).await;
     let generation = Generation::registered(chat_id, message_id, user_id, workspace_id);
     let drained = Arc::clone(&generation.drained);
+    relay::serve(state, &stream, workspace_id).await;
     let sent = handle_send_message(
         state,
         &stream,
@@ -8591,6 +8603,21 @@ cat 'DIR/reply.jsonl'
             "a turn in another organization's workspace was cancelled"
         );
         assert!(!theirs.is_cancelled(), "a colleague's turn was cancelled");
+    }
+
+    #[test]
+    fn a_turn_registered_to_start_owns_its_chat_before_it_takes_the_permit() {
+        let chat = Uuid::new_v4();
+        assert!(!owns(chat));
+
+        let turn = Generation::registered(chat, Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+
+        assert!(
+            owns(chat),
+            "an answering task in its grace would leave a registered turn with nobody answering"
+        );
+        drop(turn);
+        assert!(!owns(chat));
     }
 
     #[test]
