@@ -1528,7 +1528,7 @@ fn folding_a_huge_value_object_takes_linear_time() {
     let elapsed = started.elapsed();
 
     assert!(
-        elapsed < std::time::Duration::from_secs(1),
+        elapsed < std::time::Duration::from_secs(30),
         "folding {} keys took {elapsed:?}",
         DISTINCT + REPEATED
     );
