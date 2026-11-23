@@ -140,7 +140,7 @@ highAvailability.externalNetworkPolicy.
 {{- if not $hostname -}}
 {{- fail "secrets.redisUrl must name the host of the external Redis or Valkey" -}}
 {{- end -}}
-{{- if regexMatch "^valkey(\\.[^.]+(\\.svc(\\..+)?)?)?$" $hostname -}}
+{{- if or (regexMatch "^valkey(\\.[^.]+(\\.svc(\\..+)?)?)?$" $hostname) (regexMatch "^[^.]+\\.valkey\\.[^.]+\\.svc(\\..+)?$" $hostname) -}}
 {{- fail (printf "highAvailability.enabled needs an external Redis or Valkey, but secrets.redisUrl names the in-cluster valkey service (%s)" $hostname) -}}
 {{- end -}}
 {{- else if not .Values.highAvailability.externalValkey -}}
