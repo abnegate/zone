@@ -323,7 +323,9 @@ for an account with that email, ignoring case:
 - **An account that isn't a member**, or a former member: Zone adds the
   account to the organization as a member and links it to SCIM. A former
   member starts afresh: their old workspace memberships and roles don't come
-  back. The account's email, name, password and sessions don't change.
+  back. The account's email, name, password and sessions don't change, and
+  this organization never signs the account out (see
+  [Deactivation](#deactivation)).
 - **No account**: Zone creates one, with an unverified email and no
   password anyone knows. It doesn't get a personal organization or
   workspace. The person signs in through [SSO](#single-sign-on), or sets a
@@ -334,8 +336,9 @@ ignoring case; a clash answers 409 `uniqueness`.
 
 A `POST` with `active: false` creates the member already deactivated, in
 one step, and answers 201 with the deactivated user. It doesn't count
-against the member cap, and it signs the account out and revokes its
-invitations as [deactivation](#deactivation) does. A `POST` that matches an
+against the member cap, and it deletes the account's invitations, and signs
+the account out only when Zone creates it, as [deactivation](#deactivation)
+does. A `POST` that matches an
 owner whom someone restores while it runs answers 409 `uniqueness` and
 leaves the owner as they are.
 
@@ -454,15 +457,24 @@ workspace roles are managed in each workspace.
   workspace has no owner until an organization owner adds one, and the
   deactivation still succeeds;
 - signs the account out on the whole server, revoking every session and
-  refresh token, unless the account is still an active member of another
-  organization that has at least one other active member. Sessions belong
-  to the account rather than to an organization, so one organization's
-  identity provider can't sign out someone that another organization still
-  shares. A personal organization the person is alone in doesn't count.
-  When the account is signed out, requests are refused at once and open
-  connections close within about 15 seconds; the person can still sign in
-  and use any other organization they belong to. When it isn't, the
-  deactivated membership is what keeps them out of this organization;
+  refresh token, only when both hold:
+  - this organization's SCIM created the account, with
+    [`POST /Users`](#creating-a-user) finding no account with that email.
+    The person claiming it later, by signing in or setting a password,
+    doesn't change that;
+  - the account isn't an active member of another organization that has at
+    least one other active member. A personal organization the person is
+    alone in doesn't count.
+
+  Sessions belong to the account rather than to an organization, so an
+  account that existed before this organization added it, such as one its
+  owner registered or another organization's member, is never signed out by
+  this organization's identity provider. When the account is signed out,
+  requests are refused at once and open connections close within about 15
+  seconds; the person can still sign in and use any other organization they
+  belong to. When it isn't, the deactivated membership is what keeps them
+  out of this organization: its organization and workspace routes refuse
+  them, and their running work stops as below;
 - deletes any invitation to the organization still waiting on their
   account email or the email the identity provider gave them, ignoring
   case, and audits each as `invitation.revoked`;
@@ -473,7 +485,8 @@ workspace roles are managed in each workspace.
 The membership change, the sign-out and the invitation deletions happen
 together: if any of them fails, none of them does, and the identity
 provider's retry starts again. Deactivating a member who is already
-inactive signs them out and deletes their invitations again.
+inactive signs them out again, by the same rule, and deletes their
+invitations again.
 
 The Zone account itself is kept.
 
@@ -514,7 +527,9 @@ Reactivation needs the license. Without it, a request that sets
 
 The Zone account is kept, along with its memberships of other
 organizations. Nothing is kept to restore: if the identity provider creates
-the person again, they start afresh as a new member.
+the person again, they start afresh as a new member. Their account then
+already exists, so Zone adds it as an existing account, and deactivating
+them later doesn't sign them out.
 
 Deleting the organization's last active owner is refused with 409.
 

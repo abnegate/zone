@@ -251,6 +251,21 @@ pub async fn pristine(executor: impl PgExecutor<'_>, user_id: Uuid) -> DbResult<
     .await
 }
 
+pub async fn created(
+    executor: impl PgExecutor<'_>,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM scim_users \
+         WHERE organization_id = $1 AND user_id = $2 AND provisioned_password IS NOT NULL)",
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .fetch_one(executor)
+    .await
+}
+
 pub async fn sole_organization(
     executor: impl PgExecutor<'_>,
     organization_id: Uuid,

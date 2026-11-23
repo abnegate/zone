@@ -249,9 +249,15 @@ async fn okta_creates_updates_deactivates_and_reactivates_a_member() {
     assert_scim(&deactivated, StatusCode::OK);
     assert_eq!(deactivated.json_value()["active"], json!(false));
     assert!(
-        !fixture.signed_in(&account.token).await,
-        "the member's access token still works"
+        fixture.signed_in(&account.token).await,
+        "deactivating an account the organization adopted signed it out"
     );
+    fixture
+        .inner
+        .client
+        .get_auth(&format!("/api/workspaces/{workspace}"), &account.token)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
     assert!(!fixture.holding(user).await.unwrap().2);
     assert_eq!(
         fixture.seat(workspace, user).await,
@@ -315,10 +321,12 @@ async fn okta_creates_updates_deactivates_and_reactivates_a_member() {
         Some((WorkspaceRole::Owner.as_str().to_owned(), true)),
         "the member comes back as owner beside their successor"
     );
-    assert!(
-        !fixture.signed_in(&account.token).await,
-        "sessions never come back"
-    );
+    fixture
+        .inner
+        .client
+        .get_auth(&format!("/api/workspaces/{workspace}"), &account.token)
+        .await
+        .assert_status(StatusCode::OK);
 
     assert_eq!(
         fixture.scim_actions().await,

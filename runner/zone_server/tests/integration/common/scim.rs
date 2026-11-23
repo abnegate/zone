@@ -3,15 +3,15 @@ use axum::http::{Method, Request, StatusCode};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
-use zone_server::auth::{Grant, Permission, Scope};
+use zone_server::auth::{Grant, Permission, Scope, hash_password};
 use zone_server::db::custom_roles::{self, Creation, Definition};
 use zone_server::db::organization_members::{self, OrgRole};
 use zone_server::db::scim::{NewToken, tokens};
 use zone_server::services::scim::secret;
 use zone_server::state::AppState;
 
-use super::TestResponse;
 use super::sso::{self, Account, Audit};
+use super::{TestResponse, test_password};
 
 pub const BASE_PATH: &str = "/api/scim/v2/organizations";
 pub const CONTENT_TYPE: &str = "application/scim+json";
@@ -280,6 +280,57 @@ impl Fixture {
             StatusCode::OK => true,
             StatusCode::UNAUTHORIZED => false,
             status => panic!("the session answered {status}: {}", response.text()),
+        }
+    }
+
+    pub async fn refreshes(&self, account: &Account) -> bool {
+        let response = self
+            .inner
+            .client
+            .post_json(
+                "/api/auth/refresh",
+                &json!({ "refresh_token": account.refresh }),
+            )
+            .await;
+        match response.status {
+            StatusCode::OK => true,
+            StatusCode::UNAUTHORIZED => false,
+            status => panic!("the refresh answered {status}: {}", response.text()),
+        }
+    }
+
+    pub async fn admitted(&self, organization: Uuid, token: &str) -> bool {
+        let response = self
+            .inner
+            .client
+            .get_auth(&format!("/api/organizations/{organization}"), token)
+            .await;
+        match response.status {
+            StatusCode::OK => true,
+            StatusCode::FORBIDDEN => false,
+            status => panic!("the organization answered {status}: {}", response.text()),
+        }
+    }
+
+    /// Claims an account SCIM created, as its owner would by resetting its password, and signs
+    /// in to it.
+    pub async fn sign_in(&self, user: Uuid) -> Account {
+        let password = test_password();
+        let email: String =
+            sqlx::query_scalar("UPDATE users SET password_hash = $2 WHERE id = $1 RETURNING email")
+                .bind(user)
+                .bind(hash_password(&password).unwrap())
+                .fetch_one(self.pool())
+                .await
+                .unwrap();
+        let response = self.inner.login(&email, &password).await;
+        response.assert_status(StatusCode::OK);
+        let body = response.json_value();
+        Account {
+            id: user,
+            email,
+            token: body["access_token"].as_str().unwrap().to_owned(),
+            refresh: body["refresh_token"].as_str().unwrap().to_owned(),
         }
     }
 
