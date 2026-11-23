@@ -8,9 +8,9 @@ use crate::state::AppState;
 /// The claimant this process claims work as. Fleet policy is enforced under an Enterprise
 /// license, a stored key that no longer verifies, or a license that can't be read. An enforced
 /// claimant that hasn't registered registers first; if that fails it has no runner, and every
-/// claim it makes is refused as unregistered. Claims are refused the same way while another live
-/// process sharing the runner's name holds the row, until this process's next heartbeat
-/// registers it again, so each process is judged on its own version and labels.
+/// claim it makes is refused as unregistered. Claims are refused the same way while a newer live
+/// process sharing the runner's name holds the row, so each process is judged on its own version
+/// and labels or not at all.
 ///
 /// Registering writes `fleet_runners`, so this must not run inside an open transaction.
 pub async fn claimant(state: &AppState) -> Claimant {

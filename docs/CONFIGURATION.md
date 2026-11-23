@@ -2640,7 +2640,7 @@ Every Zone server process registers as a runner in its server's fleet, on every 
 
 ### `ZONE_RUNNER_NAME`
 - **Default**: the `HOSTNAME` environment variable, else `/etc/hostname`, else `zone-` followed by 8 random hex digits
-- **Description**: The name this server registers as. A runner's state belongs to its name, so a cordoned or revoked name stays that way when its server restarts. Give each server its own name: two live servers sharing one share its state, and Zone logs a warning when a name is taken over from a process seen in the last minute. Set it for a name that stays the same across a Kubernetes Deployment's rollouts, which give every new pod a new host name. Surrounding spaces are trimmed, and a blank value counts as unset.
+- **Description**: The name this server registers as. A runner's state belongs to its name, so a cordoned or revoked name stays that way when its server restarts. A name must be unique to one live server process: the newest process registered under a name holds it, and while it heartbeats, an older process sharing the name claims no work under an Enterprise license and logs a warning on every heartbeat. A process that started later takes the name over at once, so a restart or rollout hands it over without a gap; a process takes the name over from one that hasn't heartbeated for 60 seconds. Never give a Kubernetes Deployment's replicas one name: for a name that stays the same for each pod across restarts, run a StatefulSet and keep the default, since its pods keep their host names. See [FLEET.md](FLEET.md#names-carry-state). Surrounding spaces are trimmed, and a blank value counts as unset.
 
 ### `ZONE_RUNNER_LABELS`
 - **Default**: none

@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_enterprise::fleet::{Labels, Version};
@@ -44,11 +45,33 @@ impl Fleet {
             self.pool(),
             name,
             instance,
+            None,
             &Version::parse(version).unwrap(),
             &Labels::parse_list(carried).unwrap(),
         )
         .await
         .expect("a registration")
+    }
+
+    /// Registers again the process `instance`, which first registered at `started`.
+    async fn heartbeat(
+        &self,
+        name: &str,
+        instance: Uuid,
+        started: DateTime<Utc>,
+        version: &str,
+        carried: &str,
+    ) -> Registered {
+        runners::upsert(
+            self.pool(),
+            name,
+            instance,
+            Some(started),
+            &Version::parse(version).unwrap(),
+            &Labels::parse_list(carried).unwrap(),
+        )
+        .await
+        .expect("a heartbeat")
     }
 
     async fn runner(&self, name: &str, version: &str, carried: &str) -> Runner {
@@ -263,6 +286,48 @@ async fn a_name_registers_once_and_keeps_its_state_across_processes() {
     assert!(other.created);
     assert_ne!(other.runner.id, created.runner.id);
     fleet.remove().await;
+}
+
+#[tokio::test]
+async fn the_newest_live_process_holds_a_shared_name() {
+    let fleet = Fleet::new().await;
+    let (older, newer) = (Uuid::new_v4(), Uuid::new_v4());
+    let first = fleet.register("eu-1", older, "1.4.0", "").await;
+    let taken = fleet.register("eu-1", newer, "1.4.1", "gpu").await;
+    let (began, begun) = (first.runner.started_at, taken.runner.started_at);
+
+    let refused = fleet.heartbeat("eu-1", older, began, "1.4.0", "").await;
+    let kept = fleet.heartbeat("eu-1", newer, begun, "1.4.1", "gpu").await;
+    fleet.age(first.runner.id, 61.0).await;
+    let resumed = fleet.heartbeat("eu-1", older, began, "1.4.0", "").await;
+    let returned = fleet.heartbeat("eu-1", newer, begun, "1.4.1", "gpu").await;
+    fleet.remove().await;
+
+    assert!(first.held && taken.held && taken.contested);
+    assert!(begun > began);
+    assert_eq!(
+        (refused.held, refused.contested, refused.created),
+        (false, true, false),
+        "the older process's heartbeat took the row from a newer live one"
+    );
+    assert_eq!(
+        refused.runner, taken.runner,
+        "the refused heartbeat touched the row"
+    );
+    assert!(kept.held && !kept.contested);
+    assert_eq!(kept.runner.instance, newer);
+    assert!(resumed.held, "the row of a quiet holder is taken over");
+    assert!(!resumed.contested);
+    assert_eq!(resumed.runner.instance, older);
+    assert_eq!(resumed.runner.started_at, began);
+    assert_eq!(resumed.runner.version, version("1.4.0"));
+    assert_eq!(resumed.runner.labels, Labels::default());
+    assert!(
+        returned.held && returned.contested,
+        "a newer process back online takes the row again"
+    );
+    assert_eq!(returned.runner.instance, newer);
+    assert_eq!(returned.runner.started_at, begun);
 }
 
 #[tokio::test]

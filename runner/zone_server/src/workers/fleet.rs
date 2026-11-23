@@ -8,7 +8,7 @@ use tokio::time::{Instant, Interval, MissedTickBehavior};
 use uuid::Uuid;
 
 use crate::db::fleet::candidate::Candidate;
-use crate::db::fleet::eligibility;
+use crate::db::fleet::{eligibility, runners};
 use crate::services::fleet::{self, registration};
 use crate::state::AppState;
 use crate::workers::task;
@@ -77,7 +77,8 @@ pub async fn heartbeat(state: &AppState) -> Option<Uuid> {
 }
 
 /// The runs this runner should pick up, at most `capacity` of them. Without fleet policy there
-/// are none, since the runner that admits a run always claims it.
+/// are none, since the runner that admits a run always claims it, and neither are there while a
+/// newer process sharing the runner's name holds its row, since every claim would be refused.
 pub(crate) async fn pickup(state: &AppState, capacity: usize) -> Vec<Candidate> {
     if capacity == 0 {
         return Vec::new();
@@ -86,6 +87,14 @@ pub(crate) async fn pickup(state: &AppState, capacity: usize) -> Vec<Candidate> 
     let (true, Some(runner)) = (claimant.enforced, claimant.runner) else {
         return Vec::new();
     };
+    match runners::holds(state.db(), runner, claimant.instance).await {
+        Ok(true) => {}
+        Ok(false) => return Vec::new(),
+        Err(error) => {
+            tracing::warn!(%error, "Could not check this process holds its runner, so it picks up no task runs");
+            return Vec::new();
+        }
+    }
     let limit = i64::try_from(capacity).unwrap_or(i64::MAX);
     match eligibility::candidates(state.db(), runner, limit).await {
         Ok(candidates) => candidates,
@@ -374,6 +383,7 @@ mod tests {
             &server.database.pool,
             "another",
             Uuid::new_v4(),
+            None,
             &version(),
             &Labels::parse_list("ssd").unwrap(),
         )
@@ -445,7 +455,10 @@ mod tests {
             "the refused process left the run unclaimed for the process holding the row"
         );
         assert!(refusals.is_empty(), "{refusals:?}");
-        assert!(owner.is_some(), "the process holding the row claimed the run");
+        assert!(
+            owner.is_some(),
+            "the process holding the row claimed the run"
+        );
     }
 
     #[tokio::test]
@@ -495,6 +508,7 @@ mod tests {
                 &server.database.pool,
                 "gone",
                 Uuid::new_v4(),
+                None,
                 &version(),
                 &Labels::parse_list("ssd").unwrap(),
             )

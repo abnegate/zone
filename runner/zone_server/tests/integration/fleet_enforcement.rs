@@ -461,7 +461,10 @@ async fn the_newest_process_sharing_a_name_keeps_its_row_until_it_goes_quiet() {
     registration::register(&older.state).await.unwrap();
     let run = fleet.admit_in(fleet.workspace).await;
     fleet.execute(&newer, &run).await;
-    let ran = (fleet.run(run.id).await.status, fleet.claimed(run.id).await.1);
+    let ran = (
+        fleet.run(run.id).await.status,
+        fleet.claimed(run.id).await.1,
+    );
     sqlx::query("UPDATE fleet_runners SET last_seen_at = now() - $2 WHERE id = $1")
         .bind(older.id)
         .bind(runners::CONNECTED + TimeDelta::seconds(1))

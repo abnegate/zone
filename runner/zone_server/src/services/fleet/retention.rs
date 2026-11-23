@@ -82,6 +82,7 @@ mod tests {
                 &self.database.pool,
                 name,
                 Uuid::new_v4(),
+                None,
                 &version(),
                 &Labels::parse_list("ssd").unwrap(),
             )

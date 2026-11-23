@@ -5,7 +5,7 @@ use abnegate_agent::McpHub;
 use abnegate_exec::Niceness;
 use abnegate_http::{RateLimitConfig, RateLimiter};
 use abnegate_secret::MasterKey;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use sqlx::PgPool;
 use std::num::NonZeroUsize;
@@ -161,6 +161,7 @@ struct AppStateInner {
     pub background: TaskTracker,
     pub instance: Uuid,
     pub runner: RwLock<Option<Uuid>>,
+    pub started: OnceLock<DateTime<Utc>>,
     pub identity: OnceLock<Identity>,
     pub registration: Flight,
     /// Whether the Community member cap applies, which a test build leaves off
@@ -304,6 +305,7 @@ impl AppState {
                 background: TaskTracker::new(),
                 instance: Uuid::new_v4(),
                 runner: RwLock::new(None),
+                started: OnceLock::new(),
                 identity: OnceLock::new(),
                 registration: Flight::default(),
                 #[cfg(any(test, feature = "testing"))]
@@ -339,6 +341,18 @@ impl AppState {
             .runner
             .write()
             .unwrap_or_else(PoisonError::into_inner) = Some(runner);
+    }
+
+    /// When this process first registered as a runner, by the database's clock: the start the
+    /// fleet orders the processes sharing a runner name by. A process registers at boot, before
+    /// any worker starts, so it is the process's start without the hosts' clocks having to agree.
+    pub fn started(&self) -> Option<DateTime<Utc>> {
+        self.inner.started.get().copied()
+    }
+
+    /// Keeps the first start recorded.
+    pub fn set_started(&self, started: DateTime<Utc>) {
+        let _ = self.inner.started.set(started);
     }
 
     /// The one lazy registration as a runner that concurrent claims share.

@@ -53,7 +53,7 @@ impl fmt::Display for Refusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unregistered => formatter.write_str(
-                "This Zone server hasn't registered as a runner in its fleet, so it takes no work until it does.",
+                "This Zone server isn't taking work as a runner in its fleet right now: it may be restarting, or another server may share its runner name. Reload the page to reach another server.",
             ),
             Self::Cordoned => formatter
                 .write_str("This runner is cordoned, so it takes no new unattended work."),
