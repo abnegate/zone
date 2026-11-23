@@ -143,7 +143,7 @@ mod tests {
 
         assert_eq!(
             key(&namespace, Scope::Gather, user, 29_000_000),
-            format!("zone:{namespace}:limit:550e8400-e29b-41d4-a716-446655440000:29000000")
+            format!("zone:{namespace}:gather:550e8400-e29b-41d4-a716-446655440000:29000000")
         );
     }
 

@@ -13,7 +13,7 @@ pub enum Scope {
 impl Scope {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Gather => "limit",
+            Self::Gather => "gather",
             Self::Sso => "sso",
             Self::Scim => "scim",
             Self::ScimFailures => "scim-failures",
