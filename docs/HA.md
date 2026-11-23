@@ -28,18 +28,31 @@ flowchart TD
 Replicas coordinate through three things:
 
 - **Postgres** holds every piece of durable state: chats, the chat lease that says which replica runs a turn, task runs and their heartbeats, and the ledgers that stop a report or alert going out twice. One replica at a time holds the housekeeping leadership lock and runs the cluster-wide sweeps.
-- **Valkey** carries the cluster bus: signed messages that relay live chat frames, chat commands, task question answers, titles and action cards between replicas, plus the shared context-search rate limit. Nothing in it is durable.
+- **Valkey** carries the cluster bus: signed messages that relay live chat frames, chat commands, task question answers, titles and action cards between replicas, plus the shared context-search and single sign-on rate limits. Nothing in it is durable.
 - **The shared volume** holds what the agent CLIs and git need on disk: sign-in homes, clones, worktrees, chat workspaces and artifacts.
 
 ## Minimum cluster
 
-- **Kubernetes 1.27 or later.** Every topology spread constraint in the profile sets `nodeTaintsPolicy: Honor`, which keeps tainted and cordoned nodes out of the skew. Without it a tainted control plane, or a node being drained, counts as an empty domain, and rollouts and the HPA deadlock. Each also sets `matchLabelKeys: [pod-template-hash]`, on by default from 1.27, so a rollout's new pods spread across nodes on their own instead of stacking on one node once the old pods go.
-- **3 schedulable nodes.** CloudNativePG's required anti-affinity puts each of the 3 Postgres instances on a node of its own. The server spread does not need 3 nodes: it counts each rollout revision on its own, so a surge pod with `maxSurge: 1` and `maxUnavailable: 0` always fits within a skew of 1, and the HPA can grow past the node count at that skew.
+- **Kubernetes 1.27 or later.** Every topology spread constraint in the profile sets `nodeTaintsPolicy: Honor` (on by default from 1.26) and `matchLabelKeys: [pod-template-hash]` (on by default from 1.27). An older API server silently drops a field whose feature is off, so the profile still installs there but spreads badly. See [Scheduling](#scheduling).
+- **3 or more schedulable nodes.** CloudNativePG's required anti-affinity puts each of the 3 Postgres instances on a node of its own, so with fewer nodes an instance stays Pending. The server alone runs on 2 nodes, but 2 nodes is not a supported topology.
 - **A ReadWriteMany StorageClass with POSIX locking.** See [Shared state](#shared-state).
 - **A managed Redis or Valkey with failover.** See [Valkey](#valkey).
-- **Postgres 14 or later, reached directly or through a session-mode pooler.** The leadership lock is a session advisory lock on a dedicated connection that sets `idle_session_timeout`, which Postgres 14 added. A transaction-mode pooler (PgBouncer `pool_mode = transaction`, and the like) hands the session to someone else between statements and breaks the lock. The CloudNativePG image the chart pins is Postgres 16. An external managed Postgres through `global.externalDatabase` is supported on the same terms.
+- **Postgres 14 or later, reached directly or through a session-mode pooler.** The leadership lock is a session advisory lock on a dedicated connection that sets `idle_session_timeout`, which Postgres 14 added. A transaction-mode pooler (PgBouncer `pool_mode = transaction`, and the like) hands the session to someone else between statements and breaks it, as it does the other [session locks](#locks-across-replicas). The CloudNativePG image the chart pins is Postgres 16. An external managed Postgres through `global.externalDatabase` is supported on the same terms.
 - **An object store for backups**: S3, GCS or Azure Blob Storage, through the CloudNativePG Barman Cloud plugin.
 - **The CloudNativePG operator 1.30 or later**, and the HAProxy Kubernetes Ingress controller.
+
+### Scheduling
+
+The server's pods spread over nodes with `maxSkew: 1` and `whenUnsatisfiable: DoNotSchedule` on `kubernetes.io/hostname`, and on a best-effort basis (`ScheduleAnyway`) over `topology.kubernetes.io/zone`. Their anti-affinity on the host name is preferred, never required. The console spreads over nodes on a best-effort basis only.
+
+- **Each rollout revision spreads on its own.** `matchLabelKeys: [pod-template-hash]` makes the spread count only the pods of the new pod's own ReplicaSet. Without it the spread also counts the old ReplicaSet's pods while they are being removed, and a rollout can end with 2 new pods on one node and none on another.
+- **Cordoned and tainted nodes don't count.** `nodeTaintsPolicy: Honor` keeps a node the pod cannot tolerate, such as a tainted control plane or a node being drained, out of the skew. Without it that node counts as an empty domain, and rollouts and the HPA deadlock.
+- **Releases don't count each other.** With `highAvailability.enabled` the chart adds `app.kubernetes.io/instance: <release>` to every spread and anti-affinity selector, so two releases in one namespace spread on their own.
+- **Keep room for one more server pod on every node.** The server rolls with `maxSurge: 1` and `maxUnavailable: 0`, so a new pod must be Ready before an old one stops, and a surge pod that cannot be scheduled stalls the rollout. A server pod requests 500m CPU and 512Mi. Within one revision the spread always has a node for the next pod: while the revision has fewer pods than nodes, some node has none of them, and past that a skew of 1 allows the next. So the HPA can also grow past the node count.
+- **The PDB allows one disruption** (`maxUnavailable: 1`), so a drain evicts server pods one at a time.
+- **Nothing rebalances.** After a node is lost or drained, its pods move to the other nodes and stay there when it comes back. Run a descheduler, or roll the Deployment (`kubectl rollout restart deployment/zone-apps-server` for a release named `zone-apps`), to spread them again.
+
+**On 2 nodes** the server still rolls and drains. After a rollout no node holds more than half the replicas, rounded up. A drain cordons its node, which then leaves the skew, so every replica moves to the other node. CloudNativePG's third instance has nowhere to go, though, so 2 nodes is not a supported topology.
 
 ## Installing
 
@@ -57,8 +70,11 @@ helm upgrade --install zone-apps helm/zone-apps --namespace zone \
   -f <your values> \
   -f helm/zone-apps/values-ha.yaml \
   --set server.agentState.persistence.storageClass=<ReadWriteMany class> \
+  --set server.trustedProxies=<ingress controller pod CIDR> \
   --set highAvailability.externalValkey=true
 ```
+
+`server.trustedProxies` lists the proxies whose `X-Forwarded-For` zone-server believes, such as `10.244.0.0/16`, the pod CIDR of kind and flannel; use your ingress controller's pod CIDR. Every request reaches the servers through the ingress controller, so without it every client shares the controller's address and its [single sign-on limit](#shared-limits). An HA render without it fails, and the message gives that example. To trust loopback only on purpose, set it to `127.0.0.1/32,::1/128` (escape the comma for `--set`: `--set 'server.trustedProxies=127.0.0.1/32\,::1/128'`). See [ZONE_TRUSTED_PROXIES](CONFIGURATION.md#zone_trusted_proxies) for what a trusted range allows.
 
 `highAvailability.externalValkey=true` states that the existing secret's `valkey-url` key already points at the managed endpoint; use `secrets.create` with `secrets.redisUrl` instead to have the chart write it (see [Valkey](#valkey)). The secrets the charts read, and the 32-character `JWT_SECRET` and `ENCRYPTION_KEY`, are the same as for any install: see [helm/QUICK_START.md](../helm/QUICK_START.md).
 
@@ -96,7 +112,14 @@ Several limits are per replica and grow with the replica count rather than being
 - Each replica runs at most 5 task runs at once (`MAX_CONCURRENT_TASKS` in `workers/task.rs`, not configurable). A cluster at its HPA minimum of 3 runs up to 15.
 - Each replica runs one image generation at a time, and accepts up to 5 sockets per chat.
 
-The context-search rate limit is the exception: it is counted in Valkey, across every replica.
+### Shared limits
+
+Two rate limits are counted in Valkey, across every replica, in fixed windows that every replica numbers the same way:
+
+- the context-search rate limit, per user;
+- the single sign-on limit, per client address: [`ZONE_SSO_REQUESTS_PER_MINUTE`](CONFIGURATION.md#zone_sso_requests_per_minute) (120 by default) single sign-on starts and SAML responses a minute. The address is the one zone-server resolves through `server.trustedProxies`.
+
+While Valkey is down, or does not answer within 500 milliseconds, each replica counts on its own instead, so one user or address can make up to the limit times the replica count. The warning logged for an address's first refusal in a window is per replica, so a flood across 3 replicas can log up to 3.
 
 ## What survives a failure
 
@@ -106,7 +129,7 @@ The context-search rate limit is the exception: it is counted in Valkey, across 
 | **A server pod stops gracefully** (rollout, drain, scale-in) | Readiness turns 503 at once, and chat sockets on it start no new reply: a message that would start one is refused with an error and the socket closes with 1012 so the client reconnects elsewhere. It keeps serving for `ZONE_SHUTDOWN_DELAY_SECONDS` (10) while the Service drops it, then stops listening and gives HTTP requests in flight up to `ZONE_SHUTDOWN_GRACE_SECONDS` (30). Turns still running are then stopped the way Stop does: the reply so far is saved and the chat's lease released at once, so another replica can take the next message without waiting 30 seconds. Every socket closes with 1012. It finishes background writes and releases leadership, then exits. Turns are not waited for during the grace, because a coding agent reaches Zone's tools at `/mcp` through the same listener. | Messages queued behind its running turns, held from the moment it began draining. Task runs it ran, as for a lost pod. Sign-ins in flight on it. |
 | **A node is lost** | Every Zone pod on it is lost, as above. Kubernetes marks the node unreachable and stops sending it traffic; replacement pods are scheduled elsewhere once its pods are evicted. A Postgres instance on it is lost: if it was the primary, CloudNativePG promotes the synchronous standby. Writes continue on the 2 remaining instances, but the third cannot come back until a third node is schedulable, so a second failure would pause writes. | As for lost server pods. No committed Postgres data. |
 | **The Postgres primary fails over** | 10 to 30 seconds of write errors while CloudNativePG promotes a standby and moves the `zone-postgres-rw` Service. Replicas stay Ready throughout, by design: readiness checks only whether a replica is draining, never Postgres or Valkey, or a failover would mark every replica unready at once and empty the Service. The leadership lock does not survive onto the new primary; the old leader's pings fail and it demotes, and the new leader waits 20 seconds before its first cluster sweep. | Nothing committed: with `synchronous: {method: any, number: 1, dataDurability: required}` every commit is on a standby before it returns. Requests that failed during the failover need retrying. |
-| **Valkey is down** | Replicas stop hearing each other. Clients on a replica that is not running a turn stop receiving its live frames; they see the reply once it is saved and they reload. Commands sent on such a replica are not forwarded: a Send there is refused as busy while the turn runs, and Stop, approvals and queue edits there do not reach it. Answers to a task run's question posted on a replica other than the one it waits on return 404, at once while the bus is disconnected, or after the 2-second answer timeout. Titles and action cards reach only the replica that made them. The context-search limit falls back to each replica's own count. `zone_cluster_bus_connected` reads 0, and every replica logs an error that the cluster bus is not connected. Each replica reconnects and resubscribes on its own once Valkey is back. | Nothing persisted. Live frames and commands sent while it was down. |
+| **Valkey is down** | Replicas stop hearing each other. Clients on a replica that is not running a turn stop receiving its live frames; they see the reply once it is saved and they reload. Commands sent on such a replica are not forwarded: a Send there is refused as busy while the turn runs, and Stop, approvals and queue edits there do not reach it. Answers to a task run's question posted on a replica other than the one it waits on return 404, at once while the bus is disconnected, or after the 2-second answer timeout. Titles and action cards reach only the replica that made them. The context-search and single sign-on limits fall back to each replica's own count ([Shared limits](#shared-limits)). `zone_cluster_bus_connected` reads 0, and every replica logs an error that the cluster bus is not connected. Each replica reconnects and resubscribes on its own once Valkey is back. | Nothing persisted. Live frames and commands sent while it was down. |
 | **A LiteLLM pod is lost** | Requests in flight on it fail, and the other replica serves the rest. | Spend logs it had not flushed yet, up to one flush interval. |
 | **The shared volume is lost** | Everything that touches it fails: agent turns, clones, worktrees, chat workspaces and artifacts. Postgres is intact, so chats, tasks and Claude sign-ins (sealed in the database) remain. | Codex logins, CLI session files, clones and any uncommitted work in them, chat workspaces and artifacts. Restore it from a snapshot ([Backup and restore](#backup-and-restore)). Codex sign-ins with no home sign in again, and a chat whose session file is missing starts a fresh session with its whole transcript. |
 | **An availability zone is lost** | The server spreads across zones on a best-effort basis (`topology.kubernetes.io/zone`, `ScheduleAnyway`), but the profile's Postgres anti-affinity is per node, so all 3 instances can sit in one zone. To survive a zone, run nodes in at least 3 zones, set `postgres.affinity.topologyKey: topology.kubernetes.io/zone`, and use a regional ReadWriteMany backend and a multi-zone Valkey. Otherwise a zone loss is a loss of everything in it. | Depends on placement, as above. |
@@ -194,8 +217,29 @@ Keep these outside the cluster. Without them a restored database is unreadable o
 
 - **Migrations run at server startup**, not as a job (`migration.enabled` is refused). Every replica that starts tries to migrate, under a Postgres advisory lock held on one dedicated connection, so one applies them and the others wait, find nothing to do and carry on. `zone-server --migrate-only` uses the same lock if you would rather migrate before rolling.
 - **The startup probe covers them.** `/health` with a period of 10 and a failure threshold of 60 gives a starting pod 10 minutes before liveness or readiness are checked at all, so a long migration is not killed half way.
-- **One pod at a time.** The server rolls with `maxSurge: 1` and `maxUnavailable: 0`: a new pod has to become Ready before an old one is told to stop, and the old one drains as [described above](#what-survives-a-failure). The PDBs allow one disruption at a time.
+- **One pod at a time.** The server rolls with `maxSurge: 1` and `maxUnavailable: 0`: a new pod has to become Ready before an old one is told to stop, and the old one drains as [described above](#what-survives-a-failure). The PDBs allow one disruption at a time. See [Scheduling](#scheduling) for the room a rollout needs.
+- **Every new pod is a new runner.** Each pod registers in the runner fleet under its own name, so a rollout registers new names and leaves the old ones offline. See [Runner fleet](#runner-fleet).
 - **Old and new code run side by side** for the length of a rollout, against the new schema. Schema changes are therefore expand and contract across releases: a release adds what the new code needs without breaking the old code, and only a later release removes what the old code used. Never skip a release that does an expand step on the way to the one that contracts it.
+
+## Locks across replicas
+
+Work that only one replica may do at a time takes a Postgres advisory lock, so it holds across replicas as it does within one. Each fixed key is a 64-bit constant that spells `zone` and four letters in hex, and the unit test `every_advisory_lock_key_is_distinct` fails if two of them match, since the holders of one key would block each other.
+
+| Key | Value | Scope | Held by |
+|---|---|---|---|
+| `LEADER_KEY` | `0x7A6F_6E65_4C45_4144` | Session, on a dedicated connection | The housekeeping leader, for as long as it leads |
+| `SWEEP_LOCK` | `0x7A6F_6E65_5245_544E` | Session | The audit retention sweep |
+| `REBASE_LOCK` | `0x7A6F_6E65_4155_4454` | Session | An audit position rebase; each retention batch also holds it shared, within its transaction |
+| `SPEND_LOCK` | `0x7A6F_6E65_5350_4E44` | Session | Spend ingestion from LiteLLM |
+| `NOTICE_LOCK` | `0x7A6F_6E65_4255_4447` | Session | Settling budgets and sending their notices |
+| `CLAIM_LOCK` | `0x7A6F_6E65_5455_524E` | Transaction | Claiming a reminder turn |
+| `SEATS_LOCK` | `0x7A6F_6E65_5345_4154` | Transaction | Every capped admission, and every sign-up that finds the server empty |
+
+`SEATS_LOCK` keeps the Community member cap exact however many replicas run. Every path that adds a person on a capped server (`services::members::admit` and `reactivate`) takes it with `pg_advisory_xact_lock` in the transaction that inserts the membership, counts the active members, and holds it until that transaction ends. Two people joining on different replicas therefore can't both take the last seat. A sign-up that finds no accounts takes it too, capped or not, and counts again, so of the sign-ups racing on an empty server only one becomes its admin. An admission waits up to 5 seconds for the lock, then answers 503 `member_admission_busy` and changes nothing.
+
+Ordering a workspace's projects, delivering a sync's updates for one external issue, and saving a learned knowledge entry take transaction-scoped locks on keys hashed from what they protect. Migrations take sqlx's own session lock, as [above](#rolling-upgrades).
+
+A transaction-scoped lock works through any connection. A session lock needs the session to stay on one server connection, which is why a transaction-mode pooler is not supported (see [Minimum cluster](#minimum-cluster)).
 
 ## Shared state
 
@@ -226,6 +270,7 @@ To carry codex logins, session files and clones over, for a release named `zone-
    helm upgrade zone-apps helm/zone-apps --namespace zone -f <your values> \
      -f helm/zone-apps/values-ha.yaml \
      --set server.agentState.persistence.storageClass=<ReadWriteMany class> \
+     --set server.trustedProxies=<ingress controller pod CIDR> \
      --set highAvailability.externalValkey=true \
      --set server.autoscaling.enabled=false --set server.replicaCount=0
    ```
@@ -302,6 +347,14 @@ The profile sets `haproxy.org/cookie-persistence: zone-server` on the server Ser
 
 The supported ingress is the HAProxy Kubernetes Ingress controller, which reads the annotation from the Service.
 
+## Runner fleet
+
+Every server pod registers as a runner in the [runner fleet](FLEET.md), named after its pod: the HA render sets [`ZONE_RUNNER_NAME`](CONFIGURATION.md#zone_runner_name) from the pod's `metadata.name`. Two live processes sharing a name share its state, and under a Zone Enterprise license only the newer one takes work. So the chart refuses a render that sets `ZONE_RUNNER_NAME` in `server.env` or `commonEnv` with `highAvailability.enabled`, with `server.autoscaling.enabled`, or with `server.replicaCount` above 1.
+
+- **A rollout registers new runners.** A Deployment's new pods get new names, so a cordon or revoke on an old pod's name does not carry over to them ([Names carry state](FLEET.md#names-carry-state)). A container that restarts inside the same pod keeps its name, and its state.
+- **Old names stay listed for 7 days.** The Runners page shows each replaced pod's name as offline. Once a day, retention forgets runners unseen for 7 days that hold no live work, unless they are revoked ([Removing runners and retention](FLEET.md#removing-runners-and-retention)).
+- **Policy applies per replica.** Revoking one replica's runner refuses the chats that land on that replica, while the other replicas take theirs. Cordoning it stops it claiming task runs, reminder turns and auto-project drives, which the other replicas take, but it keeps serving chats. The `zone-server` cookie keeps a browser on the replica it is pinned to, so reloading does not move it: the people pinned to a revoked replica stay refused until that pod is gone, and its replacement registers under a new name, as active.
+
 ## Supported and unsupported
 
 Supported: the three `values-ha.yaml` profiles over your own values, on a cluster that meets the [minimum](#minimum-cluster), with the server's sizing kept within the [connection formula](#postgres-connections).
@@ -314,6 +367,7 @@ Not supported in the HA topology:
 - **`ZONE_AGENT_CALLBACK`.** Its loopback sign-in reaches one pod through `kubectl port-forward`; leave it unset and paste Claude's code.
 - **`server.hostRoot`.** It bind-mounts a directory of whichever node the pod lands on, so replicas on different nodes see different directories.
 - **The default chart values.** `helm/zone-apps/values.yaml` runs 2 to 10 server replicas, each with its own emptyDir agent state, clones, artifacts and workspace. That is not this topology, and agent providers, clones and chat files misbehave across its replicas.
+- **Fewer than 3 nodes.** The server runs on 2, but Postgres does not; see [Scheduling](#scheduling).
 - **Sentinel, cluster-mode Redis, an in-cluster Valkey, a transaction-mode pooler, a ReadWriteOnce claim, SMB or NFSv3 without `lockd`.**
 
 Known limits within it:
@@ -327,7 +381,7 @@ Known limits within it:
 
 ## Licensing and support
 
-The HA code is MIT, like the rest of Zone, and nothing in it is gated: any edition can run the profiles. The member cap of Community still applies however many replicas run (see [LICENSING.md](LICENSING.md#editions)).
+The HA code is MIT, like the rest of Zone, and nothing in it is gated: any edition can run the profiles. The member cap of Community still applies however many replicas run (see [LICENSING.md](LICENSING.md#editions)), and holds exactly across them through `SEATS_LOCK` ([Locks across replicas](#locks-across-replicas)).
 
 What Zone Enterprise adds is the support commitment: Zone supports exactly the topology on this page, at the versions and limits stated here. That boundary is:
 
@@ -350,6 +404,8 @@ The failover coverage runs on every pull request, in `.github/workflows/rust-tes
 | `housekeeping_election` | Cluster sweeps run on one replica and replica sweeps on both; leadership moves without overlap when the leader's session is terminated, partitioned or paused; a digest goes out once per slot and a regression is alerted once across leader changes. |
 | `task_relay` | An answer posted on one replica resolves a run waiting on another; titles and action cards cross once and are never relayed back. |
 | `shared_limiter` | Two replicas sharing Valkey together allow exactly the limit per window, and fall back to their own counts without it. |
+| `shared_sso_throttle` | Two replicas sharing Valkey together allow one client address exactly `ZONE_SSO_REQUESTS_PER_MINUTE` single sign-on requests per window, refuse the next on either with 429 and `Retry-After`, still allow another address, and limit on their own without Valkey. |
+| `high_availability_fleet` | Each replica registers as a runner of its own, under the name it was given, as each pod does. |
 | `cluster_bus` | Delivery between peers, ordering, request and reply, isolation by master key, resubscribing after a killed subscription, and starting with Valkey down with the gauge at 0. |
 
 To run them locally, start a Postgres with pgvector and a Valkey, apply migrations from `runner/zone_server` with `sqlx migrate run`, then from `runner`:
@@ -358,7 +414,8 @@ To run them locally, start a Postgres with pgvector and a Valkey, apply migratio
 export DATABASE_URL=postgres://postgres:postgres@127.0.0.1:<port>/zone_test
 export TEST_DATABASE_URL=$DATABASE_URL REDIS_URL=redis://127.0.0.1:<port>
 cargo test -p zone_server --test integration -- \
-  high_availability housekeeping_election task_relay shared_limiter cluster_bus
+  high_availability housekeeping_election task_relay shared_limiter \
+  shared_sso_throttle cluster_bus
 ```
 
 `scripts/test-helm-ha.sh`, run by `.github/workflows/helm.yml`, checks the profiles' renders: the properties on this page, that the guards refuse what they should, and that the default renders are unchanged.
