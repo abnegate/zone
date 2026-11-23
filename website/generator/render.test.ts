@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { site } from '../config.ts';
-import { baseURLFrom, renderSite } from './build.ts';
+import { baseURLFrom, fragmentName, renderSite } from './build.ts';
 import type { Page } from './Page.ts';
 import { pages } from './pages.ts';
 import { directoryOf, escapeHTML, fill, formatMoney, rootFor, siteValues } from './render.ts';
@@ -50,6 +50,13 @@ describe('links', () => {
   });
 });
 
+describe('fragments', () => {
+  test('names each fragment token after its file in camel case', () => {
+    expect(fragmentName('contact-form.html')).toBe('contactForm');
+    expect(fragmentName('note.html')).toBe('note');
+  });
+});
+
 describe('price', () => {
   test('formats whole and fractional amounts', () => {
     expect(formatMoney(25, 'USD')).toBe('$25');
@@ -80,7 +87,7 @@ describe('price', () => {
     expect(values.enterpriseSeatYearly).toBe('$250');
     expect(values.enterpriseYearlySaving).toBe('$44');
     expect(values.enterpriseCheckoutURL).toBe('https://example.com/enterprise');
-    expect(values.contactHref).toBe(`mailto:${site.contactEmail}`);
+    expect(values.contactFormURL).toBe(site.contactFormURL);
   });
 
   test('escapes HTML special characters', () => {
@@ -128,6 +135,10 @@ describe('site', () => {
         expect(html).toContain(page.indexed ? 'index, follow' : 'noindex');
       });
 
+      test('never opens an email client', () => {
+        expect(html).not.toContain('mailto:');
+      });
+
       test('does not claim Community is uncapped', () => {
         expect(html).not.toMatch(/no (seat|member)[^.<]*caps|no caps/i);
       });
@@ -173,6 +184,28 @@ describe('site', () => {
     expect(rendered.get('index.html')).toContain(limit);
     expect(rendered.get('licensing/index.html')).toContain(limit);
   });
+
+  test('links every Contact to the contact page from any depth', () => {
+    expect(rendered.get('index.html')).toContain('<a href="./contact/">Contact</a>');
+    expect(rendered.get('pricing/index.html')).toContain('<a href="../contact/">Contact</a>');
+    expect(rendered.get('404.html')).toContain('<a href="/zone/contact/">Contact</a>');
+  });
+
+  for (const output of ['contact/index.html', 'pricing/index.html']) {
+    test(`shows the contact form inline on ${output}`, () => {
+      const html = rendered.get(output) ?? '';
+      const form = html.match(/<form class="contact-form"[\s\S]*?<\/form>/)?.[0];
+      expect(form).toBeDefined();
+      expect(form).toContain(`action="${escapeHTML(site.contactFormURL)}" method="post"`);
+      expect(form).toContain(
+        '<input type="hidden" name="redirect" value="https://bitecodehq.github.io/zone/contact/sent/">'
+      );
+      for (const field of ['name', 'email', 'message']) {
+        expect(form).toMatch(new RegExp(`name="${field}"[^>]*required`));
+      }
+      expect(form).toMatch(/name="website"[^>]*tabindex="-1"/);
+    });
+  }
 
   test('marks the current page in the navigation', () => {
     expect(rendered.get('pricing/index.html')).toContain(

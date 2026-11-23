@@ -17,5 +17,5 @@
     "skipLibCheck": true,
     "types": ["@types/bun"]
   },
-  "include": ["config.ts", "generator"]
+  "include": ["config.ts", "generator", "contact"]
 }

@@ -108,7 +108,7 @@
     </p>
     <p class="contact-line">
       Buying for a large organization, or need an invoice instead of a card payment?
-      <a href="{{ contactHref }}">Email {{ contactEmail }}</a>.
+      <a href="#contact">Send us a message</a>.
     </p>
   </div>
 </section>
@@ -237,7 +237,7 @@
         <summary>Do we get an invoice?</summary>
         <p>
           Polar handles payment, receipts and invoices. Larger deals can be invoiced through Polar
-          at the same per-seat price; <a href="{{ contactHref }}">email us</a>.
+          at the same per-seat price; <a href="#contact">send us a message</a>.
         </p>
       </details>
       <details>
@@ -265,13 +265,10 @@
   </div>
 </section>
 
-<section class="section" aria-labelledby="contact-heading">
-  <div class="container cta">
+<section class="section" id="contact" aria-labelledby="contact-heading">
+  <div class="container narrow">
     <h2 id="contact-heading">Questions before you buy?</h2>
     <p class="section-lead">Talk to us about larger deals, invoicing or anything on this page.</p>
-    <div class="actions">
-      <a class="button button-primary" href="{{ contactHref }}">Email {{ contactEmail }}</a>
-      <a class="button button-secondary" href="#plans">Compare plans</a>
-    </div>
+    {{ contactForm }}
   </div>
 </section>
