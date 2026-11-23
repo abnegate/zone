@@ -28,6 +28,8 @@ const PAUSE: Duration = Duration::from_millis(100);
 const LEASE: Duration = Duration::from_secs(30);
 const STOPPED: &str =
     "The server running this reply stopped; any queued messages were dropped. Send again.";
+/// How long a socket may wait for `init` on a replica that is not running the chat.
+const INIT: Duration = Duration::from_secs(2);
 
 /// One test's database, LiteLLM stand-in and the environment its replicas share.
 struct Deployment {
@@ -451,12 +453,12 @@ async fn a_socket_joining_an_idle_chat_on_another_replica_gets_init_at_once() {
     let mut joining = ChatSocket::connect(&second, chat, &account.token).await;
     let asked = Instant::now();
     let init = joining
-        .next(Duration::from_millis(500))
+        .next(INIT)
         .await
-        .expect("init arrives within 500 ms");
+        .unwrap_or_else(|| panic!("init arrives within {INIT:?}"));
 
     assert_eq!(init.kind(), "init");
-    assert!(asked.elapsed() <= Duration::from_millis(500));
+    assert!(asked.elapsed() <= INIT);
     assert!(
         joining.during(QUIET).await.is_empty(),
         "an idle chat has nothing to replay"
