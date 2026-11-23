@@ -42,7 +42,7 @@ use crate::services::github::snapshots::Snapshots;
 use crate::services::github_app::Provider;
 use crate::services::license::renewal;
 use crate::services::license::{Licenses, Stored};
-use crate::services::limit::Limiter;
+use crate::services::limit::{Limiter, Scope};
 use crate::services::mail::AccountMail;
 use crate::services::mcp_servers::hubs::Hubs;
 use crate::services::mcp_servers::status::Policy;
@@ -123,7 +123,7 @@ struct AppStateInner {
     pub embedding_service: Option<Arc<dyn EmbeddingService>>,
     pub context_service: Option<Arc<ContextService>>,
     pub mail: Option<Arc<AccountMail>>,
-    pub limiter: Limiter,
+    pub limiter: Limiter<Uuid>,
     pub sso_throttle: Arc<Throttle>,
     pub sync_registry: SyncRegistry,
     pub pull_registry: PullRegistry,
@@ -255,9 +255,10 @@ impl AppState {
         let master_key = crate::secret::derive(config.encryption_key())
             .expect("Encryption key should be valid (validated in Config::from_env)");
 
+        let bus = Bus::loopback(&master_key);
         let local = RateLimiter::new(RateLimitConfig::default());
         let cleaned = local.clone();
-        let sso_throttle = Arc::new(Throttle::new(config.sso_requests_per_minute));
+        let sso_throttle = Arc::new(Throttle::new(config.sso_requests_per_minute, bus.clone()));
         let swept = Arc::clone(&sso_throttle);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(RATE_LIMITER_CLEANUP_INTERVAL);
@@ -270,8 +271,7 @@ impl AppState {
         });
 
         let github_snapshots = Snapshots::new(&config.github);
-        let bus = Bus::loopback(&master_key);
-        let limiter = Limiter::new(local, bus.clone());
+        let limiter = Limiter::new(local, bus.clone(), Scope::Gather);
 
         let mcp = Hubs::new(
             zone_routing::proxy(),
@@ -325,13 +325,16 @@ impl AppState {
         }
     }
 
-    /// Replaces the bus, and with it the Valkey the rate limit counts in. It
-    /// must be called before the state is cloned, while nothing else can be
-    /// holding the bus it replaces.
+    /// Replaces the bus, and with it the Valkey the rate limit and the
+    /// sign-in throttle count in. It must be called before the state is
+    /// cloned, while nothing else can be holding the bus it replaces. The
+    /// replaced throttle shares its local state with the new one, so the
+    /// cleanup task still sweeps what is counted.
     pub fn with_bus(mut self, bus: Bus) -> Self {
         let inner =
             Arc::get_mut(&mut self.inner).expect("the bus is replaced before the state is shared");
         inner.limiter = inner.limiter.with_bus(bus.clone());
+        inner.sso_throttle = Arc::new(inner.sso_throttle.with_bus(bus.clone()));
         inner.bus = bus;
         self
     }
@@ -457,7 +460,7 @@ impl AppState {
     }
 
     /// The context-gather rate limit, shared by every replica on the bus's Valkey.
-    pub fn limiter(&self) -> &Limiter {
+    pub fn limiter(&self) -> &Limiter<Uuid> {
         &self.inner.limiter
     }
 
@@ -832,6 +835,7 @@ mod tests {
     use abnegate_notify::MockMailer;
     use abnegate_secret::SecretValue;
     use abnegate_vcs::pull_request::ApplicationId;
+    use std::net::IpAddr;
     use std::num::{NonZeroU8, NonZeroU32};
     use std::path::PathBuf;
     use zone_context::embeddings::providers::MockEmbeddingService;
@@ -891,6 +895,20 @@ mod tests {
 
         assert_eq!(state.bus().instance(), instance);
         assert_eq!(state.clone().bus().instance(), instance);
+    }
+
+    #[tokio::test]
+    async fn a_state_moved_to_another_bus_keeps_counting_sign_ins_where_it_left_off() {
+        let state = AppState::for_tests();
+        let client = Some(IpAddr::from([198, 51, 100, 7]));
+        for _ in 0..state.config().sso_requests_per_minute {
+            assert!(state.sso_throttle().check(client).await.allowed);
+        }
+        let bus = Bus::loopback(state.master_key());
+
+        let state = state.with_bus(bus);
+
+        assert!(!state.sso_throttle().check(client).await.allowed);
     }
 
     #[tokio::test]

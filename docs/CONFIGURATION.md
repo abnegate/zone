@@ -153,9 +153,10 @@ For production, regenerate secrets for security.
   SAML post is sent back to the console with that code. IPv6 clients are
   counted by their /64 network. The first refusal of an address in each
   minute is logged as a warning, the rest at debug.
-- **Note**: The count is kept in each server process's memory, so the limit
-  is per replica: with three replicas behind a load balancer, one address
-  can make up to three times as many requests. It must be a whole number of
+- **Note**: With `REDIS_URL` set, every replica counts into one shared count
+  in Valkey, so the limit holds across replicas. Without Valkey, or while it
+  can't be reached, each server process counts in its own memory and the
+  limit is per replica. It must be a whole number of
   at least 1; `0` or anything else stops the server at startup. See
   [SSO.md](SSO.md#rate-limits-and-client-addresses).
 

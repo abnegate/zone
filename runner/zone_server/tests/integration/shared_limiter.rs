@@ -8,7 +8,7 @@ use metrics::Gauge;
 use serde_json::json;
 use uuid::Uuid;
 use zone_server::cluster::Bus;
-use zone_server::services::limit::{Window, key};
+use zone_server::services::limit::{Scope, Window, key};
 use zone_server::state::AppState;
 
 use crate::common::{
@@ -21,11 +21,11 @@ const WINDOW: Duration = Duration::from_secs(60);
 const MARGIN: Duration = Duration::from_secs(10);
 const CONNECTED: Duration = Duration::from_secs(10);
 
-fn redis_url() -> String {
+pub fn redis_url() -> String {
     std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string())
 }
 
-fn closed_port() -> u16 {
+pub fn closed_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -33,7 +33,7 @@ fn closed_port() -> u16 {
         .port()
 }
 
-async fn valkey() -> redis::aio::MultiplexedConnection {
+pub async fn valkey() -> redis::aio::MultiplexedConnection {
     redis::Client::open(redis_url())
         .unwrap()
         .get_multiplexed_async_connection()
@@ -47,7 +47,7 @@ async fn replica(url: &str) -> AppState {
     state.with_bus(bus)
 }
 
-async fn connected(state: &AppState) {
+pub async fn connected(state: &AppState) {
     tokio::time::timeout(
         CONNECTED,
         state.bus().connection().wait_for(|connected| *connected),
@@ -59,7 +59,7 @@ async fn connected(state: &AppState) {
 
 /// Waits out the end of the current fixed window when too little of it is
 /// left for a burst of requests to land inside it.
-async fn start_of_a_window() {
+pub async fn start_of_a_window() {
     let window = WINDOW.as_millis();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -188,7 +188,7 @@ async fn a_count_valkey_cannot_increment_is_limited_by_this_replica_alone() {
     let current = Window::current(WINDOW).index;
     for window in [current, current + 1] {
         redis::cmd("SET")
-            .arg(key(state.bus().namespace(), user, window))
+            .arg(key(state.bus().namespace(), Scope::Gather, user, window))
             .arg("not a count")
             .arg("EX")
             .arg(WINDOW.as_secs() * 2)
@@ -211,7 +211,12 @@ async fn a_shared_count_lives_under_its_namespaced_key_for_one_window() {
 
     assert!(decision.allowed);
     assert_eq!(decision.remaining, LIMIT - 1);
-    let counted = key(state.bus().namespace(), user, Window::current(WINDOW).index);
+    let counted = key(
+        state.bus().namespace(),
+        Scope::Gather,
+        user,
+        Window::current(WINDOW).index,
+    );
     let mut connection = valkey().await;
     let count: u64 = redis::cmd("GET")
         .arg(&counted)
