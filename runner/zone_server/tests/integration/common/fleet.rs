@@ -527,6 +527,19 @@ impl Fleet {
         }
     }
 
+    /// Waits for the provider to be asked for `turns` streamed completions, so a claimed run
+    /// is past its setup and live in its turn, failing if it never is.
+    pub async fn until_asked(&self, turns: usize) {
+        let deadline = tokio::time::Instant::now() + SETTLES_WITHIN;
+        while self.streamed().await < turns {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the provider was never asked for {turns} turn(s)"
+            );
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
     /// Serves `server`'s routes on a port of their own, for its chat socket.
     pub async fn serve(&self, server: &AppState) -> String {
         serve(server.clone()).await

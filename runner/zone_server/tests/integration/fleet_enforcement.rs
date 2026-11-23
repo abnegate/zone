@@ -669,6 +669,7 @@ async fn revoking_stops_a_live_run_keeps_its_task_reserved_and_lands_no_fenced_w
     let run = fleet.admit_in(fleet.workspace).await;
     let running = fleet.spawn(&a.state, &run);
     let (owner, claimed_on) = fleet.until_claimed(run.id).await;
+    fleet.until_asked(1).await;
 
     revoke_elsewhere(&fleet, a.id).await;
     let stopped = fleet.run(run.id).await;
