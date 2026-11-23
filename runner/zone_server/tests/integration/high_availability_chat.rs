@@ -150,6 +150,48 @@ async fn ended_with(socket: &mut ChatSocket, content: &str) -> Vec<Received> {
     }
 }
 
+/// Reads until a queue frame `matches` accepts, and returns that frame.
+async fn queue_where(socket: &mut ChatSocket, matches: impl Fn(&Value) -> bool) -> Value {
+    loop {
+        let frames = socket.until("queue", TURN).await;
+        let queue = &frames.last().expect("a queue frame").frame;
+        if matches(queue) {
+            return queue.clone();
+        }
+    }
+}
+
+fn queued_ids(queue: &Value) -> Vec<String> {
+    queue["messages"]
+        .as_array()
+        .map(|messages| {
+            messages
+                .iter()
+                .map(|message| message["id"].as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Reads until a user message with each of `contents` is saved, then until
+/// the reply to the last of them ends.
+async fn ran(socket: &mut ChatSocket, contents: &[&str]) -> Vec<Received> {
+    let mut pending = contents.to_vec();
+    let mut received = Vec::new();
+    while !pending.is_empty() {
+        let frames = socket.until("message_saved", TURN).await;
+        let content = frames
+            .last()
+            .and_then(|frame| frame.frame["content"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        pending.retain(|wanted| *wanted != content);
+        received.extend(frames);
+    }
+    received.extend(socket.until("message_end", TURN).await);
+    received
+}
+
 async fn valkey() -> SocketAddr {
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
     let url = reqwest::Url::parse(&url).expect("REDIS_URL is a URL");
@@ -530,5 +572,53 @@ async fn a_send_the_owner_answers_late_is_never_reported_busy_and_runs_once() {
             .count(),
         1
     );
+    deployment.retire(vec![first, second]).await;
+}
+
+#[tokio::test]
+async fn a_queue_held_on_one_replica_shows_on_another_and_runs_from_a_send_there() {
+    let deployment = Deployment::new().await;
+    let first = deployment.replica().await;
+    let second = deployment.replica().await;
+    let account = Account::register(&first).await;
+    let chat = account.chat(&first, false).await;
+    deployment.litellm.queue(Reply::counted(200, PAUSE));
+    deployment
+        .litellm
+        .fall_back_to(Reply::new(["Later answer"], Duration::ZERO));
+    let mut owner = ChatSocket::joined(&first, chat, &account.token, JOIN).await;
+    owner.say(Uuid::new_v4(), "Opening question").await;
+    chunked(&mut owner, 2).await;
+    let held = [Uuid::new_v4(), Uuid::new_v4()];
+    owner.say(held[0], "Held one").await;
+    owner.say(held[1], "Held two").await;
+    queue_where(&mut owner, |queue| queued_ids(queue).len() == 2).await;
+    owner.send(json!({"type": "cancel"})).await;
+    queue_where(&mut owner, |queue| queue["held"] == true).await;
+    let expected: Vec<String> = held.iter().map(Uuid::to_string).collect();
+
+    let mut joining = ChatSocket::joined(&second, chat, &account.token, JOIN).await;
+    let shown = joining.until("queue", JOIN).await;
+    let queue = &shown.last().expect("the held queue").frame;
+    assert_eq!(queued_ids(queue), expected, "{queue}");
+    assert_eq!(queue["held"], true, "{queue}");
+
+    joining.say(Uuid::new_v4(), "Fresh question").await;
+    let contents = ["Held one", "Held two", "Fresh question"];
+    let mut frames = ran(&mut joining, &contents).await;
+    frames.extend(joining.during(QUIET).await);
+
+    assert!(errors(&frames).is_empty(), "{:?}", errors(&frames));
+    let messages = account.messages(&first, chat).await;
+    for content in contents {
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["content"] == content)
+                .count(),
+            1,
+            "{content} ran once: {messages:?}"
+        );
+    }
     deployment.retire(vec![first, second]).await;
 }

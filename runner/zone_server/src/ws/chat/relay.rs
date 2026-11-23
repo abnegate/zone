@@ -5,9 +5,12 @@
 //! own (a mirror) forwards those bytes to them, keeps no log of the turn, and
 //! asks the owner for a replay when a socket joins or when frames go missing.
 //! Commands a mirror's sockets send reach the owner as requests on the chat's
-//! control topic, which only the replica holding the chat answers.
+//! control topic, which only the replica holding the chat answers. The
+//! replica answering a chat says so under the chat's serving key, so the
+//! others find it even while it holds a queue and no lease.
 
 mod acknowledgement;
+mod beacon;
 mod command;
 mod floor;
 mod header;
@@ -20,6 +23,8 @@ mod request;
 mod reservation;
 mod route;
 mod seen;
+mod serving;
+mod shown;
 mod watch;
 
 use std::collections::HashMap;
@@ -49,12 +54,14 @@ pub(super) use route::Route;
 pub(super) use watch::Watch;
 
 use acknowledgement::Acknowledgement;
+use beacon::Beacon;
 use header::Header;
 use holding::Holding;
 use outcome::Outcome;
 use replay::Replay;
 use request::Request;
 use seen::Seen;
+use serving::Serving;
 
 /// How long a replica waits for the owner to answer a command or a replay.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
@@ -242,17 +249,27 @@ pub(super) async fn settle(stream: &ChatStream) {
     }
 }
 
-/// The turn in flight on another replica, for a socket joining it. None when
-/// this replica runs the chat or no lease is live, so there is nothing to
-/// wait for. A live lease nobody answers for still arms the watchdog.
+/// The turn in flight on another replica and the queue it holds, for a socket
+/// joining. None when this replica runs the chat, or when no lease is live
+/// and no other replica holds the chat, so there is nothing to wait for. A
+/// live lease nobody answers for still arms the watchdog.
 pub(super) async fn replay(state: &AppState, stream: &ChatStream) -> Option<(Vec<String>, Floor)> {
     let chat = stream.chat_id;
     if !reaches_peers(state) || super::owns(chat) {
         return None;
     }
-    let holding = Holding::live(state.db(), chat).await?;
+    let holding = Holding::live(state.db(), chat).await;
+    if holding.is_none()
+        && !Serving::elsewhere(state.bus(), chat)
+            .await
+            .is_some_and(|serving| serving.holding)
+    {
+        return None;
+    }
     let replay = ask(state, chat).await;
-    stream.watch.lock().await.arm(holding.fence);
+    if let Some(holding) = holding {
+        stream.watch.lock().await.arm(holding.fence);
+    }
     replay.map(|replay| (replay.frames, replay.floor))
 }
 
@@ -274,12 +291,13 @@ async fn ask(state: &AppState, chat: Uuid) -> Option<Replay> {
     })
 }
 
-/// Sends a socket's command to the replica running the chat's turn, or says
-/// this replica should apply it. A command is asked again, as itself, when
-/// the first try goes unanswered. Each try carries a deadline the owner
-/// applies it by or never, so once every try is unanswered the lease alone
-/// decides: a lease that lapsed leaves the chat to this replica, and a live
-/// one means busy.
+/// Sends a socket's command to the replica serving the chat, or says this
+/// replica should apply it. A command is forwarded while another replica
+/// holds the chat's lease or says it serves the chat, and asked again, as
+/// itself, when the first try goes unanswered. Each try carries a deadline
+/// the owner applies it by or never, so once every try is unanswered the
+/// lease alone decides: a lease that lapsed leaves the chat to this replica,
+/// and a live one means busy.
 pub(super) async fn route(
     state: &AppState,
     chat: Uuid,
@@ -287,7 +305,11 @@ pub(super) async fn route(
     session: Uuid,
     command: &Command,
 ) -> Route {
-    if !reaches_peers(state) || super::owns(chat) || Holding::live(state.db(), chat).await.is_none()
+    if !reaches_peers(state) || super::owns(chat) {
+        return Route::Local;
+    }
+    if Holding::live(state.db(), chat).await.is_none()
+        && Serving::elsewhere(state.bus(), chat).await.is_none()
     {
         return Route::Local;
     }
@@ -374,6 +396,7 @@ async fn answering(
 ) {
     let chat = stream.chat_id;
     let mut seen = Seen::new(SEEN_CAPACITY);
+    let mut beacon = Beacon::new(state.bus().clone(), chat, id);
     let mut idle_since: Option<Instant> = None;
     let mut check = tokio::time::interval(IDLE_CHECK);
     loop {
@@ -386,7 +409,13 @@ async fn answering(
                 Err(RecvError::Closed) => break,
             },
             _ = check.tick() => {
-                if super::owns(chat) {
+                let holding = super::owns(chat);
+                if state.drain().is_draining() {
+                    beacon.hide().await;
+                } else {
+                    beacon.show(holding).await;
+                }
+                if holding {
                     idle_since = None;
                     continue;
                 }
@@ -402,6 +431,7 @@ async fn answering(
         }
     }
     SERVING.remove_if(&chat, |_, serving| *serving == id);
+    beacon.hide().await;
 }
 
 /// Applies one forwarded request, answering only as the replica holding the
