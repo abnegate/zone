@@ -33,15 +33,13 @@ fn stub_config() -> McpConfig {
 async fn a_task_run_is_handed_the_attached_mcp_tools() {
     let pool = common::create_test_pool().await;
     let (organization, workspace, user) = common::setup_test_data(&pool).await;
-    workspace_members::add_member(
+    common::seat::seat(
         &pool,
         workspace,
         user,
         workspace_members::WorkspaceRole::Member,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
 
     let hub = McpHub::connect(&stub_config()).await;
     assert_eq!(hub.server_count(), 1, "the stub server has to connect");

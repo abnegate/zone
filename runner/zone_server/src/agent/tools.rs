@@ -3275,15 +3275,13 @@ mod tests {
         )
         .await
         .unwrap();
-        workspace_members::add_member(
+        crate::db::testing::seat(
             &pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Member,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let state = AppState::new(test_config(), pool.clone(), None);
         state.disable_mcp();
 
@@ -3839,15 +3837,13 @@ mod tests {
         )
         .await
         .unwrap();
-        workspace_members::add_member(
+        crate::db::testing::seat(
             &pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Viewer,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let chat: Uuid = sqlx::query_scalar("INSERT INTO chats (workspace_id, title, model_name) VALUES ($1, 'Scope tests', 'test') RETURNING id").bind(workspace.id).fetch_one(&pool).await.unwrap();
         let state = AppState::new(test_config(), pool.clone(), None);
         state.disable_mcp();

@@ -87,15 +87,13 @@ async fn fixture(lifetime: u64) -> Fixture {
     let credentials = register(&router, &pool).await;
 
     let (_, workspace, _) = common::setup_test_data(&pool).await;
-    workspace_members::add_member(
+    common::seat::seat(
         &pool,
         workspace,
         credentials.user,
         workspace_members::WorkspaceRole::Member,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
     let task = tasks::create_task(
         &pool,
         workspace,

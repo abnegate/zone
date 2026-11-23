@@ -104,15 +104,13 @@ async fn setup_test_gathering_data_with_pool(pool: &PgPool) -> (Uuid, Uuid, Stri
     let (_org_id, workspace_id, _) = common::setup_test_data(pool).await;
 
     // Add the authenticated user to the workspace
-    workspace_members::add_member(
+    common::seat::seat(
         pool,
         workspace_id,
         user_id,
         workspace_members::WorkspaceRole::Member,
-        None,
     )
-    .await
-    .expect("Failed to add member");
+    .await;
 
     (workspace_id, user_id, token)
 }

@@ -2286,15 +2286,13 @@ mod tests {
             )
             .await
             .expect("a user");
-            workspace_members::add_member(
+            crate::db::testing::seat(
                 &pool,
                 workspace.id,
                 user.id,
                 workspace_members::WorkspaceRole::Member,
-                None,
             )
-            .await
-            .expect("a membership");
+            .await;
             let finalized = auto_projects::finalize(
                 &pool,
                 workspace.id,

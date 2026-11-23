@@ -3227,7 +3227,7 @@ async fn another_projects_sync_has_no_webhook_secret_to_set() {
 
 #[tokio::test]
 async fn a_read_only_member_cannot_set_a_webhook_secret() {
-    use zone_server::db::workspace_members::{self, WorkspaceRole};
+    use zone_server::db::workspace_members::WorkspaceRole;
 
     let client = common::TestClient::with_db().await;
     let (owner, _owner_id) = registered(&client).await;
@@ -3236,15 +3236,13 @@ async fn a_read_only_member_cannot_set_a_webhook_secret() {
     let config = created["config"]["id"].as_str().unwrap().to_string();
     let secret = created["webhook_secret"].as_str().unwrap().to_string();
     let (viewer, viewer_id) = registered(&client).await;
-    workspace_members::add_member(
+    common::seat::seat(
         client.state().db(),
         Uuid::parse_str(&workspace).unwrap(),
         viewer_id,
         WorkspaceRole::Viewer,
-        None,
     )
-    .await
-    .expect("the workspace takes the viewer");
+    .await;
 
     listed_config(&client, &viewer, &project).await;
     for body in [json!({}), json!({ "secret": "viewer-chosen-secret-123" })] {
@@ -3265,15 +3263,13 @@ async fn joined(
     role: zone_server::db::workspace_members::WorkspaceRole,
 ) -> (String, Uuid) {
     let (token, user) = registered(client).await;
-    zone_server::db::workspace_members::add_member(
+    common::seat::seat(
         client.state().db(),
         Uuid::parse_str(workspace).unwrap(),
         user,
         role,
-        None,
     )
-    .await
-    .expect("the workspace takes the member");
+    .await;
     (token, user)
 }
 

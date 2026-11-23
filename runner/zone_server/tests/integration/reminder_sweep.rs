@@ -45,14 +45,13 @@ async fn seed(pool: &PgPool) -> Firings {
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+    crate::common::seat::seat(
+        pool,
+        workspace,
+        user,
+        zone_server::db::workspace_members::WorkspaceRole::Member,
     )
-    .bind(workspace)
-    .bind(user)
-    .execute(pool)
-    .await
-    .unwrap();
+    .await;
     sqlx::query(
         "INSERT INTO chats (id, workspace_id, title, model_name) VALUES ($1, $2, 'Sweep', 'test')",
     )

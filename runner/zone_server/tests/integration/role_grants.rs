@@ -97,7 +97,11 @@ async fn seat_workspace(
     custom_role: Option<Uuid>,
 ) {
     sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, user_id, role, custom_role_id) \
+        "WITH joined AS ( \
+           INSERT INTO organization_members (organization_id, user_id, role) \
+           SELECT organization_id, $2, 'member' FROM workspaces WHERE id = $1 \
+           ON CONFLICT DO NOTHING) \
+         INSERT INTO workspace_members (workspace_id, user_id, role, custom_role_id) \
          VALUES ($1, $2, $3, $4)",
     )
     .bind(workspace)
@@ -444,7 +448,11 @@ async fn workspace_permits_ignores_a_stored_name_no_custom_role_may_carry() {
             .expect("a stored permission past the check");
     }
     sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, user_id, role, custom_role_id) \
+        "WITH joined AS ( \
+           INSERT INTO organization_members (organization_id, user_id, role) \
+           SELECT organization_id, $2, 'member' FROM workspaces WHERE id = $1 \
+           ON CONFLICT DO NOTHING) \
+         INSERT INTO workspace_members (workspace_id, user_id, role, custom_role_id) \
          VALUES ($1, $2, $3, $4)",
     )
     .bind(workspace)

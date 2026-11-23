@@ -7,6 +7,7 @@
 //! admin standing, the count says two are privileged and lets the owner go.
 
 use crate::common::create_test_pool;
+use crate::common::seat::seat;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 use zone_server::db::custom_roles::Assignment;
@@ -45,16 +46,8 @@ async fn workspace_with_owner_and_admin(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
 
     let owner = user(pool).await;
     let admin = user(pool).await;
-    for (member, role) in [(owner, "owner"), (admin, "admin")] {
-        sqlx::query(
-            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)",
-        )
-        .bind(workspace)
-        .bind(member)
-        .bind(role)
-        .execute(pool)
-        .await
-        .expect("a member is seated");
+    for (member, role) in [(owner, WorkspaceRole::Owner), (admin, WorkspaceRole::Admin)] {
+        seat(pool, workspace, member, role).await;
     }
     (workspace, owner, admin)
 }
@@ -178,14 +171,7 @@ async fn an_admin_cannot_grant_a_rank_only_an_owner_grants() {
     let pool = create_test_pool().await;
     let (workspace, owner, admin) = workspace_with_owner_and_admin(&pool).await;
     let member = user(&pool).await;
-    sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
-    )
-    .bind(workspace)
-    .bind(member)
-    .execute(&pool)
-    .await
-    .expect("a member is seated");
+    seat(&pool, workspace, member, WorkspaceRole::Member).await;
 
     for granted in [WorkspaceRole::Admin, WorkspaceRole::Owner] {
         let outcome = change_role(

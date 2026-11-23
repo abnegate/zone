@@ -425,6 +425,7 @@ mod tests {
 
     use super::*;
     use crate::db::chats::create_chat;
+    use crate::db::workspace_members::WorkspaceRole;
 
     async fn pool() -> PgPool {
         PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
@@ -605,14 +606,7 @@ mod tests {
         .execute(pool)
         .await
         .expect("a user");
-        sqlx::query(
-            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
-        )
-        .bind(workspace)
-        .bind(user)
-        .execute(pool)
-        .await
-        .expect("a membership");
+        crate::db::testing::seat(pool, workspace, user, WorkspaceRole::Member).await;
         (workspace, user)
     }
 

@@ -4129,15 +4129,13 @@ mod tests {
         )
         .await
         .unwrap();
-        workspace_members::add_member(
+        crate::db::testing::seat(
             &pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Member,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let task = tasks::create_task(
             &pool,
             workspace.id,
@@ -4277,15 +4275,13 @@ mod tests {
         )
         .await
         .unwrap();
-        workspace_members::add_member(
+        crate::db::testing::seat(
             &pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Member,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let task = tasks::create_task(
             &pool,
             workspace.id,
@@ -4509,15 +4505,13 @@ mod tests {
         )
         .await
         .unwrap();
-        workspace_members::add_member(
+        crate::db::testing::seat(
             &pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Member,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let task = tasks::create_task(
             &pool,
             workspace.id,
@@ -4642,15 +4636,13 @@ mod tests {
         )
         .await
         .unwrap();
-        workspace_members::add_member(
+        crate::db::testing::seat(
             &pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Member,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let task = tasks::create_task(
             &pool,
             workspace.id,
@@ -4916,15 +4908,13 @@ mod tests {
         )
         .await
         .unwrap();
-        workspace_members::add_member(
+        crate::db::testing::seat(
             &pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Member,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let task = tasks::create_task_as(
             &pool,
             workspace.id,
@@ -5087,15 +5077,13 @@ mod tests {
             )
             .await
             .unwrap();
-            workspace_members::add_member(
+            crate::db::testing::seat(
                 &pool,
                 workspace.id,
                 user.id,
                 workspace_members::WorkspaceRole::Member,
-                None,
             )
-            .await
-            .unwrap();
+            .await;
             let task = tasks::create_task_as(
                 &pool,
                 workspace.id,
@@ -6778,15 +6766,13 @@ mod watchdog_tests {
         )
         .await
         .unwrap();
-        workspace_members::add_member(
+        crate::db::testing::seat(
             &pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Member,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let task = tasks::create_task(
             &pool,
             workspace.id,
@@ -7394,15 +7380,13 @@ mod watchdog_tests {
         )
         .await
         .unwrap();
-        workspace_members::add_member(
+        crate::db::testing::seat(
             &pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Member,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let mut runs = Vec::new();
         for title in ["Parked asker", "Free runner"] {
             let task = tasks::create_task_as(
@@ -8723,15 +8707,13 @@ mod cli_tests {
             )
             .await
             .unwrap();
-            workspace_members::add_member(
+            crate::db::testing::seat(
                 &pool,
                 workspace.id,
                 user.id,
                 workspace_members::WorkspaceRole::Member,
-                None,
             )
-            .await
-            .unwrap();
+            .await;
             let task = tasks::create_task_as(
                 &pool,
                 workspace.id,

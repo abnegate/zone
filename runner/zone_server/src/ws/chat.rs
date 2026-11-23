@@ -6183,15 +6183,13 @@ cat 'DIR/reply.jsonl'
                     .await
                     .expect("a user")
                     .id;
-                    db::workspace_members::add_member(
+                    db::testing::seat(
                         &organization.pool,
                         organization.workspace,
                         user,
                         WorkspaceRole::Member,
-                        None,
                     )
-                    .await
-                    .expect("a member of the workspace");
+                    .await;
                     Self {
                         organization,
                         state,
@@ -7994,15 +7992,13 @@ cat 'DIR/reply.jsonl'
         )
         .await
         .unwrap();
-        workspace_members::add_member(
+        crate::db::testing::seat(
             pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Owner,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let chat = chats::create_chat(
             pool,
             Some(workspace.id),

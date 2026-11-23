@@ -1623,15 +1623,13 @@ async fn waiting_on_a_task_run_is_refused_on_the_task_surface_and_scoped_to_one_
     // The same person, a member of both workspaces, and a run that belongs to
     // the other one.
     let (_organization, elsewhere, stranger) = common::setup_workspace_member(&pool).await;
-    zone_server::db::workspace_members::add_member(
+    common::seat::seat(
         &pool,
         elsewhere,
         leased.user,
         zone_server::db::workspace_members::WorkspaceRole::Member,
-        None,
     )
-    .await
-    .expect("the caller joins the other workspace too");
+    .await;
     let foreign = prepared_run_in(&pool, elsewhere, stranger, "In another workspace").await;
     let refused = chat
         .execute(wait::WAIT_FOR, &waiting_on_run(foreign.run))

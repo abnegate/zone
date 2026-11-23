@@ -16,7 +16,6 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_server::db::analytics;
-use zone_server::db::workspace_members;
 use zone_server::db::workspace_members::WorkspaceRole;
 
 const RUN_CAP: i32 = 10_000;
@@ -179,15 +178,7 @@ impl Board {
 
     async fn viewer(&self) -> String {
         let (token, user) = registered(&self.client).await;
-        workspace_members::add_member(
-            self.pool(),
-            self.workspace,
-            user,
-            WorkspaceRole::Viewer,
-            None,
-        )
-        .await
-        .expect("a viewer joins the workspace");
+        crate::common::seat::seat(self.pool(), self.workspace, user, WorkspaceRole::Viewer).await;
         token
     }
 }

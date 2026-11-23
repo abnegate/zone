@@ -81,25 +81,33 @@ pub async fn verify_sources_in_workspace(
     Ok(count == source_ids.len() as i64)
 }
 
-pub async fn in_organization(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<bool> {
-    sqlx::query_scalar(
+/// Whether the user is an active member of the workspace's active
+/// organization, share-locking that membership for the rest of the
+/// transaction: a suspension or removal of the member waits for a seat being
+/// written beside it, or the seat waits for them and finds the member gone.
+pub async fn in_organization(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<bool> {
+    let held: Option<i32> = sqlx::query_scalar(
         r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM workspaces w
-            JOIN organizations o ON o.id = w.organization_id
-            JOIN organization_members m ON m.organization_id = o.id
-            WHERE w.id = $1
-              AND m.user_id = $2
-              AND m.is_active
-              AND o.is_active IS NOT FALSE
-        )
+        SELECT 1
+        FROM workspaces w
+        JOIN organizations o ON o.id = w.organization_id
+        JOIN organization_members m ON m.organization_id = o.id
+        WHERE w.id = $1
+          AND m.user_id = $2
+          AND m.is_active
+          AND o.is_active IS NOT FALSE
+        FOR SHARE OF m
         "#,
     )
     .bind(workspace_id)
     .bind(user_id)
-    .fetch_one(pool)
-    .await
+    .fetch_optional(connection)
+    .await?;
+    Ok(held.is_some())
 }
 
 /// Add a user to a workspace with a specific role
@@ -272,7 +280,7 @@ pub struct WorkspaceMemberRow {
 
 /// Get a workspace member by workspace and user ID
 pub async fn get_member(
-    pool: &PgPool,
+    executor: impl Executor<'_, Database = Postgres>,
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> DbResult<Option<WorkspaceMemberRow>> {
@@ -286,7 +294,7 @@ pub async fn get_member(
         workspace_id,
         user_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(row.map(|r| {
@@ -586,6 +594,12 @@ pub async fn membership(
         INNER JOIN workspaces w ON w.id = wm.workspace_id
         {join}
         WHERE wm.workspace_id = $1 AND wm.user_id = $2 AND wm.is_active = TRUE
+          AND EXISTS (
+            SELECT 1 FROM organization_members om
+            WHERE om.organization_id = w.organization_id
+              AND om.user_id = wm.user_id
+              AND om.is_active
+          )
         "#
     )))
     .bind(workspace_id)
