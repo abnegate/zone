@@ -495,6 +495,19 @@ impl ChatTools {
             .map_or(Origin::Member, |scope| scope.origin)
     }
 
+    /// Whether whoever these tools act for may still write to their
+    /// workspace. Only the database saying no withdraws them; a recheck that
+    /// fails to reach it does not.
+    pub(crate) async fn permitted(&self) -> bool {
+        let Some(scope) = &self.scope else {
+            return true;
+        };
+        !matches!(
+            workspace_members::can_write(scope.state.db(), scope.workspace_id, scope.user_id).await,
+            Ok(false)
+        )
+    }
+
     /// No tools at all, for a chat that answers from the server's own context.
     ///
     /// Built directly rather than through `assemble`, which would

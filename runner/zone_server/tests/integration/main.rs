@@ -178,6 +178,7 @@ mod task_title;
 mod tenant_admin_permissions;
 mod tenant_isolation;
 mod test_config;
+mod turn_access;
 mod wait_for;
 mod workspace_analytics;
 mod workspace_creation_atomicity;

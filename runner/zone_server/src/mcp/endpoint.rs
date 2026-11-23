@@ -64,16 +64,11 @@ fn own_address(config: &Config) -> String {
 
 pub async fn serve(headers: HeaderMap, body: Bytes) -> HttpResponse {
     let Some(turn) = bearer(&headers).and_then(Turn::find) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Bearer")],
-            axum::Json(Response::failed(
-                Value::Null,
-                ErrorData::new(ErrorCode::INVALID_REQUEST, "Unauthorized", None),
-            )),
-        )
-            .into_response();
+        return unauthorized();
     };
+    if !turn.tools().permitted().await {
+        return unauthorized();
+    }
 
     let request: Request = match serde_json::from_slice(&body) {
         Ok(request) => request,
@@ -103,6 +98,18 @@ pub async fn serve(headers: HeaderMap, body: Bytes) -> HttpResponse {
     };
 
     axum::Json(Response::of(id, answer)).into_response()
+}
+
+fn unauthorized() -> HttpResponse {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer")],
+        axum::Json(Response::failed(
+            Value::Null,
+            ErrorData::new(ErrorCode::INVALID_REQUEST, "Unauthorized", None),
+        )),
+    )
+        .into_response()
 }
 
 async fn dispatch(turn: &Turn, method: &str, params: Option<Value>) -> Result<Value, ErrorData> {
@@ -228,7 +235,11 @@ mod tests {
     use super::super::testing::{open, scope, tools, wait_for_card, write};
     use super::*;
     use crate::agent::wait::WAIT_FOR;
-    use crate::agent::{ASK_USER, ApprovalGate, ApprovalPolicy};
+    use crate::agent::{ASK_USER, ApprovalGate, ApprovalPolicy, ChatTools, WorkspaceScope};
+    use crate::db::organization_members::{self, OrgRole};
+    use crate::db::tasks::Origin;
+    use crate::db::workspace_members::{self, WorkspaceRole};
+    use crate::db::{organizations, users, workspaces};
     use crate::state::AppState;
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
@@ -696,6 +707,85 @@ mod tests {
         assert_eq!(
             local_endpoint(&config),
             format!("http://127.0.0.1:8421{PATH}")
+        );
+    }
+
+    /// The member can be removed through another replica than the one serving
+    /// the turn, so the token has to stop working on that replica as well.
+    #[tokio::test]
+    async fn a_token_stops_working_once_its_member_loses_the_workspace() {
+        let pool = sqlx::PgPool::connect(
+            &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+        )
+        .await
+        .unwrap();
+        let organization = organizations::create_organization(
+            &pool,
+            "Endpoint",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Endpoint",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "unused",
+            Some("Endpoint member"),
+            false,
+        )
+        .await
+        .unwrap();
+        organization_members::add_member(&pool, organization.id, user.id, OrgRole::Member, None)
+            .await
+            .unwrap();
+        workspace_members::add_member(&pool, workspace.id, user.id, WorkspaceRole::Member, None)
+            .await
+            .unwrap();
+        let state = AppState::new(crate::state::test_config(), pool.clone(), None);
+        state.disable_mcp();
+        let chat = Uuid::new_v4();
+        let tools = ChatTools::build(WorkspaceScope {
+            state,
+            workspace_id: workspace.id,
+            chat_id: Some(chat),
+            user_id: user.id,
+            offline: false,
+            origin: Origin::Member,
+        })
+        .await;
+        let (sender, _events) = unbounded_channel();
+        let lease =
+            Turn::new(scope(chat), Arc::new(tools), sender).open(endpoint("http://127.0.0.1:8080"));
+        let token = lease.toolset().token.expose().to_string();
+
+        let (status, answer) = post(Some(&token), rpc(16, protocol::TOOLS_LIST, json!({}))).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        sqlx::query(
+            "UPDATE workspace_members SET is_active = FALSE \
+             WHERE workspace_id = $1 AND user_id = $2",
+        )
+        .bind(workspace.id)
+        .bind(user.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (status, _) = post(Some(&token), rpc(17, protocol::TOOLS_LIST, json!({}))).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a departed member's turn kept reaching zone's tools"
         );
     }
 }

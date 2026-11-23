@@ -560,7 +560,7 @@ async fn lapse(harness: &Harness, turn: Uuid, lease: Lease) {
 
 /// Waits for the provider to have been asked for `count` streamed answers, so
 /// every scripted reply up to then has gone to the turn it was meant for.
-async fn until_requests(harness: &Harness, count: usize) {
+pub(crate) async fn until_requests(harness: &Harness, count: usize) {
     for _ in 0..300 {
         if streamed_requests(harness).await >= count {
             return;
