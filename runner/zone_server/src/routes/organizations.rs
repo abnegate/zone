@@ -21,7 +21,7 @@ use crate::db::organization_members::{
     RoleChange,
 };
 use crate::db::suspensions::{self, Successor};
-use crate::db::{organizations, users, workspaces};
+use crate::db::{invitations, organizations, users, workspaces};
 use crate::services::login::devices;
 use crate::services::members;
 use crate::state::AppState;
@@ -529,6 +529,28 @@ async fn audit_member(
     .await;
 }
 
+async fn audit_invitation(
+    state: &AppState,
+    actor: &OrganizationMember,
+    invitation: &invitations::Revoked,
+) {
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: Some(actor.organization_id),
+            workspace_id: None,
+            actor_id: actor.user_id,
+            actor_email: &actor.email,
+            action: actions::INVITATION_REVOKED,
+            resource_type: resources::INVITATION,
+            resource_id: Some(invitation.id),
+            old_values: Some(serde_json::json!({ "email": invitation.email })),
+            new_values: None,
+        },
+    )
+    .await;
+}
+
 async fn audit_successor(state: &AppState, actor: &OrganizationMember, successor: &Successor) {
     audit(
         state.db(),
@@ -802,10 +824,16 @@ pub async fn remove_member(
     )
     .await
     {
-        Ok(MemberRemoval::Removed(suspension)) => {
+        Ok(MemberRemoval::Removed {
+            suspension,
+            invitations,
+        }) => {
             audit_member(&state, &member, actions::MEMBER_REMOVED, path.user_id, None).await;
             for successor in &suspension.successors {
                 audit_successor(&state, &member, successor).await;
+            }
+            for invitation in &invitations {
+                audit_invitation(&state, &member, invitation).await;
             }
             if let Err(error) = members::halt(&state, member.organization_id, path.user_id).await {
                 tracing::error!(%error, user_id = %path.user_id, "Failed to halt a removed member's running work");

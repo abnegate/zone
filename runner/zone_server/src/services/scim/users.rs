@@ -10,14 +10,14 @@ use super::entitlement::Entitlement;
 use super::failure::Failure;
 use super::{password, record, resource};
 use crate::db::audit::{actions, resources};
-use crate::db::organization_members::{self, OrgRole};
+use crate::db::organization_members;
 use crate::db::scim::{
-    Applied, Criterion, Deactivation, Link, Removal, Trigger, accounts, membership, roles,
+    Applied, Criterion, Deactivation, Joining, Link, Removal, Trigger, accounts, membership, roles,
     users as links,
 };
-use crate::db::{suspensions, users};
+use crate::db::users;
 use crate::services::account::provision;
-use crate::services::members;
+use crate::services::members::{self, SignOut};
 use crate::state::AppState;
 
 const ALREADY_MEMBER: &str = "That person is already a member of the organization.";
@@ -88,6 +88,7 @@ pub async fn create(
     let organization_id = client.organization_id;
     let changes = UserChanges::from_document(document);
     let email = address(document)?;
+    let inactive = changes.deactivates();
 
     let account = match users::find_by_email_ignoring_case(state.db(), &email)
         .await?
@@ -104,16 +105,22 @@ pub async fn create(
     {
         return Err(conflict(ALREADY_MEMBER));
     }
-    let cap = members::cap(state).await?;
-    members::check(state, cap, account).await?;
+    let cap = if inactive {
+        None
+    } else {
+        let cap = members::cap(state).await?;
+        members::check(state, cap, account).await?;
+        Some(cap)
+    };
     let provisioned = match account {
         Some(_) => None,
         None => Some(password::unusable().await?),
     };
 
     let mut transaction = state.db().begin().await?;
-    members::admit(&mut transaction, cap, account).await?;
-    organization_members::lock_owners(&mut transaction, organization_id).await?;
+    if let Some(cap) = cap {
+        members::admit(&mut transaction, cap, account).await?;
+    }
     let user_id = match account {
         Some(user_id) => user_id,
         None => {
@@ -131,15 +138,11 @@ pub async fn create(
             .id
         }
     };
-    suspensions::forget(&mut *transaction, organization_id, user_id).await?;
-    organization_members::reactivate_member(
-        &mut *transaction,
-        organization_id,
-        user_id,
-        OrgRole::Member,
-        None,
-    )
-    .await?;
+    if membership::join(&mut transaction, organization_id, user_id, !inactive).await?
+        == Joining::AlreadyMember
+    {
+        return Err(conflict(ALREADY_MEMBER));
+    }
     let mut link = Link::new(organization_id, user_id, document.user_name.trim());
     apply(&mut link, &changes);
     link.email = Some(email);
@@ -154,6 +157,11 @@ pub async fn create(
         Trigger::Membership,
     )
     .await?;
+    let deprovisioned = if inactive {
+        Some(members::deprovision(&mut transaction, organization_id, user_id).await?)
+    } else {
+        None
+    };
     transaction.commit().await?;
 
     let mut attributes = described(&UserChanges {
@@ -161,6 +169,10 @@ pub async fn create(
         ..changes.clone()
     });
     attributes.insert("created_account".to_owned(), json!(account.is_none()));
+    if let Some(deprovisioned) = &deprovisioned {
+        attributes.extend(active(false));
+        attributes.extend(departed(deprovisioned.sign_out));
+    }
     describe_role(&mut attributes, &applied);
     record::audit(
         state,
@@ -171,9 +183,8 @@ pub async fn create(
         attributes,
     )
     .await;
-
-    if changes.deactivates() {
-        return update(state, client, user_id, changes.only_deactivation()).await;
+    if let Some(deprovisioned) = &deprovisioned {
+        record::invitations(state, client, &deprovisioned.invitations).await;
     }
     get(state, client, user_id).await
 }
@@ -201,7 +212,8 @@ pub async fn update(
         active: None,
         ..changes.clone()
     };
-    let deactivating = changes.deactivates() && member.active;
+    let deprovisioning = changes.deactivates();
+    let deactivating = deprovisioning && member.active;
     let reactivating = changes.active == Some(true) && !member.active;
     let cap = if reactivating {
         Some(members::cap(state).await?)
@@ -223,8 +235,10 @@ pub async fn update(
         let link = links::upsert(&mut *transaction, &link)
             .await
             .map_err(Failure::stored)?;
-        if link.provisioned_password.is_some()
-            && links::sole_organization(&mut *transaction, organization_id, user_id).await?
+        let renaming = attributes.email.is_some() || attributes.display_name.is_some();
+        if renaming
+            && link.provisioned_password.is_some()
+            && accounts::renamable(&mut transaction, organization_id, user_id).await?
         {
             accounts::update(
                 &mut *transaction,
@@ -265,13 +279,18 @@ pub async fn update(
     } else {
         Applied::Skipped
     };
+    let deprovisioned = if deprovisioning {
+        Some(members::deprovision(&mut transaction, organization_id, user_id).await?)
+    } else {
+        None
+    };
     transaction.commit().await?;
 
-    if changes.deactivates() {
-        members::deprovision(state, organization_id, user_id).await?;
+    if deprovisioning {
+        halt(state, organization_id, user_id).await;
     }
 
-    if !attributes.is_empty() || !(deactivating || reactivating) {
+    if !attributes.is_empty() || !(deprovisioning || reactivating) {
         let mut described = described(&attributes);
         if !reactivating {
             describe_role(&mut described, &applied);
@@ -286,17 +305,26 @@ pub async fn update(
         )
         .await;
     }
-    if deactivating {
-        record::audit(
-            state,
-            client,
-            actions::SCIM_USER_DEACTIVATED,
-            resources::MEMBER,
-            user_id,
-            active(false),
-        )
-        .await;
+    if let Some(deprovisioned) = &deprovisioned {
+        let signed_out = matches!(
+            deprovisioned.sign_out,
+            SignOut::Revoked { sessions } if sessions > 0
+        );
+        if deactivating || signed_out {
+            let mut described = active(false);
+            described.extend(departed(deprovisioned.sign_out));
+            record::audit(
+                state,
+                client,
+                actions::SCIM_USER_DEACTIVATED,
+                resources::MEMBER,
+                user_id,
+                described,
+            )
+            .await;
+        }
         record::successors(state, client, &successors).await;
+        record::invitations(state, client, &deprovisioned.invitations).await;
     }
     if reactivating {
         let mut described = active(true);
@@ -317,6 +345,8 @@ pub async fn update(
 pub async fn delete(state: &AppState, client: &ScimClient, user_id: Uuid) -> Result<(), Failure> {
     let organization_id = client.organization_id;
     let mut transaction = state.db().begin().await?;
+    organization_members::lock_owners(&mut transaction, organization_id).await?;
+    let deprovisioned = members::deprovision(&mut transaction, organization_id, user_id).await?;
     let successors = match membership::remove(&mut transaction, organization_id, user_id).await? {
         Removal::Missing => return Err(Failure::Protocol(Error::NotFound)),
         Removal::LastOwner => return Err(Failure::LastOwner),
@@ -324,18 +354,34 @@ pub async fn delete(state: &AppState, client: &ScimClient, user_id: Uuid) -> Res
     };
     transaction.commit().await?;
 
-    members::deprovision(state, organization_id, user_id).await?;
+    halt(state, organization_id, user_id).await;
     record::audit(
         state,
         client,
         actions::SCIM_USER_DELETED,
         resources::MEMBER,
         user_id,
-        Map::new(),
+        departed(deprovisioned.sign_out),
     )
     .await;
     record::successors(state, client, &successors).await;
+    record::invitations(state, client, &deprovisioned.invitations).await;
     Ok(())
+}
+
+async fn halt(state: &AppState, organization_id: Uuid, user_id: Uuid) {
+    if let Err(error) = members::halt(state, organization_id, user_id).await {
+        tracing::error!(%error, %organization_id, %user_id, "Failed to stop a deprovisioned member's running work");
+    }
+}
+
+fn departed(sign_out: SignOut) -> Map<String, Value> {
+    let mut attributes = Map::new();
+    attributes.insert(
+        "signed_out".to_owned(),
+        json!(matches!(sign_out, SignOut::Revoked { .. })),
+    );
+    attributes
 }
 
 fn criteria(filter: Option<&Filter>) -> Option<Vec<Criterion>> {

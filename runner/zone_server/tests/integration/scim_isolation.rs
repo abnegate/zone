@@ -519,3 +519,184 @@ async fn scim_renames_an_account_only_while_no_other_organization_shares_it() {
 
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn another_organizations_token_cannot_sign_out_its_members() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    let neighbour = neighbour(&fixture).await;
+    let only_ours = fixture.stranger().await;
+
+    for person in [&neighbour.member, &neighbour.owner, &only_ours] {
+        let joined = fixture
+            .scim_post(
+                "/Users",
+                &token.secret,
+                &user(&person.email, &Uuid::new_v4().to_string()),
+            )
+            .await;
+        assert_scim(&joined, StatusCode::CREATED);
+        let deactivated = fixture
+            .scim_patch(
+                &format!("/Users/{}", person.id),
+                &token.secret,
+                &patch(json!([{ "op": "replace", "value": { "active": false } }])),
+            )
+            .await;
+        assert_scim(&deactivated, StatusCode::OK);
+        assert_eq!(
+            held_in(&fixture, fixture.organization, person.id)
+                .await
+                .map(|(.., active)| active),
+            Some(false),
+            "the deactivation did not take this organization's access"
+        );
+    }
+    assert!(
+        fixture.signed_in(&neighbour.member.token).await,
+        "deactivating another organization's member signed them out"
+    );
+    assert!(
+        fixture.signed_in(&neighbour.owner.token).await,
+        "deactivating another organization's owner signed them out"
+    );
+    assert!(
+        !fixture.signed_in(&only_ours.token).await,
+        "a member of no other shared organization stayed signed in"
+    );
+
+    fixture
+        .scim_delete(&format!("/Users/{}", neighbour.member.id), &token.secret)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert_eq!(
+        held_in(&fixture, fixture.organization, neighbour.member.id).await,
+        None
+    );
+    assert!(
+        fixture.signed_in(&neighbour.member.token).await,
+        "deleting another organization's member signed them out"
+    );
+    assert_eq!(
+        held_in(&fixture, neighbour.organization, neighbour.member.id).await,
+        Some((OrgRole::Member.as_str().to_owned(), None, true))
+    );
+
+    fixture.cleanup().await;
+}
+
+async fn claim(fixture: &Fixture, statement: &'static str, user: Uuid) {
+    sqlx::query(statement)
+        .bind(user)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+}
+
+async fn linked_email(fixture: &Fixture, user: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT email FROM scim_users WHERE organization_id = $1 AND user_id = $2")
+        .bind(fixture.organization)
+        .bind(user)
+        .fetch_one(fixture.pool())
+        .await
+        .unwrap()
+}
+
+async fn verified(fixture: &Fixture, user: Uuid) -> bool {
+    sqlx::query_scalar("SELECT email_verified FROM users WHERE id = $1")
+        .bind(user)
+        .fetch_one(fixture.pool())
+        .await
+        .unwrap()
+}
+
+fn readdressed(email: &str) -> Value {
+    patch(json!([
+        { "op": "replace", "path": "displayName", "value": "Taken Over" },
+        { "op": "replace", "path": "emails[type eq \"work\"].value", "value": email },
+    ]))
+}
+
+#[tokio::test]
+async fn a_claimed_account_keeps_its_email() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    let provider: Uuid = sqlx::query_scalar(
+        "INSERT INTO sso_providers (display_name, issuer, client_id, client_secret) \
+         VALUES ('Acme', 'https://idp.acme.test', 'zone', 'secret') RETURNING id",
+    )
+    .fetch_one(fixture.pool())
+    .await
+    .unwrap();
+    let claims = [
+        "UPDATE users SET last_login_at = NOW() WHERE id = $1",
+        "UPDATE users SET password_hash = 'reset by its owner' WHERE id = $1",
+        "UPDATE users SET is_admin = TRUE WHERE id = $1",
+    ];
+    let mut claimed = Vec::with_capacity(claims.len() + 1);
+    for statement in claims {
+        let user = fixture.provision(&token.secret, &test_email()).await;
+        claim(&fixture, statement, user).await;
+        claimed.push(user);
+    }
+    let linked = fixture.provision(&token.secret, &test_email()).await;
+    sqlx::query(
+        "INSERT INTO sso_identities (provider_id, user_id, subject, email) \
+         SELECT $1, id, 'subject', email FROM users WHERE id = $2",
+    )
+    .bind(provider)
+    .bind(linked)
+    .execute(fixture.pool())
+    .await
+    .unwrap();
+    claimed.push(linked);
+
+    for user in claimed {
+        let before = account(&fixture, user).await;
+        let email = test_email();
+        let renamed = fixture
+            .scim_patch(
+                &format!("/Users/{user}"),
+                &token.secret,
+                &readdressed(&email),
+            )
+            .await;
+        assert_scim(&renamed, StatusCode::OK);
+        assert_eq!(renamed.json_value()["emails"][0]["value"], json!(email));
+        assert_eq!(
+            account(&fixture, user).await,
+            before,
+            "SCIM rewrote the email of an account its owner already claimed"
+        );
+        assert_eq!(linked_email(&fixture, user).await, Some(email));
+    }
+
+    let untouched = fixture.provision(&token.secret, &test_email()).await;
+    claim(
+        &fixture,
+        "UPDATE users SET email_verified = TRUE WHERE id = $1",
+        untouched,
+    )
+    .await;
+    let email = test_email();
+    assert_scim(
+        &fixture
+            .scim_patch(
+                &format!("/Users/{untouched}"),
+                &token.secret,
+                &readdressed(&email),
+            )
+            .await,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        account(&fixture, untouched).await,
+        (email.to_lowercase(), Some("Taken Over".to_owned()))
+    );
+    assert!(
+        !verified(&fixture, untouched).await,
+        "a rewritten email kept the old address's verification"
+    );
+
+    fixture.cleanup().await;
+}

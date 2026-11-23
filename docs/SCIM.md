@@ -332,9 +332,12 @@ for an account with that email, ignoring case:
 `userName` and `externalId` are unique within the organization, `userName`
 ignoring case; a clash answers 409 `uniqueness`.
 
-A `POST` with `active: false` creates the member and then
-[deactivates](#deactivation) them, and answers 201 with the deactivated
-user.
+A `POST` with `active: false` creates the member already deactivated, in
+one step, and answers 201 with the deactivated user. It doesn't count
+against the member cap, and it signs the account out and revokes its
+invitations as [deactivation](#deactivation) does. A `POST` that matches an
+owner whom someone restores while it runs answers 409 `uniqueness` and
+leaves the owner as they are.
 
 New members get the built-in member role, unless a
 [group mapping](#group-to-role-mapping) gives them another. Add them to
@@ -348,12 +351,21 @@ replaces them: an attribute it leaves out is cleared, except `active`, which
 changes nothing when it's left out.
 
 The account's own email and display name, which the member sees everywhere
-in Zone, change only when SCIM created the account and the account has no
-membership in any other organization, active or not. A member removed in
-another organization's console still counts; one that organization's
-identity provider deleted doesn't. Otherwise one organization's identity
-provider could rename an account that other organizations share.
-An email that another account already has answers 409 `uniqueness`.
+in Zone, change only while all of these hold:
+
+- SCIM created the account, and nobody has claimed it yet: it still has the
+  password SCIM gave it, it has never signed in, and it isn't linked to any
+  SSO identity (see [Single sign-on](#single-sign-on));
+- it isn't a server admin;
+- it has no membership in any other organization, active or not. A member
+  removed in another organization's console still counts; one that
+  organization's identity provider deleted doesn't.
+
+Otherwise one organization's identity provider could take over an account
+its owner already uses, or rename one that other organizations share. The
+SCIM user still shows the new values. A changed email is unverified until
+the person verifies it again. An email that another account already has
+answers 409 `uniqueness`.
 
 `active: false` [deactivates](#deactivation) the member, and `active: true`
 [reactivates](#reactivation) them.
@@ -432,15 +444,27 @@ workspace roles are managed in each workspace.
   `workspace.owner_seated` with no actor. If nobody is left to seat, the
   workspace has no owner until an organization owner adds one, and the
   deactivation still succeeds;
-- revokes every session and refresh token of the account, on the whole
-  server, because sessions belong to the account rather than to an
-  organization. Requests are refused at once, and open connections close
-  within about 15 seconds. The person can still sign in and use any other
-  organization they belong to;
-- stops their running chat turns in the organization's workspaces,
-  reminder and auto project turns included, and the task runs they started
-  there;
-- revokes any invitation to the organization still waiting on their email.
+- signs the account out on the whole server, revoking every session and
+  refresh token, unless the account is still an active member of another
+  organization that has at least one other active member. Sessions belong
+  to the account rather than to an organization, so one organization's
+  identity provider can't sign out someone that another organization still
+  shares. A personal organization the person is alone in doesn't count.
+  When the account is signed out, requests are refused at once and open
+  connections close within about 15 seconds; the person can still sign in
+  and use any other organization they belong to. When it isn't, the
+  deactivated membership is what keeps them out of this organization;
+- deletes any invitation to the organization still waiting on their
+  account email or the email the identity provider gave them, ignoring
+  case, and audits each as `invitation.revoked`;
+- after that, stops their running chat turns in the organization's
+  workspaces, reminder and auto project turns included, and the task runs
+  they started there.
+
+The membership change, the sign-out and the invitation deletions happen
+together: if any of them fails, none of them does, and the identity
+provider's retry starts again. Deactivating a member who is already
+inactive signs them out and deletes their invitations again.
 
 The Zone account itself is kept.
 
@@ -475,7 +499,9 @@ Reactivation needs the license. Without it, a request that sets
   organization's workspaces, seating workspace owners as for deactivation;
 - deletes their SCIM link and their membership of the organization's SCIM
   groups;
-- revokes their sessions and stops their work, as for deactivation.
+- signs the account out, deletes their pending invitations and stops their
+  work, as for deactivation, by the same rules and in the same single
+  step.
 
 The Zone account is kept, along with its memberships of other
 organizations. Nothing is kept to restore: if the identity provider creates
@@ -487,8 +513,9 @@ Deleting the organization's last active owner is refused with 409.
 
 Removing a member under **Settings → Organization → Members** also suspends
 their workspace memberships, seats workspace owners, stops their running
-work and revokes their pending invitations, but doesn't revoke their
-sessions. Adding them back in the console, or their accepting a new
+work and deletes their pending invitations, auditing each as
+`invitation.revoked` with the remover as the actor, but doesn't revoke their
+sessions. The invitations go in the same step as the membership. Adding them back in the console, or their accepting a new
 invitation, starts them afresh, without their old workspace memberships.
 Before SCIM, a removed member kept their workspace access; that's no longer
 the case. See [Removing members](ROLES.md#removing-members).
@@ -698,7 +725,11 @@ actor. Every entry has the token's `scim_token_id` and `scim_token_name` in
   when the member's role changed, `role` and `custom_role`.
   `scim_user.created` adds `created_account`, true when Zone created the
   account; `scim_user.deactivated` and `scim_user.reactivated` hold
-  `active`;
+  `active`. `scim_user.deactivated`, `scim_user.deleted` and a
+  `scim_user.created` with `active: false` hold `signed_out`, whether the
+  account's sessions were revoked (see [Deactivation](#deactivation));
+- `invitation.revoked` holds the `email` of an invitation that
+  deprovisioning deleted;
 - group entries hold the `display_name` and `external_id` the request set,
   `members` with the IDs of the members added or removed, and `roles`, a
   list of `{"user_id", "role", "custom_role"}` for each member whose role
@@ -710,13 +741,14 @@ actor. Every entry has the token's `scim_token_id` and `scim_token_name` in
 |---|---|---|
 | `scim_user.created` | A user is created, or an existing account is added to the organization | `member` |
 | `scim_user.updated` | A user's attributes change | `member` |
-| `scim_user.deactivated` | A user is deactivated | `member` |
+| `scim_user.deactivated` | A user is deactivated, or deactivating an inactive user revokes sessions they opened since | `member` |
 | `scim_user.reactivated` | A user is reactivated | `member` |
 | `scim_user.deleted` | A user is removed from the organization | `member` |
 | `scim_group.created` | A group is created | `scim_group` |
 | `scim_group.updated` | A group's name, external ID or members change | `scim_group` |
 | `scim_group.deleted` | A group is deleted | `scim_group` |
 | `workspace.owner_seated` | A member is made a workspace's owner because its only owner was deactivated or deleted | `workspace` |
+| `invitation.revoked` | Deactivating or deleting a user deletes an invitation waiting on their email | `invitation` |
 
 Changes in the console write these entries, with the owner who made them as
 the actor:

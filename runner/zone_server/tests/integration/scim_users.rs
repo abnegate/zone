@@ -13,6 +13,7 @@ use zone_server::db::audit::actions;
 use zone_server::db::custom_roles::{self, Creation, Definition};
 use zone_server::db::organization_members::OrgRole;
 use zone_server::db::workspace_members::{self, WorkspaceRole};
+use zone_server::db::{invitations, suspensions};
 
 use crate::common::TestResponse;
 use crate::common::scim::{self, CONTENT_TYPE, ERROR_SCHEMA, Fixture, PATCH_SCHEMA, USER_SCHEMA};
@@ -710,6 +711,10 @@ async fn deactivating_then_reactivating_restores_workspaces_and_the_custom_role(
         fixture.audits(actions::SCIM_USER_DEACTIVATED).await.len(),
         1
     );
+    assert!(
+        fixture.audits(actions::SCIM_USER_UPDATED).await.is_empty(),
+        "deactivating an inactive member was audited as an update"
+    );
 
     let reactivated = fixture
         .scim_patch(&path, &token.secret, &reactivation())
@@ -909,6 +914,247 @@ async fn an_organization_over_its_budget_is_told_when_to_retry() {
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].2, 429);
     assert_eq!(errors[0].3.as_deref(), Some("tooMany"));
+
+    fixture.cleanup().await;
+}
+
+const REFUSE_REVOCATION: &str = "CREATE FUNCTION refuse_revocation() RETURNS trigger \
+     LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'session revocation refused'; END $$";
+const ALLOW_REVOCATION: &str = "DROP TRIGGER refuse_revocation ON sessions";
+
+/// Makes revoking any session of `users` fail until [`allow_revocation`].
+async fn refuse_revocation(fixture: &Fixture, users: &[Uuid]) {
+    sqlx::query(REFUSE_REVOCATION)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+    let listed: Vec<String> = users.iter().map(|user| format!("'{user}'")).collect();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TRIGGER refuse_revocation BEFORE UPDATE ON sessions FOR EACH ROW \
+         WHEN (OLD.user_id IN ({})) EXECUTE FUNCTION refuse_revocation()",
+        listed.join(", ")
+    )))
+    .execute(fixture.pool())
+    .await
+    .unwrap();
+}
+
+async fn allow_revocation(fixture: &Fixture) {
+    sqlx::query(ALLOW_REVOCATION)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+}
+
+async fn invite(fixture: &Fixture, email: &str) {
+    invitations::create_invitation(
+        fixture.pool(),
+        email,
+        fixture.organization,
+        Vec::new(),
+        OrgRole::Member.as_str(),
+        WorkspaceRole::Member.as_str(),
+        fixture.owner.id,
+    )
+    .await
+    .unwrap();
+}
+
+async fn pending(fixture: &Fixture) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM invitations WHERE organization_id = $1 AND accepted_at IS NULL",
+    )
+    .bind(fixture.organization)
+    .fetch_one(fixture.pool())
+    .await
+    .unwrap()
+}
+
+/// Waits until a session of this test's database waits on a lock.
+async fn blocked(fixture: &Fixture) {
+    for _ in 0..500 {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(fixture.pool())
+        .await
+        .unwrap();
+        if waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("nothing waited on the lock");
+}
+
+#[tokio::test]
+async fn scim_removal_revokes_sessions_and_invitations_in_its_transaction() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    let removed = fixture.stranger().await;
+    let deactivated = fixture.stranger().await;
+    let linked = format!("Linked-{}", address());
+    for (person, external_id) in [(&removed, "00u-removed"), (&deactivated, "00u-deactivated")] {
+        fixture
+            .scim_post("/Users", &token.secret, &user(&person.email, external_id))
+            .await
+            .assert_status(StatusCode::CREATED);
+    }
+    assert_scim(
+        &fixture
+            .scim_patch(
+                &format!("/Users/{}", removed.id),
+                &token.secret,
+                &patch(json!([
+                    { "op": "replace", "path": "emails[type eq \"work\"].value", "value": linked },
+                ])),
+            )
+            .await,
+        StatusCode::OK,
+    );
+    invite(&fixture, &removed.email.to_uppercase()).await;
+    invite(&fixture, &linked.to_lowercase()).await;
+    invite(&fixture, &deactivated.email).await;
+    refuse_revocation(&fixture, &[removed.id, deactivated.id]).await;
+
+    let failed = fixture
+        .scim_delete(&format!("/Users/{}", removed.id), &token.secret)
+        .await;
+    assert_refused(&failed, StatusCode::INTERNAL_SERVER_ERROR, None);
+    let failed = fixture
+        .scim_patch(
+            &format!("/Users/{}", deactivated.id),
+            &token.secret,
+            &deactivation(),
+        )
+        .await;
+    assert_refused(&failed, StatusCode::INTERNAL_SERVER_ERROR, None);
+    for person in [&removed, &deactivated] {
+        assert_eq!(
+            fixture.holding(person.id).await,
+            Some((OrgRole::Member.as_str().to_owned(), None, true)),
+            "a failed revocation still took the membership"
+        );
+        assert!(fixture.signed_in(&person.token).await);
+    }
+    assert_eq!(pending(&fixture).await, 3, "a failed revocation committed");
+
+    allow_revocation(&fixture).await;
+    fixture
+        .scim_delete(&format!("/Users/{}", removed.id), &token.secret)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert_scim(
+        &fixture
+            .scim_patch(
+                &format!("/Users/{}", deactivated.id),
+                &token.secret,
+                &deactivation(),
+            )
+            .await,
+        StatusCode::OK,
+    );
+    assert_eq!(fixture.holding(removed.id).await, None);
+    assert!(!fixture.holding(deactivated.id).await.unwrap().2);
+    for person in [&removed, &deactivated] {
+        assert!(
+            !fixture.signed_in(&person.token).await,
+            "the retried removal left a session"
+        );
+    }
+    assert_eq!(pending(&fixture).await, 0, "an invitation outlived removal");
+    let revoked = fixture.audits(actions::INVITATION_REVOKED).await;
+    assert_eq!(revoked.len(), 3, "every revoked invitation is audited");
+    for audit in revoked {
+        assert_eq!(audit.actor_id, None);
+        assert_eq!(
+            audit.new_values.as_ref().unwrap()["scim_token_id"],
+            json!(token.id)
+        );
+    }
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_post_never_demotes_an_owner_restored_while_it_waits() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    let owner = fixture.member(OrgRole::Owner).await;
+    assert_scim(
+        &fixture
+            .scim_patch(
+                &format!("/Users/{}", owner.id),
+                &token.secret,
+                &deactivation(),
+            )
+            .await,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        fixture.holding(owner.id).await,
+        Some((OrgRole::Owner.as_str().to_owned(), None, false))
+    );
+
+    let mut restore = fixture.pool().begin().await.unwrap();
+    suspensions::resume(&mut restore, fixture.organization, owner.id)
+        .await
+        .unwrap();
+    let body = user(&owner.email, "00u-owner");
+    let posting = fixture.scim_post("/Users", &token.secret, &body);
+    let restoring = async {
+        blocked(&fixture).await;
+        restore.commit().await.unwrap();
+    };
+    let (posted, ()) = tokio::join!(posting, restoring);
+
+    assert_refused(&posted, StatusCode::CONFLICT, Some("uniqueness"));
+    assert_eq!(
+        fixture.holding(owner.id).await,
+        Some((OrgRole::Owner.as_str().to_owned(), None, true)),
+        "the provisioning demoted an owner restored meanwhile"
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_post_creating_an_inactive_member_commits_nothing_when_it_fails() {
+    let fixture = Fixture::new(PREFIX).await;
+    let token = fixture.token().await;
+    let person = fixture.stranger().await;
+    let mut body = user(&person.email, "00u-inactive");
+    body["active"] = json!(false);
+    refuse_revocation(&fixture, &[person.id]).await;
+
+    let failed = fixture.scim_post("/Users", &token.secret, &body).await;
+    assert_refused(&failed, StatusCode::INTERNAL_SERVER_ERROR, None);
+    assert_eq!(
+        fixture.holding(person.id).await,
+        None,
+        "a failed inactive provisioning left a membership"
+    );
+
+    allow_revocation(&fixture).await;
+    let created = fixture.scim_post("/Users", &token.secret, &body).await;
+    assert_scim(&created, StatusCode::CREATED);
+    assert_eq!(created.json_value()["active"], json!(false));
+    assert_eq!(
+        fixture.holding(person.id).await,
+        Some((OrgRole::Member.as_str().to_owned(), None, false))
+    );
+    assert!(!fixture.signed_in(&person.token).await);
+    assert_eq!(
+        fixture.scim_actions().await,
+        vec![actions::SCIM_USER_CREATED.to_owned()],
+        "an inactive provisioning is one created member"
+    );
+    let created = fixture.audits(actions::SCIM_USER_CREATED).await;
+    assert_eq!(
+        created[0].new_values.as_ref().unwrap()["active"],
+        json!(false)
+    );
 
     fixture.cleanup().await;
 }

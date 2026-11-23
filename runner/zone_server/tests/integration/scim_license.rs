@@ -697,3 +697,74 @@ async fn concurrent_provisionings_one_below_the_cap_admit_exactly_one() {
 
     fixture.cleanup().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_reactivations_one_below_the_cap_admit_exactly_one() {
+    let fixture = Fixture::capped(PREFIX).await;
+    let token = fixture.token().await;
+    fixture.member(OrgRole::Member).await;
+    let mut deactivated = Vec::with_capacity(ATTEMPTS);
+    for _ in 0..ATTEMPTS {
+        let account = fixture.stranger().await;
+        sqlx::query("UPDATE organization_members SET is_active = false WHERE user_id = $1")
+            .bind(account.id)
+            .execute(fixture.pool())
+            .await
+            .unwrap();
+        assert_scim(
+            &fixture
+                .scim_post("/Users", &token.secret, &user(&account.email))
+                .await,
+            StatusCode::CREATED,
+        );
+        assert_scim(
+            &fixture
+                .scim_patch(
+                    &format!("/Users/{}", account.id),
+                    &token.secret,
+                    &patch(json!([{ "op": "replace", "value": { "active": false } }])),
+                )
+                .await,
+            StatusCode::OK,
+        );
+        deactivated.push(account.id);
+    }
+    fixture.inner.remove_license(&fixture.owner).await;
+    let client = lapsing(&fixture, &token);
+    let reactivation = UserChanges {
+        active: Some(true),
+        ..UserChanges::default()
+    };
+
+    let settled = join_all(
+        deactivated
+            .iter()
+            .map(|user| users::update(fixture.state(), &client, *user, reactivation.clone())),
+    )
+    .await;
+
+    let admitted = settled.iter().filter(|settled| settled.is_ok()).count();
+    assert_eq!(
+        admitted, 1,
+        "exactly one reactivation is admitted: {settled:?}"
+    );
+    for refused in settled.into_iter().filter_map(Result::err) {
+        assert!(
+            matches!(refused, Failure::Forbidden(_) | Failure::Busy(_)),
+            "{refused:?}"
+        );
+    }
+    let mut active = 0;
+    for user in &deactivated {
+        if fixture
+            .holding(*user)
+            .await
+            .is_some_and(|(.., active)| active)
+        {
+            active += 1;
+        }
+    }
+    assert_eq!(active, 1, "only the admitted reactivation seated anyone");
+
+    fixture.cleanup().await;
+}

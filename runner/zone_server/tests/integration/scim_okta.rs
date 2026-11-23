@@ -333,6 +333,7 @@ async fn okta_creates_updates_deactivates_and_reactivates_a_member() {
             actions::SCIM_USER_UPDATED,
             actions::SCIM_USER_DEACTIVATED,
             actions::WORKSPACE_OWNER_SEATED,
+            actions::INVITATION_REVOKED,
             actions::SCIM_USER_REACTIVATED,
         ])
     );
