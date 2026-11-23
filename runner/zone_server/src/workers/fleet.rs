@@ -390,6 +390,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_process_whose_name_a_newer_process_holds_picks_up_nothing() {
+        let server = Server::new(Some(Plan::Enterprise)).await;
+        registration::register(&server.state).await.unwrap();
+        let newer = server.twin();
+        registration::register(&newer).await.unwrap();
+        let (_, workspace) = server.workspace().await;
+        let run = server.admit(workspace, 5.0).await;
+
+        let older = pickup(&server.state, 5).await;
+        let holder = pickup(&newer, 5).await;
+        server.remove().await;
+
+        assert!(older.is_empty(), "{older:?}");
+        assert_eq!(
+            holder,
+            [Candidate {
+                run: run.id,
+                task: run.task_id,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_refused_for_a_name_a_newer_process_holds_is_left_for_that_process() {
+        let _execution = task::EXECUTION.lock().await;
+        let server = Server::new(Some(Plan::Enterprise)).await;
+        let runner = registration::register(&server.state).await.unwrap();
+        let newer = server.twin();
+        let shared = registration::register(&newer).await.unwrap();
+        let (_, workspace) = server.workspace().await;
+        let run = server.admit(workspace, 5.0).await;
+
+        task::execute_task_run(&server.state, run.id, run.task_id).await;
+        let left = (server.run(run.id).await, server.claimed(run.id).await);
+        let slots = task::saturate().await;
+        let executions = pick_up(&newer).await;
+        server
+            .until(run.id, |_, claimed| claimed == Some(runner))
+            .await;
+        let (owner, _) = server.claimed(run.id).await;
+        for execution in executions {
+            execution.abort();
+        }
+        drop(slots);
+        let refusals = server.refusals().await;
+        server.remove().await;
+
+        assert_eq!(shared, runner, "both processes share the runner's row");
+        let (row, claimed) = left;
+        assert_eq!(
+            (row.status.as_str(), row.error_message, claimed),
+            ("running", None, (None, None)),
+            "the refused process left the run unclaimed for the process holding the row"
+        );
+        assert!(refusals.is_empty(), "{refusals:?}");
+        assert!(owner.is_some(), "the process holding the row claimed the run");
+    }
+
+    #[tokio::test]
     async fn a_busy_runner_still_picks_up_a_run_a_cordoned_runner_left_for_it() {
         let _execution = task::EXECUTION.lock().await;
         let server = Server::new(Some(Plan::Enterprise)).await;

@@ -82,6 +82,16 @@ impl Server {
         state
     }
 
+    /// Another server process on this server's database, under its license, sharing this
+    /// server's runner name and labels, and started after it. It hasn't registered.
+    pub(crate) fn twin(&self) -> AppState {
+        let state = AppState::new(test_config(), self.database.pool.clone(), None);
+        state.disable_mcp();
+        state.set_identity(self.state.identity().clone());
+        state.install_keyring(keyring());
+        state
+    }
+
     async fn registered(&self) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM fleet_runners")
             .fetch_one(&self.database.pool)
