@@ -19,9 +19,10 @@ mod replay;
 mod request;
 mod reservation;
 mod route;
+mod seen;
 mod watch;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -53,6 +54,7 @@ use holding::Holding;
 use outcome::Outcome;
 use replay::Replay;
 use request::Request;
+use seen::Seen;
 
 /// How long a replica waits for the owner to answer a command or a replay.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
@@ -65,6 +67,9 @@ const ANSWER_MARGIN: Duration = Duration::from_millis(500);
 /// How many times a replica asks the owner to apply one command before it
 /// gives up on an answer.
 const ATTEMPTS: usize = 2;
+
+/// How many forwarded messages an answering task remembers having taken.
+const SEEN_CAPACITY: usize = 1024;
 
 /// How long the owner keeps answering after its last turn and queued message.
 const GRACE: Duration = Duration::from_secs(5);
@@ -368,7 +373,7 @@ async fn answering(
     id: Uuid,
 ) {
     let chat = stream.chat_id;
-    let mut seen = HashSet::new();
+    let mut seen = Seen::new(SEEN_CAPACITY);
     let mut idle_since: Option<Instant> = None;
     let mut check = tokio::time::interval(IDLE_CHECK);
     loop {
@@ -408,7 +413,7 @@ async fn answer(
     state: &AppState,
     stream: &Arc<ChatStream>,
     workspace: Uuid,
-    seen: &mut HashSet<Uuid>,
+    seen: &mut Seen,
     envelope: &Envelope,
 ) {
     let chat = stream.chat_id;
