@@ -444,6 +444,7 @@ The failover coverage runs on every pull request, in `.github/workflows/rust-tes
 | `task_relay` | An answer posted on one replica resolves a run waiting on another; titles and action cards cross once and are never relayed back. |
 | `shared_limiter` | Two replicas sharing Valkey together allow exactly the limit per window, and fall back to their own counts without it. |
 | `shared_sso_throttle` | Two replicas sharing Valkey together allow one client address exactly `ZONE_SSO_REQUESTS_PER_MINUTE` single sign-on requests per window, refuse the next on either with 429 and `Retry-After`, still allow another address, and limit on their own without Valkey. |
+| `sso_throttle_forwarded` | A replica behind a trusted proxy counts each address in `X-Forwarded-For` on its own: one client using up its single sign-on limit leaves the next allowed. |
 | `high_availability_fleet` | Each replica registers as a runner of its own, under the name it was given, as each pod does. |
 | `cluster_bus` | Delivery between peers, ordering, request and reply, isolation by master key, resubscribing after a killed subscription, and starting with Valkey down with the gauge at 0. |
 
@@ -454,7 +455,7 @@ export DATABASE_URL=postgres://postgres:postgres@127.0.0.1:<port>/zone_test
 export TEST_DATABASE_URL=$DATABASE_URL REDIS_URL=redis://127.0.0.1:<port>
 cargo test -p zone_server --test integration -- \
   high_availability housekeeping_election task_relay shared_limiter \
-  shared_sso_throttle cluster_bus
+  shared_sso_throttle sso_throttle_forwarded cluster_bus
 ```
 
 `scripts/test-helm-ha.sh`, run by `.github/workflows/helm.yml`, checks the profiles' renders: the properties on this page, that the guards refuse what they should, and that the default renders are unchanged.
