@@ -1,8 +1,3 @@
-//! What a member started keeps running only while they keep their access.
-//!
-//! Halting a departed member's turns reaches only the replica that handled the
-//! departure, so a turn running on another one has to notice for itself.
-
 use crate::common;
 use crate::common::context::{Harness, answer};
 use crate::reminder_turn::{make_due, until_requests};
@@ -95,8 +90,6 @@ async fn messages(harness: &Harness) -> Vec<String> {
         .unwrap()
 }
 
-/// The suspension lands without halting anything here, as it does when
-/// another replica handles it, and the turn still ends on its own.
 #[tokio::test]
 async fn a_turn_whose_author_is_suspended_elsewhere_ends() {
     let harness = Harness::new(
@@ -126,9 +119,6 @@ async fn a_turn_whose_author_is_suspended_elsewhere_ends() {
         .expect("the ended turn did not panic");
 }
 
-/// A recurring reminder delivers as its author, so one whose author no longer
-/// belongs to the organization stops, even where a workspace seat outlived the
-/// organization membership.
 #[tokio::test]
 async fn a_recurring_reminder_of_a_departed_member_stops_firing() {
     let harness = Harness::new(Some(32_768), false, Vec::new()).await;

@@ -710,8 +710,6 @@ mod tests {
         );
     }
 
-    /// The member can be removed through another replica than the one serving
-    /// the turn, so the token has to stop working on that replica as well.
     #[tokio::test]
     async fn a_token_stops_working_once_its_member_loses_the_workspace() {
         let pool = sqlx::PgPool::connect(

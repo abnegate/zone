@@ -13,9 +13,6 @@ use crate::db::custom_roles;
 use crate::db::organization_members::OrgRole;
 use crate::db::workspace_members::WorkspaceRole;
 
-/// Seats `user` in `workspace` as `role`, joining them to its organization as
-/// a member first unless they already belong: a workspace grants nothing to
-/// someone outside its organization.
 pub(crate) async fn seat(pool: &PgPool, workspace: Uuid, user: Uuid, role: WorkspaceRole) {
     sqlx::query(
         "WITH joined AS ( \
