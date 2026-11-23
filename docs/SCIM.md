@@ -539,8 +539,9 @@ Removing a member under **Settings → Organization → Members** also suspends
 their workspace memberships, seats workspace owners, stops their running
 work and deletes their pending invitations, auditing each as
 `invitation.revoked` with the remover as the actor, but doesn't revoke their
-sessions. The invitations go in the same step as the membership. Adding them back in the console, or their accepting a new
-invitation, starts them afresh, without their old workspace memberships.
+sessions. The invitations go in the same step as the membership. Adding
+them back in the console, or their accepting a new invitation, starts them
+afresh, without their old workspace memberships.
 Before SCIM, a removed member kept their workspace access; that's no longer
 the case. See [Removing members](ROLES.md#removing-members).
 

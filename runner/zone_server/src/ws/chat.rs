@@ -251,7 +251,6 @@ async fn send_server(sender: &SharedSender, message: ServerMessage) -> bool {
         .is_ok()
 }
 
-/// Tells a connection its member lost access to the chat, and closes it.
 async fn revoke(sender: &SharedSender) {
     let revoked = ServerMessage::Error {
         message: "Access revoked".to_string(),

@@ -7,8 +7,6 @@ use uuid::Uuid;
 
 use crate::db::workspace_members;
 
-/// Cancels a turn once its author can no longer write to its workspace.
-///
 /// Halting a departed member's turns reaches only the replica that recorded
 /// the departure, so a turn running anywhere else finds out from the database.
 /// A recheck that fails to reach the database leaves the turn running.

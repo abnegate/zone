@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 
 use serde::Deserializer;
@@ -62,11 +63,16 @@ impl<'de> Visitor<'de> for FoldedVisitor {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<Folded, A::Error> {
-        let mut object = Map::new();
+        let mut slots: Vec<Option<(String, Value)>> = Vec::new();
+        let mut positions: HashMap<String, usize> = HashMap::new();
         while let Some((key, Folded(value))) = entries.next_entry::<String, Folded>()? {
-            object.retain(|existing, _| !existing.eq_ignore_ascii_case(&key));
-            object.insert(key, value);
+            if let Some(previous) = positions.insert(key.to_ascii_lowercase(), slots.len()) {
+                slots[previous] = None;
+            }
+            slots.push(Some((key, value)));
         }
-        Ok(Folded(Value::Object(object)))
+        Ok(Folded(Value::Object(
+            slots.into_iter().flatten().collect::<Map<String, Value>>(),
+        )))
     }
 }

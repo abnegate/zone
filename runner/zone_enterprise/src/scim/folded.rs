@@ -3,8 +3,8 @@ use serde_json::Value;
 
 use crate::scim::folded_visitor::FoldedVisitor;
 
-/// A JSON value whose objects hold, of the keys that differ only in case, the last one in
-/// document order: attribute names are case-insensitive, and a parsed object sorts its keys.
+/// A JSON value whose objects keep, of the keys that differ only in ASCII case, the last one in
+/// document order, since SCIM attribute names are case-insensitive.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Folded(pub(crate) Value);
 
