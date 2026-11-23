@@ -35,6 +35,10 @@ const LEASE: Duration = Duration::from_secs(30);
 /// How long a replica on default settings may take to stop.
 const PROMPT: Duration = Duration::from_secs(10);
 const TERMINATORS: [&str; 2] = ["cancelled", "message_end"];
+/// How often a replica looks for reminders that are due.
+const REMINDER_TICK: Duration = Duration::from_secs(10);
+/// What the LiteLLM stand-in answers once its queued replies run out.
+const ANSWER: &str = "Hello";
 
 /// One test's database, LiteLLM stand-in and the environment its replicas share.
 struct Deployment {
@@ -379,4 +383,120 @@ async fn a_replica_on_default_settings_exits_promptly() {
     });
     assert!(exited.success(), "{exited}");
     deployment.retire(vec![replica]).await;
+}
+
+/// A one-shot reminder in `chat`, due now, whose firing is a turn asking `prompt`.
+async fn remind(database: &Database, account: &Account, chat: Uuid, prompt: &str) -> Uuid {
+    let user: Uuid =
+        sqlx::query_scalar("SELECT user_id FROM workspace_members WHERE workspace_id = $1")
+            .bind(account.workspace)
+            .fetch_one(&database.pool)
+            .await
+            .expect("the workspace's member");
+    sqlx::query_scalar(
+        "INSERT INTO reminders (workspace_id, chat_id, created_by, content, due_at, prompt) \
+         VALUES ($1, $2, $3, $4, NOW(), $4) RETURNING id",
+    )
+    .bind(account.workspace)
+    .bind(chat)
+    .bind(user)
+    .bind(prompt)
+    .fetch_one(&database.pool)
+    .await
+    .expect("a reminder")
+}
+
+/// How many of the reminder's firings are owed, and how many of those are claimed.
+async fn owed(database: &Database, reminder: Uuid) -> (i64, i64) {
+    sqlx::query_as("SELECT COUNT(*), COUNT(claimed_at) FROM reminder_turns WHERE reminder_id = $1")
+        .bind(reminder)
+        .fetch_one(&database.pool)
+        .await
+        .expect("the reminder's turns")
+}
+
+/// Whether the reminder still waits to be delivered.
+async fn pending(database: &Database, reminder: Uuid) -> bool {
+    sqlx::query_scalar("SELECT status = 'pending' FROM reminders WHERE id = $1")
+        .bind(reminder)
+        .fetch_one(&database.pool)
+        .await
+        .expect("the reminder")
+}
+
+#[tokio::test]
+async fn a_terminated_replica_gives_its_reminder_firing_back_and_takes_no_new_one() {
+    let delay = REMINDER_TICK + Duration::from_secs(2);
+    let grace = Duration::from_secs(1);
+    let deployment = Deployment::new().await;
+    let draining = deployment
+        .environment
+        .clone()
+        .with_variable(DELAY, delay.as_secs().to_string())
+        .with_variable(GRACE, grace.as_secs().to_string());
+    let mut first = Replica::start(&draining).await;
+    let account = Account::register(&first).await;
+    let chat = account.chat(&first, false).await;
+    deployment.litellm.queue(Reply::counted(600, PAUSE));
+    let running = remind(&deployment.database, &account, chat, "Check the build").await;
+    let deadline = Instant::now() + REMINDER_TICK * 2;
+    while deployment.litellm.streamed() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the replica never started the reminder's turn"
+        );
+        tokio::time::sleep(PAUSE).await;
+    }
+    assert_eq!(owed(&deployment.database, running).await, (1, 1));
+
+    first.terminate();
+    readiness(&first, StatusCode::SERVICE_UNAVAILABLE).await;
+    let late = remind(&deployment.database, &account, chat, "Check the deploy").await;
+    let exited = first
+        .exited(delay + grace + PROMPT * 3)
+        .await
+        .expect("the replica exits");
+    assert!(exited.success(), "{exited}");
+
+    assert_eq!(
+        owed(&deployment.database, running).await,
+        (1, 0),
+        "the firing whose turn the shutdown stopped is owed again, and unclaimed"
+    );
+    let (late_owed, late_claimed) = owed(&deployment.database, late).await;
+    assert_eq!(
+        late_claimed, 0,
+        "the draining replica claimed a firing that fell due after SIGTERM"
+    );
+    assert!(
+        pending(&deployment.database, late).await || late_owed == 1,
+        "the firing that fell due after SIGTERM is still owed"
+    );
+
+    let second = deployment.replica().await;
+    let deadline = Instant::now() + REMINDER_TICK + TURN;
+    loop {
+        let settled = owed(&deployment.database, running).await.0 == 0
+            && owed(&deployment.database, late).await.0 == 0
+            && !pending(&deployment.database, late).await;
+        if settled {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the other replica never ran both firings"
+        );
+        tokio::time::sleep(PAUSE).await;
+    }
+    let answers = account
+        .messages(&second, chat)
+        .await
+        .into_iter()
+        .filter(|message| message["role"] == "assistant" && message["content"] == ANSWER)
+        .count();
+    assert_eq!(
+        answers, 2,
+        "each firing was answered in full on the other replica"
+    );
+    deployment.retire(vec![first, second]).await;
 }
