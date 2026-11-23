@@ -27,6 +27,11 @@ impl Drain {
         self.draining.is_cancelled()
     }
 
+    /// Resolves once the server starts draining.
+    pub fn draining(&self) -> WaitForCancellationFuture<'_> {
+        self.draining.cancelled()
+    }
+
     /// Tells every WebSocket to close. A server that closes has stopped draining.
     pub fn close(&self) {
         self.draining.cancel();

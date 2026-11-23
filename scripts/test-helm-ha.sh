@@ -6,7 +6,7 @@ storage_class=test-rwx
 trusted_proxies=10.244.0.0/16
 loopback='127.0.0.1/32,::1/128'
 failures=0
-shutdown_tail=27
+shutdown_tail=17
 
 jwt_secret=0123456789abcdef0123456789abcdef
 encryption_key=fedcba9876543210fedcba9876543210
