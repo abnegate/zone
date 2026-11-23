@@ -7,6 +7,7 @@
 //! since those register under the member too), task runs they triggered, and
 //! invitations still waiting on their email.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -859,5 +860,70 @@ async fn a_suspension_waits_for_a_workspace_removal_and_still_seats_an_owner() {
         owners(&pool, tenant.workspace).await,
         vec![member.user],
         "the workspace was left without the member the removal spared as owner"
+    );
+}
+
+/// A seat written while the member's suspension is still in flight waits for
+/// it and is refused, rather than landing after the suspension took the seats
+/// it saw.
+#[tokio::test]
+async fn a_workspace_seat_racing_a_suspension_does_not_survive_it() {
+    let client = Arc::new(TestClient::with_db().await);
+    let pool = create_test_pool().await;
+    let owner = account(&client).await;
+    let member = account(&client).await;
+    let tenant = tenant(&client, &owner).await;
+    join(&client, &owner, tenant.organization, &member).await;
+
+    let mut suspension = pool.begin().await.unwrap();
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *suspension)
+        .await
+        .unwrap();
+    suspensions::suspend(&mut suspension, tenant.organization, member.user)
+        .await
+        .expect("the suspension");
+
+    let seating = tokio::spawn({
+        let client = Arc::clone(&client);
+        let uri = format!("/api/workspaces/{}/members", tenant.workspace);
+        let body = json!({ "user_id": member.user, "role": "member" });
+        let token = owner.token.clone();
+        async move { client.post_json_auth(&uri, &body, &token).await.status }
+    });
+    let settled = tokio::time::timeout(PATIENCE, async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(BLOCKED)
+                .bind(holder)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if blocked || seating.is_finished() {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await;
+    assert!(
+        settled.is_ok(),
+        "the seat neither landed nor waited for the suspension"
+    );
+    suspension.commit().await.unwrap();
+
+    let status = tokio::time::timeout(PATIENCE, seating)
+        .await
+        .expect("the seat deadlocked")
+        .expect("the seating task");
+    assert_ne!(
+        status,
+        StatusCode::CREATED,
+        "the seat was written for a member being suspended"
+    );
+    assert!(
+        !held(&pool, tenant.workspace, member.user)
+            .await
+            .is_some_and(|seat| seat.is_active),
+        "a suspended member kept the seat written beside their suspension"
     );
 }

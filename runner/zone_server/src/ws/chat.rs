@@ -72,6 +72,7 @@ use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use abnegate_search::{SearchContext, SearchHit, SearxngClient, sanitize_query};
 
+mod access;
 mod confinement;
 mod denial;
 mod ending;
@@ -79,6 +80,7 @@ pub mod job;
 mod queue;
 mod registration;
 
+use access::Access;
 use registration::Registration;
 
 use confinement::Confinement;
@@ -247,6 +249,15 @@ async fn send_server(sender: &SharedSender, message: ServerMessage) -> bool {
         .send(message.to_ws_message())
         .await
         .is_ok()
+}
+
+/// Tells a connection its member lost access to the chat, and closes it.
+async fn revoke(sender: &SharedSender) {
+    let revoked = ServerMessage::Error {
+        message: "Access revoked".to_string(),
+    };
+    let _ = send_server(sender, revoked).await;
+    let _ = sender.lock().await.close().await;
 }
 
 /// Frames already published for the turn in flight.
@@ -1707,6 +1718,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                 tool_call_id,
                                 approved,
                             }) => {
+                                if !can_access_chat(&state, user_id, session_id, workspace_id)
+                                    .await
+                                    .unwrap_or(false)
+                                {
+                                    revoke(&sender).await;
+                                    return;
+                                }
                                 let decided = crate::agent::ApprovalPolicy::decide_chat(
                                     chat_id,
                                     &tool_call_id,
@@ -1755,11 +1773,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                             workspace_id,
                             chat_id
                         );
-                        let error_msg = ServerMessage::Error {
-                            message: "Access revoked".to_string(),
-                        };
-                        let _ = send_server(&sender, error_msg).await;
-                        let _ = sender.lock().await.close().await;
+                        revoke(&sender).await;
                         return;
                     }
                     Err(e) => {
@@ -2800,6 +2814,13 @@ async fn handle_send_message(
         .await;
         return false;
     }
+    let _access = Access::watch(
+        state.db().clone(),
+        workspace_id,
+        user_id,
+        AUTH_RECHECK_INTERVAL,
+        request.cancellation(),
+    );
     let mut session = match Session::acquire(state, chat_id, workspace_id, request.message_id).await
     {
         Ok(session) => session,
@@ -6183,15 +6204,13 @@ cat 'DIR/reply.jsonl'
                     .await
                     .expect("a user")
                     .id;
-                    db::workspace_members::add_member(
+                    db::testing::seat(
                         &organization.pool,
                         organization.workspace,
                         user,
                         WorkspaceRole::Member,
-                        None,
                     )
-                    .await
-                    .expect("a member of the workspace");
+                    .await;
                     Self {
                         organization,
                         state,
@@ -7994,15 +8013,13 @@ cat 'DIR/reply.jsonl'
         )
         .await
         .unwrap();
-        workspace_members::add_member(
+        crate::db::testing::seat(
             pool,
             workspace.id,
             user.id,
             workspace_members::WorkspaceRole::Owner,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         let chat = chats::create_chat(
             pool,
             Some(workspace.id),

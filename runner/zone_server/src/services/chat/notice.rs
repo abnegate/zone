@@ -115,6 +115,7 @@ mod tests {
     use crate::db::chat_pull_requests::{self, Claim, NewPullRequest};
     use crate::db::sources::testing::pool;
     use crate::db::tasks::{Create, Mutation, Origin, TaskRow, TaskRunRow};
+    use crate::db::workspace_members::WorkspaceRole;
     use crate::services::task_progress::{self, ProgressMessage};
     use sqlx::PgPool;
 
@@ -178,14 +179,7 @@ mod tests {
         .execute(pool)
         .await
         .expect("a user");
-        sqlx::query(
-            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
-        )
-        .bind(workspace)
-        .bind(user)
-        .execute(pool)
-        .await
-        .expect("a membership");
+        crate::db::testing::seat(pool, workspace, user, WorkspaceRole::Member).await;
         let chat = chats::create_chat(pool, Some(workspace), "Asking", "qwen3:8b", true, true)
             .await
             .expect("a chat")

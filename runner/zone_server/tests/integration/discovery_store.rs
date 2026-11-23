@@ -1023,14 +1023,13 @@ async fn entries_past_the_most_a_block_reads_are_still_counted() {
 /// writer asks of whoever calls it.
 async fn member(pool: &PgPool, workspace: Uuid) -> Uuid {
     let user = person(pool).await;
-    sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+    crate::common::seat::seat(
+        pool,
+        workspace,
+        user,
+        zone_server::db::workspace_members::WorkspaceRole::Member,
     )
-    .bind(workspace)
-    .bind(user)
-    .execute(pool)
-    .await
-    .expect("a membership");
+    .await;
     user
 }
 

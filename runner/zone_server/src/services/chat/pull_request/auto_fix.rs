@@ -434,6 +434,7 @@ mod tests {
     use crate::db::chat_pull_requests::NewPullRequest;
     use crate::db::chats::create_chat;
     use crate::db::sources::testing::Installation;
+    use crate::db::workspace_members::WorkspaceRole;
     use chrono::Utc;
     use sqlx::PgPool;
     use std::time::Duration;
@@ -643,14 +644,7 @@ mod tests {
         .execute(pool)
         .await
         .expect("a user");
-        sqlx::query(
-            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
-        )
-        .bind(workspace)
-        .bind(user)
-        .execute(pool)
-        .await
-        .expect("a membership");
+        crate::db::testing::seat(pool, workspace, user, WorkspaceRole::Member).await;
         sqlx::query(
             "INSERT INTO projects (id, workspace_id, name, github_repo_url, github_access_token)
              VALUES ($1, $2, 'Widgets', $3, 'sealed')",

@@ -439,7 +439,7 @@ fn answer() -> serde_json::Value {
 
 #[tokio::test]
 async fn only_a_workspace_writer_may_answer_a_parked_run() {
-    use zone_server::db::workspace_members::{self, WorkspaceRole};
+    use zone_server::db::workspace_members::WorkspaceRole;
 
     let pool = create_test_pool().await;
     let state = create_test_state(test_config(), pool.clone());
@@ -452,9 +452,7 @@ async fn only_a_workspace_writer_may_answer_a_parked_run() {
         (viewer.user, WorkspaceRole::Viewer),
         (member.user, WorkspaceRole::Member),
     ] {
-        workspace_members::add_member(&pool, owner.workspace, user, role, None)
-            .await
-            .expect("the workspace takes the member");
+        crate::common::seat::seat(&pool, owner.workspace, user, role).await;
     }
 
     let task = task(&client, &owner, project(&client, &owner).await).await;
@@ -512,7 +510,7 @@ async fn stop(client: &TestClient, run: Uuid, token: &str) -> common::TestRespon
 
 #[tokio::test]
 async fn only_a_workspace_writer_may_stop_a_run() {
-    use zone_server::db::workspace_members::{self, WorkspaceRole};
+    use zone_server::db::workspace_members::WorkspaceRole;
 
     let pool = create_test_pool().await;
     let state = create_test_state(test_config(), pool.clone());
@@ -525,9 +523,7 @@ async fn only_a_workspace_writer_may_stop_a_run() {
         (viewer.user, WorkspaceRole::Viewer),
         (member.user, WorkspaceRole::Member),
     ] {
-        workspace_members::add_member(&pool, owner.workspace, user, role, None)
-            .await
-            .expect("the workspace takes the member");
+        crate::common::seat::seat(&pool, owner.workspace, user, role).await;
     }
 
     let task = task(&client, &owner, project(&client, &owner).await).await;

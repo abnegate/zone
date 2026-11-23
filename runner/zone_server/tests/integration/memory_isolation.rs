@@ -16,6 +16,7 @@ use crate::common;
 use std::sync::Arc;
 
 use crate::common::context::{Harness, answer, usage};
+use crate::common::seat::seat;
 use crate::common::{TestClient, test_email, test_password};
 use async_trait::async_trait;
 use axum::http::StatusCode;
@@ -29,7 +30,7 @@ use zone_server::db::knowledge::{self, DocumentUpdate, NOT_MEMORY, PRIVATE_CATEG
 use zone_server::db::memory::{
     FACT_CATEGORY, MEMORY_CATEGORY_PREFIX, PREFERENCE_CATEGORY, PROFILE_CATEGORY, PROFILE_TITLE,
 };
-use zone_server::db::workspace_members::{WorkspaceRole, add_member};
+use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::workers::knowledge_refresh;
 
 /// A word that appears only in the memory entry.
@@ -102,15 +103,7 @@ impl Fixture {
         let (owner_token, owner) = register(&client).await;
         let (other_token, other) = register(&client).await;
         let workspace = workspace_for(&client, &owner_token).await;
-        add_member(
-            client.state().db(),
-            workspace,
-            other,
-            WorkspaceRole::Member,
-            None,
-        )
-        .await
-        .expect("the second person joins the workspace");
+        seat(client.state().db(), workspace, other, WorkspaceRole::Member).await;
 
         let memory = seed_memory(
             client.state().db(),

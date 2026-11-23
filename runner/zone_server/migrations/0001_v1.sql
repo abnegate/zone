@@ -1919,6 +1919,13 @@ CREATE FUNCTION workspace_permits(p_user_id uuid, p_workspace_id uuid, p_permiss
     WHERE m.user_id = p_user_id
       AND m.workspace_id = p_workspace_id
       AND m.is_active
+      AND EXISTS (
+        SELECT 1
+        FROM organization_members o
+        WHERE o.organization_id = w.organization_id
+          AND o.user_id = m.user_id
+          AND o.is_active
+      )
       AND (
         (m.custom_role_id IS NULL
           AND EXISTS (SELECT 1 FROM workspace_role_permissions b WHERE b.role = m.role AND b.permission = p_permission))

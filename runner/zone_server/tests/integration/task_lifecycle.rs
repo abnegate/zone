@@ -112,14 +112,13 @@ async fn foreign_actor_cannot_read_task() {
 async fn sweep_preserves_fresh_leases_and_newer_runs() {
     let pool = common::create_test_pool().await;
     let (_, workspace, actor) = common::setup_test_data(&pool).await;
-    sqlx::query(
-        "INSERT INTO workspace_members(workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+    common::seat::seat(
+        &pool,
+        workspace,
+        actor,
+        zone_server::db::workspace_members::WorkspaceRole::Member,
     )
-    .bind(workspace)
-    .bind(actor)
-    .execute(&pool)
-    .await
-    .unwrap();
+    .await;
     let task = tasks::create_task_as(
         &pool,
         workspace,
@@ -220,14 +219,13 @@ async fn task_routes_reject_foreign_and_readonly_mutations() {
     use zone_server::routes::tasks as routes;
     let pool = common::create_test_pool().await;
     let (_, workspace, actor) = common::setup_test_data(&pool).await;
-    sqlx::query(
-        "INSERT INTO workspace_members(workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+    common::seat::seat(
+        &pool,
+        workspace,
+        actor,
+        zone_server::db::workspace_members::WorkspaceRole::Member,
     )
-    .bind(workspace)
-    .bind(actor)
-    .execute(&pool)
-    .await
-    .unwrap();
+    .await;
     let (_, _, foreign) = common::setup_test_data(&pool).await;
     let task = tasks::create_task(
         &pool,

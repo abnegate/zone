@@ -199,14 +199,13 @@ async fn a_viewer_cannot_reorder_projects() {
     let workspace_id = workspace(&client, &owner).await;
     let alpha = project(&client, &owner, &workspace_id, "Alpha").await;
     let beta = project(&client, &owner, &workspace_id, "Beta").await;
-    sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1::uuid, $2::uuid, 'viewer')",
+    crate::common::seat::seat(
+        client.state().db(),
+        workspace_id.parse().expect("a workspace id"),
+        viewer_id.parse().expect("a user id"),
+        zone_server::db::workspace_members::WorkspaceRole::Viewer,
     )
-    .bind(&workspace_id)
-    .bind(&viewer_id)
-    .execute(client.state().db())
-    .await
-    .expect("a viewer");
+    .await;
 
     assert_eq!(
         reorder(&client, &viewer, &workspace_id, &[&alpha, &beta]).await,

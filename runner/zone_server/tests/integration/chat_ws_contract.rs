@@ -584,6 +584,54 @@ async fn a_send_after_membership_revocation_is_rejected_before_persistence() {
     let _ = socket.close(None).await;
 }
 
+/// A decision is the member acting in the workspace, so a socket whose member
+/// lost access since its last recheck cannot still approve a tool call.
+#[tokio::test]
+async fn an_approval_after_membership_revocation_is_refused() {
+    let pool = create_test_pool().await;
+    let config = test_config();
+    let client = TestClient::new(create_test_router(create_test_state(
+        config.clone(),
+        pool.clone(),
+    )));
+    let (token, workspace, chat) = seed(&client).await;
+    let user = validate_access_token(&token, &config.jwt_secret)
+        .unwrap()
+        .claims
+        .user_id()
+        .unwrap();
+    let address = spawn(config, pool.clone()).await;
+    let mut socket = authenticate(&address, chat, &token).await;
+    let decision =
+        json!({"type": "approve_tool", "tool_call_id": "call_write", "approved": true}).to_string();
+    socket
+        .send(WsMessage::Text(decision.clone().into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_json(&mut socket).await,
+        Some(json!({"type": "tool_approval_closed", "tool_call_id": "call_write"})),
+        "the connection's first recheck has passed before access is revoked"
+    );
+
+    sqlx::query(
+        "UPDATE workspace_members SET is_active = FALSE WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace)
+    .bind(user)
+    .execute(&pool)
+    .await
+    .unwrap();
+    socket.send(WsMessage::Text(decision.into())).await.unwrap();
+
+    assert_eq!(
+        next_json(&mut socket).await,
+        Some(json!({"type": "error", "message": "Access revoked"})),
+        "a revoked member's decision was handled instead of refused"
+    );
+    let _ = socket.close(None).await;
+}
+
 #[tokio::test]
 async fn a_chat_moved_after_authentication_fails_closed_before_generation() {
     let pool = create_test_pool().await;

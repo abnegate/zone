@@ -11,10 +11,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use zone_server::{
     auth::{AuthUser, jwt::Claims},
-    db::{
-        sources, tasks,
-        workspace_members::{self, WorkspaceRole},
-    },
+    db::{sources, tasks, workspace_members::WorkspaceRole},
     routes::tasks::{CreateTaskRequest, create},
 };
 
@@ -30,9 +27,7 @@ async fn check_creation() {
     let pool = common::create_test_pool().await;
     let (_, workspace_id, user_id) = common::setup_test_data(&pool).await;
     let (_, other_workspace_id, _) = common::setup_test_data(&pool).await;
-    workspace_members::add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
-        .await
-        .unwrap();
+    common::seat::seat(&pool, workspace_id, user_id, WorkspaceRole::Member).await;
     let source = sources::create_source(
         &pool,
         sources::NewSource {

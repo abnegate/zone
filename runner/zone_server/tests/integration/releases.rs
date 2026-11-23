@@ -16,7 +16,7 @@ use uuid::Uuid;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_server::db::sources;
-use zone_server::db::workspace_members::{self, WorkspaceRole};
+use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::services::github::fault::Fault;
 use zone_server::services::github::freshness::Freshness;
 use zone_server::services::github::releases::Listing;
@@ -203,15 +203,8 @@ impl Releases {
             .expect("a viewer id")
             .parse()
             .expect("a user id");
-        workspace_members::add_member(
-            self.state.db(),
-            self.workspace,
-            user,
-            WorkspaceRole::Viewer,
-            None,
-        )
-        .await
-        .expect("a viewer");
+        crate::common::seat::seat(self.state.db(), self.workspace, user, WorkspaceRole::Viewer)
+            .await;
         registered["access_token"]
             .as_str()
             .expect("a viewer token")
@@ -242,15 +235,8 @@ impl Releases {
         zone_server::db::users::assign_user_role(&self.pool, user, global)
             .await
             .expect("the global role is assigned");
-        workspace_members::add_member(
-            self.state.db(),
-            self.workspace,
-            user,
-            WorkspaceRole::Admin,
-            None,
-        )
-        .await
-        .expect("a workspace admin");
+        crate::common::seat::seat(self.state.db(), self.workspace, user, WorkspaceRole::Admin)
+            .await;
         self.client
             .post_json(
                 "/api/auth/login",
