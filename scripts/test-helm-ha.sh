@@ -293,6 +293,20 @@ barman_cloud_plugin=barman-cloud.cloudnative-pg.io
 ai_litellm='select(.kind == "Deployment" and .metadata.name == "litellm")'
 ai_ollama='select(.kind == "Deployment" and .metadata.name == "ollama")'
 ai_pdb='select(.kind == "PodDisruptionBudget" and .metadata.name == "litellm")'
+ai_litellm_workers="$ai_litellm | .spec.template.spec.containers[0].args as \$arguments | \$arguments | to_entries | .[] | select(.value == \"--num_workers\") | \$arguments[.key + 1]"
+litellm_process_mebibytes=1024
+
+mebibytes() {
+    case $1 in
+        *Gi) number=${1%Gi} multiplier=1024 ;;
+        *Mi) number=${1%Mi} multiplier=1 ;;
+        *) number=$1 multiplier='' ;;
+    esac
+    case "$number$multiplier" in
+        *[!0-9]* | '') printf '%s' "$1" ;;
+        *) printf '%s' $((number * multiplier)) ;;
+    esac
+}
 
 expect_at_most() {
     message=$1
@@ -337,7 +351,7 @@ check_infra_ha() {
     ai=$(rendered_or_fail 'the zone-ai HA profile renders for sizing' render_ha zone-ai) || return 0
     server_replicas=$(query "$apps" 'select(.kind == "HorizontalPodAutoscaler" and .metadata.name == "zone-apps-server") | .spec.maxReplicas')
     litellm_replicas=$(query "$ai" "$ai_litellm | .spec.replicas")
-    litellm_workers=$(query "$ai" "$ai_litellm | .spec.template.spec.containers[0].args as \$arguments | \$arguments | to_entries | .[] | select(.value == \"--num_workers\") | \$arguments[.key + 1]")
+    litellm_workers=$(query "$ai" "$ai_litellm_workers")
     case "$server_replicas$litellm_replicas$litellm_workers" in
         *[!0-9]* | '')
             fail 'the connection sizing inputs are numbers' " server $server_replicas, litellm $litellm_replicas x $litellm_workers"
@@ -391,6 +405,14 @@ check_ai_ha() {
         "$ai_pdb | (.spec.maxUnavailable | tostring) + \" \" + (.spec | has(\"minAvailable\") | tostring)"
     expect 'the LiteLLM PDB selects the LiteLLM pods' litellm "$rendered" \
         "$ai_pdb | .spec.selector.matchLabels[\"app.kubernetes.io/name\"]"
+
+    litellm_workers=$(query "$rendered" "$ai_litellm_workers")
+    litellm_memory=$(mebibytes "$(query "$rendered" "$ai_litellm | .spec.template.spec.containers[0].resources.limits.memory")")
+    case "$litellm_workers" in
+        *[!0-9]* | '') fail 'the LiteLLM worker count is a number' " got \"$litellm_workers\"" ;;
+        *) expect_at_most 'the LiteLLM memory limit holds its master and every worker process' \
+            "$litellm_memory" "$(((litellm_workers + 1) * litellm_process_mebibytes))" ;;
+    esac
 
     default_ollama=$(query "$(render zone-ai)" "$ai_ollama")
     ha_ollama=$(query "$rendered" "$ai_ollama")

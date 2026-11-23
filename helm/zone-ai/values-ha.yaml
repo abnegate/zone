@@ -11,6 +11,13 @@
 litellm:
   replicas: 2
 
+  # The master and each of the 4 workers is a Python process of about 1 GiB.
+  resources:
+    requests:
+      memory: "4Gi"
+    limits:
+      memory: "6Gi"
+
   podDisruptionBudget:
     enabled: true
     maxUnavailable: 1
