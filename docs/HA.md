@@ -49,7 +49,7 @@ The server's pods spread over nodes with `maxSkew: 1` and `whenUnsatisfiable: Do
 - **Cordoned and tainted nodes don't count.** `nodeTaintsPolicy: Honor` keeps a node the pod cannot tolerate, such as a tainted control plane or a node being drained, out of the skew. Without it that node counts as an empty domain, and rollouts and the HPA deadlock.
 - **Releases don't count each other.** With `highAvailability.enabled` the chart adds `app.kubernetes.io/instance: <release>` to every spread and anti-affinity selector, so two releases in one namespace spread on their own.
 - **Keep room for one more server pod on every node.** The server rolls with `maxSurge: 1` and `maxUnavailable: 0`, so a new pod must be Ready before an old one stops, and a surge pod that cannot be scheduled stalls the rollout. A server pod requests 500m CPU and 512Mi. Within one revision the spread always has a node for the next pod: while the revision has fewer pods than nodes, some node has none of them, and past that a skew of 1 allows the next. So the HPA can also grow past the node count.
-- **The PDB allows one disruption** (`maxUnavailable: 1`), so a drain evicts server pods one at a time.
+- **The PDB allows one disruption** (`maxUnavailable: 1`), so a drain evicts server pods one at a time. The server, console and LiteLLM budgets set `unhealthyPodEvictionPolicy: AlwaysAllow`, so a drain can evict a pod that is not Ready instead of waiting out its crash loop.
 - **Nothing rebalances.** After a node is lost or drained, its pods move to the other nodes and stay there when it comes back. Run a descheduler, or roll the Deployment (`kubectl rollout restart deployment/zone-apps-server` for a release named `zone-apps`), to spread them again.
 
 **On 2 nodes** the server still rolls and drains. After a rollout no node holds more than half the replicas, rounded up. A drain cordons its node, which then leaves the skew, so every replica moves to the other node. CloudNativePG's third instance has nowhere to go, though, so 2 nodes is not a supported topology.
@@ -105,7 +105,7 @@ LiteLLM recommends one worker per pod on Kubernetes and scaling by pods instead.
 
 ### CPU, memory and concurrency
 
-The HA profile keeps the server's default resources: requests of 500m CPU and 512Mi, limits of 1 CPU and 1Gi. The HPA scales on 70% CPU. The claude and codex CLIs run as child processes inside the server pod and count against its limits, so raise the memory limit for organizations on the Claude Code or Codex provider, and size it from what the pods actually use.
+The HA profile keeps the server's default resources: requests of 500m CPU and 512Mi, limits of 1 CPU and 1Gi. The HPA scales on 70% CPU. The claude and codex CLIs run as child processes inside the server pod and count against its limits, so raise the memory limit for organizations on the Claude Code or Codex provider, and size it from what the pods actually use. A LiteLLM pod requests 4Gi of memory and is limited to 6Gi, because its master and each of its 4 workers is a Python process of about 1 GiB.
 
 Several limits are per replica and grow with the replica count rather than being shared:
 
