@@ -404,7 +404,7 @@ The failover coverage runs on every pull request, in `.github/workflows/rust-tes
 | `high_availability_updates` | Titles and action cards made on one replica reach sockets on another. |
 | `housekeeping_election` | Cluster sweeps run on one replica and replica sweeps on both; leadership moves without overlap when the leader's session is terminated, partitioned or paused; a digest goes out once per slot and a regression is alerted once across leader changes. |
 | `task_relay` | An answer posted on one replica resolves a run waiting on another; titles and action cards cross once and are never relayed back. |
-| `shared_limiter` | Two replicas sharing Valkey together allow exactly the limit per window, and fall back to their own counts without it. |
+| `shared_limiter` | Two replicas sharing Valkey together allow exactly the limit per window, and fall back to their own counts without it, warning about a Valkey that refuses to count once a minute rather than on every request. |
 | `shared_sso_throttle` | Two replicas sharing Valkey together allow one client address exactly `ZONE_SSO_REQUESTS_PER_MINUTE` single sign-on requests per window, refuse the next on either with 429 and `Retry-After`, still allow another address, and limit on their own without Valkey. |
 | `high_availability_fleet` | Each replica registers as a runner of its own, under the name it was given, as each pod does. |
 | `cluster_bus` | Delivery between peers, ordering, request and reply, isolation by master key, resubscribing after a killed subscription, and starting with Valkey down with the gauge at 0. |

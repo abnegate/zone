@@ -28,7 +28,9 @@ pub use kind::Kind;
 pub use loopback::Loopback;
 pub use namespace::Namespace;
 pub use subscription::Subscription;
+pub use throttle::Throttle;
 pub use topic::Topic;
+pub use valkey::LOG_INTERVAL;
 
 /// Makes aws-lc-rs the process's rustls provider. The dependency tree enables
 /// both of rustls's providers, so without this the first TLS connection that
