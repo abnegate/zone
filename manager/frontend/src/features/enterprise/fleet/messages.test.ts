@@ -86,8 +86,10 @@ describe('fleet messages', () => {
     expect(matchingText(1)).toBe('1 runner can take this work now.');
     expect(matchingText(3)).toBe('3 runners can take this work now.');
     expect(noMatchWarning(['gpu', 'region=eu'])).toBe(
-      'No active runner on the minimum version carries gpu, region=eu, so unattended work here waits until one does.'
+      'No active runner on the minimum version carries gpu, region=eu, so task runs here fail at once, and reminder turns and auto-project drives wait until one does.'
     );
-    expect(noMatchWarning([])).toContain('No active runner on the minimum version is connected');
+    expect(noMatchWarning([])).toBe(
+      'No active runner on the minimum version is connected, so task runs fail at once, and reminder turns and auto-project drives wait until one is.'
+    );
   });
 });

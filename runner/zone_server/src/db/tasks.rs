@@ -1573,9 +1573,10 @@ pub async fn claim_task_run(
         .await?
         .rows_affected()
             == 1;
-    let claim = match claimed {
-        true => Outcome::Claimed,
-        false => unclaimed(&mut transaction, run_id, claimant, held).await?,
+    let claim = if claimed {
+        Outcome::Claimed
+    } else {
+        unclaimed(&mut transaction, run_id, claimant, held).await?
     };
     transaction.commit().await?;
     Ok(claim)

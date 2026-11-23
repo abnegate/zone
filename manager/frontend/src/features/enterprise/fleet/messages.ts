@@ -281,8 +281,8 @@ export function matchingText(matching: number): string {
 
 export function noMatchWarning(effective: readonly string[]): string {
   return effective.length === 0
-    ? 'No active runner on the minimum version is connected, so unattended work waits until one is.'
-    : `No active runner on the minimum version carries ${effective.join(', ')}, so unattended work here waits until one does.`;
+    ? 'No active runner on the minimum version is connected, so task runs fail at once, and reminder turns and auto-project drives wait until one is.'
+    : `No active runner on the minimum version carries ${effective.join(', ')}, so task runs here fail at once, and reminder turns and auto-project drives wait until one does.`;
 }
 
 export function invalidLabels(labels: readonly string[]): string {

@@ -276,7 +276,9 @@ shows the organization's labels as **Required by the organization**, locked,
 beside **Required by this workspace**, and the union as **In effect**. It
 says how many connected, active and current runners carry every required
 label. When that count is 0, the card warns that no active runner on the
-minimum version carries the labels, so the work waits until one does. Only
+minimum version carries the labels: task runs fail at once with
+`fleet_no_runner`, and reminder turns and auto-project drives wait until one
+does. Only
 someone who may change the labels also sees, under **Labels runners carry**,
 the labels the fleet's runners carry, with how many connected runners that
 aren't revoked carry each (see
@@ -331,6 +333,20 @@ Labels have their own storage, apart from the agent policy, for two reasons:
    and the labels only when the workspace requires some. The fail only
    touches a run nobody has claimed, so a runner that picked the run up
    meanwhile keeps it.
+
+Two things change how a run left for another runner ends:
+
+- **Every eligible runner is full.** A runner picks up only as many runs as
+  it has free slots plus a queue as deep as its slots. If every runner that
+  may take the run stays that busy for the 30 seconds, the run fails with
+  `fleet_no_runner` even though such a runner is connected. Cordoning a
+  replica under load can therefore fail runs that the remaining runners have
+  no room to queue.
+- **The refusing runner restarts.** The runner that left the run watches the
+  deadline in its own process. If that process restarts before the 30
+  seconds pass, nothing fails the run with `fleet_no_runner`: when no runner
+  claims it, it fails as `orphaned` once it is 60 seconds old, as any run
+  without a heartbeat does, and Zone records no `fleet.run_refused`.
 
 The check applies when a run is claimed. A run parked on a question keeps
 its runner when it resumes; the task's next run is checked again.
@@ -683,7 +699,7 @@ list comes back sorted. For an organization:
 |---|---|
 | `labels` | The labels the organization requires. |
 | `available` | Each label carried by connected runners that aren't revoked, with how many carry it. `[]` unless you may change the labels, since on a shared server they are every organization's runners' labels. |
-| `matching` | How many connected, active and current runners carry every required label. When it is 0, no active runner on the minimum version carries the labels, and unattended work waits until one does. |
+| `matching` | How many connected, active and current runners carry every required label. When it is 0, no active runner on the minimum version carries the labels: task runs fail at once with `fleet_no_runner`, and reminder turns and auto-project drives wait until one does. |
 | `updated_at` | When the labels were last saved, or `null` if they never were. |
 
 The licensing fields mean what they do for the
