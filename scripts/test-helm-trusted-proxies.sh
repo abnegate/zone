@@ -116,4 +116,30 @@ assert_trusted '' \
 assert_warned 'a blank server.trustedProxies is warned about' \
     --set-string 'server.trustedProxies= '
 
+policies() {
+    helm template zone-apps "$chart" --namespace zone \
+        --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true "$@"
+}
+
+assert_policy() {
+    message=$1
+    expected=$2
+    expression=$3
+    shift 3
+    actual=$(policies "$@" | yq eval-all "$expression" -)
+    if [ "$actual" != "$expected" ]; then
+        printf '%s\n expected: %s\n      got: %s\n' "$message" "$expected" "$actual" >&2
+        exit 1
+    fi
+}
+
+assert_policy "the default-deny policy selects only this release's pods, so the Postgres, Valkey and LiteLLM pods beside it keep their traffic" \
+    'app.kubernetes.io/name=zone-apps,app.kubernetes.io/instance=zone-apps' \
+    'select(.metadata.name == "zone-apps-default-deny") | .spec.podSelector.matchLabels | to_entries | map(.key + "=" + .value) | join(",")'
+
+assert_policy 'the ingress controller is admitted on the ports the server and console pods listen on' \
+    '8000 3001' \
+    '[select(.metadata.name == "zone-apps-server-ingress" or .metadata.name == "zone-apps-manager-ingress") | .spec.ingress[0].ports[0].port] | join(" ")' \
+    --set server.service.port=80 --set manager.service.port=81
+
 printf '%s\n' 'Helm trusted proxy checks passed'
