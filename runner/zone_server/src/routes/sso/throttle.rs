@@ -3,7 +3,6 @@
 
 use std::time::Instant;
 
-use abnegate_http::Decision;
 use axum::Json;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -15,6 +14,7 @@ use zone_enterprise::sso::RATE_LIMITED;
 use super::saml::{redirect, refused};
 use crate::auth::client_address::ClientAddress;
 use crate::routes::common::ErrorResponse;
+use crate::services::limit::Decision;
 use crate::services::sso::console::redirect_uri;
 use crate::services::sso::throttle::{Throttle, WINDOW};
 use crate::state::AppState;
@@ -33,7 +33,7 @@ pub async fn authorizations(
     next: Next,
 ) -> Response {
     let throttle = state.sso_throttle();
-    let decision = throttle.check(address.0);
+    let decision = throttle.check(address.0).await;
     if decision.allowed {
         return next.run(request).await;
     }
@@ -54,7 +54,7 @@ pub async fn acs(
     next: Next,
 ) -> Response {
     let throttle = state.sso_throttle();
-    let decision = throttle.check(address.0);
+    let decision = throttle.check(address.0).await;
     if decision.allowed {
         return next.run(request).await;
     }

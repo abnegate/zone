@@ -148,6 +148,7 @@ mod seal_secrets;
 mod seats;
 mod sessions;
 mod shared_limiter;
+mod shared_sso_throttle;
 mod skills_store;
 mod spend_enforcement;
 mod spend_routes;

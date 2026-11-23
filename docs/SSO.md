@@ -882,9 +882,10 @@ browser that started it.
 Starting a sign-in and posting a SAML response need no account, so Zone
 limits both per client address: `ZONE_SSO_REQUESTS_PER_MINUTE` (120 by
 default) starts and posts together, per address, in each one-minute window.
-The count is kept in each server process's memory, so the limit applies per
-replica: behind a load balancer spreading requests over three replicas, one
-address can make up to three times as many.
+With `REDIS_URL` set, every replica counts into one shared count in Valkey,
+so the limit holds however a load balancer spreads requests. A single node,
+or a replica that can't reach Valkey, counts in its own memory, and the limit
+then applies per replica.
 Without the limit, one client could start sign-ins in a loop and post large
 responses until every SAML response check was taken, and everyone else's
 sign-ins would fail with `sso_sign_in_failed`. The limit applies to
