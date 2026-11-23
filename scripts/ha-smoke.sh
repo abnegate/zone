@@ -15,6 +15,7 @@ cache_image=valkey/valkey:8.1.10-alpine@sha256:b21fd94099dcd4bc6b2b9230daef69b65
 storage_class=zone-ha-shared
 database_cluster=zone-postgres
 server_deployment=zone-apps-server
+litellm_deployment=litellm
 server_selector=app.kubernetes.io/instance=zone-apps,app.kubernetes.io/component=server
 server_port=8000
 readiness_path=/health/ready
@@ -351,7 +352,7 @@ litellm:
       memory: 256Mi
     limits:
       cpu: "1"
-      memory: 1Gi
+      memory: 3Gi
 EOF
 
     cat >"$workdir/zone-apps.yaml" <<EOF
@@ -605,6 +606,8 @@ install_charts() {
     log "waiting for $replicas Ready server pods, at most $pods_per_node per node"
     wait_until 900 servers_settled ||
         die "the server never settled on $replicas Ready pods with at most $pods_per_node per node"
+    kubectl rollout status "deployment/$litellm_deployment" -n "$namespace" --timeout=600s ||
+        die 'LiteLLM never became available'
 }
 
 install_chart() {

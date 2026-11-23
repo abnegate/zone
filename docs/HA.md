@@ -394,7 +394,7 @@ What it sets up:
 What it checks, in order. A failure is recorded and the run continues where it can; it exits non-zero if anything failed.
 
 1. The Postgres cluster reaches N Ready instances (at most 3).
-2. 3 server pods are Ready with at most ceil(3 / N) on any node: distinct nodes on 3 workers, at most 2 per node on 2.
+2. 3 server pods are Ready with at most ceil(3 / N) on any node: distinct nodes on 3 workers, at most 2 per node on 2. LiteLLM's rollout completes.
 3. Every server pod reads `zone_cluster_bus_connected 1` on `/metrics`, and reaches Postgres through `/api/auth/sso/providers`.
 4. The PodDisruptionBudgets exist: `zone-apps-server`, `zone-apps-manager`, `litellm`, `zone-postgres-primary`, and `zone-postgres`, which CloudNativePG creates only from 3 instances. The server's budget allows exactly 1 disruption.
 5. Four disruptions, each while `/health/ready` is polled through the Service every 0.5 seconds:
