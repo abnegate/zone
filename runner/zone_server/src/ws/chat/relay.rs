@@ -271,11 +271,7 @@ pub(super) async fn replay(state: &AppState, stream: &ChatStream) -> Option<(Vec
         return None;
     }
     let holding = Holding::live(state.db(), chat).await;
-    if holding.is_none()
-        && !Serving::elsewhere(state.bus(), chat)
-            .await
-            .is_some_and(|serving| serving.holding)
-    {
+    if holding.is_none() && !held_elsewhere(state, chat).await {
         return None;
     }
     let replay = ask(state, chat).await;
@@ -303,13 +299,21 @@ async fn ask(state: &AppState, chat: Uuid) -> Option<Replay> {
     })
 }
 
+/// Whether another replica's serving key says it holds `chat`: runs its turn
+/// or keeps messages queued for one.
+async fn held_elsewhere(state: &AppState, chat: Uuid) -> bool {
+    Serving::elsewhere(state.bus(), chat)
+        .await
+        .is_some_and(|serving| serving.holding)
+}
+
 /// Sends a socket's command to the replica serving the chat, or says this
 /// replica should apply it. A command is forwarded while another replica
 /// holds the chat's lease or says it serves the chat, and asked again, as
 /// itself, when the first try goes unanswered. Each try carries a deadline
-/// the owner applies it by or never, so once every try is unanswered the
-/// lease alone decides: a lease that lapsed leaves the chat to this replica,
-/// and a live one means busy.
+/// the owner applies it by or never, so once every try is unanswered the chat
+/// is busy while another replica still holds it, by its lease or by a serving
+/// key saying it keeps the chat's queue, and is left to this replica otherwise.
 pub(super) async fn route(
     state: &AppState,
     chat: Uuid,
@@ -336,10 +340,10 @@ pub(super) async fn route(
             Outcome::Expired => {}
         }
     }
-    match Holding::live(state.db(), chat).await {
-        Some(_) => Route::Busy,
-        None => Route::Local,
+    if Holding::live(state.db(), chat).await.is_some() || held_elsewhere(state, chat).await {
+        return Route::Busy;
     }
+    Route::Local
 }
 
 /// Asks the replica serving the chat to apply `command` once.
@@ -407,6 +411,18 @@ pub(super) async fn serve(state: &AppState, stream: &Arc<ChatStream>, workspace:
         beacon,
     ));
     answers
+}
+
+/// Takes down every serving key this replica wrote, so the chats it answered
+/// pass to another replica as it stops rather than once the keys lapse.
+pub(super) async fn withdraw() {
+    let beacons: Vec<Arc<Mutex<Beacon>>> = SERVING
+        .iter()
+        .map(|serving| Arc::clone(serving.value()))
+        .collect();
+    for beacon in beacons {
+        beacon.lock().await.hide().await;
+    }
 }
 
 async fn answering(
@@ -651,7 +667,117 @@ fn acknowledge(
 
 #[cfg(test)]
 mod tests {
+    use metrics::Gauge;
+
     use super::*;
+    use crate::cluster::Bus;
+    use crate::secret;
+    use crate::state::{test_config, unreachable_pool};
+
+    /// How long another replica's claim on a chat lasts in a test.
+    const HELD: Duration = Duration::from_secs(30);
+
+    /// How long a bus may take to reach Valkey, and a refusal to arrive.
+    const WAIT: Duration = Duration::from_secs(10);
+
+    /// A bus on the Valkey at `REDIS_URL`, as one replica of a cluster sharing `passphrase`.
+    async fn replica(passphrase: &str) -> Bus {
+        let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let bus = Bus::connect(&url, &secret::derive(passphrase).unwrap(), Gauge::noop());
+        tokio::time::timeout(WAIT, bus.connection().wait_for(|connected| *connected))
+            .await
+            .expect("the bus reaches Valkey at REDIS_URL")
+            .expect("the bus status is watched");
+        bus
+    }
+
+    /// The first error published to `chat`'s sockets on this replica.
+    async fn refusal(events: &mut tokio::sync::broadcast::Receiver<Frame>) -> String {
+        loop {
+            match events.recv().await {
+                Ok(Frame::Message(message)) => {
+                    if let ServerMessage::Error { message } = &*message {
+                        return message.clone();
+                    }
+                }
+                Ok(_) | Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => panic!("the chat's frames closed"),
+            }
+        }
+    }
+
+    /// A Send this replica took to run itself, because no other replica
+    /// seemed to hold the chat when it was routed, is refused as busy rather
+    /// than run beside the replica whose serving key holds the chat, and leaves
+    /// nothing queued or running here.
+    #[tokio::test]
+    async fn a_send_started_here_while_another_replica_holds_the_chat_is_refused_busy() {
+        let passphrase = format!("relay-drive-{}", Uuid::new_v4().simple());
+        let (here, holder) = (replica(&passphrase).await, replica(&passphrase).await);
+        let chat = Uuid::new_v4();
+        let held = Serving {
+            instance: holder.instance(),
+            answerer: Uuid::new_v4(),
+            holding: true,
+        };
+        assert!(matches!(
+            held.claim(&holder, chat, HELD).await,
+            claim::Claim::Taken(_)
+        ));
+        let state = AppState::new(test_config(), unreachable_pool(), None).with_bus(here);
+        let stream = ChatStream::on(&state, chat);
+        let mut events = stream.events.subscribe();
+
+        let handled = super::super::control(
+            &state,
+            &stream,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Command::Send {
+                id: Uuid::new_v4(),
+                content: "Hello".to_string(),
+                metadata: None,
+            },
+        )
+        .await;
+        let refused = tokio::time::timeout(WAIT, refusal(&mut events))
+            .await
+            .expect("the send is refused");
+        let settled = Instant::now() + WAIT;
+        while super::super::owns(chat) && Instant::now() < settled {
+            tokio::time::sleep(IDLE_CHECK).await;
+        }
+
+        assert!(handled.started, "the send left the queue to start here");
+        assert_eq!(refused, BUSY);
+        assert!(
+            !super::super::owns(chat),
+            "the refused send left nothing queued or running here"
+        );
+    }
+
+    /// A replica stopping takes its serving keys down as it goes, rather than
+    /// leaving them to lapse after it has gone, so the others never wait on
+    /// or report busy a chat nobody answers.
+    #[tokio::test]
+    async fn a_replica_stopping_takes_down_its_claim_on_every_chat_it_answers() {
+        let passphrase = format!("relay-withdraw-{}", Uuid::new_v4().simple());
+        let (here, other) = (replica(&passphrase).await, replica(&passphrase).await);
+        let state = AppState::new(test_config(), unreachable_pool(), None).with_bus(here);
+        let chat = Uuid::new_v4();
+        let stream = ChatStream::on(&state, chat);
+        assert!(serve(&state, &stream, Uuid::new_v4()).await);
+        let served = Serving::elsewhere(&other, chat).await;
+
+        state.drain().begin();
+        withdraw().await;
+
+        assert_eq!(
+            served.map(|serving| serving.instance),
+            Some(state.bus().instance())
+        );
+        assert_eq!(Serving::elsewhere(&other, chat).await, None);
+    }
 
     #[test]
     fn only_the_frames_that_end_a_turn_are_terminators() {

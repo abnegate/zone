@@ -197,6 +197,12 @@ impl Queue {
         Some(Started { message, turn })
     }
 
+    /// Drops the turn about to start and everything queued behind it, for a
+    /// chat another replica holds.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
     /// The draining task died mid-turn. Nothing will finish that turn, so hold
     /// what is left rather than leave every later message waiting on it.
     fn abandon(&mut self) {
@@ -334,6 +340,27 @@ mod tests {
         let first = queued("first");
         assert_eq!(queue.submit(first.clone(), false).unwrap().message, first);
         assert!(queue.messages().is_empty());
+    }
+
+    #[test]
+    fn clearing_drops_the_starting_turn_and_everything_queued_behind_it() {
+        let mut queue = Queue::default();
+        queue.submit(queued("first"), false);
+        queue.submit(queued("second"), false);
+        queue.stop(true);
+
+        queue.clear();
+
+        assert!(queue.is_idle());
+        assert!(!queue.held());
+        let third = queued("third");
+        assert_eq!(
+            queue
+                .submit(third.clone(), false)
+                .map(|started| started.message),
+            Some(third),
+            "a message sent after clearing starts at once"
+        );
     }
 
     #[test]

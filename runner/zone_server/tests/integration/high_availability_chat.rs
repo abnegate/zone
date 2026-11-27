@@ -295,6 +295,14 @@ async fn hold_queue(owner: &mut ChatSocket) -> Vec<String> {
     held.iter().map(Uuid::to_string).collect()
 }
 
+/// Waits until `socket`'s connection has made the access check it makes as it starts, so a
+/// stalled access check holds up only the replica answering the chat, never the socket's own.
+async fn settle_access_check(socket: &mut ChatSocket) {
+    socket.send(json!({"type": "unknown"})).await;
+    socket.until("error", JOIN).await;
+    tokio::time::sleep(PAUSE * 5).await;
+}
+
 fn saved_count(frames: &[Received], content: &str) -> usize {
     frames
         .iter()
@@ -921,5 +929,55 @@ async fn a_send_whose_acknowledgement_arrives_late_is_asked_again_answered_dupli
         1,
         "{messages:?}"
     );
+    deployment.retire(vec![first, second]).await;
+}
+
+#[tokio::test]
+async fn a_send_on_another_replica_while_a_slow_replica_holds_a_queue_is_busy_and_never_runs() {
+    let deployment = Deployment::new().await;
+    let first = deployment.replica().await;
+    let second = deployment.replica().await;
+    let account = Account::register(&first).await;
+    let chat = account.chat(&first, false).await;
+    deployment.litellm.queue(Reply::counted(200, PAUSE));
+    deployment
+        .litellm
+        .fall_back_to(Reply::new(["Later answer"], Duration::ZERO));
+    let mut owner = ChatSocket::joined(&first, chat, &account.token, JOIN).await;
+    hold_queue(&mut owner).await;
+    let mut asker = ChatSocket::joined(&second, chat, &account.token, JOIN).await;
+    asker.until("queue", JOIN).await;
+    settle_access_check(&mut asker).await;
+
+    let stall = deployment.stall().await;
+    asker.say(Uuid::new_v4(), "Fresh question").await;
+    let mut frames = asker.during(ANSWER * 2 + ANSWER / 2).await;
+    stall.rollback().await.expect("the stall ends");
+    frames.extend(asker.during(QUIET * 2).await);
+
+    let busy: Vec<&Value> = errors(&frames)
+        .into_iter()
+        .filter(|error| error["message"] == BUSY)
+        .collect();
+    assert_eq!(
+        busy.len(),
+        1,
+        "a send the replica holding the queue never answered is busy: {:?}",
+        texts(&frames)
+    );
+    assert_eq!(
+        saved_count(&frames, "Fresh question"),
+        0,
+        "the send ran beside the replica holding the queue: {:?}",
+        kinds(&frames)
+    );
+    let messages = account.messages(&first, chat).await;
+    for content in ["Fresh question", "Held one", "Held two"] {
+        assert_eq!(
+            stored_count(&messages, content),
+            0,
+            "{content} ran: {messages:?}"
+        );
+    }
     deployment.retire(vec![first, second]).await;
 }

@@ -358,6 +358,7 @@ async fn serve(
     {
         tracing::warn!("Chat turns were still stopping when the shutdown moved on");
     }
+    chat::withdraw().await;
     if !draining.close_sockets(SOCKETS_CLOSE).await {
         tracing::warn!("WebSockets were still closing when the shutdown moved on");
     }
