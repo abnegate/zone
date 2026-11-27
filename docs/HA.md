@@ -85,7 +85,7 @@ A trusted network has to be closed to everything but the ingress controller; see
 
 `highAvailability.externalValkey=true` states that the existing secret's `valkey-url` key already points at the managed endpoint; use `secrets.create` with `secrets.redisUrl` instead to have the chart write it (see [Valkey](#valkey)). The secrets the charts read, and the 32-character `JWT_SECRET` and `ENCRYPTION_KEY`, are the same as for any install: see [helm/QUICK_START.md](../helm/QUICK_START.md).
 
-Set `postgres.storage.size` and `postgres.storage.storageClass` for the Postgres instances, and `server.agentState.persistence.size` (100Gi in the profile) for the shared volume. Every CLI turn writes a transcript to the shared volume and Zone prunes none of them, so size it for growth.
+Set `postgres.storage.size` and `postgres.storage.storageClass` in your values for the Postgres instances. The shared volume's `server.agentState.persistence.size` is 100Gi in the profile, so change it with `--set` or a values file after the profile. Every CLI turn writes a transcript to the shared volume and Zone prunes none of them, so size it for growth.
 
 ### Isolating the server
 
@@ -140,7 +140,9 @@ When you change `server.autoscaling.maxReplicas`, `litellm.replicas` or `litellm
 21 × (server maxReplicas + 1) + 10 × litellm workers × (litellm replicas + 1) + headroom
 ```
 
-CloudNativePG applies a new `max_connections` by restarting its instances. With an external Postgres, set the same number at the provider. `scripts/test-helm-ha.sh` checks that the HA renders stay within it.
+The profiles set `server.autoscaling.maxReplicas`, `litellm.replicas` and `max_connections`, and a value a profile sets wins over your values file (see [Installing](#installing)), so a `max_connections` in your values file renders as 400 whatever it says. Set them, and `litellm.workers` with them, with `--set` or in a values file after the profile. For 14 server replicas, say, add `--set server.autoscaling.maxReplicas=14` to the zone-apps command and `--set postgres.parameters.max_connections=500` to the zone-infra one: 21 × 15 + 120 + 49 = 484.
+
+CloudNativePG applies a new `max_connections` by restarting its instances. With an external Postgres, set the same number at the provider. `scripts/test-helm-ha.sh` checks that the HA renders stay within it, both as the profiles ship and with sizing set after them.
 
 LiteLLM recommends one worker per pod on Kubernetes and scaling by pods instead. The chart keeps 4 workers per pod; if you move to 1 worker and more replicas, the formula above still holds.
 
@@ -176,9 +178,9 @@ While Valkey is down, or does not answer within 500 milliseconds, each replica c
 | **The shared volume is lost** | Everything that touches it fails: agent turns, clones, worktrees, chat workspaces and artifacts. Postgres is intact, so chats, tasks and Claude sign-ins (sealed in the database) remain. | Codex logins, CLI session files, clones and any uncommitted work in them, chat workspaces and artifacts. Restore it from a snapshot ([Backup and restore](#backup-and-restore)). Codex sign-ins with no home sign in again, and a chat whose session file is missing starts a fresh session with its whole transcript. |
 | **An availability zone is lost** | The server spreads across zones on a best-effort basis (`topology.kubernetes.io/zone`, `ScheduleAnyway`), but the profile's Postgres anti-affinity is per node, so all 3 instances can sit in one zone. To survive a zone, run nodes in at least 3 zones, set `postgres.affinity.topologyKey: topology.kubernetes.io/zone`, and use a regional ReadWriteMany backend and a multi-zone Valkey. Otherwise a zone loss is a loss of everything in it. | Depends on placement, as above. |
 
-A new leader's 30-second wait keeps it from overlapping a demoted one. The wait is safe only while freshness plus statement timeout is less than it (10 + 10 < 30 by default); the server refuses timings that break this.
+A new leader's 30-second wait keeps it from dispatching a cluster sweep while a demoted one still may. The wait is safe only while freshness plus the ping timeout is less than it (10 + 10 < 30 by default); the server refuses timings that break this.
 
-Notifications are sent at most once across leader changes. Cluster sweeps are not fenced against a paused leader: a leader that stalls, as a frozen VM or a stopped process does, long enough to lose its lock can wake and finish a pass the next leader is also running. Single delivery rests on a claim per item instead. A scheduled report is claimed in `report_deliveries` before it is sent, by a compare-and-set of its workspace's slot; a regression alert by an insert into `regression_alerts` that does nothing on conflict; and a reminder turn is fenced on its attempt count, so a replica whose claim was taken over can neither renew nor finish it. A sweep that a demoted leader cut short or a paused one resumed, and the next leader repeated, therefore sends nothing twice. A crash between the claim and the send loses that one digest rather than sending it twice. Every other cluster sweep recomputes what is due from stored state, so a repeated pass is harmless.
+Notifications are sent at most once across leader changes. Cluster sweeps are not fenced against a paused leader: a leader that stalls, as a frozen VM or a stopped process does, long enough to lose its lock can wake and finish a pass the next leader is also running. The lock bounds when a cluster sweep may be dispatched, not the statements one has already sent: they carry no `statement_timeout` and no fence token, so they can land after the next leader has started. Every cluster sweep, and any added later, must therefore be idempotent or fenced by a claim of its own on each item. A scheduled report is claimed in `report_deliveries` before it is sent, by a compare-and-set of its workspace's slot; a regression alert by an insert into `regression_alerts` that does nothing on conflict, and given back only by a delete that names the time it was claimed at; a source resync by `claim_index`, which queues no index while another for the source is pending or running; and a reminder turn is fenced on its attempt count, so a replica whose claim was taken over can neither renew nor finish it. A sweep that a demoted leader cut short or a paused one resumed, and the next leader repeated, therefore sends nothing twice. A crash between the claim and the send loses that one digest rather than sending it twice. Every other cluster sweep recomputes what is due from stored state, so a repeated pass is harmless.
 
 ## Backup and restore
 
@@ -242,7 +244,7 @@ Keep these outside the cluster. Without them a restored database is unreadable o
 3. Restore Postgres. The chart's Cluster bootstraps with `initdb` only, so restore by hand:
    - Create a new ObjectStore for the restored cluster to archive into. The old archive belongs to the cluster it came from, and archiving into it again is refused.
    - Delete the `zone-postgres` Cluster. CloudNativePG deletes its volumes with it.
-   - Render the chart's Cluster with `helm template zone-infra helm/zone-infra --namespace zone -f helm/zone-infra/values-ha.yaml --set postgres.backup.objectStore=<new ObjectStore> --show-only templates/postgres-cluster.yaml`. Replace `bootstrap.initdb` with a recovery from the old archive, and add Helm's ownership metadata so the next `helm upgrade` adopts it: the label `app.kubernetes.io/managed-by: Helm` and the annotations `meta.helm.sh/release-name: zone-infra` and `meta.helm.sh/release-namespace: zone`.
+   - Render the chart's Cluster with your values and the profile in the order you installed them, so it keeps your storage size and class, secrets, resources and image: `helm template zone-infra helm/zone-infra --namespace zone -f <your values> -f helm/zone-infra/values-ha.yaml --set postgres.backup.objectStore=<new ObjectStore> --show-only templates/postgres-cluster.yaml`. Replace `bootstrap.initdb` with a recovery from the old archive, and add Helm's ownership metadata so the next `helm upgrade` adopts it: the label `app.kubernetes.io/managed-by: Helm` and the annotations `meta.helm.sh/release-name: zone-infra` and `meta.helm.sh/release-namespace: zone`.
 
      ```yaml
      bootstrap:
@@ -260,7 +262,7 @@ Keep these outside the cluster. Without them a restored database is unreadable o
      ```
 
      Leave out `recoveryTarget` to replay to the end of the archive.
-   - Apply it and wait for the Cluster to report healthy, then `helm upgrade zone-infra` with the new `postgres.backup.objectStore`.
+   - Apply it and wait for the Cluster to report healthy, then upgrade with the new ObjectStore: `helm upgrade zone-infra helm/zone-infra --namespace zone -f <your values> -f helm/zone-infra/values-ha.yaml --set postgres.backup.objectStore=<new ObjectStore>`.
 4. Restore the shared volume from the snapshot nearest before the Postgres recovery point, into a claim named `<fullname>-shared-state`. The database decides which sign-ins exist: a home whose sign-in the database does not hold is never used, and a sign-in whose home is missing signs in again.
 5. Start the servers again with `kubectl scale deployment/zone-apps-server --namespace zone --replicas=3`, the profile's HPA minimum; the HPA takes over from there. They run any migrations at startup, and the startup probe covers them.
 
@@ -489,7 +491,7 @@ cargo test -p zone_server --test integration -- \
   shared_sso_throttle sso_throttle_forwarded cluster_bus
 ```
 
-`scripts/test-helm-ha.sh`, run by `.github/workflows/helm.yml`, checks the profiles' renders: the properties on this page, that the guards refuse what they should, that the profiles layered after an operator's values file keep that file's inputs, and that the default renders keep their single-node settings (one LiteLLM replica, no startup probe, no ReadWriteMany claim, no release in the spread selectors). It does not compare renders against an earlier version of the charts.
+`scripts/test-helm-ha.sh`, run by `.github/workflows/helm.yml`, checks the profiles' renders: the properties on this page, that the guards refuse what they should, that the profiles layered after an operator's values file keep that file's inputs, that every `helm template` and `helm upgrade` command on this page layers your values before the profile and keeps them in its render, and that the default renders keep their single-node settings (one LiteLLM replica, no startup probe, no ReadWriteMany claim, no release in the spread selectors). It does not compare renders against an earlier version of the charts.
 
 ### Smoke test on kind
 
