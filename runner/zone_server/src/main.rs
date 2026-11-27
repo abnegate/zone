@@ -283,6 +283,7 @@ async fn main() {
     // not be combined with credentials at all.
     let background = state.background().clone();
     let draining = state.drain().clone();
+    let bus = state.bus().clone();
     let stopping = state.clone();
     let app = routes::create_router(state);
 
@@ -295,7 +296,7 @@ async fn main() {
 
     let listener = TcpListener::bind(addr).await.expect("Failed to bind");
 
-    let result = serve(listener, app, &draining, config.shutdown).await;
+    let result = serve(listener, app, &draining, &bus, config.shutdown).await;
     tokio::join!(
         drain(&background, BACKGROUND_DRAIN),
         indexing::release(&stopping, INDEXES_RELEASE),
@@ -324,6 +325,7 @@ async fn serve(
     listener: TcpListener,
     app: Router,
     draining: &Drain,
+    bus: &Bus,
     shutdown: Shutdown,
 ) -> std::io::Result<()> {
     let listening = CancellationToken::new();
@@ -363,7 +365,7 @@ async fn serve(
     {
         tracing::warn!("Chat turns were still stopping when the shutdown moved on");
     }
-    chat::withdraw().await;
+    chat::withdraw(bus).await;
     if !draining.close_sockets(SOCKETS_CLOSE).await {
         tracing::warn!("WebSockets were still closing when the shutdown moved on");
     }
