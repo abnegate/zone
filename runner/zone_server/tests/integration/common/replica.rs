@@ -119,12 +119,23 @@ impl Replica {
 
     /// The JSON body of a POST, whatever its status.
     pub async fn post(&self, path: &str, body: &Value, token: Option<&str>) -> Value {
+        self.post_status(path, body, token).await.1
+    }
+
+    /// The status and JSON body of a POST.
+    pub async fn post_status(
+        &self,
+        path: &str,
+        body: &Value,
+        token: Option<&str>,
+    ) -> (StatusCode, Value) {
         let mut request = self.http.post(self.url(path)).json(body);
         if let Some(token) = token {
             request = request.bearer_auth(token);
         }
         let response = request.send().await.expect("the replica answers");
-        response.json().await.unwrap_or(Value::Null)
+        let status = response.status();
+        (status, response.json().await.unwrap_or(Value::Null))
     }
 
     pub async fn get(&self, path: &str, token: Option<&str>) -> (StatusCode, Value) {

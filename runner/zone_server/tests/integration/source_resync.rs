@@ -11,13 +11,13 @@ use tokio::sync::OwnedSemaphorePermit;
 use uuid::Uuid;
 use zone_enterprise::fleet::Labels;
 use zone_server::db::context_gatherings::{
-    self, ABANDONED, FAILED, ORPHANED, PENDING, RUNNING, SUPERSEDED,
+    self, ABANDONED, FAILED, ORPHANED, PENDING, RUNNING, STOPPED, SUPERSEDED,
 };
 use zone_server::db::migrations;
 use zone_server::services::fleet::Identity;
 use zone_server::services::fleet::identity::version;
 use zone_server::state::AppState;
-use zone_server::workers::{fleet, source_resync};
+use zone_server::workers::{fleet, indexing, source_resync};
 
 use crate::common::{self, Database, TestClient};
 
@@ -28,6 +28,10 @@ const CLAIMANTS: usize = 8;
 const LATE: Duration = Duration::from_secs(60);
 /// How long a released replica has to start what it queued.
 const STARTING: Duration = Duration::from_secs(5);
+/// How long a stopping replica gives releasing its queued indexes.
+const RELEASE: Duration = Duration::from_secs(2);
+/// How long ago a runner that stopped heartbeating was last seen, well past counting as connected.
+const UNSEEN: Duration = Duration::from_secs(120);
 
 async fn source(pool: &PgPool, workspace: Uuid) -> Uuid {
     sqlx::query_scalar(
@@ -537,5 +541,111 @@ async fn a_reindex_while_a_claimed_index_waits_is_refused() {
         "a queued index refuses another: {}",
         reindex.text()
     );
+    assert_eq!(started, 1, "the source is indexed once");
+}
+
+/// Marks runner `instance` as last seen `ago`, as if it stopped heartbeating then.
+async fn unseen(pool: &PgPool, instance: Uuid, ago: Duration) {
+    sqlx::query(
+        "UPDATE fleet_runners SET last_seen_at = now() - make_interval(secs => $2) \
+         WHERE instance_id = $1",
+    )
+    .bind(instance)
+    .bind(ago.as_secs_f64())
+    .execute(pool)
+    .await
+    .expect("the runner's heartbeat is aged");
+}
+
+/// A queued index holds its source while the process that queued it lives, and stops holding it
+/// once that process crashed: replaced as its runner by a process restarted under its name, or no
+/// longer seen. Neither waits out [`ABANDONED`].
+#[tokio::test]
+async fn a_queued_index_holds_its_source_only_while_the_process_that_queued_it_lives() {
+    let database = Database::new(PREFIX).await;
+    migrations::run(&database.pool).await.unwrap();
+    let (_, workspace, user) = common::setup_workspace_member(&database.pool).await;
+    let (live, _live_permits) = busy(&database).await;
+    let (silent, _silent_permits) = busy(&database).await;
+    let name = format!("{PREFIX}-{}", Uuid::new_v4().simple());
+    let (crashed, _crashed_permits) = held(registered(&database, &name).await).await;
+    let held_by_live = source(&database.pool, workspace).await;
+    let held_by_silent = source(&database.pool, workspace).await;
+    let held_by_crashed = source(&database.pool, workspace).await;
+    for (state, source) in [
+        (&live, held_by_live),
+        (&silent, held_by_silent),
+        (&crashed, held_by_crashed),
+    ] {
+        indexing::claim(state, source, workspace, user, true)
+            .await
+            .unwrap()
+            .expect("the replica queues the source");
+    }
+    unseen(&database.pool, silent.instance(), UNSEEN).await;
+    let (_restarted, _restarted_permits) = held(registered(&database, &name).await).await;
+    let (claimer, _claimer_permits) = busy(&database).await;
+
+    let mut outcomes = Vec::new();
+    for source in [held_by_live, held_by_silent, held_by_crashed] {
+        outcomes.push(
+            indexing::claim(&claimer, source, workspace, user, true)
+                .await
+                .unwrap()
+                .is_some(),
+        );
+    }
+    database.cleanup().await;
+
+    assert_eq!(
+        outcomes,
+        [false, true, true],
+        "a live replica's queued index holds its source, while one queued by a process no \
+         longer seen, or replaced by a restart under its runner name, does not"
+    );
+}
+
+/// A stopping replica fails the indexes still waiting for its permits, so another replica, or
+/// the server once it restarts, queues their sources at once and indexes each once.
+#[tokio::test]
+async fn a_stopping_replica_releases_its_queued_indexes_to_be_indexed_once_elsewhere() {
+    let database = Database::new(PREFIX).await;
+    migrations::run(&database.pool).await.unwrap();
+    let (_, workspace, user) = common::setup_workspace_member(&database.pool).await;
+    let source = source(&database.pool, workspace).await;
+    let (stopping, stopping_permits) = busy(&database).await;
+    let (successor, successor_permits) = busy(&database).await;
+    let queued = indexing::claim(&stopping, source, workspace, user, true)
+        .await
+        .unwrap()
+        .expect("the stopping replica queued the source before it stopped");
+
+    let before = indexing::claim(&successor, source, workspace, user, true)
+        .await
+        .unwrap();
+    indexing::release(&stopping, RELEASE).await;
+    let after = indexing::claim(&successor, source, workspace, user, true)
+        .await
+        .unwrap();
+    let released = context_gatherings::get_gathering(&database.pool, queued)
+        .await
+        .unwrap()
+        .expect("the released gathering");
+    let since = now(&database.pool).await;
+    drop(stopping_permits);
+    drop(successor_permits);
+    let started = started(&database.pool, source, since).await;
+    database.cleanup().await;
+
+    assert_eq!(
+        before, None,
+        "a live replica's queued index holds its source"
+    );
+    assert!(
+        after.is_some(),
+        "a released index no longer holds its source"
+    );
+    assert_eq!(released.status, FAILED);
+    assert_eq!(released.error_message.as_deref(), Some(STOPPED));
     assert_eq!(started, 1, "the source is indexed once");
 }

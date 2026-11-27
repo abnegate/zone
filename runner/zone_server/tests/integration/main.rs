@@ -88,6 +88,7 @@ mod github_sources;
 mod gitlab_sources;
 mod high_availability_chat;
 mod high_availability_fleet;
+mod high_availability_indexing;
 mod high_availability_shutdown;
 mod high_availability_updates;
 mod host_directories;
