@@ -78,11 +78,16 @@ const PLAIN: &[Section] = &[
 /// bytes and empties 47 below the room it is left, so a longer draft of
 /// these two sentences dropped it under what one entry needs, and
 /// `a_middling_window_shows_part_of_every_block_it_reads` is what caught it.
-pub const CHAT_MAX_CHARS: usize = 30_200;
+/// Telling that chat to have an independent agent review a pull request no
+/// bot reviewed adds a further 254, counted the same way, which is what moved
+/// this ceiling up by 200: a review bot is a workflow like any other and can
+/// be unconfigured or skipped, and a turn that reads green checks as a review
+/// ships work nothing read.
+pub const CHAT_MAX_CHARS: usize = 30_400;
 /// Bounds the prompt of a planner chat, which adds the interview section and
-/// its two tools to the chat prompt: 32,163 characters, and 30,170 offered to
-/// a coding agent, each carrying the same 257 and the same 111.
-pub const PLANNER_MAX_CHARS: usize = 32_600;
+/// its two tools to the chat prompt: 32,657 characters, and 30,170 offered to
+/// a coding agent, each carrying the same 257, the same 111 and the same 254.
+pub const PLANNER_MAX_CHARS: usize = 32_800;
 /// Bounds the prompt of a chat that offers no tools: 4,740 characters.
 pub const PLAIN_MAX_CHARS: usize = 4_800;
 /// Bounds the task prompt over everything production assembles for a run its
