@@ -27,9 +27,7 @@ impl Sealer {
     /// A random nonce. At 192 bits, random nonces do not repeat however many
     /// envelopes one key seals.
     pub fn nonce() -> [u8; NONCE_BYTES] {
-        let mut nonce = [0u8; NONCE_BYTES];
-        rand::fill(&mut nonce);
-        nonce
+        rand::random()
     }
 
     /// Encrypts `body` in place and returns the tag that authenticates it
