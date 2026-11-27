@@ -2,6 +2,9 @@
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+charts=${ZONE_HELM_CHARTS:-$root/helm}
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
 storage_class=test-rwx
 trusted_proxies=10.244.0.0/16
 loopback='127.0.0.1/32,::1/128'
@@ -14,13 +17,13 @@ encryption_key=fedcba9876543210fedcba9876543210
 render() {
     chart=$1
     shift
-    helm template "$root/helm/$chart" --name-template "$chart" --namespace zone "$@"
+    helm template "$charts/$chart" --name-template "$chart" --namespace zone "$@"
 }
 
 render_ha() {
     chart=$1
     shift
-    render "$chart" -f "$root/helm/$chart/values-ha.yaml" "$@"
+    render "$chart" -f "$charts/$chart/values-ha.yaml" "$@"
 }
 
 query() {
@@ -55,12 +58,11 @@ $actual"
 rendered_or_fail() {
     message=$1
     shift
-    if ! output=$("$@" 2>&1); then
+    if ! rendered=$("$@" 2>&1); then
         fail "$message" " the render was refused:
-$output"
+$rendered"
         return 1
     fi
-    printf '%s\n' "$output"
 }
 
 expect_refused() {
@@ -81,7 +83,7 @@ $refusal" ;;
 expect_renders() {
     message=$1
     shift
-    rendered_or_fail "$message" "$@" >/dev/null || true
+    rendered_or_fail "$message" "$@" || true
 }
 
 apps_server='select(.kind == "Deployment" and .metadata.name == "zone-apps-server")'
@@ -134,10 +136,10 @@ expect_shutdown_budget() {
 }
 
 check_apps_ha() {
-    rendered=$(rendered_or_fail 'the zone-apps HA profile renders' \
+    rendered_or_fail 'the zone-apps HA profile renders' \
         render_apps_ha_vouched \
         --set-string commonEnv.REDIS_URL=redis://plain.example.com:6379 \
-        --set-string server.env.REDIS_URL=redis://plain.example.com:6379) || return 0
+        --set-string server.env.REDIS_URL=redis://plain.example.com:6379 || return 0
 
     expect 'the server autoscales from 3 replicas' 3 "$rendered" \
         'select(.kind == "HorizontalPodAutoscaler" and .metadata.name == "zone-apps-server") | .spec.minReplicas'
@@ -217,8 +219,8 @@ check_apps_ha() {
 }
 
 check_apps_ha_trusted_proxies() {
-    rendered=$(rendered_or_fail 'the zone-apps HA profile renders trusting loopback only' \
-        render_apps_ha_vouched --set-string 'server.trustedProxies=127.0.0.1/32\,::1/128') || return 0
+    rendered_or_fail 'the zone-apps HA profile renders trusting loopback only' \
+        render_apps_ha_vouched --set-string 'server.trustedProxies=127.0.0.1/32\,::1/128' || return 0
     expect 'the explicit loopback opt-out reaches the server' "$loopback" "$rendered" \
         "$apps_container | .env[] | select(.name == \"ZONE_TRUSTED_PROXIES\") | .value"
 
@@ -227,26 +229,26 @@ check_apps_ha_trusted_proxies() {
 }
 
 check_apps_ha_runner_name() {
-    rendered=$(rendered_or_fail 'the zone-apps HA profile renders with a blank server.env.ZONE_RUNNER_NAME' \
-        render_apps_ha_vouched --set-string server.env.ZONE_RUNNER_NAME= --set-string commonEnv.ZONE_RUNNER_NAME=) || return 0
+    rendered_or_fail 'the zone-apps HA profile renders with a blank server.env.ZONE_RUNNER_NAME' \
+        render_apps_ha_vouched --set-string server.env.ZONE_RUNNER_NAME= --set-string commonEnv.ZONE_RUNNER_NAME= || return 0
     expect 'a blank ZONE_RUNNER_NAME leaves the pod name as the only runner name' metadata.name "$rendered" "$apps_runner_names"
 }
 
 check_apps_ha_release() {
-    rendered=$(rendered_or_fail 'the zone-apps HA profile renders as another release' \
-        render_apps_ha_vouched --name-template other) || return 0
+    rendered_or_fail 'the zone-apps HA profile renders as another release' \
+        render_apps_ha_vouched --name-template other || return 0
     expect 'every spread and anti-affinity selector names its own release' "$(release_selectors other)" "$rendered" \
         "[$apps_selectors | .matchLabels[\"app.kubernetes.io/instance\"]] | join(\",\")"
 }
 
 check_apps_ha_selector_override() {
-    rendered=$(rendered_or_fail 'the zone-apps HA profile renders with custom server spread selectors' \
+    rendered_or_fail 'the zone-apps HA profile renders with custom server spread selectors' \
         render_apps_ha_vouched --set-json 'server.topologySpreadConstraints=[
             {"maxSkew": 1, "topologyKey": "kubernetes.io/hostname", "whenUnsatisfiable": "DoNotSchedule", "matchLabelKeys": ["pod-template-hash"],
              "labelSelector": {"matchLabels": {"app.kubernetes.io/component": "server", "tier": "api"}}},
             {"maxSkew": 1, "topologyKey": "topology.kubernetes.io/zone", "whenUnsatisfiable": "ScheduleAnyway",
              "labelSelector": {"matchExpressions": [{"key": "tier", "operator": "In", "values": ["api"]}]}}
-        ]') || return 0
+        ]' || return 0
     expect 'a custom spread selector keeps its labels and gains the release' \
         app.kubernetes.io/component=server,app.kubernetes.io/instance=zone-apps,tier=api "$rendered" \
         "$apps_server | .spec.template.spec.topologySpreadConstraints[] | select(.topologyKey == \"kubernetes.io/hostname\") | .labelSelector | $apps_labels"
@@ -257,8 +259,8 @@ check_apps_ha_selector_override() {
 
 check_apps_ha_secret() {
     url='rediss://zone:p%40ss@redis.example.com:6380/0'
-    rendered=$(rendered_or_fail 'secrets.create with a rediss:// URL renders' \
-        render_apps_ha_created --set-string "secrets.redisUrl=$url") || return 0
+    rendered_or_fail 'secrets.create with a rediss:// URL renders' \
+        render_apps_ha_created --set-string "secrets.redisUrl=$url" || return 0
     expect 'secrets.redisUrl is the secret valkey-url' "$url" "$rendered" \
         'select(.kind == "Secret") | .stringData["valkey-url"]'
 
@@ -268,6 +270,10 @@ check_apps_ha_secret() {
         render_apps_ha_created --set-string secrets.redisUrl=redis://cache.valkey.example.com:6379
     expect_renders 'a redis:// URL on an IP address renders' \
         render_apps_ha_created --set-string 'secrets.redisUrl=redis://10.0.0.5:6379'
+    for url in redis://valkey.corp:6379 redis://valkey.example.com:6379 rediss://valkey.svc.example.com:6380; do
+        expect_renders "a secrets.redisUrl on an external host named valkey ($url) renders" \
+            render_apps_ha_created --set-string "secrets.redisUrl=$url"
+    done
 }
 
 check_apps_ha_refusals() {
@@ -284,14 +290,28 @@ check_apps_ha_refusals() {
         redis://valkey.zone.svc.cluster.local:6379 \
         rediss://:secret@valkey.zone.svc.cluster.local.:6380 \
         redis://10-244-1-5.valkey.zone.svc.cluster.local:6379 \
-        redis://valkey-0.valkey.zone.svc:6379; do
+        redis://valkey-0.valkey.zone.svc:6379 \
+        redis://valkey.other.svc:6379 \
+        redis://valkey.other.svc.cluster.local:6379; do
         expect_refused "secrets.redisUrl naming the in-cluster valkey ($url) is refused" 'in-cluster valkey service' \
             render_apps_ha_created --set-string "secrets.redisUrl=$url"
     done
+    expect_refused 'secrets.redisUrl naming the valkey service of the release namespace is refused' 'in-cluster valkey service (valkey.other)' \
+        render_apps_ha_created --namespace other --set-string secrets.redisUrl=redis://valkey.other:6379
     expect_refused 'the schema refuses a secrets.redisUrl scheme other than redis or rediss' "/secrets/redisUrl" \
         render_apps_ha_created --set-string secrets.redisUrl=http://redis.example.com:6379
     expect_refused 'the template refuses a secrets.redisUrl scheme other than redis or rediss' 'must start with redis:// or rediss://' \
         render_apps_ha_created --skip-schema-validation --set-string secrets.redisUrl=http://redis.example.com:6379
+    expect_refused 'HA with ReadWriteOnce agent state is refused' 'needs agent state shared by every replica' \
+        render_apps_ha_vouched --set server.agentState.persistence.accessMode=ReadWriteOnce
+    expect_refused 'HA without agent state persistence is refused' 'needs agent state shared by every replica' \
+        render_apps_ha_vouched --set server.agentState.persistence.enabled=false
+    for reason in \
+        'devices: enforce a NetworkPolicy of your own that admits only the ingress controller to the server and set highAvailability.externalNetworkPolicy=true' \
+        'cuts the server off from single sign-on identity providers, SMTP, git hosts and model providers'; do
+        expect_refused "HA trusting a pod network without a network policy is refused: $reason" "$reason" \
+            render_apps_ha_vouched --set highAvailability.externalNetworkPolicy=false
+    done
     expect_refused 'a ReadWriteMany claim with no storage class is refused' 'storageClass must name a ReadWriteMany storage class' \
         render_ha zone-apps --set highAvailability.externalValkey=true --set "server.trustedProxies=$trusted_proxies" \
             --set highAvailability.externalNetworkPolicy=true
@@ -312,19 +332,47 @@ check_apps_ha_refusals() {
 }
 
 check_apps_ha_network_policy() {
-    rendered=$(rendered_or_fail 'HA network policy with the external Valkey CIDR and port renders' \
+    rendered_or_fail 'HA network policy with the external Valkey CIDR and port renders' \
         render_apps_ha_vouched \
         --set networkPolicy.enabled=true \
         --set networkPolicy.externalValkeyCIDR=10.20.0.0/16 \
-        --set networkPolicy.externalValkeyPort=6380) || return 0
+        --set networkPolicy.externalValkeyPort=6380 || return 0
     expect 'the server may reach the external Valkey CIDR on its port' '10.20.0.0/16 6380' "$rendered" \
         "$apps_egress | select(.to[0].ipBlock.cidr == \"10.20.0.0/16\") | .to[0].ipBlock.cidr + \" \" + (.ports[0].port | tostring)"
     expect 'the server is not sent to in-cluster valkey pods' 0 "$rendered" \
         "[$apps_egress | select(.to[0].podSelector.matchLabels[\"app.kubernetes.io/name\"] == \"valkey\")] | length"
 }
 
+check_apps_ha_operator_values() {
+    operator=$scratch/zone-apps-operator.yaml
+    cat >"$operator" <<EOF
+highAvailability:
+  externalValkey: true
+  externalNetworkPolicy: true
+server:
+  trustedProxies: $trusted_proxies
+  agentState:
+    persistence:
+      storageClass: $storage_class
+EOF
+    rendered_or_fail 'the zone-apps HA profile layered over an operator values file renders' \
+        render zone-apps -f "$operator" -f "$charts/zone-apps/values-ha.yaml" || return 0
+    expect "the operator file's storage class reaches the shared claim" "ReadWriteMany $storage_class" "$rendered" \
+        'select(.kind == "PersistentVolumeClaim" and .metadata.name == "zone-apps-shared-state") | .spec.accessModes[0] + " " + .spec.storageClassName'
+    expect "the operator file's trusted proxies reach the server" "$trusted_proxies" "$rendered" \
+        "$apps_container | .env[] | select(.name == \"ZONE_TRUSTED_PROXIES\") | .value"
+}
+
+check_apps_ha_shared_claim() {
+    rendered_or_fail 'the shared claim renders on its own, as docs/HA.md creates it before a move' \
+        render_apps_ha_vouched --show-only templates/server/pvc.yaml || return 0
+    expect 'the shared claim renders alone, under the name and owner docs/HA.md gives' \
+        'PersistentVolumeClaim zone-apps-shared-state Helm' "$rendered" \
+        '.kind + " " + .metadata.name + " " + .metadata.labels["app.kubernetes.io/managed-by"]'
+}
+
 check_apps_default() {
-    rendered=$(rendered_or_fail 'the zone-apps defaults render' render zone-apps) || return 0
+    rendered_or_fail 'the zone-apps defaults render' render zone-apps || return 0
     expect 'the default server has no startup probe' null "$rendered" "$apps_container | .startupProbe"
     expect 'the default server is ready on /health' /health "$rendered" "$apps_container | .readinessProbe.httpGet.path"
     expect 'the default render has no ReadWriteMany claim' 0 "$rendered" \
@@ -337,21 +385,22 @@ check_apps_default() {
         "$apps_server | .spec.template.spec.terminationGracePeriodSeconds"
     expect 'the default PDBs keep the Kubernetes unhealthy pod eviction policy' 0 "$rendered" \
         '[select(.kind == "PodDisruptionBudget") | select(.spec | has("unhealthyPodEvictionPolicy"))] | length'
-    expect 'the default server egress reaches the in-cluster valkey pods' 1 "$(render zone-apps --set networkPolicy.enabled=true)" \
-        "[$apps_egress | select(.to[0].podSelector.matchLabels[\"app.kubernetes.io/name\"] == \"valkey\")] | length"
-
     expect 'the default render sets no runner name' '' "$rendered" "$apps_runner_names"
+
+    rendered_or_fail 'the zone-apps defaults render with network policies' render zone-apps --set networkPolicy.enabled=true || return 0
+    expect 'the default server egress reaches the in-cluster valkey pods' 1 "$rendered" \
+        "[$apps_egress | select(.to[0].podSelector.matchLabels[\"app.kubernetes.io/name\"] == \"valkey\")] | length"
 
     expect_refused 'two fixed replicas sharing server.env.ZONE_RUNNER_NAME are refused' server.env.ZONE_RUNNER_NAME \
         render zone-apps --set server.autoscaling.enabled=false --set server.replicaCount=2 --set server.env.ZONE_RUNNER_NAME=zone
     expect_refused 'autoscaled replicas sharing commonEnv.ZONE_RUNNER_NAME are refused' commonEnv.ZONE_RUNNER_NAME \
         render zone-apps --set server.autoscaling.enabled=true --set commonEnv.ZONE_RUNNER_NAME=zone
-    rendered=$(rendered_or_fail 'one replica with its own ZONE_RUNNER_NAME renders' \
-        render zone-apps --set server.autoscaling.enabled=false --set server.replicaCount=1 --set server.env.ZONE_RUNNER_NAME=zone) || return 0
+    rendered_or_fail 'one replica with its own ZONE_RUNNER_NAME renders' \
+        render zone-apps --set server.autoscaling.enabled=false --set server.replicaCount=1 --set server.env.ZONE_RUNNER_NAME=zone || return 0
     expect 'one replica keeps its server.env.ZONE_RUNNER_NAME' zone "$rendered" "$apps_runner_names"
 
-    rendered=$(rendered_or_fail 'a plain commonEnv.REDIS_URL renders' \
-        render zone-apps --set-string commonEnv.REDIS_URL=redis://plain.example.com:6379) || return 0
+    rendered_or_fail 'a plain commonEnv.REDIS_URL renders' \
+        render zone-apps --set-string commonEnv.REDIS_URL=redis://plain.example.com:6379 || return 0
     expect 'commonEnv.REDIS_URL is never a plain env var' 0 "$rendered" \
         '[.. | select(tag == "!!map" and .name == "REDIS_URL" and has("value"))] | length'
 }
@@ -395,7 +444,7 @@ expect_at_most() {
 }
 
 check_infra_default() {
-    rendered=$(rendered_or_fail 'the zone-infra defaults render' render zone-infra) || return 0
+    rendered_or_fail 'the zone-infra defaults render' render zone-infra || return 0
     expect 'the default cluster runs one instance' 1 "$rendered" "$infra_cluster | .spec.instances"
     expect 'the default cluster sets no postgresql block' false "$rendered" "$infra_cluster | .spec | has(\"postgresql\")"
     expect 'the default cluster leaves affinity to CNPG' false "$rendered" "$infra_cluster | .spec | has(\"affinity\")"
@@ -405,7 +454,7 @@ check_infra_default() {
 }
 
 check_infra_ha() {
-    rendered=$(rendered_or_fail 'the zone-infra HA profile renders' render_ha zone-infra) || return 0
+    rendered_or_fail 'the zone-infra HA profile renders' render_ha zone-infra || return 0
     expect 'the HA cluster runs three instances' 3 "$rendered" "$infra_cluster | .spec.instances"
     expect 'a commit waits for any one standby, and blocks without one' 'any 1 required' "$rendered" \
         "$infra_cluster | .spec.postgresql.synchronous | .method + \" \" + (.number | tostring) + \" \" + .dataDurability"
@@ -418,8 +467,10 @@ check_infra_ha() {
         '[select(.kind == "Deployment" and .spec.template.metadata.labels["app.kubernetes.io/name"] == "valkey")] | length'
 
     max_connections=$(query "$rendered" "$infra_cluster | .spec.postgresql.parameters.max_connections")
-    apps=$(rendered_or_fail 'the zone-apps HA profile renders for sizing' render_apps_ha_vouched) || return 0
-    ai=$(rendered_or_fail 'the zone-ai HA profile renders for sizing' render_ha zone-ai) || return 0
+    rendered_or_fail 'the zone-apps HA profile renders for sizing' render_apps_ha_vouched || return 0
+    apps=$rendered
+    rendered_or_fail 'the zone-ai HA profile renders for sizing' render_ha zone-ai || return 0
+    ai=$rendered
     server_replicas=$(query "$apps" 'select(.kind == "HorizontalPodAutoscaler" and .metadata.name == "zone-apps-server") | .spec.maxReplicas')
     litellm_replicas=$(query "$ai" "$ai_litellm | .spec.replicas")
     litellm_workers=$(query "$ai" "$ai_litellm_workers")
@@ -435,15 +486,15 @@ check_infra_ha() {
 }
 
 check_infra_ha_parameters() {
-    rendered=$(rendered_or_fail 'the zone-infra HA profile with a numeric parameter renders' \
-        render_ha zone-infra --set postgres.parameters.max_connections=500) || return 0
+    rendered_or_fail 'the zone-infra HA profile with a numeric parameter renders' \
+        render_ha zone-infra --set postgres.parameters.max_connections=500 || return 0
     expect 'a postgresql parameter set as a number renders as a string, as CNPG requires' '!!str 500' "$rendered" \
         "$infra_cluster | .spec.postgresql.parameters.max_connections | tag + \" \" + ."
 }
 
 check_infra_ha_backup() {
-    rendered=$(rendered_or_fail 'the zone-infra HA profile with an object store renders' \
-        render_ha zone-infra --set postgres.backup.objectStore=zone-backups) || return 0
+    rendered_or_fail 'the zone-infra HA profile with an object store renders' \
+        render_ha zone-infra --set postgres.backup.objectStore=zone-backups || return 0
     expect 'the cluster archives WAL through the Barman Cloud plugin' "$barman_cloud_plugin true zone-backups" "$rendered" \
         "$infra_cluster | .spec.plugins[] | .name + \" \" + (.isWALArchiver | tostring) + \" \" + .parameters.barmanObjectName"
     expect 'the scheduled backup targets the cluster through the plugin' "zone-postgres plugin $barman_cloud_plugin" "$rendered" \
@@ -453,20 +504,31 @@ check_infra_ha_backup() {
         "$infra_backup | .spec.schedule | split(\" \") | length"
 }
 
+check_infra_ha_operator_values() {
+    operator=$scratch/zone-infra-operator.yaml
+    printf '%s\n' 'postgres:' '  backup:' '    objectStore: zone-backups' >"$operator"
+    rendered_or_fail 'the zone-infra HA profile layered over an operator values file renders' \
+        render zone-infra -f "$operator" -f "$charts/zone-infra/values-ha.yaml" || return 0
+    expect "the operator file's object store archives WAL" "$barman_cloud_plugin true zone-backups" "$rendered" \
+        "$infra_cluster | .spec.plugins[] | .name + \" \" + (.isWALArchiver | tostring) + \" \" + .parameters.barmanObjectName"
+    expect "the operator file's object store schedules the backup" "zone-postgres plugin $barman_cloud_plugin" "$rendered" \
+        "$infra_backup | .spec | .cluster.name + \" \" + .method + \" \" + .pluginConfiguration.name"
+}
+
 check_infra_ha_refusals() {
     expect_refused 'synchronous replication with too few standbys is refused' 'must be below postgres.instances' \
         render_ha zone-infra --set postgres.instances=1
 }
 
 check_ai_default() {
-    rendered=$(rendered_or_fail 'the zone-ai defaults render' render zone-ai) || return 0
+    rendered_or_fail 'the zone-ai defaults render' render zone-ai || return 0
     expect 'the default LiteLLM runs one replica' 1 "$rendered" "$ai_litellm | .spec.replicas"
     expect 'the default LiteLLM sets no affinity' null "$rendered" "$ai_litellm | .spec.template.spec.affinity"
     expect 'the default render has no LiteLLM PDB' 0 "$rendered" "[$ai_pdb] | length"
 }
 
 check_ai_ha() {
-    rendered=$(rendered_or_fail 'the zone-ai HA profile renders' render_ha zone-ai) || return 0
+    rendered_or_fail 'the zone-ai HA profile renders' render_ha zone-ai || return 0
     expect 'LiteLLM runs two replicas' 2 "$rendered" "$ai_litellm | .spec.replicas"
     expect 'LiteLLM prefers spreading across hostnames' 'kubernetes.io/hostname litellm' "$rendered" \
         "$ai_litellm | .spec.template.spec.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].podAffinityTerm | .topologyKey + \" \" + .labelSelector.matchLabels[\"app.kubernetes.io/name\"]"
@@ -487,29 +549,57 @@ check_ai_ha() {
             "$litellm_memory" "$(((litellm_workers + 1) * litellm_process_mebibytes))" ;;
     esac
 
-    default_ollama=$(query "$(render zone-ai)" "$ai_ollama")
     ha_ollama=$(query "$rendered" "$ai_ollama")
+    rendered_or_fail 'the zone-ai defaults render beside the HA profile' render zone-ai || return 0
+    default_ollama=$(query "$rendered" "$ai_ollama")
     if [ "$default_ollama" != "$ha_ollama" ]; then
         fail 'the HA profile leaves Ollama unchanged'
     fi
 }
 
-check_apps_default
-check_apps_ha
-check_apps_ha_release
-check_apps_ha_selector_override
-check_apps_ha_secret
-check_apps_ha_trusted_proxies
-check_apps_ha_runner_name
-check_apps_ha_refusals
-check_apps_ha_network_policy
-check_infra_default
-check_infra_ha
-check_infra_ha_parameters
-check_infra_ha_backup
-check_infra_ha_refusals
-check_ai_default
-check_ai_ha
+check_a_refused_render_fails_the_run() {
+    broken=$scratch/broken
+    cp -R "$charts" "$broken"
+    for chart in zone-apps zone-ai; do
+        printf '%s\n' 'broken: [' >>"$broken/$chart/values-ha.yaml"
+    done
+    if ZONE_HELM_CHARTS=$broken sh "$0" check_apps_ha check_ai_ha >/dev/null 2>&1; then
+        fail 'a profile that no longer renders fails the run'
+    fi
+}
+
+if [ $# -eq 0 ]; then
+    set -- \
+        check_apps_default \
+        check_apps_ha \
+        check_apps_ha_release \
+        check_apps_ha_selector_override \
+        check_apps_ha_secret \
+        check_apps_ha_trusted_proxies \
+        check_apps_ha_runner_name \
+        check_apps_ha_refusals \
+        check_apps_ha_network_policy \
+        check_apps_ha_operator_values \
+        check_apps_ha_shared_claim \
+        check_infra_default \
+        check_infra_ha \
+        check_infra_ha_parameters \
+        check_infra_ha_backup \
+        check_infra_ha_operator_values \
+        check_infra_ha_refusals \
+        check_ai_default \
+        check_ai_ha \
+        check_a_refused_render_fails_the_run
+fi
+for check in "$@"; do
+    case $check in
+        check_*) "$check" ;;
+        *)
+            printf 'not a check: %s\n' "$check" >&2
+            exit 2
+            ;;
+    esac
+done
 
 if [ "$failures" -gt 0 ]; then
     printf '%s Helm HA check(s) failed\n' "$failures" >&2

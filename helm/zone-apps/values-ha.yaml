@@ -1,11 +1,18 @@
 # The supported high-availability topology for zone-apps. Layer it over your
 # own values:
 #
-#   helm upgrade --install zone-apps helm/zone-apps -f helm/zone-apps/values-ha.yaml \
+#   helm upgrade --install zone-apps helm/zone-apps -f <your values> \
+#     -f helm/zone-apps/values-ha.yaml \
 #     --set server.agentState.persistence.storageClass=<ReadWriteMany class> \
 #     --set server.trustedProxies=<ingress controller pod CIDR> \
 #     --set highAvailability.externalNetworkPolicy=true \
 #     --set highAvailability.externalValkey=true
+#
+# It sets none of the inputs it needs from you, so whether they come from your
+# values or from --set, a render that lacks one fails and names it. A value
+# this profile does set, such as server.agentState.persistence.size, wins
+# over your values file: change it with --set or with a values file after
+# this one.
 #
 # It needs Kubernetes 1.27 or later, at least 3 schedulable nodes, a
 # ReadWriteMany storage class (NFSv4.1+, EFS, Filestore, Azure Files NFS or
@@ -13,17 +20,21 @@
 # highAvailability.externalValkey once secrets.existingSecret's redisUrl key
 # points at it, or set secrets.create with secrets.redisUrl.
 #
-# server.trustedProxies is required: the render fails without it. A trusted
-# network wider than one host lets every pod in it forge X-Forwarded-For, so
-# the render also fails unless networkPolicy.enabled keeps other pods off the
-# server, or highAvailability.externalNetworkPolicy states that a NetworkPolicy
-# of your own does (see docs/HA.md). Each server pod registers as a fleet
+# server.trustedProxies is required: your ingress controller's pod CIDR, such
+# as 10.244.0.0/16 on kind, so zone-server reads each client's address from
+# X-Forwarded-For. Never a range your clients use; 127.0.0.1/32,::1/128 trusts
+# loopback only. A trusted network wider than one host lets every pod in it
+# forge X-Forwarded-For, so the render also fails unless
+# highAvailability.externalNetworkPolicy states that a NetworkPolicy of your
+# own keeps other pods off the server, or networkPolicy.enabled does, whose
+# bundled policy also cuts the server's egress to DNS, Postgres, Valkey and
+# LiteLLM (see docs/HA.md). server.agentState.persistence.storageClass must
+# name the ReadWriteMany storage class. Each server pod registers as a fleet
 # runner named after its pod, so the render also fails when server.env or
 # commonEnv sets one ZONE_RUNNER_NAME for them all.
 
 highAvailability:
   enabled: true
-  externalValkey: false
 
 server:
   autoscaling:
@@ -66,12 +77,6 @@ server:
 
   terminationGracePeriodSeconds: 75
 
-  # Required. Your ingress controller's pod CIDR, such as 10.244.0.0/16 on
-  # kind, so zone-server reads each client's address from X-Forwarded-For,
-  # with a network policy that admits only the controller to the server.
-  # Never a range your clients use. 127.0.0.1/32,::1/128 trusts loopback only.
-  trustedProxies: ""
-
   env:
     ZONE_SHUTDOWN_DELAY_SECONDS: "10"
     ZONE_SHUTDOWN_GRACE_SECONDS: "30"
@@ -81,7 +86,6 @@ server:
       enabled: true
       accessMode: ReadWriteMany
       size: 100Gi
-      storageClass: ""
 
   # Agent CLI sign-ins in flight live in one replica's memory, so a browser
   # keeps reaching the replica that started its sign-in. HAProxy Kubernetes

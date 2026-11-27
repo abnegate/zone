@@ -60,10 +60,12 @@ The server's pods spread over nodes with `maxSkew: 1` and `whenUnsatisfiable: Do
 kubectl create namespace zone
 
 helm upgrade --install zone-infra helm/zone-infra --namespace zone \
+  -f <your values> \
   -f helm/zone-infra/values-ha.yaml \
   --set postgres.backup.objectStore=<ObjectStore name>
 
 helm upgrade --install zone-ai helm/zone-ai --namespace zone \
+  -f <your values> \
   -f helm/zone-ai/values-ha.yaml
 
 helm upgrade --install zone-apps helm/zone-apps --namespace zone \
@@ -75,9 +77,11 @@ helm upgrade --install zone-apps helm/zone-apps --namespace zone \
   --set highAvailability.externalValkey=true
 ```
 
+Your values come first and the profile after them, so the profile's topology wins over anything an earlier single-node values file left behind. The profiles set none of the inputs they need from you (`server.agentState.persistence.storageClass`, `server.trustedProxies`, `highAvailability.externalValkey`, `highAvailability.externalNetworkPolicy`, `postgres.backup.objectStore`), so those reach the render from your values or from `--set` alike, and a render that lacks a required one fails and names it. A value a profile does set, such as `server.agentState.persistence.size` or `postgres.backup.schedule`, wins over your values file: change it with `--set`, or with a second values file after the profile.
+
 `server.trustedProxies` lists the proxies whose `X-Forwarded-For` zone-server believes, such as `10.244.0.0/16`, the pod CIDR of kind and flannel; use your ingress controller's pod CIDR. Every request reaches the servers through the ingress controller, so without it every client shares the controller's address and its [single sign-on limit](#shared-limits). An HA render without it fails, and the message gives that example. To trust loopback only on purpose, set it to `127.0.0.1/32,::1/128` (escape the comma for `--set`: `--set 'server.trustedProxies=127.0.0.1/32\,::1/128'`). See [ZONE_TRUSTED_PROXIES](CONFIGURATION.md#zone_trusted_proxies) for what a trusted range allows.
 
-A trusted network has to be closed to everything but the ingress controller; see [Isolating the server](#isolating-the-server). `highAvailability.externalNetworkPolicy=true` states that a policy of your own does that.
+A trusted network has to be closed to everything but the ingress controller; see [Isolating the server](#isolating-the-server). `highAvailability.externalNetworkPolicy=true` states that a policy of your own does that. Prefer it to `networkPolicy.enabled`, whose bundled policy also restricts the server's egress.
 
 `highAvailability.externalValkey=true` states that the existing secret's `valkey-url` key already points at the managed endpoint; use `secrets.create` with `secrets.redisUrl` instead to have the chart write it (see [Valkey](#valkey)). The secrets the charts read, and the 32-character `JWT_SECRET` and `ENCRYPTION_KEY`, are the same as for any install: see [helm/QUICK_START.md](../helm/QUICK_START.md).
 
@@ -87,7 +91,6 @@ Set `postgres.storage.size` and `postgres.storage.storageClass` for the Postgres
 
 On most CNIs a pod CIDR holds every pod in the cluster, not just the ingress controller's. Any of them that can open a connection to a server pod is then a trusted proxy: it can put any address in `X-Forwarded-For`, so it is counted under addresses of its choosing by the single sign-on and SCIM limits, and it picks the address recorded on its sessions and devices. So an HA render whose `server.trustedProxies` (or `server.env.ZONE_TRUSTED_PROXIES`) holds a network wider than one host fails unless one of these keeps other pods off the server:
 
-- **`networkPolicy.enabled`**: the chart's policies admit only pods in `networkPolicy.ingressNamespace` (`haproxy-controller` by default) to the server's port, and need `networkPolicy.externalValkeyCIDR` and `networkPolicy.externalValkeyPort` in HA. They also limit the server's egress to DNS, Postgres, Valkey and LiteLLM, which cuts it off from single sign-on identity providers, git hosts and model providers, so few installs can use them as they stand.
 - **A policy of your own**, stated with `highAvailability.externalNetworkPolicy=true`. The chart cannot see it, so the setting is your statement that it holds. The least it takes, for a release named `zone-apps` behind the HAProxy controller:
 
   ```yaml
@@ -114,6 +117,7 @@ On most CNIs a pod CIDR holds every pod in the cluster, not just the ingress con
   ```
 
   Add a rule for your Prometheus if it scrapes `/metrics`. Your CNI must enforce NetworkPolicy.
+- **`networkPolicy.enabled`**: the chart's policies admit only pods in `networkPolicy.ingressNamespace` (`haproxy-controller` by default) to the server's port, and need `networkPolicy.externalValkeyCIDR` and `networkPolicy.externalValkeyPort` in HA. They also limit the server's egress to DNS over UDP, Postgres, Valkey and LiteLLM, which cuts it off from single sign-on identity providers, SMTP, git hosts and model providers, so few installs can use them as they stand. The render's refusal names a policy of your own first for that reason.
 
 A single address (`10.244.1.7`, `/32` or `/128`) and loopback networks need neither, since no other pod can hold them.
 
@@ -172,7 +176,7 @@ While Valkey is down, or does not answer within 500 milliseconds, each replica c
 | **The shared volume is lost** | Everything that touches it fails: agent turns, clones, worktrees, chat workspaces and artifacts. Postgres is intact, so chats, tasks and Claude sign-ins (sealed in the database) remain. | Codex logins, CLI session files, clones and any uncommitted work in them, chat workspaces and artifacts. Restore it from a snapshot ([Backup and restore](#backup-and-restore)). Codex sign-ins with no home sign in again, and a chat whose session file is missing starts a fresh session with its whole transcript. |
 | **An availability zone is lost** | The server spreads across zones on a best-effort basis (`topology.kubernetes.io/zone`, `ScheduleAnyway`), but the profile's Postgres anti-affinity is per node, so all 3 instances can sit in one zone. To survive a zone, run nodes in at least 3 zones, set `postgres.affinity.topologyKey: topology.kubernetes.io/zone`, and use a regional ReadWriteMany backend and a multi-zone Valkey. Otherwise a zone loss is a loss of everything in it. | Depends on placement, as above. |
 
-Notifications are sent at most once across leader changes. A scheduled report is claimed in `report_deliveries` before it is sent, and a regression alert in `regression_alerts`, so a sweep that a demoted leader cut short and the next leader repeated sends nothing twice. A crash between the claim and the send loses that one digest rather than sending it twice. Every other cluster sweep recomputes what is due from stored state, so a repeated pass is harmless.
+Notifications are sent at most once across leader changes. Cluster sweeps are not fenced against a paused leader: a leader that stalls, as a frozen VM or a stopped process does, long enough to lose its lock can wake and finish a pass the next leader is also running. Single delivery rests on a claim per item instead. A scheduled report is claimed in `report_deliveries` before it is sent, by a compare-and-set of its workspace's slot; a regression alert by an insert into `regression_alerts` that does nothing on conflict; and a reminder turn is fenced on its attempt count, so a replica whose claim was taken over can neither renew nor finish it. A sweep that a demoted leader cut short or a paused one resumed, and the next leader repeated, therefore sends nothing twice. A crash between the claim and the send loses that one digest rather than sending it twice. Every other cluster sweep recomputes what is due from stored state, so a repeated pass is harmless.
 
 ## Backup and restore
 
@@ -225,7 +229,14 @@ Keep these outside the cluster. Without them a restored database is unreadable o
 ### Restore order
 
 1. Recreate the secrets above in the namespace.
-2. Stop the servers so nothing writes while Postgres is replaced: upgrade zone-apps with `--set server.autoscaling.enabled=false --set server.replicaCount=0`.
+2. Stop the servers so nothing writes while Postgres is replaced. Scale the Deployment to 0, which also leaves the HPA idle until it is scaled up again (for a release named `zone-apps`), and wait until the second command lists no pods:
+
+   ```bash
+   kubectl scale deployment/zone-apps-server --namespace zone --replicas=0
+   kubectl get pods --namespace zone -l app.kubernetes.io/instance=zone-apps,app.kubernetes.io/component=server
+   ```
+
+   Leave zone-apps otherwise untouched until step 5.
 3. Restore Postgres. The chart's Cluster bootstraps with `initdb` only, so restore by hand:
    - Create a new ObjectStore for the restored cluster to archive into. The old archive belongs to the cluster it came from, and archiving into it again is refused.
    - Delete the `zone-postgres` Cluster. CloudNativePG deletes its volumes with it.
@@ -249,12 +260,13 @@ Keep these outside the cluster. Without them a restored database is unreadable o
      Leave out `recoveryTarget` to replay to the end of the archive.
    - Apply it and wait for the Cluster to report healthy, then `helm upgrade zone-infra` with the new `postgres.backup.objectStore`.
 4. Restore the shared volume from the snapshot nearest before the Postgres recovery point, into a claim named `<fullname>-shared-state`. The database decides which sign-ins exist: a home whose sign-in the database does not hold is never used, and a sign-in whose home is missing signs in again.
-5. Start the servers again with your normal zone-apps upgrade. They run any migrations at startup, and the startup probe covers them.
+5. Start the servers again with `kubectl scale deployment/zone-apps-server --namespace zone --replicas=3`, the profile's HPA minimum; the HPA takes over from there. They run any migrations at startup, and the startup probe covers them.
 
 ## Rolling upgrades
 
 - **Migrations run at server startup**, not as a job (`migration.enabled` is refused). Every replica that starts tries to migrate, under a Postgres advisory lock held on one dedicated connection, so one applies them and the others wait, find nothing to do and carry on. `zone-server --migrate-only` uses the same lock if you would rather migrate before rolling.
 - **The startup probe covers them.** `/health` with a period of 10 and a failure threshold of 60 gives a starting pod 10 minutes before liveness or readiness are checked at all, so a long migration is not killed half way.
+- **Shutdown fits the grace period.** A stopping server takes up to `ZONE_SHUTDOWN_DELAY_SECONDS` + `ZONE_SHUTDOWN_GRACE_SECONDS` + 17 seconds from SIGTERM to exit: the 17 are fixed stop steps, 10 to stop turns, 2 to close sockets and 5 for background writes. The sum must stay under `server.terminationGracePeriodSeconds` (75 in the profile, against 10 + 30 + 17 = 57), or the kubelet kills the pod with SIGKILL before it has saved its turns' replies and released their leases. Raise the grace period with either setting.
 - **One pod at a time.** The server rolls with `maxSurge: 1` and `maxUnavailable: 0`: a new pod has to become Ready before an old one is told to stop, and the old one drains as [described above](#what-survives-a-failure). The PDBs allow one disruption at a time. See [Scheduling](#scheduling) for the room a rollout needs.
 - **Every new pod is a new runner.** Each pod registers in the runner fleet under its own name, so a rollout registers new names and leaves the old ones offline. See [Runner fleet](#runner-fleet).
 - **Old and new code run side by side** for the length of a rollout, against the new schema. Schema changes are therefore expand and contract across releases: a release adds what the new code needs without breaking the old code, and only a later release removes what the old code used. Never skip a release that does an expand step on the way to the one that contracts it.
@@ -294,27 +306,36 @@ The first three need POSIX semantics with locks, so object storage cannot replac
 
 **Supported backends**: NFSv4.1 or later, Amazon EFS, Google Filestore, Azure Files over NFS, CephFS. **Not supported**: SMB (including Azure Files over SMB), and NFSv3 without a lock manager (`lockd`), where `flock` either fails or silently locks only the local node.
 
-The chart refuses a ReadWriteMany claim with no `server.agentState.persistence.storageClass`.
+The chart refuses a ReadWriteMany claim with no `server.agentState.persistence.storageClass`, and an HA render whose agent state is not on a ReadWriteMany claim: `server.agentState.persistence.accessMode: ReadWriteOnce` cannot be shared, and `server.agentState.persistence.enabled: false` gives each pod its own emptyDir.
 
 ### Moving from a single-node install
 
 A single-replica install keeps agent state on a ReadWriteOnce claim, `<fullname>-agent-state`, with agent state at its root and clones under `clones/`. The HA profile uses a new claim, because a claim's access modes cannot change, and does not copy anything into it. The old claim is kept (`helm.sh/resource-policy: keep`). Artifacts and the chat workspace were emptyDirs on a single node, so there is nothing of theirs to carry over.
 
-To carry codex logins, session files and clones over, for a release named `zone-apps`:
+To carry codex logins, session files and clones over, for a release named `zone-apps`, create the new claim and copy into it before the upgrade, so that no server runs on either claim in between:
 
-1. Upgrade to the HA profile with the servers at 0, so the new claim exists and nothing writes to either:
+1. Stop the single server, and wait until the second command lists no pods:
 
    ```bash
-   helm upgrade zone-apps helm/zone-apps --namespace zone -f <your values> \
+   kubectl scale deployment/zone-apps-server --namespace zone --replicas=0
+   kubectl get pods --namespace zone -l app.kubernetes.io/instance=zone-apps,app.kubernetes.io/component=server
+   ```
+
+2. Create the shared claim from the chart, with the flags of the upgrade in step 4, and give it Helm's ownership annotations so that upgrade adopts it (the chart's labels already carry `app.kubernetes.io/managed-by: Helm`):
+
+   ```bash
+   helm template zone-apps helm/zone-apps --namespace zone -f <your values> \
      -f helm/zone-apps/values-ha.yaml \
      --set server.agentState.persistence.storageClass=<ReadWriteMany class> \
      --set server.trustedProxies=<ingress controller pod CIDR> \
      --set highAvailability.externalNetworkPolicy=true \
      --set highAvailability.externalValkey=true \
-     --set server.autoscaling.enabled=false --set server.replicaCount=0
+     --show-only templates/server/pvc.yaml | kubectl create --namespace zone -f -
+   kubectl annotate pvc zone-apps-shared-state --namespace zone \
+     meta.helm.sh/release-name=zone-apps meta.helm.sh/release-namespace=zone
    ```
 
-2. Copy with a pod that mounts both claims as the server's user:
+3. Copy with a pod that mounts both claims as the server's user:
 
    ```yaml
    apiVersion: v1
@@ -354,7 +375,7 @@ To carry codex logins, session files and clones over, for a release named `zone-
    ```
 
    `kubectl apply` it, wait for it to complete, check its log, then `kubectl delete pod zone-state-copy`.
-3. Upgrade again without the last two `--set` flags. Once the servers run, delete the old claim: `kubectl delete pvc zone-apps-agent-state`.
+4. Upgrade to the HA profile with the same flags as step 2, without `--show-only`: `helm upgrade zone-apps helm/zone-apps --namespace zone -f <your values> -f helm/zone-apps/values-ha.yaml --set ...`. The upgrade adopts the claim. Start the servers on it with `kubectl scale deployment/zone-apps-server --namespace zone --replicas=3`, the HPA minimum, and the HPA takes over from there. Once they run, delete the old claim: `kubectl delete pvc zone-apps-agent-state`.
 
 ## Valkey
 
@@ -362,14 +383,16 @@ The profile needs an external, managed Redis or Valkey with automatic failover, 
 
 The server reads `REDIS_URL` only from the secret, under the key `secrets.keys.redisUrl` (default `valkey-url`). There are two ways to set it, and an HA render fails unless one holds:
 
-- **The chart writes the secret.** Set `secrets.create: true` and `secrets.redisUrl` to the endpoint, `redis://` or `rediss://` (TLS). It takes precedence over `commonEnv.REDIS_URL` and the URL built from `VALKEY_HOST`. The render fails when the URL names the in-cluster `valkey` service (`valkey`, `valkey.<namespace>`, `valkey.<namespace>.svc` or `valkey.<namespace>.svc.cluster.local`) or one of its pod records (`<pod>.valkey.<namespace>.svc...`), or uses another scheme. The check reads the host name only, so it is best-effort: the service's ClusterIP, a pod address or a name of your own that resolves to the in-cluster Valkey all pass it. zone-infra's HA profile deploys no Valkey, so this only matters where one is left running from an earlier install.
+- **The chart writes the secret.** Set `secrets.create: true` and `secrets.redisUrl` to the endpoint, `redis://` or `rediss://` (TLS). It takes precedence over `commonEnv.REDIS_URL` and the URL built from `VALKEY_HOST`. The render fails when the URL names an in-cluster `valkey` service (`valkey` or `valkey.<release namespace>`, or `valkey.<any namespace>.svc` with or without a cluster domain such as `.cluster.local`) or one of its pod records (`<pod>.valkey.<namespace>.svc...`), or uses another scheme. A host outside the cluster that happens to start with `valkey`, such as `valkey.corp` or `valkey.example.com`, passes. The check reads the host name only, so it is best-effort: the service's ClusterIP, a pod address, `valkey.<another namespace>` or a name of your own that resolves to an in-cluster Valkey all pass it. zone-infra's HA profile deploys no Valkey, so this only matters where one is left running from an earlier install.
 - **You manage the secret.** Point the `valkey-url` key of `secrets.existingSecret` at the endpoint yourself, and set `highAvailability.externalValkey: true` to say so. `helm template` cannot read an existing secret, so the chart cannot check this; the setting is your statement that it is true.
 
 Either way, check the result after installing: every server pod's `/metrics` should report `zone_cluster_bus_connected 1`. While `REDIS_URL` is set but the bus is disconnected, or could not use the URL at all, it reads 0 and the server logs an error, at most once a minute. Alert on it. A wrong URL shows up there, not as a failure to start: the server starts with Valkey down.
 
 Every replica of one install must share `ENCRYPTION_KEY`. The bus seals every message with XChaCha20-Poly1305 under a key derived from it, so chat frames, commands, answers, titles and action cards cross Valkey encrypted, and a message opens only on the channel it was published to. The bus also names its channels and keys under a namespace derived from the key, so installs with different keys can share one Valkey without reading or hearing each other's messages.
 
-Each message carries the time it was sealed. A replica drops a command more than 10 seconds old, any other message more than 30 seconds old, and anything stamped more than 5 seconds in its future, and delivers a command once however often it arrives, so a message captured from Valkey cannot be replayed later. Keep the replicas' clocks within a second of each other, as Kubernetes nodes running NTP are. A chat command forwarded to the replica serving the chat carries a deadline 1.5 seconds after it was asked, by the asking replica's clock, and is applied by then or never; it is asked once more, and then, while the chat's lease is live, the socket is told the chat is busy. So on a replica whose clock runs about 1.5 seconds ahead, commands forwarded from the others expire unapplied, and a replica whose clock runs more than 5 seconds ahead of another's, or 10 seconds behind it, has its commands dropped there outright.
+Each message carries the time it was sealed. A replica drops a request, such as a forwarded chat command, more than 10 seconds old, any other message more than 30 seconds old, and anything stamped more than 5 seconds in its future, so a message captured from Valkey stops working within its lifetime. Within it, only requests are checked for repeats: each process remembers the requests it has taken, by sender and id, for 15 seconds, and drops one it has already taken. That memory is per process and starts empty when the process does. Chat frames, titles and action cards are not checked, so whoever can publish to the Valkey can replay a captured one within its 30 seconds.
+
+A chat command forwarded to the replica serving the chat also carries a deadline 1.5 seconds after it was asked, by the asking replica's clock, and is applied by then or never. The asking replica waits 2 seconds for the answer, which leaves 500 milliseconds (`ANSWER_MARGIN` in `ws/chat/relay.rs`) for the acknowledgement to arrive and for the two replicas' clocks to disagree. It is asked once more, and then, while the chat's lease is live, the socket is told the chat is busy. So keep every replica's clock within 500 milliseconds of the others, as Kubernetes nodes running NTP or chrony are. A serving replica whose clock runs more than that behind the asker's can apply a command after the asker stopped waiting, so the sender is told the chat is busy for a command that ran. One whose clock runs 1.5 seconds or more ahead lets every command forwarded to it expire unapplied. A replica whose clock runs more than 5 seconds ahead of another's, or 10 seconds behind it, has its requests dropped there outright.
 
 Sealing hides what the messages say, not that they exist. Whoever can read the Valkey still sees the channel names, which carry chat and replica ids, the size and timing of messages, the chats' serving keys, which carry chat and replica ids, and the keys of the [shared limits](#shared-limits), which carry user ids, organization ids and client addresses. Whoever can write to it can drop messages, hold up a chat's commands with a forged serving key, and raise or use up those limits. So still give each install its own Valkey, or at least an ACL user restricted to the `zone:<namespace>:*` keys and channels, and reach it over `rediss://`.
 
@@ -462,7 +485,7 @@ cargo test -p zone_server --test integration -- \
   shared_sso_throttle sso_throttle_forwarded cluster_bus
 ```
 
-`scripts/test-helm-ha.sh`, run by `.github/workflows/helm.yml`, checks the profiles' renders: the properties on this page, that the guards refuse what they should, and that the default renders are unchanged.
+`scripts/test-helm-ha.sh`, run by `.github/workflows/helm.yml`, checks the profiles' renders: the properties on this page, that the guards refuse what they should, that the profiles layered after an operator's values file keep that file's inputs, and that the default renders keep their single-node settings (one LiteLLM replica, no startup probe, no ReadWriteMany claim, no release in the spread selectors). It does not compare renders against an earlier version of the charts.
 
 ### Smoke test on kind
 
