@@ -55,11 +55,15 @@ impl Drive<'_> {
     }
 
     /// Whether the drive must stop here, at a boundary between its steps,
-    /// because another instance took the project over.
+    /// because another instance took the project over or this replica is
+    /// shutting down.
     pub fn superseded(&self) -> bool {
         let lost = self.lease.lost();
         if lost {
-            tracing::debug!(project_id = %self.project.project_id, "Auto project drive stopping: its claim was taken over");
+            tracing::debug!(
+                project_id = %self.project.project_id,
+                "Auto project drive stopping: its claim was taken over or this replica is shutting down"
+            );
         }
         lost
     }

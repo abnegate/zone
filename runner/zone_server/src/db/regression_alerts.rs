@@ -23,6 +23,20 @@ where
     Ok(claimed.is_some())
 }
 
+/// Give back the claim `claim` made for `task_id` at `at`, so the next scan alerts again.
+pub async fn release<'e, E>(executor: E, task_id: Uuid, at: NaiveDateTime) -> DbResult<bool>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let released =
+        sqlx::query("DELETE FROM regression_alerts WHERE task_id = $1 AND alerted_at = $2")
+            .bind(task_id)
+            .bind(at)
+            .execute(executor)
+            .await?;
+    Ok(released.rows_affected() == 1)
+}
+
 /// Forget alerts sent before `before`.
 pub async fn prune<'e, E>(executor: E, before: NaiveDateTime) -> DbResult<u64>
 where

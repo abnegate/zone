@@ -7,6 +7,7 @@ mod recorder;
 mod regressing;
 mod replica;
 mod tally;
+mod vanishing;
 
 use std::future::Future;
 use std::sync::mpsc;
@@ -34,6 +35,7 @@ use recorder::Recorder;
 use regressing::Regressing;
 use replica::Replica;
 use tally::Tally;
+use vanishing::Vanishing;
 
 const PREFIX: &str = "housekeeping_election";
 const PERIOD: Duration = Duration::from_secs(1);
@@ -49,7 +51,7 @@ fn timing() -> Timing {
         ping: Duration::from_millis(200),
         timeout: Duration::from_secs(1),
         freshness: Duration::from_secs(1),
-        wait: Duration::from_secs(2),
+        wait: Duration::from_secs(3),
         idle: Duration::from_secs(2),
     }
 }
@@ -818,4 +820,130 @@ async fn a_regression_is_alerted_once_across_a_leader_change_and_old_alerts_are_
         "an alert older than the watch window is pruned"
     );
     database.cleanup().await;
+}
+
+/// A fix shipped a day ago with a run after it, which [`Regressing`] finds regressed.
+async fn watched_fix(pool: &PgPool, workspace_id: Uuid, now: NaiveDateTime) -> Uuid {
+    let watched = task(pool, workspace_id, Some(now - TimeDelta::days(1))).await;
+    sqlx::query(
+        "INSERT INTO task_runs (task_id, status, started_at, completed_at)
+         VALUES ($1, 'completed', $2, $3)",
+    )
+    .bind(watched)
+    .bind(now - TimeDelta::hours(2))
+    .bind(now - TimeDelta::hours(1))
+    .execute(pool)
+    .await
+    .expect("the run is created");
+    watched
+}
+
+async fn scan(
+    database: &Database,
+    checkers: &[Arc<dyn RegressionChecker>],
+    fanout: &Fanout,
+    now: NaiveDateTime,
+) {
+    regression::worker::run_cycle(
+        &state(database),
+        checkers,
+        &RegressionSettings::default(),
+        fanout,
+        now,
+    )
+    .await
+    .expect("the cycle runs");
+}
+
+#[tokio::test]
+async fn a_regression_alert_that_reached_no_channel_for_a_passing_reason_is_sent_next_cycle() {
+    let database = Database::new(PREFIX).await;
+    migrations::run(&database.pool).await.unwrap();
+    let pool = &database.pool;
+    let now = Utc::now().naive_utc();
+    let (_, workspace_id, _) = common::setup_test_data(pool).await;
+    let watched = watched_fix(pool, workspace_id, now).await;
+    let clock = Arc::new(Mutex::new(now));
+    let deliveries: Deliveries = Arc::default();
+    let fanout = Fanout::new().with(
+        Recorder::new(0, &clock, &deliveries).failing(Error::timeout(Duration::from_secs(5))),
+    );
+    let checkers: Vec<Arc<dyn RegressionChecker>> = vec![Arc::new(Regressing)];
+
+    scan(&database, &checkers, &fanout, now).await;
+    let claimed_after_failure = alerted(pool, watched).await;
+    scan(&database, &checkers, &fanout, now + TimeDelta::hours(1)).await;
+    let claimed_after_retry = alerted(pool, watched).await;
+    scan(&database, &checkers, &fanout, now + TimeDelta::hours(2)).await;
+    database.cleanup().await;
+
+    assert!(
+        !claimed_after_failure,
+        "a send that timed out everywhere gives its claim back"
+    );
+    assert!(claimed_after_retry);
+    assert_eq!(
+        delivered(&deliveries).len(),
+        1,
+        "the alert goes out on the next cycle, and once"
+    );
+}
+
+#[tokio::test]
+async fn a_regression_alert_refused_for_good_is_not_sent_again() {
+    let database = Database::new(PREFIX).await;
+    migrations::run(&database.pool).await.unwrap();
+    let pool = &database.pool;
+    let now = Utc::now().naive_utc();
+    let (_, workspace_id, _) = common::setup_test_data(pool).await;
+    let watched = watched_fix(pool, workspace_id, now).await;
+    let clock = Arc::new(Mutex::new(now));
+    let deliveries: Deliveries = Arc::default();
+    let fanout = Fanout::new()
+        .with(Recorder::new(0, &clock, &deliveries).failing(Error::malformed("no recipients")));
+    let checkers: Vec<Arc<dyn RegressionChecker>> = vec![Arc::new(Regressing)];
+
+    scan(&database, &checkers, &fanout, now).await;
+    scan(&database, &checkers, &fanout, now + TimeDelta::hours(1)).await;
+    let claimed = alerted(pool, watched).await;
+    database.cleanup().await;
+
+    assert!(
+        claimed,
+        "a refusal that retrying cannot fix keeps its claim"
+    );
+    assert!(
+        delivered(&deliveries).is_empty(),
+        "the refused alert is not tried again every hour"
+    );
+}
+
+#[tokio::test]
+async fn a_regression_alert_that_cannot_be_claimed_leaves_the_others_to_go_out() {
+    let database = Database::new(PREFIX).await;
+    migrations::run(&database.pool).await.unwrap();
+    let pool = &database.pool;
+    let now = Utc::now().naive_utc();
+    let (_, workspace_id, _) = common::setup_test_data(pool).await;
+    let first = watched_fix(pool, workspace_id, now).await;
+    let second = watched_fix(pool, workspace_id, now).await;
+    let clock = Arc::new(Mutex::new(now));
+    let deliveries: Deliveries = Arc::default();
+    let fanout = Fanout::new().with(Recorder::new(0, &clock, &deliveries));
+    let checkers: Vec<Arc<dyn RegressionChecker>> = vec![Arc::new(Vanishing::new(pool.clone()))];
+
+    scan(&database, &checkers, &fanout, now).await;
+    let claimed = [alerted(pool, first).await, alerted(pool, second).await];
+    database.cleanup().await;
+
+    assert_eq!(
+        claimed.iter().filter(|claimed| **claimed).count(),
+        1,
+        "the fix that vanished could not be claimed, and the other still was"
+    );
+    assert_eq!(
+        delivered(&deliveries).len(),
+        1,
+        "one alert's failed claim does not cost the cycle its other alerts"
+    );
 }

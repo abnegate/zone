@@ -9,6 +9,7 @@
 use chrono::{DateTime, Utc};
 use std::time::Duration;
 
+use crate::db::context_gatherings;
 use crate::db::sources::{self, ActiveIndexSource, IndexStatus};
 use crate::state::AppState;
 use crate::workers::gathering::core_source_from_row;
@@ -66,6 +67,11 @@ pub fn resync_decision(
 /// The short first delay, so a just-started server picks up failed files well
 /// before the first full poll would come round.
 pub const FIRST_POLL_DELAY: Duration = Duration::from_secs(15);
+
+/// How long an index a pass queued may wait for its replica's indexing permit before a later
+/// pass, on whichever replica leads by then, takes it to have died with that replica and
+/// queues the source again.
+pub const ABANDONED: Duration = Duration::from_secs(60 * 60);
 
 pub async fn poll_sources(state: &AppState) -> Result<(), sqlx::Error> {
     let sources = sources::list_active_index_sources(state.db()).await?;
@@ -169,6 +175,20 @@ async fn consider_source(
         return Ok(false);
     };
 
+    let claimed = context_gatherings::claim_index(
+        state.db(),
+        source.id,
+        source.workspace_id,
+        user_id,
+        ABANDONED,
+    )
+    .await
+    .map_err(|e| format!("index claim: {e}"))?;
+    let Some(gathering_id) = claimed else {
+        tracing::debug!(source_id = %source.id, "skipping source another pass already queued");
+        return Ok(false);
+    };
+
     tracing::info!(
         source_id = %source.id,
         source_name = %source.name,
@@ -181,7 +201,7 @@ async fn consider_source(
         ResyncReason::MissingEmbeddings => "missing_embeddings",
         ResyncReason::ScheduleDue => "schedule_due",
     });
-    indexing::spawn_index_source(state.clone(), source.id, source.workspace_id, user_id, true);
+    indexing::spawn_claimed_index(state.clone(), gathering_id, source.id, source.workspace_id);
     Ok(true)
 }
 

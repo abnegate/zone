@@ -1,6 +1,7 @@
 //! Audit event streaming. Each tick rebases positions left behind by a logical restore, then
 //! drains every due destination, a bounded number at a time, under Postgres leases shared by all
-//! server instances.
+//! server instances. A replica that is shutting down claims no more destinations, so none of
+//! its leases is cut at exit and left for another instance to wait out.
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -19,7 +20,14 @@ pub fn spawn(state: AppState, open: Arc<dyn Open>) -> JoinHandle<()> {
         let mut interval = tokio::time::interval(cadence.tick);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                () = state.drain().draining() => {}
+            }
+            if state.drain().is_draining() {
+                tracing::info!("Audit delivery stopped; this replica is shutting down");
+                return;
+            }
             if let Err(error) = drain(&state, cadence, open.as_ref()).await {
                 tracing::warn!(%error, "Audit delivery tick failed; retrying next tick");
             }
@@ -55,7 +63,7 @@ async fn slot(
     caught: &Mutex<HashSet<Uuid>>,
 ) -> Result<usize, sqlx::Error> {
     let mut delivered = 0;
-    loop {
+    while !state.drain().is_draining() {
         match deliver(state, cadence, open).await? {
             Outcome::Delivered(count) => delivered += count,
             Outcome::Paused(_) | Outcome::Unclaimed => return Ok(delivered),
@@ -75,4 +83,5 @@ async fn slot(
             Outcome::Failed(_) | Outcome::Lost => {}
         }
     }
+    Ok(delivered)
 }

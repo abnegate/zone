@@ -34,6 +34,8 @@ use abnegate_notify::Severity;
 pub const REGRESSION_INTERVAL_SECONDS: u64 = 60 * 60;
 const MAXIMUM_TASKS_PER_WORKSPACE: i64 = 500;
 const MAXIMUM_RUNS_PER_WORKSPACE: i64 = 10_000;
+const DELIVERED: &str = "delivered";
+const FAILED: &str = "failed";
 
 /// Which fixes a scan covers, and how much of their history it loads.
 #[derive(Debug, Clone, PartialEq)]
@@ -251,31 +253,69 @@ pub async fn run_cycle(
             };
 
         for result in reportable(&results) {
-            if !regression_alerts::claim(pool, result.task_id, now).await? {
-                continue;
-            }
-            tracing::warn!(
-                workspace_id = %workspace.workspace_id,
-                task_id = %result.task_id,
-                checker = result.checker,
-                confidence = result.confidence,
-                "Regression detected on a shipped fix"
-            );
-            let report = fanout.deliver(&describe(result, &workspace)).await;
-            for delivery in report.deliveries() {
-                crate::metrics::record_report_delivery(
-                    delivery.channel().as_str(),
-                    if delivery.is_delivered() {
-                        "delivered"
-                    } else {
-                        "failed"
-                    },
-                );
-            }
+            alert(pool, fanout, result, &workspace, now).await;
         }
     }
 
     Ok(())
+}
+
+/// Claim one result's alert and send it. A claim that cannot be made costs this alert and no
+/// other, and a send that reached no channel for a reason worth retrying gives its claim back,
+/// so the next cycle sends it again rather than never.
+async fn alert(
+    pool: &PgPool,
+    fanout: &Fanout,
+    result: &RegressionResult,
+    workspace: &ReportableWorkspace,
+    now: NaiveDateTime,
+) {
+    match regression_alerts::claim(pool, result.task_id, now).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            tracing::warn!(
+                workspace_id = %workspace.workspace_id,
+                task_id = %result.task_id,
+                %error,
+                "Could not claim a regression alert; retrying next cycle"
+            );
+            return;
+        }
+    }
+    tracing::warn!(
+        workspace_id = %workspace.workspace_id,
+        task_id = %result.task_id,
+        checker = result.checker,
+        confidence = result.confidence,
+        "Regression detected on a shipped fix"
+    );
+    let report = fanout.deliver(&describe(result, workspace)).await;
+    for delivery in report.deliveries() {
+        crate::metrics::record_report_delivery(
+            delivery.channel().as_str(),
+            if delivery.is_delivered() {
+                DELIVERED
+            } else {
+                FAILED
+            },
+        );
+    }
+    if report.any_delivered() || report.retryable().next().is_none() {
+        return;
+    }
+    match regression_alerts::release(pool, result.task_id, now).await {
+        Ok(_) => tracing::warn!(
+            task_id = %result.task_id,
+            "A regression alert reached no channel; it is sent again next cycle"
+        ),
+        Err(error) => tracing::warn!(
+            task_id = %result.task_id,
+            %error,
+            "A regression alert reached no channel and its claim could not be given back; it is \
+             not sent again until the fix leaves its watch window"
+        ),
+    }
 }
 
 /// The checkers a scan runs, in the order they were written.

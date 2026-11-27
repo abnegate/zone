@@ -401,7 +401,7 @@ mod tests {
         )
         .with_jitter(Jitter::none())
         .spawn();
-        tokio::time::sleep(Duration::from_millis(19_500)).await;
+        tokio::time::sleep(Timing::default().wait - Duration::from_millis(500)).await;
         let waiting = clustered.load(Ordering::SeqCst);
         tokio::time::sleep(Duration::from_secs(2)).await;
         handle.abort();
@@ -442,7 +442,7 @@ mod tests {
         let handle = Worker::new(Registry::new().with(sweep), leadership)
             .with_jitter(Jitter::none())
             .spawn();
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        tokio::time::sleep(Timing::default().wait + Duration::from_secs(10)).await;
         handle.abort();
         pinging.abort();
 

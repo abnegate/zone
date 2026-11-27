@@ -2,10 +2,15 @@ use std::time::Duration;
 
 /// The intervals the leader election runs on.
 ///
-/// Two leaders never overlap while `freshness < wait`: a leader stops `freshness`
-/// after the last answered ping was sent, and a successor can only take the lock
-/// after that ping, then waits `wait` before it starts. Pinging more often than
-/// `freshness` and `idle` keeps a healthy leader leading.
+/// A leader stops leading `freshness` after its last answered ping was sent. That ping ran on
+/// the database after it was sent, while the leader's session still held the lock, so a
+/// successor's lock is granted later than that send, and the successor counts its wait from
+/// when its lock statement returned, later still. The successor therefore starts at least
+/// `wait` after the old leader's last confirmation, and the old leader stopped `freshness`
+/// after it. Two leaders never overlap while `freshness + timeout < wait`: the `timeout` on top
+/// leaves what the old leader had sent to the database just before its deadline time to land
+/// before the successor starts. Pinging more often than `freshness` and `idle` keeps a healthy
+/// leader leading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timing {
     /// How often a follower tries to take the lock.
@@ -29,7 +34,7 @@ impl Default for Timing {
             ping: Duration::from_secs(5),
             timeout: Duration::from_secs(10),
             freshness: Duration::from_secs(10),
-            wait: Duration::from_secs(20),
+            wait: Duration::from_secs(30),
             idle: Duration::from_secs(30),
         }
     }
@@ -38,7 +43,9 @@ impl Default for Timing {
 impl Timing {
     /// Whether these intervals keep a demoted leader and its successor apart.
     pub fn is_safe(&self) -> bool {
-        self.ping < self.freshness && self.ping < self.idle && self.freshness < self.wait
+        self.ping < self.freshness
+            && self.ping < self.idle
+            && self.freshness + self.timeout < self.wait
     }
 }
 
@@ -54,7 +61,7 @@ mod tests {
         assert_eq!(timing.ping, Duration::from_secs(5));
         assert_eq!(timing.timeout, Duration::from_secs(10));
         assert_eq!(timing.freshness, Duration::from_secs(10));
-        assert_eq!(timing.wait, Duration::from_secs(20));
+        assert_eq!(timing.wait, Duration::from_secs(30));
         assert_eq!(timing.idle, Duration::from_secs(30));
         assert!(timing.is_safe());
     }
@@ -67,5 +74,39 @@ mod tests {
         };
 
         assert!(!timing.is_safe());
+    }
+
+    #[test]
+    fn a_lock_statement_slow_enough_to_outlast_the_wait_is_unsafe() {
+        let timing = Timing {
+            timeout: Duration::from_secs(30),
+            ..Timing::default()
+        };
+
+        assert!(!timing.is_safe());
+    }
+
+    #[test]
+    fn a_wait_that_only_just_covers_freshness_and_timeout_is_unsafe() {
+        let timing = Timing {
+            freshness: Duration::from_secs(10),
+            timeout: Duration::from_secs(10),
+            wait: Duration::from_secs(20),
+            ..Timing::default()
+        };
+
+        assert!(!timing.is_safe());
+    }
+
+    #[test]
+    fn the_default_wait_leaves_a_margin_past_freshness_and_timeout() {
+        let timing = Timing::default();
+
+        assert!(timing.is_safe());
+        assert!(
+            timing.wait >= timing.freshness + timing.timeout + Duration::from_secs(10),
+            "a successor starts at least ten seconds after a demoted leader's last statement \
+             could land: {timing:?}"
+        );
     }
 }

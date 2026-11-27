@@ -142,8 +142,8 @@ impl Leadership {
     }
 
     #[cfg(test)]
-    pub fn promote(&self, sent: Instant) {
-        self.tenure.send_replace(Some(Tenure::new(sent)));
+    pub fn promote(&self, at: Instant) {
+        self.tenure.send_replace(Some(Tenure::new(at, at)));
     }
 
     #[cfg(test)]
@@ -174,8 +174,8 @@ async fn campaign(
             attempt = timeout(timing.timeout, acquire(&options, &timing)) => attempt,
         };
         match attempt {
-            Ok(Ok(Some((connection, sent)))) => {
-                tenure.send_replace(Some(Tenure::new(sent)));
+            Ok(Ok(Some((connection, acquired)))) => {
+                tenure.send_replace(Some(acquired));
                 tracing::info!(
                     wait_seconds = timing.wait.as_secs(),
                     "This replica now leads the cluster housekeeping sweeps, once the wait ends"
@@ -206,7 +206,7 @@ async fn campaign(
 async fn acquire(
     options: &PgConnectOptions,
     timing: &Timing,
-) -> DbResult<Option<(PgConnection, Instant)>> {
+) -> DbResult<Option<(PgConnection, Tenure)>> {
     let mut connection = PgConnection::connect_with(options).await?;
     sqlx::query(IDLE_SESSION_TIMEOUT)
         .bind(format!("{}ms", timing.idle.as_millis()))
@@ -218,7 +218,7 @@ async fn acquire(
         .fetch_one(&mut connection)
         .await?;
     if acquired {
-        return Ok(Some((connection, sent)));
+        return Ok(Some((connection, Tenure::new(sent, Instant::now()))));
     }
     connection.close().await?;
     Ok(None)
@@ -309,16 +309,14 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_new_leader_leads_only_after_its_wait() {
         let leadership = Leadership::manual(timing());
-        leadership.promote(Instant::now());
+        let start = Instant::now();
+        leadership.promote(start);
 
-        assert!(!leadership.leads());
-        tokio::time::advance(Duration::from_secs(5)).await;
-        leadership.confirm(Instant::now());
-        tokio::time::advance(Duration::from_secs(5)).await;
-        leadership.confirm(Instant::now());
-        tokio::time::advance(Duration::from_secs(5)).await;
-        leadership.confirm(Instant::now());
-        tokio::time::advance(Duration::from_secs(5)).await;
+        while Instant::now() < start + timing().wait {
+            assert!(!leadership.leads());
+            tokio::time::advance(timing().ping).await;
+            leadership.confirm(Instant::now());
+        }
 
         assert!(leadership.leads());
     }
@@ -327,11 +325,11 @@ mod tests {
     async fn a_paused_leader_stops_leading_while_it_still_holds_the_lock() {
         let leadership = Leadership::manual(timing());
         leadership.promote(Instant::now());
-        tokio::time::advance(Duration::from_secs(20)).await;
+        tokio::time::advance(timing().wait).await;
         leadership.confirm(Instant::now());
         assert!(leadership.leads());
 
-        tokio::time::advance(Duration::from_secs(11)).await;
+        tokio::time::advance(timing().freshness + Duration::from_secs(1)).await;
 
         assert!(
             leadership.tenure().is_some(),
@@ -348,19 +346,19 @@ mod tests {
         let leadership = Leadership::manual(timing());
         let start = Instant::now();
         leadership.promote(start);
-        tokio::time::advance(Duration::from_secs(20)).await;
+        tokio::time::advance(timing().wait).await;
         leadership.confirm(Instant::now());
 
         leadership.lost().await;
 
-        assert_eq!(Instant::now(), start + Duration::from_secs(30));
+        assert_eq!(Instant::now(), start + timing().wait + timing().freshness);
     }
 
     #[tokio::test(start_paused = true)]
     async fn losing_resolves_on_demotion() {
         let leadership = Leadership::manual(timing());
         leadership.promote(Instant::now());
-        tokio::time::advance(Duration::from_secs(20)).await;
+        tokio::time::advance(timing().wait).await;
         leadership.confirm(Instant::now());
         let demoting = leadership.clone();
 
@@ -378,7 +376,7 @@ mod tests {
     async fn releasing_stops_leading_before_the_lock_is_given_back() {
         let leadership = Leadership::manual(timing());
         leadership.promote(Instant::now());
-        tokio::time::advance(Duration::from_secs(20)).await;
+        tokio::time::advance(timing().wait).await;
         leadership.confirm(Instant::now());
         assert!(leadership.leads());
         let watching = leadership.clone();
@@ -397,6 +395,19 @@ mod tests {
     async fn an_election_on_unsafe_timing_is_refused() {
         let timing = Timing {
             wait: Duration::from_secs(5),
+            ..timing()
+        };
+
+        assert_eq!(
+            Leadership::start(PgConnectOptions::new(), timing).err(),
+            Some(UnsafeTiming(timing))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_election_whose_lock_statement_could_outlast_the_wait_is_refused() {
+        let timing = Timing {
+            timeout: Duration::from_secs(30),
             ..timing()
         };
 

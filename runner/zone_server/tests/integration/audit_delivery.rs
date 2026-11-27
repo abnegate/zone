@@ -876,3 +876,38 @@ async fn a_deep_backlog_takes_turns_with_other_destinations() {
     );
     engine.cleanup().await;
 }
+
+#[tokio::test]
+async fn a_draining_replica_claims_no_destination_and_its_worker_stops() {
+    let engine = Engine::licensed().await;
+    let scope = engine.organization().await;
+    let destination = engine.destination(scope, Kind::Webhook).await;
+    engine.written(scope, 3).await;
+    settle(engine.pool()).await;
+    let before = engine.delivery(destination).await;
+    engine.state.drain().begin();
+
+    let delivered = engine.drain().await;
+    let worker = spawn(
+        engine.state.clone(),
+        Arc::new(Fake(engine.receiver.clone())),
+    );
+    let stopped = tokio::time::timeout(BOOT_WAIT, worker).await;
+    let after = engine.delivery(destination).await;
+    let sent = engine.receiver.sent(destination);
+    engine.cleanup().await;
+
+    assert_eq!(
+        delivered, 0,
+        "a replica that is shutting down delivers nothing"
+    );
+    assert!(sent.is_empty(), "nothing reached the destination: {sent:?}");
+    assert_eq!(
+        (after.lease_owner, after.attempts, after.batch),
+        (before.lease_owner, before.attempts, before.batch),
+        "the destination was never claimed, so no lease is left to wait out"
+    );
+    stopped
+        .expect("the delivery worker stops once its replica drains")
+        .expect("the delivery worker does not panic");
+}

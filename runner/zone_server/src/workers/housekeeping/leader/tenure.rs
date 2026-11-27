@@ -10,10 +10,12 @@ pub struct Tenure {
 }
 
 impl Tenure {
-    /// `sent` is when the statement that took the lock was sent, which is also its first confirmation.
-    pub fn new(sent: Instant) -> Self {
+    /// `sent` is when the statement that took the lock was sent, and `acquired` when it
+    /// returned. The lock was granted between the two, so the first confirmation is the earlier
+    /// and the wait counts from the later: each errs on the side that keeps two leaders apart.
+    pub fn new(sent: Instant, acquired: Instant) -> Self {
         Self {
-            acquired: sent,
+            acquired,
             confirmed: sent,
         }
     }
@@ -60,21 +62,21 @@ mod tests {
     fn a_new_leader_waits_before_it_leads() {
         let timing = Timing::default();
         let start = Instant::now();
-        let mut tenure = Tenure::new(start);
+        let mut tenure = Tenure::new(start, start);
 
         assert!(!tenure.leads(&timing, start));
-        assert!(!tenure.leads(&timing, start + Duration::from_secs(19)));
+        assert!(!tenure.leads(&timing, start + timing.wait - Duration::from_secs(1)));
 
-        tenure.confirm(start + Duration::from_secs(15));
-        assert!(tenure.leads(&timing, start + Duration::from_secs(20)));
+        tenure.confirm(start + timing.wait - Duration::from_secs(5));
+        assert!(tenure.leads(&timing, start + timing.wait));
     }
 
     #[test]
     fn a_tenure_lapses_freshness_after_its_last_answered_ping_was_sent() {
         let timing = Timing::default();
         let start = Instant::now();
-        let mut tenure = Tenure::new(start);
-        let sent = start + Duration::from_secs(20);
+        let mut tenure = Tenure::new(start, start);
+        let sent = start + timing.wait;
         tenure.confirm(sent);
 
         assert!(tenure.leads(&timing, sent + Duration::from_millis(9_999)));
@@ -85,11 +87,24 @@ mod tests {
     #[test]
     fn a_late_answer_to_an_earlier_ping_does_not_move_the_confirmation_back() {
         let start = Instant::now();
-        let mut tenure = Tenure::new(start);
+        let mut tenure = Tenure::new(start, start);
 
         tenure.confirm(start + Duration::from_secs(10));
         tenure.confirm(start + Duration::from_secs(5));
 
         assert_eq!(tenure.confirmed(), start + Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_slow_lock_statement_lapses_from_its_send_and_waits_from_its_return() {
+        let timing = Timing::default();
+        let sent = Instant::now();
+        let acquired = sent + timing.timeout;
+        let tenure = Tenure::new(sent, acquired);
+
+        assert_eq!(tenure.confirmed(), sent);
+        assert_eq!(tenure.expires(&timing), sent + timing.freshness);
+        assert_eq!(tenure.acquired(), acquired);
+        assert_eq!(tenure.ready(&timing), acquired + timing.wait);
     }
 }
