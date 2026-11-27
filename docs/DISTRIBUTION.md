@@ -37,8 +37,9 @@ this page builds on the signer described there.
                                                   GitHub Actions (OIDC, CI only)
 ```
 
-Everything public runs on the signer's EC2 host (`i-0325b72f3b2ad4f9f`, a
-t3.micro in ap-southeast-2) as containers on the docker network `signer`:
+Everything public runs on the signer's EC2 host (`i-0af8b67ac8079f6b0`, a
+t3.micro in ap-southeast-2 in the Bitecode AWS account `730986603828`) as
+containers on the docker network `signer`:
 
 - **Caddy** terminates TLS for both names and forwards only the paths listed in
   [Caddy](#caddy).
@@ -435,7 +436,7 @@ sudo docker run -d --name registry --restart unless-stopped \
   --memory 128m --memory-swap 128m \
   --user 65534:65534 --read-only --cap-drop ALL --security-opt no-new-privileges \
   --log-opt max-size=50m --log-opt max-file=10 \
-  -e REGISTRY_STORAGE_S3_BUCKET=<bucket> \
+  -e REGISTRY_STORAGE_S3_BUCKET=bitecode-zone-distribution \
   -e REGISTRY_STORAGE_S3_REGION=ap-southeast-2 \
   -v /etc/zone-registry:/etc/zone-registry:ro \
   registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0 \
@@ -555,8 +556,10 @@ the registry is read-only.
 
 ## AWS
 
-Replace `<bucket>` and `<account id>` throughout. Keep the bucket name free of
-dots, so S3's virtual-hosted URLs match its TLS certificate.
+Everything lives in the Bitecode AWS account `730986603828`, and every `aws`
+command below runs with `--profile bitecode`. The bucket is
+`bitecode-zone-distribution`. Keep a bucket name free of dots, so S3's
+virtual-hosted URLs match its TLS certificate.
 
 ### The bucket
 
@@ -566,16 +569,16 @@ multipart uploads after 7 days and expire the registry's replaced versions
 after 7 days:
 
 ```sh
-aws s3api create-bucket --bucket <bucket> --region ap-southeast-2 \
+aws --profile bitecode s3api create-bucket --bucket bitecode-zone-distribution --region ap-southeast-2 \
   --create-bucket-configuration LocationConstraint=ap-southeast-2
-aws s3api put-public-access-block --bucket <bucket> --public-access-block-configuration \
+aws --profile bitecode s3api put-public-access-block --bucket bitecode-zone-distribution --public-access-block-configuration \
   BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-aws s3api put-bucket-encryption --bucket <bucket> --server-side-encryption-configuration \
+aws --profile bitecode s3api put-bucket-encryption --bucket bitecode-zone-distribution --server-side-encryption-configuration \
   '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
-aws s3api put-bucket-versioning --bucket <bucket> --versioning-configuration Status=Enabled
-aws s3api put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-configuration \
+aws --profile bitecode s3api put-bucket-versioning --bucket bitecode-zone-distribution --versioning-configuration Status=Enabled
+aws --profile bitecode s3api put-bucket-lifecycle-configuration --bucket bitecode-zone-distribution --lifecycle-configuration \
   '{"Rules":[{"ID":"abort-incomplete-uploads","Status":"Enabled","Filter":{},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":7}},{"ID":"expire-replaced-registry-versions","Status":"Enabled","Filter":{"Prefix":"registry/"},"NoncurrentVersionExpiration":{"NoncurrentDays":7},"Expiration":{"ExpiredObjectDeleteMarker":true}}]}'
-aws s3api put-bucket-policy --bucket <bucket> --policy file://bundle-policy.json
+aws --profile bitecode s3api put-bucket-policy --bucket bitecode-zone-distribution --policy file://bundle-policy.json
 ```
 
 `bundle-policy.json` refuses every write to `bundles/` that could replace an
@@ -590,7 +593,7 @@ object:
       "Effect": "Deny",
       "Principal": "*",
       "Action": "s3:PutObject",
-      "Resource": "arn:aws:s3:::<bucket>/bundles/*",
+      "Resource": "arn:aws:s3:::bitecode-zone-distribution/bundles/*",
       "Condition": {
         "Null": {"s3:if-none-match": "true"},
         "Bool": {"s3:ObjectCreationOperation": "true"}
@@ -626,9 +629,9 @@ original, so its prefix piles up replaced versions; the second lifecycle rule
 expires them. Restore a bundle by copying its previous version back:
 
 ```sh
-aws s3api list-object-versions --bucket <bucket> --prefix bundles/1.4.3-lts/
-aws s3api copy-object --bucket <bucket> --key <key> \
-  --copy-source '<bucket>/<key>?versionId=<version id>'
+aws --profile bitecode s3api list-object-versions --bucket bitecode-zone-distribution --prefix bundles/1.4.3-lts/
+aws --profile bitecode s3api copy-object --bucket bitecode-zone-distribution --key <key> \
+  --copy-source 'bitecode-zone-distribution/<key>?versionId=<version id>'
 ```
 
 The policy refuses that copy, so an operator removes it for the restore and
@@ -641,11 +644,11 @@ small files.
 **Egress.** Customers download blobs and bundles straight from S3, which bills
 internet egress per gigabyte. A first pull of the three images is several
 gigabytes, and a bundle is about 11 GB per architecture per download. Check the
-current ap-southeast-2 rate before turning this on.
+current ap-southeast-2 rate when planning for growth.
 
 ### The instance role
 
-Attach a role to `i-0325b72f3b2ad4f9f` (or add this policy to its existing
+Attach a role to `i-0af8b67ac8079f6b0` (or add this policy to its existing
 role). It reads and lists the registry's storage and nothing else:
 
 ```json
@@ -656,13 +659,13 @@ role). It reads and lists the registry's storage and nothing else:
       "Sid": "ListDistribution",
       "Effect": "Allow",
       "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
-      "Resource": "arn:aws:s3:::<bucket>"
+      "Resource": "arn:aws:s3:::bitecode-zone-distribution"
     },
     {
       "Sid": "ReadRegistry",
       "Effect": "Allow",
       "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::<bucket>/registry/*"
+      "Resource": "arn:aws:s3:::bitecode-zone-distribution/registry/*"
     }
   ]
 }
@@ -694,7 +697,7 @@ The registry runs in a container, one network hop past the host, so raise the
 IMDSv2 hop limit to 2:
 
 ```sh
-aws ec2 modify-instance-metadata-options --instance-id i-0325b72f3b2ad4f9f \
+aws --profile bitecode ec2 modify-instance-metadata-options --instance-id i-0af8b67ac8079f6b0 \
   --http-tokens required --http-put-response-hop-limit 2
 ```
 
@@ -713,7 +716,7 @@ leaked license allows anyway:
       "Sid": "ReadBundles",
       "Effect": "Allow",
       "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::<bucket>/bundles/*"
+      "Resource": "arn:aws:s3:::bitecode-zone-distribution/bundles/*"
     }
   ]
 }
@@ -736,7 +739,7 @@ only jobs running in the `distribution` environment of `bitecodehq/zone`:
     {
       "Effect": "Allow",
       "Principal": {
-        "Federated": "arn:aws:iam::<account id>:oidc-provider/token.actions.githubusercontent.com"
+        "Federated": "arn:aws:iam::730986603828:oidc-provider/token.actions.githubusercontent.com"
       },
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {
@@ -762,19 +765,19 @@ deleting the original; bundles are only ever added:
       "Sid": "ListDistribution",
       "Effect": "Allow",
       "Action": ["s3:ListBucket", "s3:GetBucketLocation", "s3:ListBucketMultipartUploads"],
-      "Resource": "arn:aws:s3:::<bucket>"
+      "Resource": "arn:aws:s3:::bitecode-zone-distribution"
     },
     {
       "Sid": "WriteDistribution",
       "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:PutObject", "s3:ListMultipartUploadParts", "s3:AbortMultipartUpload"],
-      "Resource": ["arn:aws:s3:::<bucket>/registry/*", "arn:aws:s3:::<bucket>/bundles/*"]
+      "Resource": ["arn:aws:s3:::bitecode-zone-distribution/registry/*", "arn:aws:s3:::bitecode-zone-distribution/bundles/*"]
     },
     {
       "Sid": "CommitRegistryUploads",
       "Effect": "Allow",
       "Action": ["s3:DeleteObject", "s3:PutObjectAcl"],
-      "Resource": "arn:aws:s3:::<bucket>/registry/*"
+      "Resource": "arn:aws:s3:::bitecode-zone-distribution/registry/*"
     }
   ]
 }
@@ -788,7 +791,7 @@ about 11 GB through it can outlast the default hour. STS refuses a session
 longer than the role's maximum, which is one hour unless you raise it:
 
 ```sh
-aws iam update-role --role-name zone-distribution-publisher --max-session-duration 7200
+aws --profile bitecode iam update-role --role-name zone-distribution-publisher --max-session-duration 7200
 ```
 
 The registry runs only while the bundle is assembled, and the upload takes a
@@ -797,13 +800,13 @@ fresh one-hour session.
 ## Network access
 
 - **The host** needs outbound HTTPS to `s3.ap-southeast-2.amazonaws.com` and
-  `<bucket>.s3.ap-southeast-2.amazonaws.com`, which the default security group
-  egress allows. Inbound stays 80 and 443; the registry publishes no port.
+  `bitecode-zone-distribution.s3.ap-southeast-2.amazonaws.com`, which the
+  default security group egress allows. Inbound stays 80 and 443; the registry publishes no port.
 - **Customers** pulling images or downloading bundles must reach, on 443:
   - `registry.bitecode.ltd`, for manifests;
   - `licenses.bitecode.ltd`, for tokens and bundle URLs;
   - `*.s3.ap-southeast-2.amazonaws.com`, where the registry's blob redirects go
-    (`<bucket>.s3.ap-southeast-2.amazonaws.com`);
+    (`bitecode-zone-distribution.s3.ap-southeast-2.amazonaws.com`);
   - `s3.ap-southeast-2.amazonaws.com`, where the bundle URLs go (path style).
 
   A proxy or firewall that allows only the two `bitecode.ltd` names fails on
@@ -813,11 +816,14 @@ fresh one-hour session.
 
 ## Deploying
 
-None of this is live yet. In order, after the code merges:
+This is deployed: signer 1.3.0 runs on `i-0af8b67ac8079f6b0`, the registry
+serves `registry.bitecode.ltd`, and the bucket is `bitecode-zone-distribution`.
+Only the first LTS tag remains. The steps below record how it was deployed, in
+order, and are the procedure for a redeploy:
 
-1. **DNS.** An `A` record `registry.bitecode.ltd` → `3.24.143.182` in
-   Cloudflare. It and `licenses.bitecode.ltd` must both be DNS only (not
-   proxied), so Caddy can get their certificates and sees each customer's own
+1. **DNS.** An `A` record `registry.bitecode.ltd` → the signer host's public
+   address in the Cloudflare account "Bitecode Ltd". It and
+   `licenses.bitecode.ltd` must both be DNS only (not proxied), so Caddy can get their certificates and sees each customer's own
    address. Behind Cloudflare's proxy, every request reaches Caddy from a
    Cloudflare edge address, so `X-Forwarded-For` names the edge and not the
    customer. Customers behind the same edge would then share one
@@ -825,8 +831,7 @@ None of this is live yet. In order, after the code merges:
    the signer's logs and `http.request.remoteaddr` in the registry's would
    name Cloudflare instead of the client. Check `licenses.bitecode.ltd` too:
    it predates distribution and may have been proxied.
-2. **S3.** Create the bucket as in [The bucket](#the-bucket), once the egress
-   cost is approved.
+2. **S3.** Create the bucket as in [The bucket](#the-bucket).
 3. **IAM.** The [instance role](#the-instance-role) with the hop limit raised
    to 2, the [presigner user](#the-presigner-user) and its access key, and the
    OIDC provider with the [publisher role](#the-publisher-role).
@@ -838,7 +843,7 @@ None of this is live yet. In order, after the code merges:
      `ZONE_LTS_RUNNER_ARM64` are optional.
    - A tag ruleset on `v*-lts` (admins only) and a branch ruleset on
      `release/*-lts` (pull request and green CI required).
-5. **Signer.** Open port 22 to your address in `sg-021730ada0d45d64d` for this
+5. **Signer.** Open port 22 to your address in `sg-0d9105a1e178624dc` for this
    session only, then:
    1. Tag `license-signer-v1.3.0` and wait for its image.
    2. Record the running image:
@@ -850,7 +855,8 @@ None of this is live yet. In order, after the code merges:
       [The token key](#the-token-key).
    5. Add to `signer.env`: `ZONE_REGISTRY_SERVICE=registry.bitecode.ltd`,
       `ZONE_LICENSE_TRUSTED_PROXIES=<the signer network's subnet>`,
-      `ZONE_BUNDLE_BUCKET=<bucket>`, `ZONE_BUNDLE_REGION=ap-southeast-2`,
+      `ZONE_BUNDLE_BUCKET=bitecode-zone-distribution`,
+      `ZONE_BUNDLE_REGION=ap-southeast-2`,
       `ZONE_BUNDLE_ACCESS_KEY_ID` and `ZONE_BUNDLE_SECRET_ACCESS_KEY`.
    6. `sudo docker rename zone-license zone-license-previous && sudo docker stop zone-license-previous`.
    7. Start `ghcr.io/bitecodehq/zone-license:1.3.0` as `zone-license` with the
@@ -859,7 +865,7 @@ None of this is live yet. In order, after the code merges:
       mounted read-only at `/run/secrets/zone-license-key`.
    8. Check the startup log lists the trusted proxies once, says
       `Issuing registry tokens` with `key_id` `registry-2026-2-1`, and says
-      `Serving air-gapped bundles` with your bucket.
+      `Serving air-gapped bundles` with `bitecode-zone-distribution`.
    9. To roll back: `sudo docker rm -f zone-license`, restore the env backup,
       `sudo docker rename zone-license-previous zone-license && sudo docker start zone-license`.
 6. **Registry.** Copy `config.yml` to `/etc/zone-registry/` and start it as in
@@ -879,8 +885,9 @@ None of this is live yet. In order, after the code merges:
 
    Close port 22 again when done.
 8. **Smoke tests**, below.
-
-No LTS branch is cut as part of this. That's a separate decision.
+9. **The first LTS tag.** Cut the first `release/*-lts` branch and push its
+   `vX.Y.Z-lts` tag as in [LTS.md](LTS.md#cutting-a-branch), then run the
+   "After the first LTS tag" check in [Smoke tests](#smoke-tests).
 
 ## Smoke tests
 
