@@ -9,12 +9,15 @@ use serde_json::json;
 use sqlx::PgPool;
 use tokio::sync::OwnedSemaphorePermit;
 use uuid::Uuid;
+use zone_enterprise::fleet::Labels;
 use zone_server::db::context_gatherings::{
     self, ABANDONED, FAILED, ORPHANED, PENDING, RUNNING, SUPERSEDED,
 };
 use zone_server::db::migrations;
+use zone_server::services::fleet::Identity;
+use zone_server::services::fleet::identity::version;
 use zone_server::state::AppState;
-use zone_server::workers::source_resync;
+use zone_server::workers::{fleet, source_resync};
 
 use crate::common::{self, Database, TestClient};
 
@@ -148,9 +151,28 @@ async fn gathering(pool: &PgPool, source: Uuid, status: &str, age: Duration) {
     .expect("a gathering");
 }
 
-/// A replica whose indexing permits are all taken, so whatever it queues waits.
-async fn busy(database: &Database) -> (AppState, OwnedSemaphorePermit) {
+/// A replica registered as the runner `name`, as a server process does when it starts.
+async fn registered(database: &Database, name: &str) -> AppState {
     let state = common::create_test_state(common::test_config(), database.pool.clone());
+    state.set_identity(Identity {
+        name: name.to_string(),
+        version: version(),
+        labels: Labels::default(),
+    });
+    fleet::heartbeat(&state)
+        .await
+        .expect("the replica registers as a runner");
+    state
+}
+
+/// A live replica, registered under a runner name of its own, whose indexing permits are all
+/// taken, so whatever it queues waits.
+async fn busy(database: &Database) -> (AppState, OwnedSemaphorePermit) {
+    let name = format!("{PREFIX}-{}", Uuid::new_v4().simple());
+    held(registered(database, &name).await).await
+}
+
+async fn held(state: AppState) -> (AppState, OwnedSemaphorePermit) {
     let semaphore = state.index_semaphore().clone();
     let permits = u32::try_from(semaphore.available_permits()).expect("a permit count");
     let held = semaphore
@@ -194,11 +216,11 @@ async fn concurrent_claims_on_one_source_queue_it_once() {
     migrations::run(&database.pool).await.unwrap();
     let (_, workspace, user) = common::setup_workspace_member(&database.pool).await;
     let source = source(&database.pool, workspace).await;
+    let instance = Uuid::new_v4();
 
-    let claims = futures::future::join_all(
-        (0..CLAIMANTS)
-            .map(|_| context_gatherings::claim_index(&database.pool, source, workspace, user)),
-    )
+    let claims = futures::future::join_all((0..CLAIMANTS).map(|_| {
+        context_gatherings::claim_index(&database.pool, source, workspace, user, instance)
+    }))
     .await;
     let queued = gatherings(&database.pool, source).await;
     database.cleanup().await;
@@ -220,8 +242,10 @@ async fn a_source_is_queued_again_once_its_index_ended_or_was_abandoned() {
     let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let (_, workspace, user) = common::setup_workspace_member(&database.pool).await;
-    let claim =
-        |source: Uuid| context_gatherings::claim_index(&database.pool, source, workspace, user);
+    let instance = Uuid::new_v4();
+    let claim = |source: Uuid| {
+        context_gatherings::claim_index(&database.pool, source, workspace, user, instance)
+    };
     let running = source(&database.pool, workspace).await;
     gathering(&database.pool, running, RUNNING, ORPHANED / 2).await;
     let orphaned = source(&database.pool, workspace).await;
@@ -278,9 +302,10 @@ async fn a_gathering_that_waited_long_to_run_still_holds_its_source() {
     let started = context_gatherings::start(&database.pool, queued)
         .await
         .expect("the gathering begins running");
-    let claimed = context_gatherings::claim_index(&database.pool, source, workspace, user)
-        .await
-        .expect("the claim runs");
+    let claimed =
+        context_gatherings::claim_index(&database.pool, source, workspace, user, Uuid::new_v4())
+            .await
+            .expect("the claim runs");
     database.cleanup().await;
 
     assert!(started, "a pending gathering can start");
@@ -298,7 +323,9 @@ async fn only_the_newest_claim_of_a_source_can_start() {
     migrations::run(&database.pool).await.unwrap();
     let (_, workspace, user) = common::setup_workspace_member(&database.pool).await;
     let source = source(&database.pool, workspace).await;
-    let claim = || context_gatherings::claim_index(&database.pool, source, workspace, user);
+    let instance = Uuid::new_v4();
+    let claim =
+        || context_gatherings::claim_index(&database.pool, source, workspace, user, instance);
     let stale = claim().await.unwrap().expect("the first claim");
     age(&database.pool, source, ABANDONED * 2).await;
     let newest = claim()
@@ -340,20 +367,23 @@ async fn a_changed_source_supersedes_only_its_queued_index() {
     migrations::run(&database.pool).await.unwrap();
     let (_, workspace, user) = common::setup_workspace_member(&database.pool).await;
     let source = source(&database.pool, workspace).await;
-    let queued = context_gatherings::claim_index(&database.pool, source, workspace, user)
+    let instance = Uuid::new_v4();
+    let queued = context_gatherings::claim_index(&database.pool, source, workspace, user, instance)
         .await
         .unwrap()
         .expect("the first claim");
     let context = context_gatherings::create_gathering(&database.pool, user, workspace, &[source])
         .await
         .unwrap();
-    let changed = context_gatherings::queue_index(&database.pool, source, workspace, user)
-        .await
-        .unwrap()
-        .expect("a changed source is always queued");
-    let missing = context_gatherings::queue_index(&database.pool, Uuid::new_v4(), workspace, user)
-        .await
-        .unwrap();
+    let changed =
+        context_gatherings::queue_index(&database.pool, source, workspace, user, instance)
+            .await
+            .unwrap()
+            .expect("a changed source is always queued");
+    let missing =
+        context_gatherings::queue_index(&database.pool, Uuid::new_v4(), workspace, user, instance)
+            .await
+            .unwrap();
 
     let outcomes = [
         context_gatherings::start(&database.pool, queued)

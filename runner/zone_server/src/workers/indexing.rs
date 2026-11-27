@@ -2,6 +2,8 @@
 //!
 //! Automatically indexes sources when they are created or updated.
 
+use std::time::Duration;
+
 use uuid::Uuid;
 
 use crate::db::DbResult;
@@ -21,8 +23,14 @@ pub async fn claim(
     user_id: Uuid,
     is_update: bool,
 ) -> DbResult<Option<Uuid>> {
-    let claimed =
-        context_gatherings::claim_index(state.db(), source_id, workspace_id, user_id).await?;
+    let claimed = context_gatherings::claim_index(
+        state.db(),
+        source_id,
+        workspace_id,
+        user_id,
+        state.instance(),
+    )
+    .await?;
     if let Some(gathering_id) = claimed {
         spawn(
             state.clone(),
@@ -43,12 +51,46 @@ pub async fn queue(
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> DbResult<Option<Uuid>> {
-    let queued =
-        context_gatherings::queue_index(state.db(), source_id, workspace_id, user_id).await?;
+    let queued = context_gatherings::queue_index(
+        state.db(),
+        source_id,
+        workspace_id,
+        user_id,
+        state.instance(),
+    )
+    .await?;
     if let Some(gathering_id) = queued {
         spawn(state.clone(), gathering_id, source_id, workspace_id, true);
     }
     Ok(queued)
+}
+
+/// Fails the indexes this process queued that are still waiting for a permit, for a process
+/// that is stopping and will never start them, so any replica, or this server once it restarts,
+/// can index their sources again at once. Gives up after `within`, leaving them to be taken
+/// over once this process's runner stops being seen.
+pub async fn release(state: &AppState, within: Duration) {
+    let released = tokio::time::timeout(
+        within,
+        context_gatherings::release(state.db(), state.instance()),
+    )
+    .await;
+    match released {
+        Ok(Ok(0)) => {}
+        Ok(Ok(released)) => {
+            tracing::info!(
+                released,
+                "Released the indexes this process queued but never started"
+            );
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Could not release the indexes this process queued");
+        }
+        Err(_) => tracing::warn!(
+            ?within,
+            "Releasing the indexes this process queued did not finish in time"
+        ),
+    }
 }
 
 /// Run a queued index once this replica has an indexing permit free.

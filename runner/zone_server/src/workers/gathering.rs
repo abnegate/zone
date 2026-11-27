@@ -148,6 +148,16 @@ pub async fn execute_gathering(
         Err(error) => {
             obs.set_status("error");
             tracing::error!(%gathering_id, %error, "Failed to start the gathering");
+            if let Err(error) = context_gatherings::update_gathering_status(
+                state.db(),
+                gathering_id,
+                context_gatherings::FAILED,
+                Some(&format!("Failed to start: {error}")),
+            )
+            .await
+            {
+                tracing::error!(%gathering_id, %error, "Failed to fail the gathering that did not start");
+            }
             return;
         }
     }
