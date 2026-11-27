@@ -15,7 +15,7 @@ export const pages: ReadonlyArray<Page> = [
     template: 'pricing.html',
     output: 'pricing/index.html',
     title: 'Pricing · Zone',
-    description: `Zone Community is free for up to ${site.plans.community.memberLimit} active members per server. Zone Team adds unlimited members, spend reports and budgets. Zone Enterprise adds SSO, agent and model policy, custom roles and audit export. Per seat, monthly or yearly.`,
+    description: `Zone Community is free for up to ${site.plans.community.memberLimit} active members per server. Zone Team adds unlimited members, spend reports and budgets. Zone Enterprise adds SSO, SCIM provisioning, agent and model policy, custom roles and audit export. Per seat, monthly or yearly.`,
     navigationLabel: 'Pricing',
     indexed: true,
     linksFromBasePath: false,
