@@ -13,10 +13,13 @@
 //! blocker, and a state GitHub has not worked out yet is unknown rather than
 //! clean, because GitHub refuses the merge until it has.
 //!
-//! Which review bots are recognised is configuration, not a constant. Every
-//! bot states its own scale, and a score is only ever compared against the bar
-//! of the scale it was published on, so a perfect mark from one bot can never
-//! stand in for a perfect mark from another.
+//! Which review bots are recognised is configuration, not a constant, and the
+//! set is open: a bot this build has never heard of is read as a bot review
+//! the moment GitHub says a bot wrote it. Vendor knowledge only makes a bot
+//! easier to read, never a precondition for counting. Every bot states its own
+//! scale, and a score is only ever compared against the bar of the scale it
+//! was published on, so a perfect mark from one bot can never stand in for a
+//! perfect mark from another.
 
 use serde::Serialize;
 use std::fmt;
@@ -212,6 +215,17 @@ pub trait ReviewSignal: Send + Sync {
 
     fn reviewed_commit(&self, body: &str) -> Option<CommitSha>;
 
+    /// The bar the score it published has to clear.
+    ///
+    /// A bot whose scale this build knows is held to the bar it declared. A
+    /// bot it does not know is held to full marks on whatever scale that bot
+    /// used, because nothing here can tell which of that bot's scores means
+    /// "ship it".
+    fn requirement(&self, observed: Option<Confidence>) -> Confidence {
+        let _ = observed;
+        self.required()
+    }
+
     /// Whether a comment author is this reviewer. GitHub reports a bot account
     /// as `name` over GraphQL and `name[bot]` over REST, so both are the
     /// reviewer.
@@ -235,79 +249,112 @@ pub trait ReviewSignal: Send + Sync {
     }
 }
 
-/// A review bot this build knows how to read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One review bot: either one this build has vendor knowledge of, or any
+/// other bot account, read by the conventions those vendors share.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignalKind {
     CodeRabbit,
     Greptile,
+    /// A bot named in configuration or met on a pull request, whose account is
+    /// held here without the `[bot]` suffix.
+    Other(String),
 }
 
 impl SignalKind {
-    pub const ALL: [Self; 2] = [Self::CodeRabbit, Self::Greptile];
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match account(value).as_str() {
-            "coderabbit" | "coderabbitai" => Some(Self::CodeRabbit),
-            "greptile" | "greptile-apps" => Some(Self::Greptile),
-            _ => None,
-        }
+    /// The bots this build has vendor knowledge of. Every other bot is read
+    /// generically, so this is a head start, not the set that counts.
+    pub fn known() -> [Self; 2] {
+        [Self::CodeRabbit, Self::Greptile]
     }
 
-    pub fn as_str(self) -> &'static str {
+    /// The bot a name refers to. Any account names a bot: one this build does
+    /// not know is read generically rather than refused, so a repository can
+    /// adopt a reviewer this build has never heard of. Only a blank name is
+    /// no bot at all.
+    pub fn parse(value: &str) -> Option<Self> {
+        let account = account(value);
+        Some(match account.as_str() {
+            "" => return None,
+            "coderabbit" | "coderabbitai" => Self::CodeRabbit,
+            "greptile" | "greptile-apps" => Self::Greptile,
+            _ => Self::Other(account),
+        })
+    }
+
+    /// Whether this build knows the bot's format, rather than reading it by
+    /// the conventions bots share.
+    pub fn is_known(&self) -> bool {
+        !matches!(self, Self::Other(_))
+    }
+
+    pub fn as_str(&self) -> &str {
         match self {
             Self::CodeRabbit => "coderabbit",
             Self::Greptile => "greptile",
+            Self::Other(account) => account,
         }
     }
 
     /// The account the bot comments as, without the `[bot]` suffix REST adds.
-    pub fn reviewer(self) -> &'static str {
+    pub fn reviewer(&self) -> &str {
         match self {
             Self::CodeRabbit => CODERABBIT_REVIEWER,
             Self::Greptile => GREPTILE_REVIEWER,
+            Self::Other(account) => account,
         }
     }
 
     /// The comment that asks the bot to review, or review again, when it has
     /// not done so on its own.
-    pub fn trigger_command(self) -> &'static str {
+    ///
+    /// Only a bot whose command this build knows has one. A guess at an
+    /// unknown bot's command would post a comment that bot ignores, so an
+    /// unknown bot is waited for and never prodded.
+    pub fn trigger_command(&self) -> Option<&'static str> {
         match self {
-            Self::CodeRabbit => "@coderabbitai review",
-            Self::Greptile => "@greptileai review",
+            Self::CodeRabbit => Some("@coderabbitai review"),
+            Self::Greptile => Some("@greptileai review"),
+            Self::Other(_) => None,
         }
     }
 
     /// Whether the bot can post its score in a pull request review instead of
     /// its summary comment. CodeRabbit on a paid plan does; Greptile never
-    /// does.
-    pub fn scores_in_reviews(self) -> bool {
+    /// does; a bot this build does not know may, so its reviews are read.
+    pub fn scores_in_reviews(&self) -> bool {
         match self {
             Self::CodeRabbit => true,
             Self::Greptile => false,
+            Self::Other(_) => true,
         }
     }
 
     /// The one signal, for a caller that reads bots one at a time.
-    pub fn as_signal(self) -> Box<dyn ReviewSignal> {
+    pub fn as_signal(&self) -> Box<dyn ReviewSignal> {
         self.signal()
     }
 
-    fn signal(self) -> Box<dyn ReviewSignal> {
+    fn signal(&self) -> Box<dyn ReviewSignal> {
         match self {
             Self::CodeRabbit => Box::new(CodeRabbit),
             Self::Greptile => Box::new(Greptile),
+            Self::Other(account) => Box::new(AnyBot::new(account)),
         }
     }
 }
 
 /// The set of review bots whose summaries count as review evidence.
 ///
-/// The set is configuration. A deployment that runs one bot recognises one; a
-/// deployment that runs several recognises several and every one of them that
-/// spoke has to clear its own bar. A set with nothing in it can never
-/// establish review evidence, so it can never be ready.
+/// The set is configuration. A deployment that names its bots recognises those
+/// and every one of them that spoke has to clear its own bar. A deployment
+/// that names none has an open set: whichever bot reviewed the pull request
+/// counts, read by vendor knowledge where this build has it and generically
+/// where it does not. A set explicitly emptied can never establish review
+/// evidence, so it can never be ready.
 pub struct ReviewSignals {
     signals: Vec<Box<dyn ReviewSignal>>,
+    /// Whether a bot the set does not name also counts once it has reviewed.
+    open: bool,
 }
 
 /// One recognised bot's latest summary, paired with the bar it must clear.
@@ -318,17 +365,23 @@ pub struct ReviewFinding {
 }
 
 impl ReviewSignals {
-    /// Every bot this build knows how to read.
+    /// The bots this build reads by default: the ones it knows, plus whichever
+    /// other bot turns out to have reviewed the pull request.
     pub fn recognized() -> Self {
-        Self::of(SignalKind::ALL)
+        Self {
+            open: true,
+            ..Self::of(SignalKind::known())
+        }
     }
 
     pub fn empty() -> Self {
         Self {
             signals: Vec::new(),
+            open: false,
         }
     }
 
+    /// Exactly these bots, and no other.
     pub fn of(kinds: impl IntoIterator<Item = SignalKind>) -> Self {
         let mut chosen: Vec<SignalKind> = Vec::new();
         for kind in kinds {
@@ -336,25 +389,26 @@ impl ReviewSignals {
                 chosen.push(kind);
             }
         }
-        Self::custom(chosen.into_iter().map(SignalKind::signal).collect())
+        Self::custom(chosen.iter().map(SignalKind::signal).collect())
     }
 
     pub fn custom(signals: Vec<Box<dyn ReviewSignal>>) -> Self {
-        Self { signals }
+        Self {
+            signals,
+            open: false,
+        }
     }
 
-    /// Build a set from configured names, rejecting anything unrecognised
-    /// rather than silently dropping it.
+    /// Build a set from configured names. Any account names a bot, so a bot
+    /// this build has no vendor knowledge of is read generically rather than
+    /// refused; only a blank name is rejected.
     pub fn select<Name: AsRef<str>>(names: &[Name]) -> Result<Self, String> {
         let mut kinds = Vec::with_capacity(names.len());
         for name in names {
-            kinds.push(SignalKind::parse(name.as_ref()).ok_or_else(|| {
-                format!(
-                    "Unrecognised review signal \"{}\". Recognised signals: {}.",
-                    name.as_ref(),
-                    SignalKind::ALL.map(SignalKind::as_str).join(", ")
-                )
-            })?);
+            kinds.push(
+                SignalKind::parse(name.as_ref())
+                    .ok_or_else(|| "A review signal name cannot be blank.".to_string())?,
+            );
         }
         Ok(Self::of(kinds))
     }
@@ -366,6 +420,22 @@ impl ReviewSignals {
             .collect()
     }
 
+    /// The bots a verdict waits for by name. An open set waits for no bot in
+    /// particular: whichever one reviews satisfies it, so naming the bots this
+    /// build happens to know would misreport what is being waited for.
+    pub fn expected(&self) -> Vec<String> {
+        if self.open {
+            Vec::new()
+        } else {
+            self.reviewers()
+        }
+    }
+
+    /// Whether a bot this set does not name counts once it has reviewed.
+    pub fn open(&self) -> bool {
+        self.open
+    }
+
     pub fn len(&self) -> usize {
         self.signals.len()
     }
@@ -374,20 +444,54 @@ impl ReviewSignals {
         self.signals.is_empty()
     }
 
-    /// The latest summary from every recognised bot that published one.
+    /// The latest summary from every bot that published one: the bots this set
+    /// names, and on an open set every other account GitHub marked a bot.
     ///
     /// A bot that said nothing produces no finding: silence is not evidence
     /// either way, and the missing-review blocker covers the case where every
-    /// recognised bot was silent.
+    /// bot was silent.
     pub fn findings(&self, comments: &[ReviewComment]) -> Vec<ReviewFinding> {
+        let unnamed = self.unnamed(comments);
         self.signals
             .iter()
+            .chain(unnamed.iter())
             .filter_map(|signal| {
                 signal.summarize(comments).map(|summary| ReviewFinding {
-                    required: signal.required(),
+                    required: signal.requirement(summary.confidence),
                     summary,
                 })
             })
+            .collect()
+    }
+
+    /// A generic signal for every bot that commented and this set does not
+    /// name, newest account order, once each.
+    ///
+    /// A bot is one GitHub marked as a bot, which it does by suffixing the
+    /// login REST reports with `[bot]`. A person's comment is never read as a
+    /// review summary, whatever it says.
+    fn unnamed(&self, comments: &[ReviewComment]) -> Vec<Box<dyn ReviewSignal>> {
+        if !self.open {
+            return Vec::new();
+        }
+        let mut accounts: Vec<String> = Vec::new();
+        for comment in comments {
+            let Some(account) = bot_account(&comment.author) else {
+                continue;
+            };
+            if accounts.contains(&account)
+                || self
+                    .signals
+                    .iter()
+                    .any(|signal| signal.authored(&comment.author))
+            {
+                continue;
+            }
+            accounts.push(account);
+        }
+        accounts
+            .iter()
+            .map(|account| Box::new(AnyBot::new(account)) as Box<dyn ReviewSignal>)
             .collect()
     }
 }
@@ -453,17 +557,11 @@ impl ReviewSignal for Greptile {
     }
 
     fn confidence(&self, body: &str) -> Option<Confidence> {
-        let readable = readable(body);
-        let captures = CONFIDENCE_PATTERN.captures(&readable)?;
-        let score: u8 = captures.get(1)?.as_str().parse().ok()?;
-        let scale: u8 = captures.get(2)?.as_str().parse().ok()?;
-        (scale > 0 && score <= scale).then_some(Confidence { score, scale })
+        stated_confidence(body)
     }
 
     fn reviewed_commit(&self, body: &str) -> Option<CommitSha> {
-        let line = REVIEWED_LINE_PATTERN.find(body)?;
-        let captures = REVIEWED_SHA_PATTERN.captures(line.as_str())?;
-        CommitSha::parse(captures.get(1)?.as_str())
+        stated_commit(body)
     }
 }
 
@@ -495,20 +593,114 @@ impl ReviewSignal for CodeRabbit {
     }
 
     fn confidence(&self, body: &str) -> Option<Confidence> {
-        let readable = readable(body);
-        let captures = ACTIONABLE_PATTERN.captures(&readable)?;
-        let actionable: u32 = captures.get(1)?.as_str().parse().ok()?;
-        Some(Confidence {
-            score: u8::from(actionable == 0),
-            scale: CODERABBIT_SCALE,
-        })
+        actionable_confidence(body)
     }
 
     fn reviewed_commit(&self, body: &str) -> Option<CommitSha> {
-        let readable = readable(body);
-        let captures = REVIEWED_RANGE_PATTERN.captures(&readable)?;
-        CommitSha::parse(captures.get(2)?.as_str())
+        ranged_commit(body)
     }
+}
+
+/// A bot this build has no vendor knowledge of, read by the conventions the
+/// bots it does know share.
+///
+/// It takes what the bot's own summary states: a score, or the count of
+/// actionable comments it posted, and the commit it says it reviewed. Nothing
+/// is guessed at. A comment carrying neither mark is not a review summary and
+/// is passed over; a summary whose score or reviewed commit cannot be read is
+/// a named blocker rather than a pass, exactly as it is for a bot this build
+/// knows.
+pub struct AnyBot {
+    account: String,
+}
+
+impl AnyBot {
+    /// The bot commenting under `login`, with or without the `[bot]` suffix
+    /// REST adds.
+    pub fn new(login: &str) -> Self {
+        Self {
+            account: account(login),
+        }
+    }
+}
+
+impl ReviewSignal for AnyBot {
+    fn reviewer(&self) -> &str {
+        &self.account
+    }
+
+    /// The bar for a bot that stated no scale: a clean bill on the one-point
+    /// scale a yes-or-no verdict is read on.
+    fn required(&self) -> Confidence {
+        Confidence {
+            score: CODERABBIT_SCALE,
+            scale: CODERABBIT_SCALE,
+        }
+    }
+
+    /// Full marks on whatever scale this bot used. Which of an unknown bot's
+    /// middling scores means "ship it" is the bot's own business, and reading
+    /// one as approval would turn a reservation into a pass.
+    fn requirement(&self, observed: Option<Confidence>) -> Confidence {
+        observed.map_or_else(
+            || self.required(),
+            |observed| Confidence {
+                score: observed.scale,
+                scale: observed.scale,
+            },
+        )
+    }
+
+    fn identifies(&self, body: &str) -> bool {
+        let readable = readable(body);
+        CONFIDENCE_PATTERN.is_match(&readable)
+            || ACTIONABLE_PATTERN.is_match(&readable)
+            || REVIEWED_LINE_PATTERN.is_match(&readable)
+            || REVIEWED_RANGE_PATTERN.is_match(&readable)
+    }
+
+    fn confidence(&self, body: &str) -> Option<Confidence> {
+        stated_confidence(body).or_else(|| actionable_confidence(body))
+    }
+
+    fn reviewed_commit(&self, body: &str) -> Option<CommitSha> {
+        stated_commit(body).or_else(|| ranged_commit(body))
+    }
+}
+
+/// The score a summary states as `Confidence Score: n/m`.
+fn stated_confidence(body: &str) -> Option<Confidence> {
+    let readable = readable(body);
+    let captures = CONFIDENCE_PATTERN.captures(&readable)?;
+    let score: u8 = captures.get(1)?.as_str().parse().ok()?;
+    let scale: u8 = captures.get(2)?.as_str().parse().ok()?;
+    (scale > 0 && score <= scale).then_some(Confidence { score, scale })
+}
+
+/// The score implied by `Actionable comments posted: n`, on the one-point
+/// scale a count of outstanding comments is read on.
+fn actionable_confidence(body: &str) -> Option<Confidence> {
+    let readable = readable(body);
+    let captures = ACTIONABLE_PATTERN.captures(&readable)?;
+    let actionable: u32 = captures.get(1)?.as_str().parse().ok()?;
+    Some(Confidence {
+        score: u8::from(actionable == 0),
+        scale: CODERABBIT_SCALE,
+    })
+}
+
+/// The commit a `Last reviewed commit: <sha>` line names.
+fn stated_commit(body: &str) -> Option<CommitSha> {
+    let line = REVIEWED_LINE_PATTERN.find(body)?;
+    let captures = REVIEWED_SHA_PATTERN.captures(line.as_str())?;
+    CommitSha::parse(captures.get(1)?.as_str())
+}
+
+/// The head of a `between <base> and <head>` review range.
+fn ranged_commit(body: &str) -> Option<CommitSha> {
+    let readable = readable(body);
+    let captures = REVIEWED_RANGE_PATTERN.captures(&readable)?;
+    CommitSha::parse(captures.get(2)?.as_str())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -628,7 +820,10 @@ pub enum Blocker {
     CommentsIncomplete,
     UnresolvedThreads(u32),
     ReviewMissing {
+        /// The bots this deployment named, when it named any.
         reviewers: Vec<String>,
+        /// Whether a review from a bot it never named would have counted.
+        any_bot: bool,
     },
     ReviewLinkMissing {
         reviewer: String,
@@ -718,10 +913,16 @@ impl fmt::Display for Blocker {
                 "{count} unresolved review {}",
                 if *count == 1 { "thread" } else { "threads" }
             ),
-            Self::ReviewMissing { reviewers } if reviewers.is_empty() => formatter.write_str(
+            Self::ReviewMissing {
+                reviewers,
+                any_bot: true,
+            } if reviewers.is_empty() => {
+                formatter.write_str("No bot has reviewed this commit")
+            }
+            Self::ReviewMissing { reviewers, .. } if reviewers.is_empty() => formatter.write_str(
                 "No review signal is recognised, so no review evidence can be established",
             ),
-            Self::ReviewMissing { reviewers } => {
+            Self::ReviewMissing { reviewers, .. } => {
                 write!(formatter, "{} summary missing", reviewers.join(", "))
             }
             Self::ReviewLinkMissing { reviewer } => {
@@ -862,7 +1063,8 @@ pub fn assess(evidence: PullEvidence, signals: &ReviewSignals) -> Assessment {
 
     if findings.is_empty() {
         blockers.push(Blocker::ReviewMissing {
-            reviewers: signals.reviewers(),
+            reviewers: signals.expected(),
+            any_bot: signals.open(),
         });
     }
     for finding in &findings {
@@ -953,6 +1155,17 @@ fn account(login: &str) -> String {
         .trim()
         .trim_end_matches(BOT_SUFFIX)
         .to_ascii_lowercase()
+}
+
+/// The account behind a login GitHub marked as a bot's.
+///
+/// GitHub suffixes a bot account's login with `[bot]` on the REST responses
+/// every comment weighed here is read from. A login without that suffix
+/// belongs to a person as far as this evidence can tell, and a person's
+/// comment is never read as a bot review.
+fn bot_account(login: &str) -> Option<String> {
+    let account = account(login.trim().strip_suffix(BOT_SUFFIX)?);
+    (!account.is_empty()).then_some(account)
 }
 
 pub(crate) fn published_at(value: &str) -> i64 {
@@ -1274,8 +1487,28 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "2 unresolved review threads".to_string(),
-                "coderabbitai, greptile-apps summary missing".to_string(),
-            ]
+                "No bot has reviewed this commit".to_string(),
+            ],
+            "a deployment that named no bot waits for whichever one reviews, so \
+             the blocker names none of them"
+        );
+        assert_eq!(
+            assess(
+                PullEvidence {
+                    comments: CommentEvidence {
+                        complete: true,
+                        comments: Vec::new(),
+                    },
+                    ..green_pull()
+                },
+                &ReviewSignals::select(&["appwrite"]).expect("a named bot"),
+            )
+            .reports()
+            .into_iter()
+            .map(|report| report.detail)
+            .collect::<Vec<_>>(),
+            vec!["appwrite summary missing".to_string()],
+            "a deployment that named its bot is told which one is missing"
         );
     }
 
@@ -1887,7 +2120,7 @@ mod tests {
     }
 
     #[test]
-    fn signal_names_are_parsed_and_unrecognised_names_are_rejected() {
+    fn any_bot_account_names_a_signal_and_only_a_blank_name_is_rejected() {
         assert_eq!(
             ReviewSignals::select(&["greptile", "CodeRabbit", "greptile-apps"])
                 .unwrap()
@@ -1899,12 +2132,125 @@ mod tests {
             SignalKind::parse("coderabbitai[bot]"),
             Some(SignalKind::CodeRabbit)
         );
-        assert!(SignalKind::parse("sonarcloud").is_none());
-        let error = ReviewSignals::select(&["sonarcloud"]).unwrap_err();
-        assert!(error.contains("sonarcloud"), "{error}");
-        assert!(error.contains("coderabbit, greptile"), "{error}");
-        assert_eq!(ReviewSignals::recognized().len(), SignalKind::ALL.len());
+        assert_eq!(
+            SignalKind::parse("Appwrite[bot]"),
+            Some(SignalKind::Other("appwrite".to_string())),
+            "a bot this build has no vendor knowledge of still names a signal"
+        );
+        assert!(
+            !SignalKind::parse("appwrite").expect("a bot").is_known(),
+            "and says so, so nothing claims vendor knowledge it lacks"
+        );
+        assert_eq!(
+            SignalKind::parse("appwrite").and_then(|kind| kind.trigger_command()),
+            None,
+            "a bot whose command is unknown is waited for, never prodded"
+        );
+        assert_eq!(
+            ReviewSignals::select(&["appwrite"]).unwrap().reviewers(),
+            vec!["appwrite"],
+        );
+        assert!(SignalKind::parse("   ").is_none());
+        let error = ReviewSignals::select(&[" "]).unwrap_err();
+        assert!(error.contains("blank"), "{error}");
+        assert_eq!(ReviewSignals::recognized().len(), SignalKind::known().len());
+        assert!(ReviewSignals::recognized().open());
+        assert!(
+            !ReviewSignals::select(&["appwrite"]).unwrap().open(),
+            "a deployment that named its bots waits for those and no others"
+        );
         assert!(ReviewSignals::empty().is_empty());
+    }
+
+    #[test]
+    fn a_bot_this_build_never_heard_of_is_read_from_its_own_summary() {
+        let summary = |body: &str| ReviewComment {
+            id: 71,
+            author: "appwrite[bot]".to_string(),
+            body: body.to_string(),
+            url: "https://github.com/acme/shop/pull/4#issuecomment-71".to_string(),
+            created_at: "2026-09-20T10:00:00Z".to_string(),
+        };
+        let graded = assess(
+            PullEvidence {
+                comments: CommentEvidence {
+                    complete: true,
+                    comments: vec![summary(&format!(
+                        "Confidence Score: 5/5\n\nLast reviewed commit: {HEAD}"
+                    ))],
+                },
+                ..green_pull()
+            },
+            &ReviewSignals::recognized(),
+        );
+        assert!(
+            graded.ready,
+            "a bot nobody configured reviewed the head: {:?}",
+            graded.reports()
+        );
+        assert_eq!(graded.reviews.len(), 1);
+        assert_eq!(graded.reviews[0].reviewer, "appwrite");
+        assert!(
+            graded.reviews[0].url.is_some(),
+            "the summary it was read from is linked"
+        );
+
+        let reserved = assess(
+            PullEvidence {
+                comments: CommentEvidence {
+                    complete: true,
+                    comments: vec![summary(&format!(
+                        "Confidence Score: 3/5\n\nLast reviewed commit: {HEAD}"
+                    ))],
+                },
+                ..green_pull()
+            },
+            &ReviewSignals::recognized(),
+        );
+        assert!(!reserved.ready);
+        assert_eq!(
+            reserved.reports()[0].detail,
+            "appwrite confidence 3/5; 5/5 required",
+            "full marks on its own scale, since which of its scores means ship it is its own business"
+        );
+
+        let person = assess(
+            PullEvidence {
+                comments: CommentEvidence {
+                    complete: true,
+                    comments: vec![ReviewComment {
+                        author: "a-colleague".to_string(),
+                        ..summary(&format!(
+                            "Confidence Score: 5/5\n\nLast reviewed commit: {HEAD}"
+                        ))
+                    }],
+                },
+                ..green_pull()
+            },
+            &ReviewSignals::recognized(),
+        );
+        assert!(
+            !person.ready,
+            "a comment GitHub did not mark a bot's is never a bot review"
+        );
+        assert_eq!(person.reports()[0].code, BlockerCode::ReviewMissing);
+
+        let unreadable = assess(
+            PullEvidence {
+                comments: CommentEvidence {
+                    complete: true,
+                    comments: vec![summary(&format!("Last reviewed commit: {HEAD}"))],
+                },
+                ..green_pull()
+            },
+            &ReviewSignals::recognized(),
+        );
+        assert!(!unreadable.ready);
+        assert_eq!(
+            unreadable.reports()[0].code,
+            BlockerCode::ConfidenceUnreadable,
+            "a summary without a score is a named blocker, never a pass"
+        );
     }
 
     #[test]
