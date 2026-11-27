@@ -3161,7 +3161,8 @@ async fn handle_audio_generation(
 /// refused the chat's lease saved nothing either. Unless it is owed, it says so
 /// as a denial, since nothing else will run it. An owed turn says nothing in the
 /// chat: it stays owed and another runner takes it, so telling whoever watches to
-/// reload would be wrong.
+/// reload would be wrong. Nor is an owed turn told the chat is busy when another
+/// turn holds its lease: it is [`Sent::Deferred`], and runs once that turn is over.
 async fn handle_send_message(
     state: &AppState,
     stream: &Arc<ChatStream>,
@@ -3218,7 +3219,7 @@ async fn handle_send_message(
         Ok(session) => session,
         Err(db::context::Error::Refused(shortfall)) => {
             let refusal = crate::services::fleet::refusal::of(shortfall);
-            if audience.announces_refusal() {
+            if !audience.retried() {
                 publish(
                     stream,
                     ServerMessage::Denied {
@@ -3231,6 +3232,10 @@ async fn handle_send_message(
                 tracing::info!(%chat_id, code = refusal.code(), "Fleet policy refused this runner an owed turn, so it stays owed for another runner");
             }
             return Sent::Refused;
+        }
+        Err(db::context::Error::Busy) if audience.retried() => {
+            tracing::info!(%chat_id, "Another turn holds this chat's lease, so an owed turn stays owed until it frees");
+            return Sent::Deferred;
         }
         Err(error) => {
             publish(
@@ -3466,8 +3471,9 @@ pub(crate) async fn run_turn(
 /// stop this turn and no other through [`cancel_turn`] while it runs. Says
 /// what became of the message, [`Sent::Refused`] when fleet policy refused this
 /// runner the chat, [`Sent::Stopped`] when this replica's shutdown stopped the
-/// turn and [`Sent::Deferred`] when another replica holds the chat, so the
-/// caller of an owed turn can leave it owed rather than count it run.
+/// turn and [`Sent::Deferred`] when another replica serves the chat or, for an
+/// owed turn, another turn holds its lease, so the caller of an owed turn can
+/// leave it owed rather than count it run.
 ///
 /// The turn is registered before the chat's control topic is served, so an
 /// answering task left over from an earlier turn sees this replica own the

@@ -39,8 +39,9 @@ const REFUSED: &str = "Fleet policy refused this runner the reminder's chat";
 /// Logged when a claimed firing is given back because this replica is shutting down.
 const DRAINING: &str = "This replica is shutting down";
 
-/// Logged when a claimed firing is given back because another replica holds its chat.
-const DEFERRED: &str = "Another replica holds the reminder's chat";
+/// Logged when a claimed firing is given back because another replica serves its chat or
+/// another turn holds its lease.
+const DEFERRED: &str = "Another turn holds the reminder's chat";
 
 /// Stops a turn's renewals when the turn is over, however it ended -- a turn
 /// that panicked must not leave its claim renewed for ever, or its firing is
@@ -198,7 +199,7 @@ fn watching(prompt: &str, baseline: Option<&str>) -> String {
 /// Runs one claimed firing's turn in its chat, keeping the claim as `claimant`
 /// for as long as the turn runs, and marks it done. A turn fleet policy refuses
 /// the chat, one this replica's shutdown stops or keeps from starting, and one
-/// deferred because another replica holds the chat, gives the claim back
+/// deferred because another replica or turn holds the chat, gives the claim back
 /// without counting the attempt, and the firing stays owed for the next sweep.
 pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease, claimant: Claimant) {
     // A watch is the same turn with the last firing's answer composed in. Read
