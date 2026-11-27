@@ -343,6 +343,26 @@ check_apps_ha_network_policy() {
         "[$apps_egress | select(.to[0].podSelector.matchLabels[\"app.kubernetes.io/name\"] == \"valkey\")] | length"
 }
 
+check_apps_ha_operator_values() {
+    operator=$scratch/zone-apps-operator.yaml
+    cat >"$operator" <<EOF
+highAvailability:
+  externalValkey: true
+  externalNetworkPolicy: true
+server:
+  trustedProxies: $trusted_proxies
+  agentState:
+    persistence:
+      storageClass: $storage_class
+EOF
+    rendered_or_fail 'the zone-apps HA profile layered over an operator values file renders' \
+        render zone-apps -f "$operator" -f "$charts/zone-apps/values-ha.yaml" || return 0
+    expect "the operator file's storage class reaches the shared claim" "ReadWriteMany $storage_class" "$rendered" \
+        'select(.kind == "PersistentVolumeClaim" and .metadata.name == "zone-apps-shared-state") | .spec.accessModes[0] + " " + .spec.storageClassName'
+    expect "the operator file's trusted proxies reach the server" "$trusted_proxies" "$rendered" \
+        "$apps_container | .env[] | select(.name == \"ZONE_TRUSTED_PROXIES\") | .value"
+}
+
 check_apps_default() {
     rendered_or_fail 'the zone-apps defaults render' render zone-apps || return 0
     expect 'the default server has no startup probe' null "$rendered" "$apps_container | .startupProbe"
@@ -476,6 +496,17 @@ check_infra_ha_backup() {
         "$infra_backup | .spec.schedule | split(\" \") | length"
 }
 
+check_infra_ha_operator_values() {
+    operator=$scratch/zone-infra-operator.yaml
+    printf '%s\n' 'postgres:' '  backup:' '    objectStore: zone-backups' >"$operator"
+    rendered_or_fail 'the zone-infra HA profile layered over an operator values file renders' \
+        render zone-infra -f "$operator" -f "$charts/zone-infra/values-ha.yaml" || return 0
+    expect "the operator file's object store archives WAL" "$barman_cloud_plugin true zone-backups" "$rendered" \
+        "$infra_cluster | .spec.plugins[] | .name + \" \" + (.isWALArchiver | tostring) + \" \" + .parameters.barmanObjectName"
+    expect "the operator file's object store schedules the backup" "zone-postgres plugin $barman_cloud_plugin" "$rendered" \
+        "$infra_backup | .spec | .cluster.name + \" \" + .method + \" \" + .pluginConfiguration.name"
+}
+
 check_infra_ha_refusals() {
     expect_refused 'synchronous replication with too few standbys is refused' 'must be below postgres.instances' \
         render_ha zone-infra --set postgres.instances=1
@@ -540,10 +571,12 @@ if [ $# -eq 0 ]; then
         check_apps_ha_runner_name \
         check_apps_ha_refusals \
         check_apps_ha_network_policy \
+        check_apps_ha_operator_values \
         check_infra_default \
         check_infra_ha \
         check_infra_ha_parameters \
         check_infra_ha_backup \
+        check_infra_ha_operator_values \
         check_infra_ha_refusals \
         check_ai_default \
         check_ai_ha \

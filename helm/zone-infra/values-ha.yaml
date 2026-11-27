@@ -1,8 +1,15 @@
 # The supported high-availability topology for zone-infra. Layer it over your
 # own values:
 #
-#   helm upgrade --install zone-infra helm/zone-infra -f helm/zone-infra/values-ha.yaml \
+#   helm upgrade --install zone-infra helm/zone-infra -f <your values> \
+#     -f helm/zone-infra/values-ha.yaml \
 #     --set postgres.backup.objectStore=<barmancloud.cnpg.io ObjectStore name>
+#
+# postgres.backup.objectStore is yours to set, in your values or with --set;
+# the profile leaves it alone, and without it the cluster archives no WAL and
+# schedules no backup. A value this profile does set, such as
+# postgres.backup.schedule, wins over your values file: change it with --set
+# or with a values file after this one.
 #
 # It needs CloudNativePG 1.30 or later and at least 3 schedulable nodes: each
 # Postgres instance requires a node of its own. Backups need the Barman Cloud
@@ -33,7 +40,6 @@ postgres:
     max_connections: "400"
 
   backup:
-    objectStore: ""
     schedule: "0 0 0 * * *"
     target: prefer-standby
 

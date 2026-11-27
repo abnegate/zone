@@ -1,7 +1,11 @@
 # The supported high-availability topology for zone-ai. Layer it over your
 # own values:
 #
-#   helm upgrade --install zone-ai helm/zone-ai -f helm/zone-ai/values-ha.yaml
+#   helm upgrade --install zone-ai helm/zone-ai -f <your values> \
+#     -f helm/zone-ai/values-ha.yaml
+#
+# A value this profile sets, such as litellm.resources, wins over your values
+# file: change it with --set or with a values file after this one.
 #
 # Zone issues LiteLLM keys with no budget, rpm or tpm limits, so replicas share
 # nothing but the database and need no LiteLLM Redis. A killed replica loses
