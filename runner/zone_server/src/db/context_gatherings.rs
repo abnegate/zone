@@ -2,13 +2,30 @@
 //!
 //! Provides persistence for context gathering operations
 
+mod latest;
+
 use std::time::Duration;
 
 use chrono::NaiveDateTime;
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
 use super::DbResult;
+
+pub use latest::Latest;
+
+pub const PENDING: &str = "pending";
+pub const RUNNING: &str = "running";
+
+/// How long a gathering may run before it is stopped and failed.
+pub const TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+/// What a gathering past its timeout may still take to record how it ended.
+const SETTLING: Duration = Duration::from_secs(10 * 60);
+
+/// How long a gathering can stay `running` before it is taken to have stopped with its replica.
+/// Its task lives in that replica alone, so a pod stopped mid-index leaves it `running` for good.
+pub const ORPHANED: Duration = TIMEOUT.saturating_add(SETTLING);
 
 /// Context gathering row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -47,9 +64,10 @@ pub async fn create_gathering(
     Ok(id)
 }
 
-/// Queue an index of `source_id` as a gathering of its own, unless one is already under way:
-/// its latest gathering is running, or pending and younger than `abandoned`. Returns the new
-/// gathering, or `None` when another pass got there first.
+/// Queue an index of `source_id` as a gathering of its own, unless one is already
+/// [under way](Latest::under_way): its latest gathering is running and not orphaned, or pending
+/// and younger than `abandoned`. Returns the new gathering, or `None` when another pass got there
+/// first.
 ///
 /// Two callers claiming one source at once queue it once: the source's row is locked before
 /// its gatherings are read, so the second reads the first's gathering once it is committed.
@@ -69,35 +87,49 @@ pub async fn claim_index(
     if source.is_none() {
         return Ok(None);
     }
+    if latest(&mut *transaction, source_id)
+        .await?
+        .is_some_and(|latest| latest.under_way(abandoned))
+    {
+        return Ok(None);
+    }
     let claimed = sqlx::query_scalar(
         r#"
         INSERT INTO context_gatherings
             (user_id, workspace_id, source_ids, status, started_at, created_at)
-        SELECT $2, $3, ARRAY[$1]::uuid[], 'pending', LOCALTIMESTAMP, statement_timestamp()
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM (
-                SELECT status, started_at
-                FROM context_gatherings
-                WHERE $1 = ANY(source_ids)
-                ORDER BY created_at DESC, id DESC
-                LIMIT 1
-            ) latest
-            WHERE latest.status = 'running'
-               OR (latest.status = 'pending'
-                   AND latest.started_at > LOCALTIMESTAMP - make_interval(secs => $4))
-        )
+        VALUES ($2, $3, ARRAY[$1]::uuid[], $4, LOCALTIMESTAMP, statement_timestamp())
         RETURNING id
         "#,
     )
     .bind(source_id)
     .bind(user_id)
     .bind(workspace_id)
-    .bind(abandoned.as_secs_f64())
-    .fetch_optional(&mut *transaction)
+    .bind(PENDING)
+    .fetch_one(&mut *transaction)
     .await?;
     transaction.commit().await?;
-    Ok(claimed)
+    Ok(Some(claimed))
+}
+
+/// The newest gathering of `source_id`, if it has ever had one.
+pub async fn latest<'e>(
+    executor: impl PgExecutor<'e>,
+    source_id: Uuid,
+) -> DbResult<Option<Latest>> {
+    sqlx::query_as::<_, Latest>(
+        r#"
+        SELECT status, completed_at,
+               EXTRACT(EPOCH FROM LOCALTIMESTAMP - COALESCE(started_at, created_at))::float8
+                   AS age
+        FROM context_gatherings
+        WHERE $1 = ANY(source_ids)
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(source_id)
+    .fetch_optional(executor)
+    .await
 }
 
 /// Get a gathering by ID
@@ -115,7 +147,8 @@ pub async fn get_gathering(pool: &PgPool, id: Uuid) -> DbResult<Option<ContextGa
     .await
 }
 
-/// Update gathering status
+/// Update gathering status. A gathering that begins running is timed from then, not from when it
+/// was queued, so one that waited for a permit is not taken to be [orphaned](ORPHANED) early.
 pub async fn update_gathering_status(
     pool: &PgPool,
     id: Uuid,
@@ -126,6 +159,7 @@ pub async fn update_gathering_status(
         r#"
         UPDATE context_gatherings
         SET status = $2,
+            started_at = CASE WHEN $2 = $4 THEN LOCALTIMESTAMP ELSE started_at END,
             completed_at = CASE WHEN $2 IN ('completed', 'failed') THEN NOW() ELSE completed_at END,
             error_message = $3
         WHERE id = $1
@@ -134,6 +168,7 @@ pub async fn update_gathering_status(
     .bind(id)
     .bind(status)
     .bind(error_message)
+    .bind(RUNNING)
     .execute(pool)
     .await?;
 
