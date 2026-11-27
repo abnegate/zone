@@ -3,9 +3,13 @@ use crate::services::comfy::adoption;
 use abnegate_comfy::Config;
 use abnegate_comfy::host;
 use abnegate_comfy::host::Job;
+use abnegate_comfy::host::JobDirectory;
+use abnegate_comfy::host::Status;
 use abnegate_comfy::lora::TrainError;
+use std::fs;
 use std::path::PathBuf;
 use tokio::sync::watch;
+use uuid::Uuid;
 
 /// Adopts the weights zone trained before abnegate-comfy, so their names
 /// train again, then picks up the host jobs a restart left behind. Every job
@@ -15,12 +19,23 @@ use tokio::sync::watch;
 /// alone.
 pub async fn recover(config: Config, registry: TrainRegistry) {
     let scan = config.clone();
-    let (published, running) = match tokio::task::spawn_blocking(move || {
+    let finished = match tokio::task::spawn_blocking(move || {
         adoption::adopt(&scan);
-        scan_jobs(&scan)
+        finished_jobs(&scan)
     })
     .await
     {
+        Ok(finished) => finished,
+        Err(error) => {
+            tracing::warn!(%error, "Could not look for training jobs a restart left behind");
+            return;
+        }
+    };
+    for id in finished {
+        report(host::resume(&config, id).await);
+    }
+    let scan = config.clone();
+    let (published, running) = match tokio::task::spawn_blocking(move || scan_jobs(&scan)).await {
         Ok(found) => found,
         Err(error) => {
             tracing::warn!(%error, "Could not look for training jobs a restart left behind");
@@ -28,16 +43,7 @@ pub async fn recover(config: Config, registry: TrainRegistry) {
         }
     };
     for result in published {
-        match result {
-            Ok(path) => tracing::info!(
-                path = %path.display(),
-                "Published a training job that finished while the server was down"
-            ),
-            Err(error) => tracing::warn!(
-                %error,
-                "Could not publish a training job that finished while the server was down"
-            ),
-        }
+        report(result);
     }
     let Some(running) = running else {
         return;
@@ -61,6 +67,43 @@ pub async fn recover(config: Config, registry: TrainRegistry) {
     }
 }
 
+fn report(result: Result<PathBuf, TrainError>) {
+    match result {
+        Ok(path) => tracing::info!(
+            path = %path.display(),
+            "Published a training job that finished while the server was down"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            "Could not publish a training job that finished while the server was down"
+        ),
+    }
+}
+
+/// The jobs that succeeded while the server was down and whose weight still
+/// waits in their directory, which [`host::resume`] publishes once it holds
+/// the job's lock. [`host::recover`] only tries that lock, and a child that
+/// another thread spawns while it is held inherits the lock's descriptor
+/// until it execs, so a job nobody publishes can read as held and be skipped.
+fn finished_jobs(config: &Config) -> Vec<Uuid> {
+    if config.host_trainer.is_none() {
+        return Vec::new();
+    }
+    host::jobs(config)
+        .into_iter()
+        .filter(|job| {
+            job.status == Status::Succeeded
+                && !job.base.is_empty()
+                && job.published.is_none()
+                && job.filename.as_deref().is_some_and(|filename| {
+                    fs::symlink_metadata(JobDirectory::new(config, job.id).path().join(filename))
+                        .is_ok_and(|metadata| metadata.is_file())
+                })
+        })
+        .map(|job| job.id)
+        .collect()
+}
+
 fn scan_jobs(config: &Config) -> (Vec<Result<PathBuf, TrainError>>, Option<Job>) {
     let published = host::recover(config);
     let running = host::current(config).filter(|job| job.busy() && !job.base.is_empty());
@@ -74,11 +117,11 @@ mod tests {
     use crate::services::comfy::policy::PEOPLE_CHECKPOINT;
     use crate::services::comfy::settings;
     use crate::train_jobs::TrainJobStatus;
-    use abnegate_comfy::host::JobDirectory;
-    use abnegate_comfy::host::Status;
+    use abnegate_comfy::host::LOCK_FILE;
     use abnegate_comfy::host::Trainer;
     use abnegate_comfy::train::TrainProgress;
-    use std::fs;
+    use std::fs::OpenOptions;
+    use std::process::{Command, Stdio};
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -221,5 +264,40 @@ mod tests {
         recover(config, registry.clone()).await;
 
         assert!(registry.current().is_none());
+    }
+
+    /// Hands the job's lock to a child process, the way a child spawned while
+    /// the lock is held inherits it, and drops this process's own descriptor.
+    /// The child holds the lock until it exits.
+    fn held_by_a_child(directory: &JobDirectory) -> std::process::Child {
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(directory.path().join(LOCK_FILE))
+            .expect("publish.lock");
+        lock.try_lock().expect("nobody holds the job yet");
+        Command::new("/bin/sleep")
+            .arg("1")
+            .stdin(Stdio::from(lock))
+            .spawn()
+            .expect("a child holding the lock")
+    }
+
+    #[tokio::test]
+    async fn a_finished_job_whose_lock_a_spawned_child_inherited_is_still_published() {
+        let (_models, config) = hosted();
+        let directory = write(&config, &person(Status::Running));
+        finish(&directory);
+        let mut child = held_by_a_child(&directory);
+
+        recover(config.clone(), TrainRegistry::new()).await;
+
+        child.wait().expect("the child exits");
+        assert_eq!(
+            fs::read(config.models_directory.join(PUBLISHED)).expect("published weight"),
+            b"adapter"
+        );
     }
 }

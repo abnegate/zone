@@ -104,7 +104,9 @@ That has consequences for how names are chosen:
   a Deployment's replicas one `ZONE_RUNNER_NAME`: under enforcement only the
   newest replica would take work. For a name that stays the same for each
   pod, run Zone as a StatefulSet, whose pods keep their host names (`zone-0`,
-  `zone-1`, …) across restarts, and keep the default name.
+  `zone-1`, …) across restarts, and keep the default name. The `zone-apps`
+  chart's high-availability profile names each pod's runner after the pod
+  and refuses a shared name; see [HA.md](HA.md#runner-fleet).
 - **Without a host name**, the random `zone-…` name changes on every start,
   so state never carries over.
 

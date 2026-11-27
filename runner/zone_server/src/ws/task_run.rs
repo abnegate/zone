@@ -69,7 +69,8 @@ pub async fn handle_task_ws(
     State(state): State<AppState>,
     Path(run_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, run_id))
+    let sockets = state.drain().sockets().clone();
+    ws.on_upgrade(move |socket| sockets.track_future(handle_socket(socket, state, run_id)))
 }
 
 /// Whether the bound identity may watch this run.
@@ -386,6 +387,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                     Some(Ok(Message::Close(_))) | None => return,
                     _ => {}
                 }
+            }
+
+            () = state.drain().closing() => {
+                let _ = sender.send(super::restarting()).await;
+                return;
             }
         }
     }

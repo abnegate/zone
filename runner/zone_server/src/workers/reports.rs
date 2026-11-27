@@ -20,13 +20,15 @@
 //! workspace with a stale Discord webhook still gets its digest on Slack and the
 //! slot is recorded rather than retried into a duplicate.
 //!
-//! [`schedule`] and [`digest`] are pure. [`worker`] is the only part that reads
-//! a database, sends anything, or schedules.
+//! [`schedule`] and [`digest`] are pure. [`claim`] records deliveries and
+//! [`worker`] sends them.
 
+pub mod claim;
 pub mod digest;
 pub mod schedule;
 pub mod worker;
 
+pub use claim::Claim;
 pub use digest::{Digest, generate};
 pub use schedule::{Cadence, Due, Schedule, due};
-pub use worker::{Ledger, ReportEnvironment, ReportSettings, build, deliver, owed};
+pub use worker::{ReportEnvironment, ReportSettings, build, deliver};

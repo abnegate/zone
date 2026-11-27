@@ -20,10 +20,18 @@ pub(crate) const RUNNER_STARTED: &str = "Runner started. Wait for it with wait_f
 pub(crate) const RUNNER_MESSAGE: &str = "message";
 
 static UPDATES: Lazy<broadcast::Sender<(Uuid, Value)>> = Lazy::new(|| broadcast::channel(256).0);
+
 pub fn subscribe() -> broadcast::Receiver<(Uuid, Value)> {
     UPDATES.subscribe()
 }
+
+/// Hands a stored message to every socket on its chat, on every replica.
 pub fn publish(chat_id: Uuid, message: Value) {
+    crate::services::task_relay::action(chat_id, message);
+}
+
+/// Hands a stored message to the sockets in this process only.
+pub(crate) fn deliver(chat_id: Uuid, message: Value) {
     let _ = UPDATES.send((chat_id, message));
 }
 

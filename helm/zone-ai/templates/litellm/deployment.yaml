@@ -8,7 +8,7 @@ metadata:
     {{- include "zone-ai.labels" . | nindent 4 }}
     app.kubernetes.io/component: llm-proxy
 spec:
-  replicas: 1
+  replicas: {{ .Values.litellm.replicas }}
   selector:
     matchLabels:
       app.kubernetes.io/name: litellm
@@ -19,6 +19,12 @@ spec:
         app.kubernetes.io/component: llm-proxy
     spec:
       terminationGracePeriodSeconds: 60
+      {{- with .Values.litellm.podAntiAffinity }}
+      affinity:
+        podAntiAffinity:
+          {{- toYaml . | nindent 10 }}
+      {{- end }}
+      {{- if and .Values.ollama.enabled .Values.litellm.waitForOllama }}
       initContainers:
         - name: wait-for-ollama
           image: "{{ .Values.litellm.waitImage.repository }}:{{ .Values.litellm.waitImage.tag }}"
@@ -38,6 +44,7 @@ spec:
             capabilities:
               drop:
                 - ALL
+      {{- end }}
       securityContext:
         runAsNonRoot: {{ .Values.litellm.securityContext.runAsNonRoot }}
         runAsUser: {{ .Values.litellm.securityContext.runAsUser }}

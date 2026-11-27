@@ -4,18 +4,22 @@ on:
   push:
     branches: [main]
     paths:
+      - 'docs/HA.md'
       - 'helm/**'
       - 'k8s/values-tilt-*.yaml'
       - 'Makefile'
       - 'scripts/test-helm-base-url.sh'
+      - 'scripts/test-helm-ha.sh'
       - 'scripts/test-helm-trusted-proxies.sh'
       - '.github/workflows/helm.yml'
   pull_request:
     paths:
+      - 'docs/HA.md'
       - 'helm/**'
       - 'k8s/values-tilt-*.yaml'
       - 'Makefile'
       - 'scripts/test-helm-base-url.sh'
+      - 'scripts/test-helm-ha.sh'
       - 'scripts/test-helm-trusted-proxies.sh'
       - '.github/workflows/helm.yml'
 
@@ -43,6 +47,11 @@ jobs:
 
       - name: Verify the server is handed its public origin
         run: sh scripts/test-helm-base-url.sh
+
+      - name: Verify the high-availability profile
+        run: |
+          yq --version
+          sh scripts/test-helm-ha.sh
 
       - name: Verify the server trusts only the proxies it is given
         run: sh scripts/test-helm-trusted-proxies.sh

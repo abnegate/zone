@@ -14,6 +14,7 @@ use zone_context::error::ContextError;
 use crate::auth::Permission;
 
 use super::DbResult;
+use super::context_gatherings;
 use super::workspace_members::WorkspaceRole;
 
 mod create_error;
@@ -640,31 +641,13 @@ pub struct SourceIndexStatus {
     pub indexed_items_count: Option<i64>,
 }
 
-/// Context gathering row (minimal, for index status queries)
-#[derive(Debug, sqlx::FromRow)]
-struct GatheringRow {
-    pub status: String,
-    pub completed_at: Option<NaiveDateTime>,
-}
-
-/// Get indexing status for a source
+/// Get indexing status for a source. A gathering orphaned while running reads as failed, so it
+/// holds back neither a resync nor a manual reindex.
 pub async fn get_source_index_status(
     pool: &PgPool,
     source_id: Uuid,
 ) -> DbResult<SourceIndexStatus> {
-    // Get latest gathering for this source
-    let gathering = sqlx::query_as::<_, GatheringRow>(
-        r#"
-        SELECT status, completed_at
-        FROM context_gatherings
-        WHERE $1 = ANY(source_ids)
-        ORDER BY created_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(source_id)
-    .fetch_optional(pool)
-    .await?;
+    let gathering = context_gatherings::latest(pool, source_id).await?;
 
     let item_count: Option<i64> = sqlx::query_scalar(
         r#"
@@ -681,8 +664,10 @@ pub async fn get_source_index_status(
 
     let searchable = item_count.unwrap_or(0) > 0;
     let status = match gathering {
-        Some(ref g) if g.status == "running" => IndexStatus::Indexing,
-        Some(ref g) if g.status == "failed" => IndexStatus::Failed,
+        Some(ref g) if g.running() => IndexStatus::Indexing,
+        Some(ref g) if g.status == context_gatherings::RUNNING || g.status == "failed" => {
+            IndexStatus::Failed
+        }
         Some(ref g) if g.status == "completed" && searchable => IndexStatus::Indexed,
         Some(ref g) if g.status == "completed" => IndexStatus::Failed,
         _ if searchable => IndexStatus::Indexed,

@@ -222,13 +222,31 @@ async fn prune(pool: &PgPool, scope: Scope, before: DateTime<Utc>) -> DbResult<u
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::db::reminders;
+    use crate::services::members::SEATS_LOCK;
+    use crate::services::spend;
+    use crate::workers::housekeeping::LEADER_KEY;
 
     #[test]
-    fn the_sweep_lock_differs_from_every_other_advisory_lock() {
-        assert_ne!(SWEEP_LOCK, events::REBASE_LOCK);
-        assert_ne!(SWEEP_LOCK, reminders::CLAIM_LOCK);
+    fn every_advisory_lock_key_is_distinct() {
+        let keys = [
+            SWEEP_LOCK,
+            events::REBASE_LOCK,
+            reminders::CLAIM_LOCK,
+            spend::ingest::SPEND_LOCK,
+            spend::sweep::NOTICE_LOCK,
+            LEADER_KEY,
+            SEATS_LOCK,
+        ];
+
+        assert_eq!(
+            keys.iter().collect::<BTreeSet<_>>().len(),
+            keys.len(),
+            "two advisory locks sharing a key would block each other's holders"
+        );
     }
 
     fn number(value: serde_json::Value) -> Number {

@@ -10,12 +10,12 @@ use zone_server::config::Config;
 
 use crate::common::{TestClient, TestResponse, test_config};
 
-const LIMIT: u32 = 3;
+pub const LIMIT: u32 = 3;
 const PORT: u16 = 40_000;
 const FORWARDED_FOR: &str = "x-forwarded-for";
 const LOOPBACK: &str = "127.0.0.1";
 
-fn throttled() -> Config {
+pub fn throttled() -> Config {
     Config {
         sso_requests_per_minute: LIMIT,
         ..test_config()
@@ -45,7 +45,7 @@ fn connected(
     }
 }
 
-async fn authorize(
+pub async fn authorize(
     client: &TestClient,
     peer: Option<&str>,
     forwarded: Option<&str>,
@@ -82,12 +82,12 @@ async fn post_acs(client: &TestClient, peer: &str) -> TestResponse {
         .await
 }
 
-fn not_found(response: &TestResponse) {
+pub fn not_found(response: &TestResponse) {
     response.assert_status(StatusCode::NOT_FOUND);
     assert_eq!(response.json_value()["code"], PROVIDER_NOT_FOUND);
 }
 
-fn limited(response: &TestResponse) {
+pub fn limited(response: &TestResponse) {
     response.assert_status(StatusCode::TOO_MANY_REQUESTS);
     let body = response.json_value();
     assert_eq!(body["code"], RATE_LIMITED, "{body}");

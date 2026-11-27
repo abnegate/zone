@@ -13,8 +13,8 @@ pub enum Audience {
     /// Started for a person who isn't on the socket yet, such as an auto project's planner
     /// answering its brief. Nothing else will run it, so a refusal is told to the chat.
     Watched,
-    /// Owed by a schedule, such as a reminder's firing. A refusal leaves it owed and another
-    /// runner takes it, so the chat is told nothing.
+    /// Owed by a schedule, such as a reminder's firing. A refusal, or another turn holding the
+    /// chat, leaves it owed for a later attempt, so the chat is told nothing.
     Owed,
 }
 
@@ -23,8 +23,10 @@ impl Audience {
         self == Self::Interactive
     }
 
-    pub(super) fn announces_refusal(self) -> bool {
-        self != Self::Owed
+    /// Whether the turn is offered again when it cannot run now, so the chat is told nothing of
+    /// a refusal or of another turn holding it.
+    pub(super) fn retried(self) -> bool {
+        self == Self::Owed
     }
 }
 
@@ -43,7 +45,8 @@ mod tests {
     use crate::db::workspace_members::WorkspaceRole;
     use crate::services::fleet;
     use crate::services::fleet::tests::Server;
-    use crate::ws::chat::{ChatStream, ServerMessage, run_turn};
+    use crate::ws::chat::frame::Frame;
+    use crate::ws::chat::{ChatStream, run_turn};
 
     const BRIEF: &str = "Plan a small landing page.";
 
@@ -91,9 +94,9 @@ mod tests {
     }
 
     /// The frames that end a turn without an answer, published since the last read.
-    fn endings(frames: &mut Receiver<ServerMessage>) -> Vec<Value> {
+    fn endings(frames: &mut Receiver<Frame>) -> Vec<Value> {
         std::iter::from_fn(|| frames.try_recv().ok())
-            .map(|frame| serde_json::to_value(frame).expect("the frame serialises"))
+            .map(|frame| serde_json::to_value(frame.published()).expect("the frame serialises"))
             .filter(|frame| frame["type"] == "denied" || frame["type"] == "error")
             .collect()
     }

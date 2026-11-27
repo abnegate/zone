@@ -11,7 +11,7 @@ use crate::common::test_email;
 const PREFIX: &str = "scim_rate_limit";
 const WINDOW: Duration = Duration::from_secs(60);
 
-fn throttled(response: &TestResponse, window: Duration) {
+pub fn throttled(response: &TestResponse, window: Duration) {
     assert_refused(response, StatusCode::TOO_MANY_REQUESTS, Some("tooMany"));
     let retry_after: u64 = response
         .header("retry-after")

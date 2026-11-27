@@ -39,29 +39,30 @@
 //!
 //! # Multi-instance safety
 //!
-//! Several of these sweeps are still not safe to run on two instances at once,
-//! and this worker does not change that. Every instance runs every registered
-//! sweep, exactly as it did before. Jitter separates them in time, which reduces
-//! collisions but does not prevent them; the protections that exist are the
-//! ones the work already carried, such as the `pg_advisory_xact_lock` in
-//! [`crate::db::knowledge`].
+//! Every sweep has a [`Scope`]. Replica sweeps run on every replica because the
+//! state they keep is the replica's own. Cluster sweeps run only on the one
+//! replica whose [`Leadership`] holds [`leader::LEADER_KEY`], checked at each
+//! dispatch and aborted on demotion.
 //!
-//! Fixing it properly means per-job leader election on a session-scoped
-//! advisory lock over a pinned connection, the shape sqlx's migrator uses for
-//! `_sqlx_migrations`. That is a behaviour change
-//! rather than a move, it needs a connection held for the length of a sweep,
-//! and it cannot be tested here, so it is deliberately out of scope for this
-//! change. The seam for it is [`Sweep`]: a sweep's work is a closure, so
-//! wrapping one in a lock is a change to [`periodic`] alone.
+//! A pass aborted mid-way can be repeated by the next leader, never alongside
+//! it: the old leader stops within `freshness` of its last answered ping, and a
+//! new one waits longer than that before its first sweep. The two sweeps that
+//! notify claim in Postgres before they send, scheduled reports in
+//! `report_deliveries` and regression alerts in `regression_alerts`, so a repeat
+//! sends nothing twice. Every other cluster sweep tolerates a duplicate pass:
+//! each recomputes what is due from stored state on every pass, so a repeat is
+//! the same as one replica sweeping again early, which a restart already does.
 
 pub mod catchup;
 pub mod jitter;
 pub mod job;
+pub mod leader;
 pub mod outcome;
 pub mod periodic;
 pub mod registry;
 pub mod report;
 pub mod schedule;
+pub mod scope;
 pub mod slot;
 pub mod sweep;
 pub mod warmup;
@@ -70,11 +71,13 @@ pub mod worker;
 pub use catchup::Catchup;
 pub use jitter::Jitter;
 pub use job::{Failure, Job, Sweeping};
+pub use leader::{LEADER_KEY, Leadership, Tenure, Timing, UnsafeTiming};
 pub use outcome::Outcome;
 pub use periodic::{Periodic, periodic};
 pub use registry::Registry;
 pub use report::Report;
 pub use schedule::Schedule;
+pub use scope::Scope;
 pub use slot::Slot;
 pub use sweep::Sweep;
 pub use warmup::Warmup;

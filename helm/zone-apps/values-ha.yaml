@@ -1,0 +1,165 @@
+# The supported high-availability topology for zone-apps. Layer it over your
+# own values:
+#
+#   helm upgrade --install zone-apps helm/zone-apps -f <your values> \
+#     -f helm/zone-apps/values-ha.yaml \
+#     --set server.agentState.persistence.storageClass=<ReadWriteMany class> \
+#     --set server.trustedProxies=<ingress controller pod CIDR> \
+#     --set highAvailability.externalNetworkPolicy=true \
+#     --set highAvailability.externalValkey=true
+#
+# It sets none of the inputs it needs from you, so whether they come from your
+# values or from --set, a render that lacks one fails and names it. A value
+# this profile does set, such as server.agentState.persistence.size, wins
+# over your values file: change it with --set or with a values file after
+# this one.
+#
+# It needs Kubernetes 1.27 or later, at least 3 schedulable nodes, a
+# ReadWriteMany storage class (NFSv4.1+, EFS, Filestore, Azure Files NFS or
+# CephFS) and an external, managed Redis or Valkey with failover. Either set
+# highAvailability.externalValkey once secrets.existingSecret's redisUrl key
+# points at it, or set secrets.create with secrets.redisUrl.
+#
+# server.trustedProxies is required: your ingress controller's pod CIDR, such
+# as 10.244.0.0/16 on kind, so zone-server reads each client's address from
+# X-Forwarded-For. Never a range your clients use; 127.0.0.1/32,::1/128 trusts
+# loopback only. A trusted network wider than one host lets every pod in it
+# forge X-Forwarded-For, so the render also fails unless
+# highAvailability.externalNetworkPolicy states that a NetworkPolicy of your
+# own keeps other pods off the server, or networkPolicy.enabled does, whose
+# bundled policy also cuts the server's egress to DNS, Postgres, Valkey and
+# LiteLLM (see docs/HA.md). server.agentState.persistence.storageClass must
+# name the ReadWriteMany storage class. Each server pod registers as a fleet
+# runner named after its pod, so the render also fails when server.env or
+# commonEnv sets one ZONE_RUNNER_NAME for them all.
+
+highAvailability:
+  enabled: true
+
+server:
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  # AlwaysAllow lets a drain evict a replica that is not Ready, or a crash
+  # loop blocks the drain for as long as it lasts.
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+    unhealthyPodEvictionPolicy: AlwaysAllow
+
+  probes:
+    startup:
+      enabled: true
+      path: /health
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 60
+    liveness:
+      path: /health
+      initialDelaySeconds: 0
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      path: /health/ready
+      initialDelaySeconds: 0
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 2
+
+  # The delay outlasts readiness failing (periodSeconds 5 x failureThreshold 2)
+  # plus the HAProxy ingress controller's 5-second sync, and the termination
+  # grace covers delay + grace + the server's 17 fixed seconds of stopping.
+  terminationGracePeriodSeconds: 75
+
+  env:
+    ZONE_SHUTDOWN_DELAY_SECONDS: "15"
+    ZONE_SHUTDOWN_GRACE_SECONDS: "30"
+
+  agentState:
+    persistence:
+      enabled: true
+      accessMode: ReadWriteMany
+      size: 100Gi
+
+  # Agent CLI sign-ins in flight live in one replica's memory, so a browser
+  # keeps reaching the replica that started its sign-in. HAProxy Kubernetes
+  # Ingress reads cookie-persistence from the Service; on an Ingress it is
+  # deprecated.
+  service:
+    annotations:
+      haproxy.org/cookie-persistence: zone-server
+
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: server
+          topologyKey: kubernetes.io/hostname
+
+  # nodeTaintsPolicy Honor keeps tainted and cordoned nodes out of the skew,
+  # or they count as empty domains and deadlock rollouts and the HPA.
+  # matchLabelKeys pod-template-hash spreads each rollout revision on its own:
+  # counting the old ReplicaSet's pods stacks new pods on one node. Under
+  # highAvailability the chart adds app.kubernetes.io/instance to every spread
+  # and anti-affinity selector.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      nodeTaintsPolicy: Honor
+      matchLabelKeys:
+        - pod-template-hash
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: server
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      nodeTaintsPolicy: Honor
+      matchLabelKeys:
+        - pod-template-hash
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: server
+
+manager:
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+    unhealthyPodEvictionPolicy: AlwaysAllow
+
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: manager
+          topologyKey: kubernetes.io/hostname
+
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      nodeTaintsPolicy: Honor
+      matchLabelKeys:
+        - pod-template-hash
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: manager

@@ -122,6 +122,12 @@ impl Queue {
         self.finish(true)
     }
 
+    /// Leaves whatever waits in the queue once the running turn ends, as a
+    /// Stop does, but without stopping that turn.
+    pub fn hold(&mut self) {
+        self.held = true;
+    }
+
     pub fn stop(&mut self, busy: bool) {
         if let Some(current) = self.current.as_mut() {
             current.cancelled = true;
@@ -191,6 +197,18 @@ impl Queue {
         Some(Started { message, turn })
     }
 
+    /// The turn about to start was refused, because another replica holds the
+    /// chat. `kept`, the message it was starting, goes back where it left the
+    /// queue, behind a message an Interrupt moved to the front meanwhile, and
+    /// whatever waits is held for the user rather than dropped.
+    pub fn refuse(&mut self, kept: Option<Queued>) {
+        if let Some(message) = kept {
+            let at = usize::from(self.interrupting).min(self.messages.len());
+            self.messages.insert(at, message);
+        }
+        self.abandon();
+    }
+
     /// The draining task died mid-turn. Nothing will finish that turn, so hold
     /// what is left rather than leave every later message waiting on it.
     fn abandon(&mut self) {
@@ -221,6 +239,16 @@ pub fn with<T>(chat_id: Uuid, change: impl FnOnce(&mut Queue) -> T) -> T {
     drop(queue);
     QUEUES.remove_if(&chat_id, |_, queue| queue.is_idle());
     result
+}
+
+/// Every chat with a queue on this replica.
+pub fn chats() -> Vec<Uuid> {
+    QUEUES.iter().map(|queue| *queue.key()).collect()
+}
+
+/// A turn this queue started is running, or messages wait in it.
+pub fn active(chat_id: Uuid) -> bool {
+    QUEUES.get(&chat_id).is_some_and(|queue| !queue.is_idle())
 }
 
 pub fn snapshot(chat_id: Uuid) -> Option<(Vec<Queued>, bool)> {
@@ -321,6 +349,72 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_turn_puts_its_message_back_first_and_holds_the_queue() {
+        let mut queue = Queue::default();
+        queue.submit(queued("first"), true);
+        queue.submit(queued("second"), true);
+        let Finished::Next(started) = queue.release() else {
+            panic!("the queue starts its front once the other turn ends");
+        };
+
+        queue.refuse(Some(started.message));
+
+        assert_eq!(contents(&queue), ["first", "second"]);
+        assert!(queue.held());
+        assert_eq!(
+            queue.release(),
+            Finished::Held,
+            "nothing starts until the user acts"
+        );
+    }
+
+    #[test]
+    fn a_refused_send_that_never_queued_is_dropped_and_the_rest_is_held() {
+        let mut queue = Queue::default();
+        queue.submit(queued("sent"), false);
+        queue.submit(queued("behind"), false);
+        queue.stop(false);
+
+        queue.refuse(None);
+
+        assert_eq!(contents(&queue), ["behind"]);
+        assert!(queue.held());
+        let Some(next) = queue.submit(queued("again"), false) else {
+            panic!("a send starts the held queue, since nothing runs");
+        };
+        assert_eq!(next.message.content, "behind");
+    }
+
+    #[test]
+    fn a_refused_send_with_nothing_behind_it_leaves_the_queue_idle() {
+        let mut queue = Queue::default();
+        queue.submit(queued("sent"), false);
+
+        queue.refuse(None);
+
+        assert!(queue.is_idle());
+        assert!(!queue.held());
+    }
+
+    #[test]
+    fn a_refused_turn_goes_back_behind_the_message_an_interrupt_moved_up() {
+        let mut queue = Queue::default();
+        queue.submit(queued("first"), true);
+        queue.submit(queued("second"), true);
+        let third = queued("third");
+        queue.submit(third.clone(), true);
+        let Finished::Next(started) = queue.release() else {
+            panic!("the queue starts its front once the other turn ends");
+        };
+        assert_eq!(queue.interrupt(third.id, false), Interrupted::Cancel);
+
+        queue.refuse(Some(started.message));
+
+        assert_eq!(contents(&queue), ["third", "first", "second"]);
+        assert!(queue.held());
+    }
+
+    #[test]
     fn a_message_sent_during_a_turn_waits_and_runs_next_in_order() {
         let mut queue = Queue::default();
         queue.submit(queued("first"), false);
@@ -331,6 +425,30 @@ mod tests {
         assert_eq!(next(queue.finish(true)), "second");
         assert_eq!(next(queue.finish(true)), "third");
         assert_eq!(queue.finish(true), Finished::Idle);
+    }
+
+    #[test]
+    fn a_held_queue_lets_the_running_turn_finish_and_keeps_the_rest_waiting() {
+        let mut queue = Queue::default();
+        queue.submit(queued("first"), false);
+        queue.submit(queued("second"), false);
+
+        queue.hold();
+
+        assert_eq!(queue.finish(true), Finished::Held);
+        assert_eq!(contents(&queue), ["second"]);
+        assert!(queue.held());
+    }
+
+    #[test]
+    fn holding_an_idle_queue_leaves_it_idle() {
+        let mut queue = Queue::default();
+        queue.submit(queued("only"), false);
+
+        queue.hold();
+
+        assert_eq!(queue.finish(true), Finished::Idle);
+        assert!(queue.is_idle());
     }
 
     #[test]

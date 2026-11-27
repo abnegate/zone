@@ -47,6 +47,25 @@ The following table lists the configurable parameters and their default values.
 | `global.externalDatabase` | Use external database | `false` |
 | `global.securityContexts` | Enable security contexts | `true` |
 
+### High Availability
+
+`values-ha.yaml` is the supported HA topology: layer it after your values with `-f <your values> -f helm/zone-apps/values-ha.yaml`, set `server.agentState.persistence.storageClass` to a ReadWriteMany class, and set `server.trustedProxies` to your ingress controller's pod CIDR. The profile sets none of these inputs, so they come from your values or `--set`. An HA render without `server.trustedProxies` fails; `127.0.0.1/32,::1/128` trusts loopback only on purpose (see [Client Addresses](#client-addresses)). So does one that trusts a network wider than one host while other pods can reach the server: set `highAvailability.externalNetworkPolicy` once a NetworkPolicy of your own admits only the ingress controller to the server pods, or `networkPolicy.enabled`, whose bundled policy also limits the server's egress to DNS, Postgres, Valkey and LiteLLM (see [docs/HA.md](../../docs/HA.md#isolating-the-server)). So does one whose agent state is not on a ReadWriteMany claim.
+
+Each server pod registers in the runner fleet under its own name: the HA render sets `ZONE_RUNNER_NAME` from the pod's `metadata.name`. The chart refuses `ZONE_RUNNER_NAME` in `server.env` or `commonEnv` with `highAvailability.enabled`, `server.autoscaling.enabled` or `server.replicaCount` above 1, because replicas sharing a name share one runner and only the newest takes work.
+
+It needs Kubernetes 1.27 or later. Its topology spread constraints set `matchLabelKeys: [pod-template-hash]`, so each rollout revision spreads across nodes on its own rather than counting the old ReplicaSet's pods, and `nodeTaintsPolicy: Honor`. With `highAvailability.enabled`, the chart adds `app.kubernetes.io/instance: <release>` to every spread and pod anti-affinity label selector, merged into the labels you set, so two releases in one namespace never count each other's pods.
+
+[docs/HA.md](../../docs/HA.md) describes the whole topology: its requirements, sizing, failure modes, backups, upgrades and support boundary.
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `highAvailability.enabled` | Refuse a render whose replicas would not share one external Redis or Valkey: with `secrets.create`, `secrets.redisUrl` must name a host other than the in-cluster `valkey` service | `false` |
+| `highAvailability.externalValkey` | With `secrets.create` off, state that the existing secret's `secrets.keys.redisUrl` key points at an external, managed Redis or Valkey, which `helm template` cannot check | `false` |
+| `highAvailability.externalNetworkPolicy` | State that a NetworkPolicy outside this chart admits only the ingress controller to the server pods, so a `server.trustedProxies` network renders without `networkPolicy.enabled` | `false` |
+| `secrets.redisUrl` | `redis://` or `rediss://` URL written to the created secret's `valkey-url`, in place of `commonEnv.REDIS_URL` and the URL built from `VALKEY_HOST` | `""` |
+| `networkPolicy.externalValkeyCIDR` | CIDR of the external Redis or Valkey the server may reach; required with `networkPolicy.enabled` and `highAvailability.enabled` | `""` |
+| `networkPolicy.externalValkeyPort` | Its port, required with the CIDR | `null` |
+
 ### Server Configuration
 
 | Parameter | Description | Default |
@@ -62,9 +81,16 @@ The following table lists the configurable parameters and their default values.
 | `server.autoscaling.maxReplicas` | Maximum number of replicas | `10` |
 | `server.autoscaling.targetCPUUtilization` | Target CPU utilization percentage | `70` |
 | `server.baseUrl` | Origin a browser reaches Zone at, `scheme://host[:port]` with no path, passed to zone-server as `APP_BASE_URL`; see [Public Origin](#public-origin) | `""` (the first ingress host) |
-| `server.agentState.persistence.enabled` | Keep agent state (each sign-in's CLI home under `<state>/<org>/<agent>/logins/<id>`, with codex's login and the CLI's session files, and each agent's shared `work` directory) on a claim; applies only with one replica and autoscaling off. Claude tokens are in the database either way | `true` |
+| `server.agentState.persistence.enabled` | Keep agent state (each sign-in's CLI home under `<state>/<org>/<agent>/logins/<id>`, with codex's login and the CLI's session files, and each agent's shared `work` directory) on a claim; a ReadWriteOnce claim applies only with one replica and autoscaling off. Claude tokens are in the database either way | `true` |
+| `server.agentState.persistence.accessMode` | `ReadWriteOnce`, or `ReadWriteMany` for one claim, `<release>-shared-state`, that every replica mounts agent state, clones, artifacts and the chat workspace from as subPaths | `ReadWriteOnce` |
 | `server.agentState.persistence.size` | Size of the agent-state claim, which grows with every CLI turn; see [Coding Agent Sign-ins](#coding-agent-sign-ins) | `1Gi` |
-| `server.agentState.persistence.storageClass` | Storage class of the agent-state claim; empty uses the cluster default | `""` |
+| `server.agentState.persistence.storageClass` | Storage class of the agent-state claim; empty uses the cluster default, and is refused for `ReadWriteMany` | `""` |
+| `server.strategy` | Deployment strategy while the server holds no ReadWriteOnce claim, which always recreates | `{}` (rolling, 25%) |
+| `server.probes.startup.enabled` | Add a startup probe on `server.probes.startup.path`, which holds off liveness and readiness until it passes | `false` |
+| `server.probes.liveness.path`, `server.probes.readiness.path` | Paths of the liveness and readiness probes, each with `initialDelaySeconds`, `periodSeconds`, `timeoutSeconds` and `failureThreshold` | `/health` |
+| `server.terminationGracePeriodSeconds` | Seconds a terminating server pod has before it is killed | `null` (Kubernetes' 30) |
+| `server.service.annotations` | Extra annotations on the server Service, such as the ingress controller's session affinity | `{}` |
+| `server.podDisruptionBudget.maxUnavailable` | Replaces `minAvailable` when set; `manager.podDisruptionBudget.maxUnavailable` does the same for the console | `null` |
 | `server.env.ZONE_AGENT_USAGE_TTL_SECONDS` | Whole seconds a sign-in's usage reading stays fresh before zone-server reads it again to pick the account a chat or task starts on; anything else is refused at boot | `"60"` |
 | `server.env.ZONE_AGENT_NICENESS` | Nice value, `0` to `19`, the claude and codex CLIs and every build and test they run start at, so zone-server keeps its share of the pod's CPU; anything else is refused at boot | unset (`19`) |
 | `server.env.ZONE_CLAUDE_API_URL` | Where zone-server reads Claude sign-ins' usage and profile, for example through a proxy | unset (`https://api.anthropic.com`) |
@@ -86,7 +112,7 @@ The following table lists the configurable parameters and their default values.
 | `server.env.ZONE_REPORT_DAY_OF_MONTH` | Day of the month, `1` to `31`, a monthly digest is owed; moved to the last day in shorter months | unset (`1`) |
 | `server.env.ZONE_LICENSE_RENEWAL` | Renew a paid license that carries a Polar subscription by posting only its key to the license server once a day from 14 days before expiry, and install the key it returns: `true`, `1`, `yes` or `on` turns it on, `false`, `0`, `no` or `off` off, in any case, and any other value logs a warning and keeps it on. Turn it off for an air-gapped install; see [docs/LICENSING.md](../../docs/LICENSING.md#automatic-renewal) | unset (`true`) |
 | `server.env.ZONE_LICENSE_RENEWAL_URL` | Where the license key is posted for renewal: an `http` or `https` URL with no user name or password that doesn't name a link-local or cloud metadata address. Plain `http` is accepted only for a loopback or private network host; see [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md#zone_license_renewal_url) for the list. A URL that breaks a rule stops zone-server at startup | unset (`https://licenses.bitecode.ltd/licenses/renew`) |
-| `server.trustedProxies` | Comma-separated CIDRs of the peers whose `X-Forwarded-For` zone-server believes, passed as `ZONE_TRUSTED_PROXIES`. Set it to your ingress controller's pod CIDR, never a range your clients use; see [Client Addresses](#client-addresses). `server.env.ZONE_TRUSTED_PROXIES` does the same and wins | `""` (unset: loopback only, so every client shares one single sign-on limit) |
+| `server.trustedProxies` | Comma-separated CIDRs of the peers whose `X-Forwarded-For` zone-server believes, passed as `ZONE_TRUSTED_PROXIES`. Set it to your ingress controller's pod CIDR, never a range your clients use; see [Client Addresses](#client-addresses). `server.env.ZONE_TRUSTED_PROXIES` does the same and wins. Required with `highAvailability.enabled` | `""` (unset: loopback only, so every client shares one single sign-on limit) |
 
 ### Manager Configuration
 
@@ -273,7 +299,9 @@ GitHub keeps the addresses an App was registered with, so settle the origin befo
 
 ## Client Addresses
 
-zone-server decides which address a request came from for its single sign-on throttle and for the address it records on sessions and devices. It believes `X-Forwarded-For` only from the peers `server.trustedProxies` lists. The chart leaves the list empty, so zone-server trusts loopback only: every request through the ingress arrives from the ingress controller's pod, every client shares that pod's single sign-on limit (per zone-server replica), and the devices list shows the controller's address. That fails closed, and the install notes warn about it.
+zone-server decides which address a request came from for its single sign-on throttle and for the address it records on sessions and devices. It believes `X-Forwarded-For` only from the peers `server.trustedProxies` lists. The chart leaves the list empty, so zone-server trusts loopback only: every request through the ingress arrives from the ingress controller's pod, every client shares that pod's single sign-on limit, and the devices list shows the controller's address. That fails closed, and the install notes warn about it.
+
+The single sign-on limit is counted in Valkey across every zone-server replica while the cluster bus is connected, and by each replica on its own while it is not. See [docs/HA.md](../../docs/HA.md#shared-limits).
 
 Set it to your ingress controller's pod CIDR, never a range your clients use:
 
@@ -282,7 +310,7 @@ server:
   trustedProxies: 10.244.0.0/16
 ```
 
-zone-server skips every hop in a trusted range as if it were a proxy, so a client whose own address is in one (a corporate install where users have private addresses, with `10.0.0.0/8` trusted) can put any address to the left of its own in `X-Forwarded-For` and be counted under that address instead. Every pod in the CIDR can do the same, so where pods other than the ingress controller share it, list the controller's pods more narrowly or keep them off zone-server with a network policy. See [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md#zone_trusted_proxies).
+zone-server skips every hop in a trusted range as if it were a proxy, so a client whose own address is in one (a corporate install where users have private addresses, with `10.0.0.0/8` trusted) can put any address to the left of its own in `X-Forwarded-For` and be counted under that address instead. Every pod in the CIDR can do the same, so where pods other than the ingress controller share it, list the controller's pods more narrowly or keep them off zone-server with a network policy. With `highAvailability.enabled` the render insists on one: see [docs/HA.md](../../docs/HA.md#isolating-the-server). See [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md#zone_trusted_proxies).
 
 ## Upgrading
 

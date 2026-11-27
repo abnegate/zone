@@ -23,6 +23,38 @@ postgres:
 
   sharedPreloadLibraries: []
 
+  # postgresql.conf settings; CNPG takes every value as a string.
+  parameters: {}
+
+  # CNPG spec.postgresql.synchronous, e.g. {method: any, number: 1,
+  # dataDurability: required}. number must be below instances.
+  synchronous: {}
+
+  # CNPG spec.affinity, e.g. {podAntiAffinityType: required}.
+  affinity: {}
+
+  # Barman Cloud plugin backups. Set objectStore to the name of a
+  # barmancloud.cnpg.io ObjectStore in this namespace to archive WAL there and
+  # take scheduled base backups; empty leaves backups off. schedule has a
+  # leading seconds field.
+  backup:
+    objectStore: ""
+    schedule: "0 0 0 * * *"
+    target: ""
+
+  # Bootstrap the cluster from backups instead of with initdb, as docs/HA.md
+  # describes under Restore order. Set objectStore to the barmancloud.cnpg.io
+  # ObjectStore that holds them (never backup.objectStore: a recovered cluster
+  # archives into a new one) and serverName to the cluster that took them,
+  # zone-postgres for a cluster this chart created. targetTime, an RFC 3339
+  # timestamp with its zone, stops the replay there instead of at the end of
+  # the archive. Keep these set on every later upgrade of a recovered release,
+  # so the running Cluster's bootstrap is never rewritten to initdb.
+  recovery:
+    objectStore: ""
+    serverName: ""
+    targetTime: ""
+
   postInitTemplateSQL:
     - CREATE EXTENSION IF NOT EXISTS vector
     - CREATE EXTENSION IF NOT EXISTS pg_trgm

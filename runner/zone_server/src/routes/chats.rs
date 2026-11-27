@@ -1130,7 +1130,7 @@ pub async fn delete_message(
         .delete_message(&session.lease, message_id)
         .await;
     if let Ok(Some(subagents)) = &result {
-        crate::ws::chat::announce_removed_subagents(chat_id, subagents.clone()).await;
+        crate::ws::chat::announce_removed_subagents(&state, chat_id, subagents.clone()).await;
     }
     if let Err(error) = session.close().await {
         return ServerError::Conflict(error.to_string()).into_response();

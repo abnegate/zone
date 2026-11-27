@@ -1015,6 +1015,7 @@ async fn revoking_ends_an_auto_project_drive_and_its_fenced_writes() {
         claim,
         claimant,
         RENEWAL,
+        a.state.drain().clone(),
         |lease: lease::Lease| {
             let (fleet, driver, automation) = (&fleet, &driver, &automation);
             async move {

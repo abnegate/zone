@@ -13,12 +13,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use abnegate_notify::Fanout;
-use tokio::sync::Mutex;
+use chrono::Utc;
 
 use super::catchup::Catchup;
 use super::job::Failure;
 use super::registry::Registry;
 use super::schedule::Schedule;
+use super::scope::Scope;
 use super::sweep::Sweep;
 use super::warmup::Warmup;
 use crate::config::SourceIndexConfig;
@@ -32,7 +33,7 @@ use crate::state::AppState;
 use crate::workers::analytics::AnalyticsPolicy;
 use crate::workers::promotion::PromotionPolicy;
 use crate::workers::regression::RegressionSettings;
-use crate::workers::reports::{Ledger, ReportSettings};
+use crate::workers::reports::ReportSettings;
 use crate::workers::{
     analytics, knowledge_refresh, learning, notify, promotion, pull_requests, reception,
     regression, reports, source_resync, subagents,
@@ -214,6 +215,32 @@ impl Periodic {
         }
     }
 
+    /// Whether one leader runs the sweep for every replica, or every replica runs it.
+    pub fn scope(self) -> Scope {
+        match self {
+            Self::KnowledgeRefresh
+            | Self::SourceResync
+            | Self::AnswerPromotion
+            | Self::Learning
+            | Self::RegressionWatch
+            | Self::ScheduledReports
+            | Self::ReceptionSync
+            | Self::SubagentRecovery
+            | Self::PullRequestWatch
+            | Self::AuditRetention
+            | Self::LicenseRenewal
+            | Self::RunnerRetention => Scope::Cluster,
+            // The gauges this publishes are this process's own.
+            Self::AgentAnalytics
+            // The connections this brings level are this process's own.
+            | Self::McpConvergence
+            // The worktrees this removes may be on this replica's own disk.
+            | Self::WorktreeCleanup
+            // Its verify pass repairs only the keys this process's registry holds.
+            | Self::SpendIngest => Scope::Replica,
+        }
+    }
+
     pub fn schedule(self, sources: &SourceIndexConfig) -> Schedule {
         Schedule::new(self.period(sources), self.warmup(), self.catchup())
     }
@@ -279,87 +306,115 @@ fn refresh_knowledge(schedule: Schedule, state: AppState) -> Sweep {
     let permits = knowledge_refresh::permits();
     let recovery = knowledge_refresh::recovery();
 
-    Sweep::new(Periodic::KnowledgeRefresh.name(), schedule, move || {
-        let state = state.clone();
-        let permits = Arc::clone(&permits);
-        let recovery = Arc::clone(&recovery);
-        async move {
-            knowledge_refresh::run_cycle(&state, &permits, &recovery)
-                .await
-                .map_err(Failure::new)
-        }
-    })
+    Sweep::new(
+        Periodic::KnowledgeRefresh.name(),
+        schedule,
+        Periodic::KnowledgeRefresh.scope(),
+        move || {
+            let state = state.clone();
+            let permits = Arc::clone(&permits);
+            let recovery = Arc::clone(&recovery);
+            async move {
+                knowledge_refresh::run_cycle(&state, &permits, &recovery)
+                    .await
+                    .map_err(Failure::new)
+            }
+        },
+    )
 }
 
 fn resync_sources(schedule: Schedule, state: AppState) -> Sweep {
-    Sweep::new(Periodic::SourceResync.name(), schedule, move || {
-        let state = state.clone();
-        async move {
-            source_resync::poll_sources(&state)
-                .await
-                .map_err(Failure::new)
-        }
-    })
+    Sweep::new(
+        Periodic::SourceResync.name(),
+        schedule,
+        Periodic::SourceResync.scope(),
+        move || {
+            let state = state.clone();
+            async move {
+                source_resync::poll_sources(&state)
+                    .await
+                    .map_err(Failure::new)
+            }
+        },
+    )
 }
 
 fn promote_answers(schedule: Schedule, state: AppState) -> Sweep {
     let policy = PromotionPolicy::default();
 
-    Sweep::new(Periodic::AnswerPromotion.name(), schedule, move || {
-        let state = state.clone();
-        async move {
-            promotion::run_cycle(&state, &policy)
-                .await
-                .map_err(Failure::new)
-        }
-    })
+    Sweep::new(
+        Periodic::AnswerPromotion.name(),
+        schedule,
+        Periodic::AnswerPromotion.scope(),
+        move || {
+            let state = state.clone();
+            async move {
+                promotion::run_cycle(&state, &policy)
+                    .await
+                    .map_err(Failure::new)
+            }
+        },
+    )
 }
 
 fn learn_from_runs(schedule: Schedule, state: AppState) -> Sweep {
     let policy = learning::LearningPolicy::default();
 
-    Sweep::new(Periodic::Learning.name(), schedule, move || {
-        let state = state.clone();
-        async move {
-            learning::worker::run_cycle(&state, &policy)
-                .await
-                .map_err(Failure::new)
-        }
-    })
+    Sweep::new(
+        Periodic::Learning.name(),
+        schedule,
+        Periodic::Learning.scope(),
+        move || {
+            let state = state.clone();
+            async move {
+                learning::worker::run_cycle(&state, &policy)
+                    .await
+                    .map_err(Failure::new)
+            }
+        },
+    )
 }
 
 fn refresh_analytics(schedule: Schedule, state: AppState) -> Sweep {
     let policy = Arc::new(AnalyticsPolicy::default());
 
-    Sweep::new(Periodic::AgentAnalytics.name(), schedule, move || {
-        let state = state.clone();
-        let policy = Arc::clone(&policy);
-        async move {
-            analytics::worker::run_cycle(&state, &policy)
-                .await
-                .map_err(Failure::new)
-        }
-    })
+    Sweep::new(
+        Periodic::AgentAnalytics.name(),
+        schedule,
+        Periodic::AgentAnalytics.scope(),
+        move || {
+            let state = state.clone();
+            let policy = Arc::clone(&policy);
+            async move {
+                analytics::worker::run_cycle(&state, &policy)
+                    .await
+                    .map_err(Failure::new)
+            }
+        },
+    )
 }
 
 fn watch_regressions(schedule: Schedule, state: AppState, fanout: Arc<Fanout>) -> Sweep {
     let settings = Arc::new(RegressionSettings::default());
     let checkers = Arc::new(regression::worker::checkers(&settings));
-    let alerted = Arc::new(Mutex::new(regression::worker::Alerted::new()));
 
-    Sweep::new(Periodic::RegressionWatch.name(), schedule, move || {
-        let state = state.clone();
-        let settings = Arc::clone(&settings);
-        let checkers = Arc::clone(&checkers);
-        let fanout = Arc::clone(&fanout);
-        let alerted = Arc::clone(&alerted);
-        async move {
-            let mut alerted = alerted.lock().await;
-            regression::worker::run_cycle(&state, &checkers, &settings, &fanout, &mut alerted)
-                .await
-                .map_err(Failure::new)
-        }
-    })
+    Sweep::new(
+        Periodic::RegressionWatch.name(),
+        schedule,
+        Periodic::RegressionWatch.scope(),
+        move || {
+            let state = state.clone();
+            let settings = Arc::clone(&settings);
+            let checkers = Arc::clone(&checkers);
+            let fanout = Arc::clone(&fanout);
+            async move {
+                let now = Utc::now().naive_utc();
+                regression::worker::run_cycle(&state, &checkers, &settings, &fanout, now)
+                    .await
+                    .map_err(Failure::new)
+            }
+        },
+    )
 }
 
 fn deliver_reports(
@@ -370,158 +425,206 @@ fn deliver_reports(
 ) -> Sweep {
     let checkers = Arc::new(reports::worker::checkers(&settings));
     let settings = Arc::new(settings);
-    let ledger = Arc::new(Mutex::new(Ledger::new()));
 
-    Sweep::new(Periodic::ScheduledReports.name(), schedule, move || {
-        let state = state.clone();
-        let settings = Arc::clone(&settings);
-        let checkers = Arc::clone(&checkers);
-        let fanout = Arc::clone(&fanout);
-        let ledger = Arc::clone(&ledger);
-        async move {
-            let mut ledger = ledger.lock().await;
-            reports::worker::run_cycle(&state, &settings, &checkers, &fanout, &mut ledger)
-                .await
-                .map_err(Failure::new)
-        }
-    })
+    Sweep::new(
+        Periodic::ScheduledReports.name(),
+        schedule,
+        Periodic::ScheduledReports.scope(),
+        move || {
+            let state = state.clone();
+            let settings = Arc::clone(&settings);
+            let checkers = Arc::clone(&checkers);
+            let fanout = Arc::clone(&fanout);
+            async move {
+                let now = Utc::now().naive_utc();
+                reports::worker::run_cycle(&state, &settings, &checkers, &fanout, now)
+                    .await
+                    .map_err(Failure::new)
+            }
+        },
+    )
 }
 
 fn sync_reception(schedule: Schedule, state: AppState) -> Sweep {
-    Sweep::new(Periodic::ReceptionSync.name(), schedule, move || {
-        let state = state.clone();
-        async move {
-            match reception::run_cycle(&state).await {
-                Ok(0) => Ok(()),
-                Ok(recorded) => {
-                    tracing::info!("Recorded reception for {} run(s)", recorded);
-                    Ok(())
+    Sweep::new(
+        Periodic::ReceptionSync.name(),
+        schedule,
+        Periodic::ReceptionSync.scope(),
+        move || {
+            let state = state.clone();
+            async move {
+                match reception::run_cycle(&state).await {
+                    Ok(0) => Ok(()),
+                    Ok(recorded) => {
+                        tracing::info!("Recorded reception for {} run(s)", recorded);
+                        Ok(())
+                    }
+                    Err(error) => Err(Failure::new(error)),
                 }
-                Err(error) => Err(Failure::new(error)),
             }
-        }
-    })
+        },
+    )
 }
 
 fn recover_subagents(schedule: Schedule, state: AppState) -> Sweep {
-    Sweep::new(Periodic::SubagentRecovery.name(), schedule, move || {
-        let state = state.clone();
-        async move {
-            match subagents::run_cycle(&state).await {
-                Ok(0) => Ok(()),
-                Ok(stopped) => {
-                    tracing::info!("Stopped {} subagent(s) whose turns ended", stopped);
-                    Ok(())
+    Sweep::new(
+        Periodic::SubagentRecovery.name(),
+        schedule,
+        Periodic::SubagentRecovery.scope(),
+        move || {
+            let state = state.clone();
+            async move {
+                match subagents::run_cycle(&state).await {
+                    Ok(0) => Ok(()),
+                    Ok(stopped) => {
+                        tracing::info!("Stopped {} subagent(s) whose turns ended", stopped);
+                        Ok(())
+                    }
+                    Err(error) => Err(Failure::new(error)),
                 }
-                Err(error) => Err(Failure::new(error)),
             }
-        }
-    })
+        },
+    )
 }
 
 fn converge_mcp_servers(schedule: Schedule, state: AppState) -> Sweep {
-    Sweep::new(Periodic::McpConvergence.name(), schedule, move || {
-        let state = state.clone();
-        async move {
-            match load::converge(&state).await {
-                Ok(0) => Ok(()),
-                Ok(dropped) => {
-                    tracing::info!(
-                        "Stopped the MCP servers of {} deleted organization(s)",
-                        dropped
-                    );
-                    Ok(())
+    Sweep::new(
+        Periodic::McpConvergence.name(),
+        schedule,
+        Periodic::McpConvergence.scope(),
+        move || {
+            let state = state.clone();
+            async move {
+                match load::converge(&state).await {
+                    Ok(0) => Ok(()),
+                    Ok(dropped) => {
+                        tracing::info!(
+                            "Stopped the MCP servers of {} deleted organization(s)",
+                            dropped
+                        );
+                        Ok(())
+                    }
+                    Err(error) => Err(Failure::new(error)),
                 }
-                Err(error) => Err(Failure::new(error)),
             }
-        }
-    })
+        },
+    )
 }
 
 fn watch_pull_requests(schedule: Schedule, state: AppState) -> Sweep {
-    Sweep::new(Periodic::PullRequestWatch.name(), schedule, move || {
-        let state = state.clone();
-        async move {
-            pull_requests::run_cycle(&state)
-                .await
-                .map(|_| ())
-                .map_err(Failure::new)
-        }
-    })
+    Sweep::new(
+        Periodic::PullRequestWatch.name(),
+        schedule,
+        Periodic::PullRequestWatch.scope(),
+        move || {
+            let state = state.clone();
+            async move {
+                pull_requests::run_cycle(&state)
+                    .await
+                    .map(|_| ())
+                    .map_err(Failure::new)
+            }
+        },
+    )
 }
 
 fn apply_audit_retention(schedule: Schedule, state: AppState) -> Sweep {
-    Sweep::new(Periodic::AuditRetention.name(), schedule, move || {
-        let state = state.clone();
-        async move {
-            match retention::sweep(&state).await {
-                Ok(0) => Ok(()),
-                Ok(deleted) => {
-                    tracing::info!(deleted, "Deleted audit rows past their retention period");
-                    Ok(())
+    Sweep::new(
+        Periodic::AuditRetention.name(),
+        schedule,
+        Periodic::AuditRetention.scope(),
+        move || {
+            let state = state.clone();
+            async move {
+                match retention::sweep(&state).await {
+                    Ok(0) => Ok(()),
+                    Ok(deleted) => {
+                        tracing::info!(deleted, "Deleted audit rows past their retention period");
+                        Ok(())
+                    }
+                    Err(error) => Err(Failure::new(error)),
                 }
-                Err(error) => Err(Failure::new(error)),
             }
-        }
-    })
+        },
+    )
 }
 
 fn clean_worktrees(schedule: Schedule, state: AppState) -> Sweep {
-    Sweep::new(Periodic::WorktreeCleanup.name(), schedule, move || {
-        let state = state.clone();
-        async move {
-            let tally = worktree::sweep(&state).await.map_err(Failure::new)?;
-            if tally.removed > 0 || tally.failed > 0 {
-                tracing::info!(
-                    removed = tally.removed,
-                    kept = tally.kept,
-                    failed = tally.failed,
-                    "Swept agent worktrees"
-                );
+    Sweep::new(
+        Periodic::WorktreeCleanup.name(),
+        schedule,
+        Periodic::WorktreeCleanup.scope(),
+        move || {
+            let state = state.clone();
+            async move {
+                let tally = worktree::sweep(&state).await.map_err(Failure::new)?;
+                if tally.removed > 0 || tally.failed > 0 {
+                    tracing::info!(
+                        removed = tally.removed,
+                        kept = tally.kept,
+                        failed = tally.failed,
+                        "Swept agent worktrees"
+                    );
+                }
+                Ok(())
             }
-            Ok(())
-        }
-    })
+        },
+    )
 }
 
 fn renew_license(schedule: Schedule, state: AppState, client: Client) -> Sweep {
-    Sweep::new(Periodic::LicenseRenewal.name(), schedule, move || {
-        let state = state.clone();
-        let client = client.clone();
-        async move {
-            renewal::run(&state, &client)
-                .await
-                .map(|_| ())
-                .map_err(Failure::new)
-        }
-    })
+    Sweep::new(
+        Periodic::LicenseRenewal.name(),
+        schedule,
+        Periodic::LicenseRenewal.scope(),
+        move || {
+            let state = state.clone();
+            let client = client.clone();
+            async move {
+                renewal::run(&state, &client)
+                    .await
+                    .map(|_| ())
+                    .map_err(Failure::new)
+            }
+        },
+    )
 }
 
 fn ingest_spend(schedule: Schedule, state: AppState, fanout: Arc<Fanout>) -> Sweep {
     let sweep = Arc::new(spend::sweep::Sweep::default());
 
-    Sweep::new(Periodic::SpendIngest.name(), schedule, move || {
-        let state = state.clone();
-        let fanout = Arc::clone(&fanout);
-        let sweep = Arc::clone(&sweep);
-        async move { sweep.run(&state, &fanout).await.map_err(Failure::new) }
-    })
+    Sweep::new(
+        Periodic::SpendIngest.name(),
+        schedule,
+        Periodic::SpendIngest.scope(),
+        move || {
+            let state = state.clone();
+            let fanout = Arc::clone(&fanout);
+            let sweep = Arc::clone(&sweep);
+            async move { sweep.run(&state, &fanout).await.map_err(Failure::new) }
+        },
+    )
 }
 
 fn forget_runners(schedule: Schedule, state: AppState) -> Sweep {
-    Sweep::new(Periodic::RunnerRetention.name(), schedule, move || {
-        let state = state.clone();
-        async move {
-            match fleet::retention::sweep(&state).await {
-                Ok(0) => Ok(()),
-                Ok(removed) => {
-                    tracing::info!(removed, "Removed runners offline past their retention");
-                    Ok(())
+    Sweep::new(
+        Periodic::RunnerRetention.name(),
+        schedule,
+        Periodic::RunnerRetention.scope(),
+        move || {
+            let state = state.clone();
+            async move {
+                match fleet::retention::sweep(&state).await {
+                    Ok(0) => Ok(()),
+                    Ok(removed) => {
+                        tracing::info!(removed, "Removed runners offline past their retention");
+                        Ok(())
+                    }
+                    Err(error) => Err(Failure::new(error)),
                 }
-                Err(error) => Err(Failure::new(error)),
             }
-        }
-    })
+        },
+    )
 }
 
 #[cfg(test)]
@@ -563,6 +666,46 @@ mod tests {
              renewal, the spend ingest and the runner retention joined them later. Dropping one \
              here would silently stop that background work."
         );
+    }
+
+    #[test]
+    fn every_sweep_states_where_it_runs() {
+        assert_eq!(
+            Periodic::ALL.map(|periodic| (periodic, periodic.scope())),
+            [
+                (Periodic::KnowledgeRefresh, Scope::Cluster),
+                (Periodic::SourceResync, Scope::Cluster),
+                (Periodic::AnswerPromotion, Scope::Cluster),
+                (Periodic::Learning, Scope::Cluster),
+                (Periodic::AgentAnalytics, Scope::Replica),
+                (Periodic::RegressionWatch, Scope::Cluster),
+                (Periodic::ScheduledReports, Scope::Cluster),
+                (Periodic::ReceptionSync, Scope::Cluster),
+                (Periodic::SubagentRecovery, Scope::Cluster),
+                (Periodic::McpConvergence, Scope::Replica),
+                (Periodic::PullRequestWatch, Scope::Cluster),
+                (Periodic::AuditRetention, Scope::Cluster),
+                (Periodic::WorktreeCleanup, Scope::Replica),
+                (Periodic::LicenseRenewal, Scope::Cluster),
+                (Periodic::SpendIngest, Scope::Replica),
+                (Periodic::RunnerRetention, Scope::Cluster),
+            ],
+            "a replica sweep run only on the leader leaves the other replicas' own state \
+             untended, and a cluster sweep run on every replica repeats shared work"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_registered_sweep_carries_its_periodic_scope() {
+        let registry = periodic(AppState::for_tests());
+
+        for job in registry.jobs() {
+            let periodic = Periodic::ALL
+                .into_iter()
+                .find(|periodic| periodic.name() == job.name())
+                .expect("every registered job is a periodic sweep");
+            assert_eq!(job.scope(), periodic.scope(), "{}", job.name());
+        }
     }
 
     #[test]

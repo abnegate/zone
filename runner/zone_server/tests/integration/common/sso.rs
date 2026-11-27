@@ -7,10 +7,12 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use chrono::{SubsecRound, TimeDelta, Utc};
+use metrics::Gauge;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_enterprise::{GRACE_DAYS, Keyring, Payload, Plan, SigningKey, TrustedKey, sign};
+use zone_server::cluster::Bus;
 use zone_server::config::Config;
 use zone_server::db::{licenses, migrations};
 use zone_server::services::mail::AccountMail;
@@ -58,23 +60,40 @@ impl Fixture {
     }
 
     pub async fn configured(prefix: &'static str, config: Config) -> Self {
+        Self::assembled(prefix, config, None).await
+    }
+
+    /// As [`Fixture::configured`], with the server on a bus to the Valkey at `url`.
+    pub async fn clustered(prefix: &'static str, config: Config, url: &str) -> Self {
+        Self::assembled(prefix, config, Some(url)).await
+    }
+
+    async fn assembled(prefix: &'static str, config: Config, url: Option<&str>) -> Self {
         let database = Database::new(prefix).await;
         migrations::run(&database.pool).await.unwrap();
         let mail = Arc::new(Recording::default());
-        let state = AppState::new_with_mail(
-            config,
-            database.pool.clone(),
-            None,
-            Some(Arc::new(AccountMail::new(mail.clone()))),
-        );
-        state.disable_mcp();
-        state.install_keyring(keyring());
+        let state = server(config, database.pool.clone(), &mail);
+        let state = match url {
+            Some(url) => connect(state, url),
+            None => state,
+        };
         let client = TestClient::with_state(state);
         Self {
             database,
             client,
             mail,
         }
+    }
+
+    /// Another replica of this fixture's server, on its database and configuration, with a bus
+    /// to the Valkey at `url`.
+    pub fn replica(&self, url: &str) -> TestClient {
+        let state = server(
+            self.state().config().clone(),
+            self.pool().clone(),
+            &self.mail,
+        );
+        TestClient::with_state(connect(state, url))
     }
 
     /// As [`Fixture::new`], with the Community member cap in force.
@@ -233,6 +252,23 @@ impl Fixture {
     pub async fn cleanup(self) {
         self.database.cleanup().await;
     }
+}
+
+fn server(config: Config, pool: PgPool, mail: &Arc<Recording>) -> AppState {
+    let state = AppState::new_with_mail(
+        config,
+        pool,
+        None,
+        Some(Arc::new(AccountMail::new(mail.clone()))),
+    );
+    state.disable_mcp();
+    state.install_keyring(keyring());
+    state
+}
+
+fn connect(state: AppState, url: &str) -> AppState {
+    let bus = Bus::connect(url, state.master_key(), Gauge::noop());
+    state.with_bus(bus)
 }
 
 pub fn keyring() -> Keyring {

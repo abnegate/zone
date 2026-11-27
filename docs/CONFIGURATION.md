@@ -118,7 +118,11 @@ For production, regenerate secrets for security.
   trusting it would let anyone who can reach that port name any address. A
   value in `.env` replaces either one. The `zone-apps` Helm chart leaves it
   unset unless you set `server.trustedProxies`, and warns after an install
-  that leaves it empty.
+  that leaves it empty. Its high-availability profile refuses to render
+  without it: to trust loopback only there, set `127.0.0.1/32,::1/128`. It
+  also refuses a network wider than one host unless a network policy keeps
+  every pod but the ingress controller off the server. See
+  [HA.md](HA.md#isolating-the-server).
 - **Description**: The reverse proxies whose `X-Forwarded-For` header Zone
   believes, as a comma-separated list of IP addresses and networks. Zone uses
   the client address it resolves for the single sign-on rate limit and for
@@ -153,11 +157,15 @@ For production, regenerate secrets for security.
   SAML post is sent back to the console with that code. IPv6 clients are
   counted by their /64 network. The first refusal of an address in each
   minute is logged as a warning, the rest at debug.
-- **Note**: The count is kept in each server process's memory, so the limit
-  is per replica: with three replicas behind a load balancer, one address
-  can make up to three times as many requests. It must be a whole number of
-  at least 1; `0` or anything else stops the server at startup. See
-  [SSO.md](SSO.md#rate-limits-and-client-addresses).
+- **Note**: With `REDIS_URL` set, every replica counts into Valkey, so the
+  limit holds across all of them. Without it, or while Valkey is down or
+  doesn't answer within 500 milliseconds, each server process counts on its
+  own: with three replicas behind a load balancer, one address can then make
+  up to three times as many requests. The first-refusal warning is logged by
+  each replica. It must be a whole number of at least 1; `0` or anything
+  else stops the server at startup. See
+  [SSO.md](SSO.md#rate-limits-and-client-addresses) and
+  [HA.md](HA.md#shared-limits).
 
 ---
 
@@ -2634,13 +2642,38 @@ On by default. Once a day, the server looks at its license, and when the license
 
 ---
 
+## 🛑 Shutdown and readiness
+
+The server serves two probes. `GET /health` answers 200 `{"status":"healthy",...}` for as long as the process runs; use it for liveness and startup. `GET /health/ready` answers 200 `{"status":"ready"}` until the server receives SIGTERM (or ctrl-c), and 503 `{"status":"draining"}` from then on; use it for readiness. Readiness looks only at whether the server is draining, never at Postgres or Valkey: a database failover would otherwise mark every replica unready at once and leave the Service with nowhere to send anyone.
+
+On SIGTERM the server:
+
+1. marks itself draining, so readiness fails and chat sockets start no new reply. A message that would start one is refused with an error, and the socket is closed with code 1012 so the console reconnects, to another replica once this one has left the load balancer. Messages already queued behind a running reply stay queued and are dropped when the process exits. It gives up housekeeping leadership, so another replica takes the cluster sweeps, and claims no more reminder firings, auto-project drives or audit deliveries.
+2. keeps serving for `ZONE_SHUTDOWN_DELAY_SECONDS`, while load balancers notice the failed readiness. Chat replies already running carry on.
+3. stops listening, and gives HTTP requests in flight up to `ZONE_SHUTDOWN_GRACE_SECONDS` to finish.
+4. stops every chat reply still running, the way Stop does: the reply so far is saved, and the chat is released at once for another replica instead of after its 30-second lease. Replies are not waited for past the listener, because a coding agent reaches Zone's tools through it. A reminder's reply stopped this way leaves its firing owed, and another replica runs it again.
+5. closes every WebSocket (chat, task run, context and model pull) with code 1012, Service Restart.
+6. finishes its background writes, including giving stopped reminder firings back, then exits.
+
+Both settings are read at startup. A blank value counts as unset, and a value that is not a whole number of seconds stops the server at startup. Leave both at 0 for a single server, which then stops at once, as it always did, apart from steps 4 to 6. Steps 4 to 6 take at most 17 seconds: up to 10 to stop replies, 2 to close sockets and 5 for background writes. On Kubernetes, keep `terminationGracePeriodSeconds` at least delay + grace + 17; the HA profile (`helm/zone-apps/values-ha.yaml`) uses delay 15, grace 30 and a termination grace of 75.
+
+### `ZONE_SHUTDOWN_DELAY_SECONDS`
+- **Default**: `0`
+- **Description**: Seconds the server keeps serving after SIGTERM, with readiness failing, before it stops listening. Set it to at least the readiness probe's `periodSeconds × failureThreshold`, plus the time your ingress takes to drop an endpoint. The HA profile's 15 is its readiness window of 5 × 2 plus the HAProxy Kubernetes Ingress controller's default 5-second sync.
+
+### `ZONE_SHUTDOWN_GRACE_SECONDS`
+- **Default**: `0`
+- **Description**: Seconds HTTP requests in flight get to finish once the server stops listening. Chat replies still running after it are stopped and saved as they stand. At `0`, nothing in flight is waited for.
+
+---
+
 ## Runner fleet
 
 Every Zone server process registers as a runner in its server's fleet, on every edition, and heartbeats every 15 seconds. Under a Zone Enterprise license, server admins can cordon or revoke a runner and set a minimum version, and organizations and workspaces can require runner labels for their unattended work. Both settings are read once at startup. See [FLEET.md](FLEET.md) for the whole policy.
 
 ### `ZONE_RUNNER_NAME`
 - **Default**: the `HOSTNAME` environment variable, else `/etc/hostname`, else `zone-` followed by 8 random hex digits
-- **Description**: The name this server registers as. A runner's state belongs to its name, so a cordoned or revoked name stays that way when its server restarts. A name must be unique to one live server process: the newest process registered under a name holds it, and while it heartbeats, an older process sharing the name claims no work under an Enterprise license and logs a warning on every heartbeat. A process that started later takes the name over at once, so a restart or rollout hands it over without a gap; a process takes the name over from one that hasn't heartbeated for 60 seconds. Never give a Kubernetes Deployment's replicas one name: for a name that stays the same for each pod across restarts, run a StatefulSet and keep the default, since its pods keep their host names. See [FLEET.md](FLEET.md#names-carry-state). Surrounding spaces are trimmed, and a blank value counts as unset.
+- **Description**: The name this server registers as. A runner's state belongs to its name, so a cordoned or revoked name stays that way when its server restarts. A name must be unique to one live server process: the newest process registered under a name holds it, and while it heartbeats, an older process sharing the name claims no work under an Enterprise license and logs a warning on every heartbeat. A process that started later takes the name over at once, so a restart or rollout hands it over without a gap; a process takes the name over from one that hasn't heartbeated for 60 seconds. Never give a Kubernetes Deployment's replicas one name: for a name that stays the same for each pod across restarts, run a StatefulSet and keep the default, since its pods keep their host names. The `zone-apps` chart's high-availability profile sets it to each pod's name, from `metadata.name`, and the chart refuses a render that sets one name for several replicas. See [FLEET.md](FLEET.md#names-carry-state) and [HA.md](HA.md#runner-fleet). Surrounding spaces are trimmed, and a blank value counts as unset.
 
 ### `ZONE_RUNNER_LABELS`
 - **Default**: none
@@ -2802,6 +2835,7 @@ Regenerate secrets for production:
 | Task evaluation | No | ✅ Yes (off) |
 | Workspace digests | No | ✅ Yes (off) |
 | License renewal | No | ✅ Yes (on) |
+| Shutdown | No | ✅ Yes (stops at once) |
 | Runner fleet | No | Yes (host name, no labels) |
 
 *Security variables have insecure defaults. Change for production.
@@ -2868,6 +2902,7 @@ Need to find a specific config? Quick lookup:
 - **Task evaluation**: ZONE_TASK_EVALUATION, ZONE_TASK_EVALUATION_CATEGORIES, ZONE_TASK_EVALUATION_TOOL_TIMEOUT_SECONDS, ZONE_TASK_EVALUATION_BUDGET_SECONDS
 - **Workspace digests**: ZONE_REPORT_ENABLED, ZONE_REPORT_CADENCE, ZONE_REPORT_HOUR, ZONE_REPORT_WEEKDAY, ZONE_REPORT_DAY_OF_MONTH
 - **License renewal**: ZONE_LICENSE_RENEWAL, ZONE_LICENSE_RENEWAL_URL
+- **Shutdown**: ZONE_SHUTDOWN_DELAY_SECONDS, ZONE_SHUTDOWN_GRACE_SECONDS
 - **Runner fleet**: ZONE_RUNNER_NAME, ZONE_RUNNER_LABELS
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
 - **Timezone**: TZ

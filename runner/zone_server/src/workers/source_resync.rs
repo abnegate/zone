@@ -169,6 +169,14 @@ async fn consider_source(
         return Ok(false);
     };
 
+    let claimed = indexing::claim(state, source.id, source.workspace_id, user_id, true)
+        .await
+        .map_err(|error| format!("index claim: {error}"))?;
+    if claimed.is_none() {
+        tracing::debug!(source_id = %source.id, "skipping source another index already queued");
+        return Ok(false);
+    }
+
     tracing::info!(
         source_id = %source.id,
         source_name = %source.name,
@@ -181,7 +189,6 @@ async fn consider_source(
         ResyncReason::MissingEmbeddings => "missing_embeddings",
         ResyncReason::ScheduleDue => "schedule_due",
     });
-    indexing::spawn_index_source(state.clone(), source.id, source.workspace_id, user_id, true);
     Ok(true)
 }
 

@@ -56,6 +56,7 @@ where
             Err(Failure::Unauthenticated) => {
                 return Err(limiter
                     .reject(address, &hash)
+                    .await
                     .map_or(Failure::Unauthenticated, flooded));
             }
             authenticated => authenticated?,
@@ -73,7 +74,7 @@ where
             token_name: credential.name,
             entitlement: Entitlement::of(license.as_ref(), Utc::now()),
         };
-        let decision = limiter.check(organization_id);
+        let decision = limiter.check(organization_id).await;
         if (decision.allowed || limiter.records(organization_id, &decision))
             && let Some(slot) = parts.extensions.get::<Slot>()
         {

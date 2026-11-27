@@ -29,10 +29,12 @@ use zone_enterprise::sso::{Oidc, saml};
 use zone_enterprise::{Edition, License, status};
 
 use crate::cache::Cache;
+use crate::cluster::Bus;
 #[cfg(test)]
 use crate::config::AgentConfig;
 use crate::config::{Config, ModelBackend};
 use crate::db::DbResult;
+use crate::drain::Drain;
 use crate::pull::PullRegistry;
 use crate::services::chat::pull_request::StatusCache;
 use crate::services::fleet::{Flight, Identity};
@@ -40,12 +42,12 @@ use crate::services::github::snapshots::Snapshots;
 use crate::services::github_app::Provider;
 use crate::services::license::renewal;
 use crate::services::license::{Licenses, Stored};
+use crate::services::limit::{Limiter, Scope};
 use crate::services::mail::AccountMail;
 use crate::services::mcp_servers::hubs::Hubs;
 use crate::services::mcp_servers::status::Policy;
 use crate::services::network_denial::NetworkDenial;
-use crate::services::scim::limit;
-use crate::services::scim::limiter::Limiter;
+use crate::services::scim::{self, limit};
 use crate::services::sso::throttle::Throttle;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
@@ -62,7 +64,7 @@ const MAX_CONCURRENT_FRAME_EXTRACT: usize = 4;
 /// Without a sweep, every client the rate limiter has ever seen stays in it.
 const RATE_LIMITER_CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
 
-fn read(limiter: &RwLock<Arc<Limiter>>) -> Arc<Limiter> {
+fn read(limiter: &RwLock<Arc<scim::Limiter>>) -> Arc<scim::Limiter> {
     Arc::clone(&limiter.read().unwrap_or_else(PoisonError::into_inner))
 }
 
@@ -126,8 +128,8 @@ struct AppStateInner {
     pub embedding_service: Option<Arc<dyn EmbeddingService>>,
     pub context_service: Option<Arc<ContextService>>,
     pub mail: Option<Arc<AccountMail>>,
-    pub rate_limiter: Arc<RateLimiter<Uuid>>,
-    pub scim_limiter: Arc<RwLock<Arc<Limiter>>>,
+    pub limiter: Limiter<Uuid>,
+    pub scim_limiter: Arc<RwLock<Arc<scim::Limiter>>>,
     pub sso_throttle: Arc<Throttle>,
     pub sync_registry: SyncRegistry,
     pub pull_registry: PullRegistry,
@@ -166,6 +168,10 @@ struct AppStateInner {
     pub pull_request_statuses: StatusCache,
     pub github_snapshots: Snapshots,
     pub background: TaskTracker,
+    /// Relays live state to the other replicas. A process starts on its own
+    /// loopback, which reaches nobody, until [`AppState::with_bus`] gives it Valkey.
+    pub bus: Bus,
+    pub drain: Drain,
     pub instance: Uuid,
     pub runner: RwLock<Option<Uuid>>,
     pub started: OnceLock<DateTime<Utc>>,
@@ -255,11 +261,12 @@ impl AppState {
         let master_key = crate::secret::derive(config.encryption_key())
             .expect("Encryption key should be valid (validated in Config::from_env)");
 
-        let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::default()));
-        let scim_limiter = Arc::new(RwLock::new(Arc::new(limit::limiter())));
-        let sso_throttle = Arc::new(Throttle::new(config.sso_requests_per_minute));
-        let cleaned = Arc::clone(&rate_limiter);
+        let bus = Bus::loopback(&master_key);
+        let local = RateLimiter::new(RateLimitConfig::default());
+        let cleaned = local.clone();
+        let scim_limiter = Arc::new(RwLock::new(Arc::new(limit::limiter(bus.clone()))));
         let scim_cleaned = Arc::clone(&scim_limiter);
+        let sso_throttle = Arc::new(Throttle::new(config.sso_requests_per_minute, bus.clone()));
         let swept = Arc::clone(&sso_throttle);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(RATE_LIMITER_CLEANUP_INTERVAL);
@@ -273,6 +280,7 @@ impl AppState {
         });
 
         let github_snapshots = Snapshots::new(&config.github);
+        let limiter = Limiter::new(local, bus.clone(), Scope::Gather);
 
         let mcp = Hubs::new(
             zone_routing::proxy(),
@@ -291,7 +299,7 @@ impl AppState {
                 embedding_service,
                 context_service,
                 mail,
-                rate_limiter,
+                limiter,
                 scim_limiter,
                 sso_throttle,
                 sync_registry: SyncRegistry::new(Arc::clone(&master_key)),
@@ -314,6 +322,8 @@ impl AppState {
                 pull_request_statuses: StatusCache::default(),
                 github_snapshots,
                 background: TaskTracker::new(),
+                bus,
+                drain: Drain::default(),
                 instance: Uuid::new_v4(),
                 runner: RwLock::new(None),
                 started: OnceLock::new(),
@@ -323,6 +333,35 @@ impl AppState {
                 capped: AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Replaces the bus, and with it the Valkey the rate limit, the
+    /// sign-in throttle and the SCIM limits count in. It must be called
+    /// before the state is cloned, while nothing else can be holding the bus
+    /// it replaces. The replaced throttle shares its local state with the
+    /// new one, so the cleanup task still sweeps what is counted.
+    pub fn with_bus(mut self, bus: Bus) -> Self {
+        let inner =
+            Arc::get_mut(&mut self.inner).expect("the bus is replaced before the state is shared");
+        inner.limiter = inner.limiter.with_bus(bus.clone());
+        inner.sso_throttle = Arc::new(inner.sso_throttle.with_bus(bus.clone()));
+        let scim_limiter = read(&inner.scim_limiter).with_bus(bus.clone());
+        *inner
+            .scim_limiter
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(scim_limiter);
+        inner.bus = bus;
+        self
+    }
+
+    /// The bus to the other replicas.
+    pub fn bus(&self) -> &Bus {
+        &self.inner.bus
+    }
+
+    /// Whether the process is stopping, and its WebSockets with it.
+    pub fn drain(&self) -> &Drain {
+        &self.inner.drain
     }
 
     /// Writes that finish off work already delivered, which the server waits
@@ -435,37 +474,39 @@ impl AppState {
         self.inner.mail.as_ref()
     }
 
-    /// Get the rate limiter
-    pub fn rate_limiter(&self) -> &Arc<RateLimiter<Uuid>> {
-        &self.inner.rate_limiter
+    /// The context-gather rate limit, shared by every replica on the bus's Valkey.
+    pub fn limiter(&self) -> &Limiter<Uuid> {
+        &self.inner.limiter
     }
 
-    pub fn scim_limiter(&self) -> Arc<Limiter> {
+    pub fn scim_limiter(&self) -> Arc<scim::Limiter> {
         read(&self.inner.scim_limiter)
     }
 
     #[cfg(any(test, feature = "testing"))]
     pub fn limit_scim(&self, requests: u32, window: Duration) {
-        self.replace_scim_limiter(Limiter::new(
+        self.replace_scim_limiter(scim::Limiter::new(
             requests,
             window,
             limit::ADDRESS_FAILURES,
             limit::RELOAD,
+            self.inner.bus.clone(),
         ));
     }
 
     #[cfg(any(test, feature = "testing"))]
     pub fn limit_scim_addresses(&self, failures: u32) {
-        self.replace_scim_limiter(Limiter::new(
+        self.replace_scim_limiter(scim::Limiter::new(
             limit::REQUESTS,
             limit::WINDOW,
             failures,
             limit::RELOAD,
+            self.inner.bus.clone(),
         ));
     }
 
     #[cfg(any(test, feature = "testing"))]
-    fn replace_scim_limiter(&self, limiter: Limiter) {
+    fn replace_scim_limiter(&self, limiter: scim::Limiter) {
         *self
             .inner
             .scim_limiter
@@ -815,6 +856,7 @@ pub(crate) fn test_config() -> Config {
         source_index: Default::default(),
         evaluation: Default::default(),
         license_renewal: Default::default(),
+        shutdown: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
         train_upload_limit_mb: 512,
@@ -843,6 +885,7 @@ mod tests {
     use abnegate_notify::MockMailer;
     use abnegate_secret::SecretValue;
     use abnegate_vcs::pull_request::ApplicationId;
+    use std::net::IpAddr;
     use std::num::{NonZeroU8, NonZeroU32};
     use std::path::PathBuf;
     use zone_context::embeddings::providers::MockEmbeddingService;
@@ -889,6 +932,47 @@ mod tests {
             state.licenses().keyring(),
             clone.licenses().keyring()
         ));
+    }
+
+    #[tokio::test]
+    async fn a_state_starts_on_a_loopback_bus_that_with_bus_replaces() {
+        let state = AppState::for_tests();
+        assert!(!state.bus().connected());
+        let bus = Bus::loopback(state.master_key());
+        let instance = bus.instance();
+
+        let state = state.with_bus(bus);
+
+        assert_eq!(state.bus().instance(), instance);
+        assert_eq!(state.clone().bus().instance(), instance);
+    }
+
+    #[tokio::test]
+    async fn a_state_moved_to_another_bus_keeps_counting_sign_ins_where_it_left_off() {
+        let state = AppState::for_tests();
+        let client = Some(IpAddr::from([198, 51, 100, 7]));
+        for _ in 0..state.config().sso_requests_per_minute {
+            assert!(state.sso_throttle().check(client).await.allowed);
+        }
+        let bus = Bus::loopback(state.master_key());
+
+        let state = state.with_bus(bus);
+
+        assert!(!state.sso_throttle().check(client).await.allowed);
+    }
+
+    #[tokio::test]
+    async fn a_state_moved_to_another_bus_keeps_counting_scim_requests_where_it_left_off() {
+        let state = AppState::for_tests();
+        let organization = Uuid::new_v4();
+        for _ in 0..limit::REQUESTS {
+            assert!(state.scim_limiter().check(organization).await.allowed);
+        }
+        let bus = Bus::loopback(state.master_key());
+
+        let state = state.with_bus(bus);
+
+        assert!(!state.scim_limiter().check(organization).await.allowed);
     }
 
     #[tokio::test]
@@ -1109,6 +1193,7 @@ mod tests {
             source_index: Default::default(),
             evaluation: Default::default(),
             license_renewal: Default::default(),
+            shutdown: Default::default(),
             monitoring: Default::default(),
             chat: Default::default(),
             train_upload_limit_mb: 512,
@@ -1280,7 +1365,7 @@ mod tests {
                 .expose(),
             "ghp_sealed_by_the_state"
         );
-        let _ = state.rate_limiter();
+        assert_eq!(*state.limiter().config(), RateLimitConfig::default());
         let _ = state.sync_registry();
         let _ = state.pull_registry();
         assert!(state.train_jobs().current().is_none());

@@ -1,0 +1,34 @@
+# Kind cluster for scripts/ha-smoke.sh: one control plane and three workers,
+# so the server and CloudNativePG each place one pod per worker. The script
+# names the cluster, repeats the first worker to match --workers, and
+# substitutes ZONE_HA_SHARED_DIR with a temporary host directory, mounted at
+# /shared on every node behind a hostPath ReadWriteMany volume. No host
+# ports: the script reaches the cluster through the API server.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+    extraMounts:
+      - hostPath: ${ZONE_HA_SHARED_DIR}
+        containerPath: /shared
+  - role: worker
+    image: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+    extraMounts:
+      - hostPath: ${ZONE_HA_SHARED_DIR}
+        containerPath: /shared
+  - role: worker
+    image: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+    extraMounts:
+      - hostPath: ${ZONE_HA_SHARED_DIR}
+        containerPath: /shared
+  - role: worker
+    image: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+    extraMounts:
+      - hostPath: ${ZONE_HA_SHARED_DIR}
+        containerPath: /shared
+
+networking:
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/12"

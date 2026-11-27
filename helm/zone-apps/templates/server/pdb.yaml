@@ -6,7 +6,14 @@ metadata:
   labels:
     {{- include "zone-apps.server.labels" . | nindent 4 }}
 spec:
+  {{- if not (kindIs "invalid" .Values.server.podDisruptionBudget.maxUnavailable) }}
+  maxUnavailable: {{ .Values.server.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
   minAvailable: {{ .Values.server.podDisruptionBudget.minAvailable }}
+  {{- end }}
+  {{- with .Values.server.podDisruptionBudget.unhealthyPodEvictionPolicy }}
+  unhealthyPodEvictionPolicy: {{ . }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "zone-apps.server.selectorLabels" . | nindent 6 }}

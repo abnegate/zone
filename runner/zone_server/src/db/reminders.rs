@@ -612,6 +612,20 @@ pub async fn claim_turn(
     lease: Duration,
     claimant: Claimant,
 ) -> DbResult<Option<PendingTurn>> {
+    claim_turn_except(pool, sweep, lease, claimant, &[]).await
+}
+
+/// [`claim_turn`], passing over the firings in `claimed`: those one sweep
+/// already took. A firing a sweep gave back, because its chat was busy, then
+/// waits for the next sweep instead of being taken again straight away, as
+/// often as it can be given back before the sweep runs out of firings.
+pub async fn claim_turn_except(
+    pool: &PgPool,
+    sweep: Sweep,
+    lease: Duration,
+    claimant: Claimant,
+    claimed: &[Uuid],
+) -> DbResult<Option<PendingTurn>> {
     let seconds = lease.as_secs_f64();
     let mut transaction = pool.begin().await?;
     let held = eligibility::hold(&mut transaction, claimant).await?;
@@ -676,13 +690,14 @@ pub async fn claim_turn(
     // though nothing held the schedule at all. The bound belongs on the row
     // being taken, which is a different question from whether another one is
     // already out.
-    let claimed = sqlx::query_as::<_, PendingTurn>(sqlx::AssertSqlSafe(format!(
+    let taken = sqlx::query_as::<_, PendingTurn>(sqlx::AssertSqlSafe(format!(
         "UPDATE reminder_turns SET attempts = attempts + 1, claimed_at = statement_timestamp() \
          WHERE id = ( \
          SELECT owed.id FROM reminder_turns AS owed WHERE owed.attempts < $1 \
          AND (owed.claimed_at IS NULL \
            OR owed.claimed_at <= statement_timestamp() - make_interval(secs => $2)) \
          AND ($3::uuid IS NULL OR owed.workspace_id = $3) \
+         AND owed.id <> ALL($6::uuid[]) \
          AND NOT EXISTS ( \
            SELECT 1 FROM reminder_turns AS ahead \
            WHERE ahead.reminder_id = owed.reminder_id AND ahead.id <> owed.id \
@@ -703,10 +718,11 @@ pub async fn claim_turn(
     .bind(sweep.workspace())
     .bind(claimant.enforced)
     .bind(claimant.runner)
+    .bind(claimed)
     .fetch_optional(&mut *transaction)
     .await?;
     transaction.commit().await?;
-    Ok(claimed)
+    Ok(taken)
 }
 
 /// Keeps a claim live while its turn is still running, and says whether it
@@ -758,7 +774,8 @@ pub async fn renew_turn(
 
 /// Gives a claimed firing back untried, for a turn fleet policy refused before
 /// it reached the chat: the attempt is not counted, so refusals can't spend
-/// the attempts a firing has, and the firing is offered again at once.
+/// the attempts a firing has, and the firing is offered again at once to
+/// every sweep but the one that gave it back.
 ///
 /// Fenced on the claim's `attempts` like `finish_turn`.
 pub async fn release_turn(pool: &PgPool, turn_id: Uuid, attempts: i32) -> DbResult<bool> {

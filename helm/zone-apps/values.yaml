@@ -39,6 +39,10 @@ secrets:
   encryptionKey: ""
   litellmMasterKey: ""
   redisPassword: ""
+  # redis:// or rediss:// URL of the Redis or Valkey zone-server uses. When
+  # set it is the secret's valkey-url, in place of commonEnv.REDIS_URL and the
+  # URL built from VALKEY_HOST and VALKEY_PORT.
+  redisUrl: ""
   stripeSecretKey: ""
   smtpPassword: ""
 
@@ -49,6 +53,19 @@ secrets:
     encryptionKey: encryption-key
     litellmKey: litellm-master-key
     dbPassword: postgres-password
+
+# The supported HA topology; see values-ha.yaml. enabled refuses a render whose
+# replicas would not share one external Redis or Valkey: with secrets.create,
+# secrets.redisUrl must name a host other than the in-cluster valkey service;
+# otherwise set externalValkey once secrets.existingSecret's redisUrl key
+# points at the managed endpoint, which helm template cannot check. It also
+# refuses a server.trustedProxies network wider than one host unless
+# networkPolicy.enabled keeps other pods off the server, or
+# externalNetworkPolicy states that a NetworkPolicy of your own does.
+highAvailability:
+  enabled: false
+  externalValkey: false
+  externalNetworkPolicy: false
 
 serviceAccount:
   create: true
@@ -90,6 +107,36 @@ server:
     type: ClusterIP
     port: 8000
     targetPort: 8000
+    annotations: {}
+
+  # Deployment strategy while the server holds no ReadWriteOnce claim, which
+  # always recreates. Empty rolls 25% at a time.
+  strategy: {}
+
+  # startup gates liveness and readiness until it passes, so it covers
+  # migrations at boot.
+  probes:
+    startup:
+      enabled: false
+      path: /health
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 60
+    liveness:
+      path: /health
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      path: /health
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+  # Empty keeps the Kubernetes default of 30 seconds.
+  terminationGracePeriodSeconds: null
 
   resources:
     limits:
@@ -157,19 +204,27 @@ server:
   # under <state>/<org>/<agent>/logins/<id>, holding codex's auth.json and
   # the CLI's session files under its projects/ or sessions/, beside the
   # work directory the agent's sign-ins share. Claude tokens are sealed in
-  # the database, not here. This state is per pod, so the claim is used only
-  # while zone-server runs one replica (replicaCount 1, autoscaling off);
-  # otherwise it is an emptyDir. The chart keeps the claim when it stops
-  # using it, and every CLI turn adds a transcript to it: see the README.
+  # the database, not here. A ReadWriteOnce claim holds per-pod state, so it
+  # is used only while zone-server runs one replica (replicaCount 1,
+  # autoscaling off); otherwise it is an emptyDir. A ReadWriteMany claim,
+  # which needs a storageClass, is shared by every replica and also holds
+  # the clones, artifacts and chat workspace. The chart keeps the claim when
+  # it stops using it, and every CLI turn adds a transcript to it: see the
+  # README.
   agentState:
     persistence:
       enabled: true
+      accessMode: ReadWriteOnce
       size: 1Gi
       storageClass: ""
 
+  # maxUnavailable, when set, replaces minAvailable. unhealthyPodEvictionPolicy
+  # (IfHealthyBudget or AlwaysAllow) is left to Kubernetes when empty.
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
+    maxUnavailable: null
+    unhealthyPodEvictionPolicy: ""
 
   podAntiAffinity:
     preferredDuringSchedulingIgnoredDuringExecution:
@@ -220,9 +275,13 @@ manager:
   env:
     PORT: "3001"
 
+  # maxUnavailable, when set, replaces minAvailable. unhealthyPodEvictionPolicy
+  # (IfHealthyBudget or AlwaysAllow) is left to Kubernetes when empty.
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
+    maxUnavailable: null
+    unhealthyPodEvictionPolicy: ""
 
   podAntiAffinity:
     preferredDuringSchedulingIgnoredDuringExecution:
@@ -291,6 +350,10 @@ networkPolicy:
   ingressNamespace: haproxy-controller
   # CIDR containing commonEnv.DB_HOST; required for external databases when enabled.
   externalDatabaseCIDR: ""
+  # CIDR and port of the external Redis or Valkey; required when enabled with
+  # highAvailability.enabled, in place of the in-cluster valkey pods.
+  externalValkeyCIDR: ""
+  externalValkeyPort: null
 
 # Preserve an existing claim when retiring the former chat service.
 # A connected Helm upgrade looks up the claim automatically. Offline renderers

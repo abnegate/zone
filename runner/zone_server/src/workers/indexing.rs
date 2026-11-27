@@ -2,87 +2,154 @@
 //!
 //! Automatically indexes sources when they are created or updated.
 
+use std::time::Duration;
+
 use uuid::Uuid;
 
-use crate::db::context_gatherings;
+use crate::db::DbResult;
+use crate::db::context_gatherings::{self, FAILED};
 use crate::state::AppState;
+use crate::workers::gathering;
 
-/// Spawn background indexing task for a source
-///
-/// This is called when a source is created or updated.
-/// It queues the source for background indexing.
-pub fn spawn_index_source(
-    state: AppState,
+const SEMAPHORE_CLOSED: &str = "The indexing semaphore closed before the index started";
+
+/// Index a source in the background unless an index of it is already under way on any replica.
+/// The index is claimed before this replica waits for a permit, so it holds the source while it
+/// waits. `is_update` re-indexes what is already there. Returns `None` when one was under way.
+pub async fn claim(
+    state: &AppState,
     source_id: Uuid,
     workspace_id: Uuid,
     user_id: Uuid,
-    is_update: bool, // true = re-index, false = initial index
+    is_update: bool,
+) -> DbResult<Option<Uuid>> {
+    let claimed = context_gatherings::claim_index(
+        state.db(),
+        source_id,
+        workspace_id,
+        user_id,
+        state.instance(),
+    )
+    .await?;
+    if let Some(gathering_id) = claimed {
+        spawn(
+            state.clone(),
+            gathering_id,
+            source_id,
+            workspace_id,
+            is_update,
+        );
+    }
+    Ok(claimed)
+}
+
+/// Re-index a source whose config or credentials changed, superseding an index of it that is
+/// still queued. Returns `None` when the source is gone.
+pub async fn queue(
+    state: &AppState,
+    source_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<Uuid>> {
+    let queued = context_gatherings::queue_index(
+        state.db(),
+        source_id,
+        workspace_id,
+        user_id,
+        state.instance(),
+    )
+    .await?;
+    if let Some(gathering_id) = queued {
+        spawn(state.clone(), gathering_id, source_id, workspace_id, true);
+    }
+    Ok(queued)
+}
+
+/// Fails the indexes this process queued that are still waiting for a permit, for a process
+/// that is stopping and will never start them, so any replica, or this server once it restarts,
+/// can index their sources again at once. Gives up after `within`, leaving them to be taken
+/// over once this process's runner stops being seen.
+pub async fn release(state: &AppState, within: Duration) {
+    let released = tokio::time::timeout(
+        within,
+        context_gatherings::release(state.db(), state.instance()),
+    )
+    .await;
+    match released {
+        Ok(Ok(0)) => {}
+        Ok(Ok(released)) => {
+            tracing::info!(
+                released,
+                "Released the indexes this process queued but never started"
+            );
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Could not release the indexes this process queued");
+        }
+        Err(_) => tracing::warn!(
+            ?within,
+            "Releasing the indexes this process queued did not finish in time"
+        ),
+    }
+}
+
+/// Run a queued index once this replica has an indexing permit free.
+fn spawn(
+    state: AppState,
+    gathering_id: Uuid,
+    source_id: Uuid,
+    workspace_id: Uuid,
+    is_update: bool,
 ) {
     tokio::spawn(async move {
-        // Acquire semaphore permit from AppState
-        let semaphore = state.index_semaphore().clone();
-        let _permit = match semaphore.acquire().await {
-            Ok(p) => p,
-            Err(_) => {
-                tracing::error!(
-                    "Failed to acquire indexing semaphore for source {}",
-                    source_id
-                );
-                return;
+        let Ok(_permit) = state.index_semaphore().acquire().await else {
+            tracing::error!(%source_id, "Failed to acquire the indexing semaphore");
+            if let Err(error) = context_gatherings::update_gathering_status(
+                state.db(),
+                gathering_id,
+                FAILED,
+                Some(SEMAPHORE_CLOSED),
+            )
+            .await
+            {
+                tracing::error!(%source_id, %error, "Failed to fail the queued gathering");
             }
+            return;
         };
-
-        tracing::info!(
-            "Starting background {} for source {}",
-            if is_update { "re-index" } else { "index" },
-            source_id
-        );
-
-        // Create gathering record
-        let gathering_id = match context_gatherings::create_gathering(
-            state.db(),
-            user_id,
-            workspace_id,
-            &[source_id],
-        )
-        .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!("Failed to create gathering for source {}: {}", source_id, e);
-                return;
-            }
-        };
-
-        // Execute gathering (reuse existing worker)
-        use crate::workers::gathering;
-
-        gathering::execute_gathering(
-            &state,
-            gathering_id,
-            workspace_id,
-            vec![source_id],
-            is_update, // force_refresh = true for updates
-            true,      // index the full source, not a chat token budget
-        )
-        .await;
-
-        // Note: execute_gathering returns () so we can't check result directly
-        // The gathering worker updates the gathering status in the database
-        tracing::info!(
-            "Background indexing task completed for source {}",
-            source_id
-        );
+        index(&state, gathering_id, workspace_id, source_id, is_update).await;
     });
 }
 
+async fn index(
+    state: &AppState,
+    gathering_id: Uuid,
+    workspace_id: Uuid,
+    source_id: Uuid,
+    is_update: bool,
+) {
+    tracing::info!(
+        %source_id,
+        "Starting background {} of the source",
+        if is_update { "re-index" } else { "index" }
+    );
+    gathering::execute_gathering(
+        state,
+        gathering_id,
+        workspace_id,
+        vec![source_id],
+        is_update,
+        true,
+    )
+    .await;
+    tracing::info!(%source_id, "Background indexing of the source finished");
+}
+
 /// Check if a source needs re-indexing based on config changes
-pub fn config_changed(old_config: &serde_json::Value, new_config: &serde_json::Value) -> bool {
-    // Deep compare configs
-    old_config != new_config
+pub fn config_changed(previous: &serde_json::Value, current: &serde_json::Value) -> bool {
+    previous != current
 }
 
 /// Check if a source needs re-indexing based on credential changes
-pub fn credentials_changed(old_creds: Option<&str>, new_creds: Option<&str>) -> bool {
-    old_creds != new_creds
+pub fn credentials_changed(previous: Option<&str>, current: Option<&str>) -> bool {
+    previous != current
 }

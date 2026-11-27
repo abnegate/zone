@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_server::auth::{Grant, Permission, Scope, hash_password};
+use zone_server::config::Config;
 use zone_server::db::custom_roles::{self, Creation, Definition};
 use zone_server::db::organization_members::{self, OrgRole};
 use zone_server::db::scim::{NewToken, tokens};
@@ -11,7 +12,7 @@ use zone_server::services::scim::secret;
 use zone_server::state::AppState;
 
 use super::sso::{self, Account, Audit};
-use super::{TestResponse, test_password};
+use super::{TestClient, TestResponse, test_password};
 
 pub const BASE_PATH: &str = "/api/scim/v2/organizations";
 pub const CONTENT_TYPE: &str = "application/scim+json";
@@ -129,6 +130,16 @@ impl Fixture {
 
     pub async fn capped(prefix: &'static str) -> Self {
         Self::licensed(sso::Fixture::capped(prefix).await).await
+    }
+
+    /// As [`Fixture::new`] on `config`, with the server on a bus to the Valkey at `url`.
+    pub async fn clustered(prefix: &'static str, config: Config, url: &str) -> Self {
+        Self::licensed(sso::Fixture::clustered(prefix, config, url).await).await
+    }
+
+    /// Another replica of this fixture's server, on its database and the Valkey at `url`.
+    pub fn replica(&self, url: &str) -> TestClient {
+        self.inner.replica(url)
     }
 
     async fn licensed(inner: sso::Fixture) -> Self {
@@ -369,6 +380,29 @@ impl Fixture {
         token: &str,
         body: Option<&Value>,
     ) -> TestResponse {
+        self.scim_through(&self.inner.client, method, uri, token, body)
+            .await
+    }
+
+    /// A GET of `path` through `client`, such as another replica of this fixture's server.
+    pub async fn scim_get_through(
+        &self,
+        client: &TestClient,
+        path: &str,
+        token: &str,
+    ) -> TestResponse {
+        self.scim_through(client, Method::GET, &self.uri(path), token, None)
+            .await
+    }
+
+    async fn scim_through(
+        &self,
+        client: &TestClient,
+        method: Method,
+        uri: &str,
+        token: &str,
+        body: Option<&Value>,
+    ) -> TestResponse {
         let request = Request::builder()
             .method(method)
             .uri(uri)
@@ -380,7 +414,7 @@ impl Fixture {
                 .body(Body::from(serde_json::to_vec(body).unwrap())),
             None => request.body(Body::empty()),
         };
-        self.inner.client.send_request(request.unwrap()).await
+        client.send_request(request.unwrap()).await
     }
 
     pub async fn provision(&self, token: &str, user_name: &str) -> Uuid {

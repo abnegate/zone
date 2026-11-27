@@ -19,9 +19,6 @@ use crate::state::AppState;
 // Max concurrent gatherings to prevent resource exhaustion
 const MAX_CONCURRENT_GATHERINGS: usize = 10;
 
-// Timeout for gathering operations (1 hour)
-const GATHERING_TIMEOUT_SECS: u64 = 3600;
-
 const TOKEN: &str = "token";
 
 // Global semaphore to limit concurrent gatherings
@@ -86,7 +83,7 @@ impl GatheringCallback for DatabaseCallback {
 ///
 /// This function runs the complete gathering pipeline:
 /// 1. Acquires semaphore permit to limit concurrent gatherings
-/// 2. Updates gathering status to "running"
+/// 2. Starts the gathering, and drops it if it is no longer pending
 /// 3. Fetches sources from database (with workspace_id authorization)
 /// 4. Executes ContextService.gather() with DatabaseCallback (with timeout)
 /// 5. Updates status to "completed" or "failed"
@@ -138,14 +135,31 @@ pub async fn execute_gathering(
         index_mode
     );
 
-    // Update status to running
-    if let Err(e) = context_gatherings::update_status(state.db(), gathering_id, "running").await {
-        tracing::error!(
-            "CRITICAL: Failed to update gathering {} status to running: {}",
-            gathering_id,
-            e
-        );
-        // Continue anyway - the gathering can still run even if status update fails
+    match context_gatherings::start(state.db(), gathering_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            obs.set_status("superseded");
+            tracing::info!(
+                %gathering_id,
+                "Dropping a gathering that is no longer pending, which a newer index superseded"
+            );
+            return;
+        }
+        Err(error) => {
+            obs.set_status("error");
+            tracing::error!(%gathering_id, %error, "Failed to start the gathering");
+            if let Err(error) = context_gatherings::update_gathering_status(
+                state.db(),
+                gathering_id,
+                context_gatherings::FAILED,
+                Some(&format!("Failed to start: {error}")),
+            )
+            .await
+            {
+                tracing::error!(%gathering_id, %error, "Failed to fail the gathering that did not start");
+            }
+            return;
+        }
     }
 
     // Get context service
@@ -228,13 +242,8 @@ pub async fn execute_gathering(
         FetchConfig::for_context_gathering(force_refresh)
     };
 
-    // Execute gathering with timeout
     let gathering_future = context_service.gather(&sources, fetch_config, &callback);
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(GATHERING_TIMEOUT_SECS),
-        gathering_future,
-    )
-    .await;
+    let result = tokio::time::timeout(context_gatherings::TIMEOUT, gathering_future).await;
 
     match result {
         Ok(Ok(gathering_result)) => {
@@ -330,20 +339,17 @@ pub async fn execute_gathering(
         }
         Err(_) => {
             obs.set_status("timeout");
-            // Gathering timed out
+            let timeout = context_gatherings::TIMEOUT.as_secs();
             tracing::error!(
                 "Gathering {} timed out after {} seconds",
                 gathering_id,
-                GATHERING_TIMEOUT_SECS
+                timeout
             );
             if let Err(e) = context_gatherings::update_gathering_status(
                 state.db(),
                 gathering_id,
                 "failed",
-                Some(&format!(
-                    "Gathering timed out after {} seconds",
-                    GATHERING_TIMEOUT_SECS
-                )),
+                Some(&format!("Gathering timed out after {timeout} seconds")),
             )
             .await
             {

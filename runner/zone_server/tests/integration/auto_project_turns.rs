@@ -273,6 +273,7 @@ async fn a_drive_longer_than_its_lease_keeps_its_claim() {
         claim,
         Claimant::UNENFORCED,
         SHORT_RENEWAL,
+        fixture.state.drain().clone(),
         |_| async {
             tokio::time::sleep(SHORT_LEASE * 3).await;
             fixture.claim(SHORT_LEASE).await
@@ -424,6 +425,7 @@ async fn a_drive_told_its_claim_was_lost_stops_at_its_next_step() {
         stale,
         Claimant::UNENFORCED,
         SHORT_RENEWAL,
+        fixture.state.drain().clone(),
         |lease: Lease| async move {
             let noticed = tokio::time::timeout(NOTICED_WITHIN, async {
                 while !lease.lost() {
@@ -475,6 +477,7 @@ async fn a_drive_whose_claim_was_taken_over_cannot_admit_a_run() {
         stale,
         Claimant::UNENFORCED,
         UNRENEWED,
+        fixture.state.drain().clone(),
         |lease: Lease| async move {
             let drive = driver::Drive {
                 state,
@@ -503,4 +506,79 @@ async fn a_drive_whose_claim_was_taken_over_cannot_admit_a_run() {
         admitted, 0,
         "no run is started under a claim that was taken over"
     );
+}
+
+#[tokio::test]
+async fn a_draining_replica_claims_no_project() {
+    let fixture = Fixture::new().await;
+    let task = fixture.project("Due while draining").await;
+    let project = fixture.project_of(task).await;
+    fixture.state.drain().begin();
+
+    fixture.tick().await;
+    let owner = fixture.owner(project).await;
+    let admitted = fixture.unattended_runs(task).await;
+    let driven: bool =
+        sqlx::query_scalar("SELECT auto_driven_at IS NOT NULL FROM projects WHERE id = $1")
+            .bind(project)
+            .fetch_one(&fixture.database.pool)
+            .await
+            .unwrap();
+    let claimable = fixture.claim(SHORT_LEASE).await.len();
+    fixture.database.cleanup().await;
+
+    assert_eq!(
+        owner, None,
+        "a replica that is shutting down claims nothing"
+    );
+    assert_eq!(admitted, 0);
+    assert!(!driven, "the project was never driven here");
+    assert_eq!(
+        claimable, 1,
+        "the project is left due for a replica that stays up"
+    );
+}
+
+#[tokio::test]
+async fn a_drive_stops_at_its_next_step_once_its_replica_drains_and_keeps_its_claim_to_give_back() {
+    const NOTICED_WITHIN: Duration = Duration::from_secs(10);
+    let fixture = Fixture::new().await;
+    fixture.project("Interrupted").await;
+    let [claim] = fixture.claim(SHORT_LEASE).await[..] else {
+        panic!("the one open project is claimed");
+    };
+    let drain = fixture.state.drain().clone();
+
+    let noticed = auto_project::lease::holding(
+        fixture.database.pool.clone(),
+        claim,
+        Claimant::UNENFORCED,
+        SHORT_RENEWAL,
+        drain.clone(),
+        |lease: Lease| async move {
+            drain.begin();
+            let noticed = tokio::time::timeout(NOTICED_WITHIN, async {
+                while !lease.lost() {
+                    tokio::time::sleep(SHORT_RENEWAL).await;
+                }
+            })
+            .await
+            .is_ok();
+            tokio::time::sleep(SHORT_LEASE * 2).await;
+            noticed
+        },
+    )
+    .await;
+    let released = auto_projects::release(&fixture.database.pool, claim)
+        .await
+        .unwrap();
+    let claimable = fixture.claim(SHORT_LEASE).await.len();
+    fixture.database.cleanup().await;
+
+    assert!(noticed, "a drain tells the drive to stop at its next step");
+    assert!(
+        released,
+        "the drive kept renewing until it stopped, so its claim was still its own to give back"
+    );
+    assert_eq!(claimable, 1, "another replica takes the project at once");
 }

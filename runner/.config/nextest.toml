@@ -1,0 +1,6 @@
+[test-groups]
+replicas = { max-threads = 4 }
+
+[[profile.default.overrides]]
+filter = 'package(zone_server) & binary(integration) & test(/^(high_availability_chat|high_availability_fleet|high_availability_indexing|high_availability_shutdown|high_availability_updates|sso_throttle_forwarded)::/)'
+test-group = 'replicas'

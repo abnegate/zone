@@ -13,6 +13,6 @@ pub const SWEEP_INTERVAL_SECONDS: u64 = 2 * LEASE_LIFETIME.as_secs();
 pub async fn run_cycle(state: &AppState) -> DbResult<usize> {
     let stopped = chat_subagents::abandon(state.db()).await?;
     let count = stopped.len();
-    crate::ws::chat::announce_stopped_subagents(stopped).await;
+    crate::ws::chat::announce_stopped_subagents(state, stopped).await;
     Ok(count)
 }

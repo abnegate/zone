@@ -151,6 +151,23 @@ class HelmRender:
     consumers: tuple[tuple[Entry, Consumer], ...]
 
 
+@dataclass(frozen=True)
+class OperatorInput:
+    chart: str
+    value_set: str
+    key: str
+    value: object
+
+
+OPERATOR_INPUTS = (
+    OperatorInput('zone-apps', 'values-ha.yaml', 'highAvailability.externalValkey', True),
+    OperatorInput('zone-apps', 'values-ha.yaml', 'server.agentState.persistence.storageClass', 'test-rwx'),
+    OperatorInput('zone-apps', 'values-ha.yaml', 'server.trustedProxies', '10.244.0.0/16'),
+    OperatorInput('zone-apps', 'values-ha.yaml', 'highAvailability.externalNetworkPolicy', True),
+    OperatorInput('zone-infra', 'values-ha.yaml', 'postgres.backup.objectStore', 'zone-backups'),
+)
+
+
 @dataclass
 class Comparison:
     problems: list[str] = field(default_factory=list)
@@ -354,6 +371,24 @@ def consumer_path_problems(listing: Listing, defaults: Mapping[str, dict]) -> li
     return problems
 
 
+def operator_values(inputs: tuple[OperatorInput, ...], chart: str, value_set: str) -> dict:
+    values: dict = {}
+    for required in inputs:
+        if (required.chart, required.value_set) == (chart, value_set):
+            assign(values, required.key, required.value)
+    return values
+
+
+def operator_input_problems(inputs: tuple[OperatorInput, ...], defaults: Mapping[str, dict]) -> list[str]:
+    problems = []
+    for required in inputs:
+        if not (CHARTS / required.chart / required.value_set).is_file():
+            problems.append(f'operator input {required.key} names helm/{required.chart}/{required.value_set}, which does not exist')
+        elif lookup(defaults.get(required.chart, {}), required.key) is MISSING:
+            problems.append(f'operator input {required.key} is not in helm/{required.chart}/values.yaml')
+    return problems
+
+
 def sentinel_values(consumers: tuple[tuple[Entry, Consumer], ...], values: dict) -> dict:
     override: dict = {}
     for index, (_, consumer) in enumerate(consumers):
@@ -505,19 +540,24 @@ def helm_images(chart: Path, files: tuple[Path, ...]) -> list[str]:
 
 @cache
 def helm_render(chart: Path, value_set: Path | None) -> HelmRender:
-    files = () if value_set is None else (value_set,)
-    values = chart_defaults()[chart.name]
-    for path in files:
-        values = merge(values, yaml.safe_load(path.read_text()) or {})
-    consumers = tuple(listing().helm_consumers(chart.name))
+    label = DEFAULT_VALUES if value_set is None else str(value_set.relative_to(chart))
+    required = operator_values(OPERATOR_INPUTS, chart.name, label)
     with TemporaryDirectory() as folder:
+        files: tuple[Path, ...] = () if value_set is None else (value_set,)
+        if required:
+            inputs = Path(folder) / 'operator.yaml'
+            inputs.write_text(yaml.safe_dump(required))
+            files = (*files, inputs)
+        values = chart_defaults()[chart.name]
+        for path in files:
+            values = merge(values, yaml.safe_load(path.read_text()) or {})
+        consumers = tuple(listing().helm_consumers(chart.name))
         override = Path(folder) / 'sentinel.yaml'
         override.write_text(yaml.safe_dump(sentinel_values(consumers, values)))
         sentinels = helm_images(chart, (*files, override))
-    rendered = helm_images(chart, files)
+        rendered = helm_images(chart, files)
     if len(rendered) != len(sentinels):
         raise AssertionError(f'{chart.name}: setting every consumer changed the number of rendered images')
-    label = DEFAULT_VALUES if value_set is None else str(value_set.relative_to(chart))
     return HelmRender(chart.name, label, value_set is None, tuple(zip(rendered, sentinels)), consumers)
 
 
@@ -795,6 +835,33 @@ class HelmComparisonTests(unittest.TestCase):
             'initContainers': {'postgres': {'image': self.sentinel(1)}},
         })
 
+    def test_operator_values_layer_only_the_matching_value_set(self) -> None:
+        inputs = (
+            OperatorInput('zone-apps', 'values-ha.yaml', 'server.trustedProxies', '10.244.0.0/16'),
+            OperatorInput('zone-apps', 'values-ha.yaml', 'highAvailability.externalValkey', True),
+            OperatorInput('zone-infra', 'values-ha.yaml', 'postgres.backup.objectStore', 'zone-backups'),
+        )
+        self.assertEqual(
+            operator_values(inputs, 'zone-apps', 'values-ha.yaml'),
+            {'server': {'trustedProxies': '10.244.0.0/16'}, 'highAvailability': {'externalValkey': True}},
+        )
+        self.assertEqual(operator_values(inputs, 'zone-apps', DEFAULT_VALUES), {})
+
+    def test_stale_operator_input_is_reported(self) -> None:
+        defaults = {'zone-apps': {'server': {'trustedProxies': ''}}}
+        problems = operator_input_problems((
+            OperatorInput('zone-apps', 'values-ha.yaml', 'server.trustedProxies', '10.244.0.0/16'),
+            OperatorInput('zone-apps', 'values-ha.yaml', 'server.renamed', True),
+            OperatorInput('zone-apps', 'values-gone.yaml', 'server.trustedProxies', '10.244.0.0/16'),
+        ), defaults)
+        self.assertEqual(problems, [
+            'operator input server.renamed is not in helm/zone-apps/values.yaml',
+            'operator input server.trustedProxies names helm/zone-apps/values-gone.yaml, which does not exist',
+        ])
+
+    def test_operator_inputs_name_real_value_sets_and_keys(self) -> None:
+        self.assertEqual(operator_input_problems(OPERATOR_INPUTS, chart_defaults()), [])
+
     def test_merge_follows_helm(self) -> None:
         base = {'server': {'image': {'repository': 'zone/server', 'tag': 'latest'}, 'replicas': 1}}
         override = {'server': {'image': {'tag': '1.0.0'}, 'replicas': None}}
@@ -830,6 +897,15 @@ class HelmRenderTests(unittest.TestCase):
 
     def test_consumer_paths_exist(self) -> None:
         self.assertEqual(consumer_path_problems(listing(), chart_defaults()), [])
+
+    def test_high_availability_profile_renders(self) -> None:
+        chart = CHARTS / 'zone-apps'
+        profile = chart / 'values-ha.yaml'
+        self.assertIn(profile, value_sets(chart))
+        render = helm_render(chart, profile)
+        self.assertEqual((render.chart, render.label), ('zone-apps', 'values-ha.yaml'))
+        self.assertTrue(render.pairs, 'zone-apps (values-ha.yaml) renders no images')
+        self.assertIn(render, every_helm_render())
 
     def test_every_rendered_image_is_listed(self) -> None:
         for render in every_helm_render():

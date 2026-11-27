@@ -87,6 +87,14 @@ impl Server {
         }
     }
 
+    /// A capped server whose admissions wait for [`SEATS_LOCK`] longer than any test does, so
+    /// a race run under load is decided by the cap and never by the wait.
+    async fn contested() -> Self {
+        let server = Self::patient().await;
+        server.fixture.state().cap_members();
+        server
+    }
+
     /// An uncapped server whose admissions wait for [`SEATS_LOCK`] longer than any test does.
     async fn patient() -> Self {
         Self {
@@ -905,7 +913,7 @@ fn admitted_once(responses: &[TestResponse], admitted: StatusCode) -> usize {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_sign_ups_one_below_the_cap_admit_exactly_one() {
-    let server = Arc::new(Server::capped().await);
+    let server = Arc::new(Server::contested().await);
     server.members(2).await;
     let emails: Vec<String> = (0..ATTEMPTS).map(|_| test_email()).collect();
 
@@ -927,7 +935,7 @@ async fn concurrent_sign_ups_one_below_the_cap_admit_exactly_one() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_first_single_sign_ons_one_below_the_cap_provision_exactly_one() {
-    let server = Arc::new(Server::capped().await);
+    let server = Arc::new(Server::contested().await);
     let admin = server.join().await;
     server.fixture.store_license(&active()).await;
     let single_sign_on = Arc::new(SingleSignOn::configure(&server, &admin).await);
@@ -959,7 +967,7 @@ async fn concurrent_first_single_sign_ons_one_below_the_cap_provision_exactly_on
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_invitation_accepts_one_below_the_cap_admit_exactly_one() {
-    let server = Arc::new(Server::capped().await);
+    let server = Arc::new(Server::contested().await);
     let invitees = server.stranded(ATTEMPTS).await;
     let owner = server.join().await;
     server.join().await;
@@ -994,7 +1002,7 @@ async fn concurrent_invitation_accepts_one_below_the_cap_admit_exactly_one() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_adds_one_below_the_cap_admit_exactly_one() {
-    let server = Arc::new(Server::capped().await);
+    let server = Arc::new(Server::contested().await);
     let targets = server.stranded(ATTEMPTS).await;
     let owner = server.join().await;
     server.join().await;
@@ -1020,7 +1028,7 @@ async fn concurrent_adds_one_below_the_cap_admit_exactly_one() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_organization_creates_one_below_the_cap_admit_exactly_one() {
-    let server = Arc::new(Server::capped().await);
+    let server = Arc::new(Server::contested().await);
     let founders = server.stranded(ATTEMPTS).await;
     server.members(2).await;
     assert_eq!(server.active().await, COMMUNITY_MEMBERS - 1);
@@ -1044,7 +1052,7 @@ async fn concurrent_organization_creates_one_below_the_cap_admit_exactly_one() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_reactivations_one_below_the_cap_reactivate_exactly_one() {
-    let server = Arc::new(Server::capped().await);
+    let server = Arc::new(Server::contested().await);
     let mut owners = Vec::with_capacity(ATTEMPTS);
     for _ in 0..ATTEMPTS {
         let owner = server.join().await;

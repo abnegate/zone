@@ -63,6 +63,7 @@ mod tests {
     use std::time::Duration;
 
     use super::super::catchup::Catchup;
+    use super::super::scope::Scope;
     use super::super::sweep::Sweep;
     use super::super::warmup::Warmup;
     use super::*;
@@ -71,6 +72,7 @@ mod tests {
         Sweep::new(
             name,
             Schedule::new(Duration::from_secs(seconds), Warmup::Period, catchup),
+            Scope::Replica,
             || async { Ok(()) },
         )
     }

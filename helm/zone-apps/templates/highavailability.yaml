@@ -1,0 +1,3 @@
+{{- if .Values.highAvailability.enabled }}
+{{- include "zone-apps.highAvailability.validate" . }}
+{{- end }}

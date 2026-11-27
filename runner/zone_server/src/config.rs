@@ -26,6 +26,7 @@ use crate::services::sso::parse_permit::PARSE_PERMIT_WAIT;
 use crate::workers::evaluation::EvaluationSettings;
 
 mod environment;
+mod shutdown;
 pub mod trusted_proxies;
 
 pub use abnegate_comfy::Config as ComfyUiConfig;
@@ -33,6 +34,7 @@ pub use abnegate_llm::catalog::DEFAULT_GPT4ALL_MODELS_URL;
 pub use abnegate_llm::catalog::DEFAULT_HUGGINGFACE_MODELS_URL;
 pub use abnegate_search::WebSearchConfig;
 pub use environment::Environment;
+pub use shutdown::Shutdown;
 pub use trusted_proxies::TrustedProxies;
 
 /// GitHub's own REST origin, which `GITHUB_API_URL` overrides for GitHub
@@ -157,6 +159,8 @@ pub struct Config {
     pub evaluation: EvaluationSettings,
     /// Automatic renewal of an Enterprise license (`ZONE_LICENSE_RENEWAL*`).
     pub license_renewal: renewal::Settings,
+    /// How a SIGTERM drains the server (`ZONE_SHUTDOWN_*`).
+    pub shutdown: Shutdown,
     /// The peers whose `X-Forwarded-For` names the client (`ZONE_TRUSTED_PROXIES`).
     pub trusted_proxies: TrustedProxies,
     /// Single sign-on starts and SAML posts one client address may make a minute
@@ -1509,6 +1513,7 @@ impl Config {
             evaluation: EvaluationSettings::from_process_environment(),
             license_renewal: renewal::Settings::from_process_environment()
                 .map_err(|error| ConfigError::Invalid(error.message()))?,
+            shutdown: Shutdown::from_process_environment()?,
             trusted_proxies: TrustedProxies::from_env()?,
             sso_requests_per_minute: sso_requests_per_minute(
                 env::var(SSO_REQUESTS_PER_MINUTE).ok(),
@@ -1570,6 +1575,7 @@ impl std::fmt::Debug for Config {
             .field("mcp_commands", &self.mcp_commands)
             .field("evaluation", &self.evaluation)
             .field("license_renewal", &self.license_renewal)
+            .field("shutdown", &self.shutdown)
             .field("trusted_proxies", &self.trusted_proxies)
             .field("sso_requests_per_minute", &self.sso_requests_per_minute)
             .field("saml_permit_wait", &self.saml_permit_wait)
@@ -1748,6 +1754,7 @@ mod tests {
             mcp_commands: false,
             evaluation: EvaluationSettings::default(),
             license_renewal: renewal::Settings::default(),
+            shutdown: Shutdown::default(),
             trusted_proxies: TrustedProxies::default(),
             sso_requests_per_minute: DEFAULT_SSO_REQUESTS_PER_MINUTE,
             saml_permit_wait: PARSE_PERMIT_WAIT,

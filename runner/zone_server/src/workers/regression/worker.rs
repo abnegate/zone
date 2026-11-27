@@ -1,26 +1,28 @@
 //! Running every checker over every fix that is still being watched.
 //!
 //! [`subjects`] turns loaded rows into what a checker is asked about, and
-//! [`unalerted`] decides what is worth sending. Both are pure, so the schedule
-//! can be exercised without a database and the ledger without a network.
+//! [`reportable`] decides what is worth sending. Both are pure, so the schedule
+//! can be exercised without a database.
 //!
 //! A fix is alerted on once. The scan runs hourly and a regression stays true
 //! for as long as the fix is watched, so without a ledger the same task would
 //! produce the same alert every hour until the window closed — which is the
-//! other way to teach people to ignore a notification.
+//! other way to teach people to ignore a notification. The ledger is
+//! `regression_alerts`, claimed before each send, so neither a restart nor
+//! another replica alerts again.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use chrono::{NaiveDateTime, Utc};
+use chrono::NaiveDateTime;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::checker::{FixSubject, RegressionChecker, RegressionPolicy, RegressionResult, Verdict};
 use super::recurrence::RecurrenceChecker;
 use super::reopen::ReopenChecker;
-use crate::db::DbResult;
 use crate::db::analytics::{self, ReportableWorkspace, ShippedTaskRow};
+use crate::db::{DbResult, regression_alerts};
 use crate::state::AppState;
 use crate::workers::analytics::{AgentRun, TimeWindow, load_runs};
 use crate::workers::learning::attempt::AttemptOutcome;
@@ -32,6 +34,8 @@ use abnegate_notify::Severity;
 pub const REGRESSION_INTERVAL_SECONDS: u64 = 60 * 60;
 const MAXIMUM_TASKS_PER_WORKSPACE: i64 = 500;
 const MAXIMUM_RUNS_PER_WORKSPACE: i64 = 10_000;
+const DELIVERED: &str = "delivered";
+const FAILED: &str = "failed";
 
 /// Which fixes a scan covers, and how much of their history it loads.
 #[derive(Debug, Clone, PartialEq)]
@@ -114,24 +118,15 @@ fn addressed_failure(history: &[&AgentRun], shipped_at: NaiveDateTime) -> ErrorC
         .unwrap_or(ErrorCategory::Unknown)
 }
 
-/// The reportable results that have not already been alerted on.
-pub fn unalerted<'a>(
-    results: &'a [RegressionResult],
-    alerted: &BTreeMap<Uuid, NaiveDateTime>,
-) -> Vec<&'a RegressionResult> {
-    results
-        .iter()
-        .filter(|result| result.is_reportable() && !alerted.contains_key(&result.task_id))
-        .collect()
+/// The results worth an alert, before the ledger says whether one already went out.
+pub fn reportable(results: &[RegressionResult]) -> impl Iterator<Item = &RegressionResult> {
+    results.iter().filter(|result| result.is_reportable())
 }
 
-/// Forget tasks whose watch window has closed, so the ledger stays bounded.
-pub fn prune(
-    alerted: &mut BTreeMap<Uuid, NaiveDateTime>,
-    policy: &RegressionPolicy,
-    now: NaiveDateTime,
-) {
-    alerted.retain(|_, alerted_at| now - *alerted_at <= policy.monitoring);
+/// Alerts sent before this are for fixes whose watch window has closed, so the ledger forgets
+/// them and stays bounded.
+pub fn horizon(policy: &RegressionPolicy, now: NaiveDateTime) -> NaiveDateTime {
+    now - policy.monitoring
 }
 
 /// Render one result as the message that goes out.
@@ -230,17 +225,16 @@ pub async fn check_all(
     results
 }
 
-/// Check every monitored fix once, alerting on the ones that came back.
+/// Check every monitored fix once at `now`, alerting on the ones that came back.
 pub async fn run_cycle(
     state: &AppState,
     checkers: &[Arc<dyn RegressionChecker>],
     settings: &RegressionSettings,
     fanout: &Fanout,
-    alerted: &mut BTreeMap<Uuid, NaiveDateTime>,
+    now: NaiveDateTime,
 ) -> DbResult<()> {
     let pool = state.db();
-    let now = Utc::now().naive_utc();
-    prune(alerted, &settings.policy, now);
+    regression_alerts::prune(pool, horizon(&settings.policy, now)).await?;
 
     for workspace in
         analytics::reportable_workspaces(pool, now - settings.policy.monitoring).await?
@@ -258,30 +252,70 @@ pub async fn run_cycle(
                 }
             };
 
-        for result in unalerted(&results, alerted) {
-            tracing::warn!(
-                workspace_id = %workspace.workspace_id,
-                task_id = %result.task_id,
-                checker = result.checker,
-                confidence = result.confidence,
-                "Regression detected on a shipped fix"
-            );
-            let report = fanout.deliver(&describe(result, &workspace)).await;
-            for delivery in report.deliveries() {
-                crate::metrics::record_report_delivery(
-                    delivery.channel().as_str(),
-                    if delivery.is_delivered() {
-                        "delivered"
-                    } else {
-                        "failed"
-                    },
-                );
-            }
-            alerted.insert(result.task_id, now);
+        for result in reportable(&results) {
+            alert(pool, fanout, result, &workspace, now).await;
         }
     }
 
     Ok(())
+}
+
+/// Claim one result's alert and send it. A claim that cannot be made costs this alert and no
+/// other, and a send that reached no channel for a reason worth retrying gives its claim back,
+/// so the next cycle sends it again rather than never.
+async fn alert(
+    pool: &PgPool,
+    fanout: &Fanout,
+    result: &RegressionResult,
+    workspace: &ReportableWorkspace,
+    now: NaiveDateTime,
+) {
+    match regression_alerts::claim(pool, result.task_id, now).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            tracing::warn!(
+                workspace_id = %workspace.workspace_id,
+                task_id = %result.task_id,
+                %error,
+                "Could not claim a regression alert; retrying next cycle"
+            );
+            return;
+        }
+    }
+    tracing::warn!(
+        workspace_id = %workspace.workspace_id,
+        task_id = %result.task_id,
+        checker = result.checker,
+        confidence = result.confidence,
+        "Regression detected on a shipped fix"
+    );
+    let report = fanout.deliver(&describe(result, workspace)).await;
+    for delivery in report.deliveries() {
+        crate::metrics::record_report_delivery(
+            delivery.channel().as_str(),
+            if delivery.is_delivered() {
+                DELIVERED
+            } else {
+                FAILED
+            },
+        );
+    }
+    if report.any_delivered() || report.retryable().next().is_none() {
+        return;
+    }
+    match regression_alerts::release(pool, result.task_id, now).await {
+        Ok(_) => tracing::warn!(
+            task_id = %result.task_id,
+            "A regression alert reached no channel; it is sent again next cycle"
+        ),
+        Err(error) => tracing::warn!(
+            task_id = %result.task_id,
+            %error,
+            "A regression alert reached no channel and its claim could not be given back; it is \
+             not sent again until the fix leaves its watch window"
+        ),
+    }
 }
 
 /// The checkers a scan runs, in the order they were written.
@@ -291,10 +325,6 @@ pub fn checkers(settings: &RegressionSettings) -> Vec<Arc<dyn RegressionChecker>
         Arc::new(ReopenChecker::new(settings.policy)),
     ]
 }
-
-/// Which fixes have already been alerted on, so a regression is reported once
-/// rather than every hour it stays broken.
-pub type Alerted = BTreeMap<Uuid, NaiveDateTime>;
 
 #[cfg(test)]
 mod tests {
@@ -530,13 +560,10 @@ mod tests {
     }
 
     #[test]
-    fn a_fix_is_only_alerted_on_once() {
+    fn a_regressed_result_is_worth_an_alert() {
         let results = vec![regressed(7)];
-        let mut alerted = BTreeMap::new();
 
-        assert_eq!(unalerted(&results, &alerted).len(), 1);
-        alerted.insert(Uuid::from_u128(7), moment(3, 9, 0));
-        assert!(unalerted(&results, &alerted).is_empty());
+        assert_eq!(reportable(&results).count(), 1);
     }
 
     #[test]
@@ -544,20 +571,21 @@ mod tests {
         let mut suspected = regressed(7);
         suspected.verdict = Verdict::Suspected;
 
-        assert!(unalerted(&[suspected], &BTreeMap::new()).is_empty());
+        assert_eq!(reportable(&[suspected]).count(), 0);
     }
 
     #[test]
     fn the_ledger_forgets_fixes_once_their_window_closes() {
         let policy = RegressionPolicy::default();
-        let mut alerted = BTreeMap::from([
-            (Uuid::from_u128(1), moment(1, 9, 0)),
-            (Uuid::from_u128(2), moment(20, 9, 0)),
-        ]);
+        let now = moment(21, 9, 0);
 
-        prune(&mut alerted, &policy, moment(21, 9, 0));
-
-        assert_eq!(alerted.len(), 1, "only the recent one survives");
-        assert!(alerted.contains_key(&Uuid::from_u128(2)));
+        assert!(
+            moment(1, 9, 0) < horizon(&policy, now),
+            "an alert from day 1 is forgotten"
+        );
+        assert!(
+            moment(20, 9, 0) >= horizon(&policy, now),
+            "an alert from day 20 is kept"
+        );
     }
 }

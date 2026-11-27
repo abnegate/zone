@@ -32,11 +32,14 @@ use futures::{SinkExt, Stream, StreamExt};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::{Mutex, OnceCell, Semaphore, broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zone_core::llm::{LlmBackend, LlmClient, Observer};
 use zone_enterprise::policy::Effective;
@@ -48,6 +51,7 @@ use crate::agent::{
     ToolCallRecord,
 };
 use crate::auth::validate_access_token;
+use crate::cluster::Bus;
 use crate::db::{
     self, chat_attached_sources, chat_sources, chats, knowledge, sessions, workspace_members,
 };
@@ -77,21 +81,33 @@ mod audience;
 mod confinement;
 mod denial;
 mod ending;
+mod frame;
+mod handled;
 pub mod job;
 mod queue;
 mod registration;
+mod relay;
 mod sent;
 
 use access::Access;
 pub use audience::Audience;
 use confinement::Confinement;
 use ending::Ending;
-use queue::{Finished, Interrupted, Queued, Started};
+use frame::Frame;
+use handled::Handled;
+use queue::{Finished, Interrupted, Queue, Queued, Started};
 use registration::Registration;
+use relay::{Command, Floor, Reservation, Watch};
 pub use sent::Sent;
 
 /// WebSocket polling interval in milliseconds
 const WS_POLL_INTERVAL_MS: u64 = 50;
+
+/// How often a draining replica looks for turns still running.
+const SETTLE_POLL: Duration = Duration::from_millis(50);
+
+/// Told to a socket whose message would start a turn on a draining replica.
+const RESTART_REFUSAL: &str = "This server is restarting, so it can't start a reply. Reconnecting you to another server; send your message again.";
 
 /// Authentication timeout in seconds
 const WS_AUTH_TIMEOUT_SECS: u64 = 30;
@@ -334,8 +350,16 @@ impl LiveTurn {
 /// The frames of one chat, shared by every connection to it.
 struct ChatStream {
     chat_id: Uuid,
-    events: broadcast::Sender<ServerMessage>,
+    events: broadcast::Sender<Frame>,
     live: Mutex<LiveTurn>,
+    /// The number of the last frame published here, which other replicas
+    /// order relayed frames by. Moved only under `live`.
+    sequence: AtomicU64,
+    /// The replica the stream relays through, once something with one holds it.
+    relay: OnceLock<AppState>,
+    listening: OnceCell<()>,
+    watch: Mutex<Watch>,
+    stop: CancellationToken,
 }
 
 impl ChatStream {
@@ -348,16 +372,38 @@ impl ChatStream {
             chat_id,
             events: broadcast::channel(CHAT_STREAM_CAPACITY).0,
             live: Mutex::new(LiveTurn::default()),
+            sequence: AtomicU64::new(first_sequence()),
+            relay: OnceLock::new(),
+            listening: OnceCell::new(),
+            watch: Mutex::new(Watch::default()),
+            stop: CancellationToken::new(),
         });
         *entry = Arc::downgrade(&stream);
+        stream
+    }
+
+    /// The chat's stream, relaying what is published on it to the other replicas.
+    fn on(state: &AppState, chat_id: Uuid) -> Arc<Self> {
+        let stream = Self::of(chat_id);
+        let _ = stream.relay.set(state.clone());
         stream
     }
 
     /// Replay the turn in flight and subscribe under one lock, so a joining
     /// connection can neither miss a frame published between the two nor see
     /// one twice.
-    async fn join(&self) -> (Vec<ServerMessage>, broadcast::Receiver<ServerMessage>) {
+    async fn join(&self) -> (Vec<ServerMessage>, broadcast::Receiver<Frame>) {
         let live = self.live.lock().await;
+        (self.replay(&live), self.events.subscribe())
+    }
+
+    /// What a connection joining now is shown, and the last frame it covers.
+    async fn snapshot(&self) -> (Vec<ServerMessage>, u64) {
+        let live = self.live.lock().await;
+        (self.replay(&live), self.sequence())
+    }
+
+    fn replay(&self, live: &LiveTurn) -> Vec<ServerMessage> {
         let mut frames = live.replay();
         if let Some((messages, held)) = queue::snapshot(self.chat_id) {
             frames.push(ServerMessage::Queue {
@@ -366,14 +412,46 @@ impl ChatStream {
                 started: None,
             });
         }
-        (frames, self.events.subscribe())
+        frames
+    }
+
+    fn sequence(&self) -> u64 {
+        self.sequence.load(Ordering::SeqCst)
+    }
+
+    /// Numbers, relays and broadcasts a frame. Taking the log proves the
+    /// caller holds its lock, which keeps the numbers in broadcast order.
+    fn emit(&self, _held: &LiveTurn, message: ServerMessage) {
+        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(state) = self.relay.get()
+            && relay::reaches_peers(state)
+        {
+            relay::publish(state, self.chat_id, sequence, &message);
+        }
+        let _ = self.events.send(Frame::message(message));
+    }
+
+    /// Broadcasts a frame to this replica's connections alone.
+    fn local(&self, message: ServerMessage) {
+        let _ = self.events.send(Frame::message(message));
     }
 }
 
 impl Drop for ChatStream {
     fn drop(&mut self) {
+        self.stop.cancel();
         CHAT_STREAMS.remove_if(&self.chat_id, |_, stream| stream.strong_count() == 0);
     }
+}
+
+/// Where a new stream starts numbering: the time in microseconds, so a stream
+/// made after another for the same chat on this replica numbers past it.
+fn first_sequence() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX / 2)
+        })
 }
 
 /// Record and broadcast under one lock, so the log and the subscribers stay in
@@ -381,7 +459,7 @@ impl Drop for ChatStream {
 async fn publish(stream: &ChatStream, message: ServerMessage) {
     let mut live = stream.live.lock().await;
     live.record(&message);
-    let _ = stream.events.send(message);
+    stream.emit(&live, message);
 }
 
 /// Publishes each change a turn's tracker stores to a chat's subagents.
@@ -406,10 +484,13 @@ impl Announcer for SubagentFrames {
 }
 
 /// Tells every connection to each subagent's chat that a sweep stopped it.
-pub(crate) async fn announce_stopped_subagents(stopped: Vec<db::chat_subagents::Stopped>) {
+pub(crate) async fn announce_stopped_subagents(
+    state: &AppState,
+    stopped: Vec<db::chat_subagents::Stopped>,
+) {
     for db::chat_subagents::Stopped { subagent, failed } in stopped {
         let frames = SubagentFrames {
-            stream: ChatStream::of(subagent.chat_id),
+            stream: ChatStream::on(state, subagent.chat_id),
         };
         frames
             .announce(ChatSubagent::from(subagent), failed.0)
@@ -419,12 +500,12 @@ pub(crate) async fn announce_stopped_subagents(stopped: Vec<db::chat_subagents::
 
 /// Tells every connection to `chat_id` that deleting a message removed these
 /// subagents.
-pub(crate) async fn announce_removed_subagents(chat_id: Uuid, ids: Vec<Uuid>) {
+pub(crate) async fn announce_removed_subagents(state: &AppState, chat_id: Uuid, ids: Vec<Uuid>) {
     if ids.is_empty() {
         return;
     }
     publish(
-        &ChatStream::of(chat_id),
+        &ChatStream::on(state, chat_id),
         ServerMessage::SubagentsRemoved { chat_id, ids },
     )
     .await;
@@ -433,13 +514,16 @@ pub(crate) async fn announce_removed_subagents(chat_id: Uuid, ids: Vec<Uuid>) {
 /// Broadcast the queue as it is now. Read under the lock a joining connection
 /// reads it under, so the last queue frame every connection sees is current.
 async fn announce(stream: &ChatStream, started: Option<Queued>) {
-    let _live = stream.live.lock().await;
+    let live = stream.live.lock().await;
     let (messages, held) = queue::snapshot(stream.chat_id).unwrap_or_default();
-    let _ = stream.events.send(ServerMessage::Queue {
-        messages,
-        held,
-        started,
-    });
+    stream.emit(
+        &live,
+        ServerMessage::Queue {
+            messages,
+            held,
+            started,
+        },
+    );
 }
 
 /// A turn holds the chat's generation permit, including one the queue did not start.
@@ -447,6 +531,240 @@ fn generating(chat_id: Uuid) -> bool {
     CHAT_GENERATIONS
         .get(&chat_id)
         .is_some_and(|generation| generation.available_permits() == 0)
+}
+
+/// A turn of the chat is registered here, including one still waiting for the
+/// chat's generation permit.
+fn registered(chat_id: Uuid) -> bool {
+    CHAT_CANCELLATIONS
+        .iter()
+        .any(|entry| entry.key().0 == chat_id)
+}
+
+/// This replica runs a turn of the chat, has one registered to start, or
+/// holds messages queued for one, so the chat's commands are its own to apply.
+fn owns(chat_id: Uuid) -> bool {
+    generating(chat_id) || registered(chat_id) || queue::active(chat_id)
+}
+
+/// Applies a socket's command to this replica's queue and turn.
+async fn control(
+    state: &AppState,
+    stream: &Arc<ChatStream>,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    command: Command,
+) -> Handled {
+    let chat_id = stream.chat_id;
+    match command {
+        Command::Send {
+            id,
+            content,
+            metadata,
+        } => {
+            let message = Queued {
+                id,
+                content,
+                metadata,
+                author: user_id,
+            };
+            let started = queue::with(chat_id, |queue| {
+                queue
+                    .submit(message, generating(chat_id))
+                    .map(|started| begin(chat_id, workspace_id, started))
+            });
+            match started {
+                // A message that starts at once never showed in the
+                // queue, so there is no change for anyone to hear.
+                Some(started) => {
+                    let told = started.0.id != id;
+                    drive(
+                        state.clone(),
+                        stream.clone(),
+                        chat_id,
+                        workspace_id,
+                        started,
+                        told,
+                    );
+                    Handled {
+                        started: true,
+                        ..Handled::default()
+                    }
+                }
+                None => {
+                    announce(stream, None).await;
+                    Handled::default()
+                }
+            }
+        }
+        Command::Cancel => {
+            queue::with(chat_id, |queue| {
+                queue.stop(generating(chat_id));
+                cancel_turns(chat_id);
+            });
+            Handled::default()
+        }
+        Command::Interrupt { id } => {
+            let started = queue::with(chat_id, |queue| {
+                match queue.interrupt(id, generating(chat_id)) {
+                    Interrupted::Cancel => {
+                        cancel_turns(chat_id);
+                        None
+                    }
+                    Interrupted::Start(started) => Some(begin(chat_id, workspace_id, started)),
+                    Interrupted::Missing => None,
+                }
+            });
+            match started {
+                Some(started) => {
+                    drive(
+                        state.clone(),
+                        stream.clone(),
+                        chat_id,
+                        workspace_id,
+                        started,
+                        true,
+                    );
+                    Handled {
+                        started: true,
+                        ..Handled::default()
+                    }
+                }
+                None => {
+                    announce(stream, None).await;
+                    Handled::default()
+                }
+            }
+        }
+        Command::EditQueued { id, content } => {
+            queue::with(chat_id, |queue| {
+                if content.trim().is_empty() {
+                    queue.remove(id)
+                } else {
+                    queue.edit(id, content, user_id)
+                }
+            });
+            announce(stream, None).await;
+            Handled::default()
+        }
+        Command::RemoveQueued { id } => {
+            queue::with(chat_id, |queue| queue.remove(id));
+            announce(stream, None).await;
+            Handled::default()
+        }
+        Command::ApproveTool {
+            tool_call_id,
+            approved,
+        } => {
+            let decided =
+                crate::agent::ApprovalPolicy::decide_chat(chat_id, &tool_call_id, approved);
+            Handled {
+                frames: if decided {
+                    Vec::new()
+                } else {
+                    vec![ServerMessage::ToolApprovalClosed { tool_call_id }]
+                },
+                started: false,
+            }
+        }
+    }
+}
+
+/// Applies a socket's command where the chat's turn runs, and writes what the
+/// command produced for this socket alone back to it. Returns whether the
+/// socket stays open: a draining replica starts no turn, and closes the socket
+/// so its client reconnects to one that will.
+async fn dispatch(
+    state: &AppState,
+    stream: &Arc<ChatStream>,
+    sender: &SharedSender,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+    command: Command,
+) -> bool {
+    let starts = matches!(command, Command::Send { .. } | Command::Interrupt { .. });
+    let frames: Vec<Message> =
+        match relay::route(state, stream.chat_id, user_id, session_id, &command).await {
+            relay::Route::Local if starts && state.drain().is_draining() => {
+                let refusal = ServerMessage::Error {
+                    message: RESTART_REFUSAL.to_string(),
+                };
+                let mut sender = sender.lock().await;
+                let _ = sender.send(refusal.to_ws_message()).await;
+                let _ = sender.send(super::restarting()).await;
+                return false;
+            }
+            relay::Route::Local => {
+                if starts {
+                    relay::settle(stream).await;
+                }
+                control(state, stream, workspace_id, user_id, command)
+                    .await
+                    .frames
+                    .iter()
+                    .map(ServerMessage::to_ws_message)
+                    .collect()
+            }
+            relay::Route::Forwarded(frames) => frames
+                .into_iter()
+                .map(|frame| Message::Text(frame.into()))
+                .collect(),
+            relay::Route::Busy => vec![
+                ServerMessage::Error {
+                    message: relay::BUSY.to_string(),
+                }
+                .to_ws_message(),
+            ],
+        };
+    for frame in frames {
+        if sender.lock().await.send(frame).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Sends one entry of the chat's fan-out to a connection. Relayed frames go
+/// out as the bytes they arrived as; those a replay already showed are skipped.
+async fn deliver(sender: &SharedSender, frame: Frame, floor: Option<Floor>) -> bool {
+    match frame {
+        Frame::Message(message) => sender
+            .lock()
+            .await
+            .send(message.to_ws_message())
+            .await
+            .is_ok(),
+        Frame::Relayed(relayed) => {
+            if floor.is_some_and(|floor| floor.covers(&relayed)) {
+                return true;
+            }
+            match axum::extract::ws::Utf8Bytes::try_from(relayed.json) {
+                Ok(text) => sender.lock().await.send(Message::Text(text)).await.is_ok(),
+                Err(error) => {
+                    tracing::debug!(%error, "Dropped a relayed chat frame that is not text");
+                    true
+                }
+            }
+        }
+        Frame::Gap => true,
+    }
+}
+
+/// Sends frames serialized on another replica to one connection, unaltered.
+async fn forward_relayed(sender: &SharedSender, frames: Vec<String>) -> bool {
+    for frame in frames {
+        if sender
+            .lock()
+            .await
+            .send(Message::Text(frame.into()))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn cancel_turns(chat_id: Uuid) {
@@ -457,6 +775,55 @@ fn cancel_turns(chat_id: Uuid) {
         let _ = entry.value().sender.send(());
     }
     crate::agent::ApprovalPolicy::deny_chat(chat_id);
+}
+
+/// Keeps every chat's queued messages from starting a turn here once the
+/// running one ends, since this replica is draining.
+pub fn hold_queues() {
+    for chat_id in queue::chats() {
+        queue::with(chat_id, Queue::hold);
+    }
+}
+
+/// Stops every turn this replica runs the way a person's Stop does: the reply
+/// so far is kept, and the chat's lease is released for another replica. Each
+/// turn is marked drained first, so an owed turn ends [`Sent::Stopped`].
+pub fn stop_turns() {
+    let chats: HashSet<Uuid> = CHAT_CANCELLATIONS
+        .iter()
+        .map(|entry| entry.key().0)
+        .collect();
+    for chat_id in chats {
+        drain_turns(chat_id);
+    }
+}
+
+fn drain_turns(chat_id: Uuid) {
+    for entry in CHAT_CANCELLATIONS
+        .iter()
+        .filter(|entry| entry.key().0 == chat_id)
+    {
+        entry.value().drained.store(true, Ordering::SeqCst);
+    }
+    queue::with(chat_id, |queue| {
+        queue.stop(generating(chat_id));
+        cancel_turns(chat_id);
+    });
+}
+
+/// Resolves once no turn runs here. A turn leaves only after it has closed
+/// its session, so by then every lease it held is released.
+pub async fn settled() {
+    while !CHAT_CANCELLATIONS.is_empty() {
+        tokio::time::sleep(SETTLE_POLL).await;
+    }
+}
+
+/// Gives up this replica's claim on every chat it answers over `bus`, so a
+/// send on another replica is never told such a chat is busy once this one is
+/// gone.
+pub async fn withdraw(bus: &Bus) {
+    relay::withdraw(bus).await;
 }
 
 /// Cancels every turn `user_id` started in any of `workspaces`, waiting or
@@ -483,7 +850,9 @@ fn begin(chat_id: Uuid, workspace_id: Uuid, started: Started) -> (Queued, Genera
 }
 
 /// Run a message and then whatever was queued behind it, with nobody needing
-/// to stay connected.
+/// to stay connected. When another replica holds the chat, nothing runs here
+/// beside it: the turn is refused as busy and the queue held. `told` says the
+/// message was queued before it started, so the user has seen it accepted.
 fn drive(
     state: AppState,
     stream: Arc<ChatStream>,
@@ -493,6 +862,7 @@ fn drive(
     told: bool,
 ) {
     let announcer = stream.clone();
+    let serving = state.clone();
     let started = told.then(|| first.0.clone());
     let turn = move |(message, generation): (Queued, Generation)| {
         let state = state.clone();
@@ -516,6 +886,11 @@ fn drive(
     let running = turn(first);
     let teller = announcer.clone();
     tokio::spawn(async move {
+        if !relay::serve(&serving, &announcer, workspace_id).await {
+            drop(running);
+            refuse(&announcer, started).await;
+            return;
+        }
         if started.is_some() {
             announce(&announcer, started).await;
         }
@@ -536,6 +911,28 @@ fn drive(
     });
 }
 
+/// Gives up the turn about to start here, because another replica holds the
+/// chat, and tells this replica's sockets the chat is busy and what is left
+/// queued here. A message the user saw accepted into the queue, `kept`, goes
+/// back in it, held with the rest until this replica can serve the chat or the
+/// user acts on it; only a send that started at once is dropped. Told only
+/// here, under the lock a joining socket reads the queue under: the queue the
+/// others show is the holder's.
+async fn refuse(stream: &ChatStream, kept: Option<Queued>) {
+    queue::with(stream.chat_id, |queue| queue.refuse(kept));
+    let live = stream.live.lock().await;
+    let (messages, held) = queue::snapshot(stream.chat_id).unwrap_or_default();
+    stream.local(ServerMessage::Error {
+        message: relay::BUSY.to_string(),
+    });
+    stream.local(ServerMessage::Queue {
+        messages,
+        held,
+        started: None,
+    });
+    drop(live);
+}
+
 /// Send frames the caller already holds to one connection.
 async fn forward(sender: &SharedSender, frames: Vec<ServerMessage>) -> bool {
     for frame in frames {
@@ -552,6 +949,7 @@ struct Generation {
     chat_id: Uuid,
     message_id: Uuid,
     cancel: broadcast::Receiver<()>,
+    drained: Arc<AtomicBool>,
     approvals: crate::agent::ApprovalPolicy,
     started: bool,
 }
@@ -563,21 +961,43 @@ impl Generation {
 
     fn registered(chat_id: Uuid, message_id: Uuid, author: Uuid, workspace_id: Uuid) -> Self {
         let (sender, cancel) = broadcast::channel(1);
+        let drained = Arc::new(AtomicBool::new(false));
         CHAT_CANCELLATIONS.insert(
             (chat_id, message_id),
             Registration {
                 sender,
                 author,
                 workspace_id,
+                drained: Arc::clone(&drained),
             },
         );
         Self {
             chat_id,
             message_id,
             cancel,
+            drained,
             approvals: crate::agent::ApprovalPolicy::required(crate::agent::ApprovalGate::new()),
             started: false,
         }
+    }
+
+    /// Registers the turn, then lets `serve` serve its chat's control topic. Registered first,
+    /// an answering task left over from an earlier turn, which `serve` leaves in charge, sees
+    /// this replica own the chat and keeps answering rather than leaving in its grace period.
+    /// Gives back what `serve` said alongside the turn; dropping the turn unregisters it.
+    async fn serving<Serve>(
+        chat_id: Uuid,
+        message_id: Uuid,
+        author: Uuid,
+        workspace_id: Uuid,
+        serve: impl FnOnce() -> Serve,
+    ) -> (Self, Serve::Output)
+    where
+        Serve: Future,
+    {
+        let generation = Self::registered(chat_id, message_id, author, workspace_id);
+        let served = serve().await;
+        (generation, served)
     }
 
     fn is_cancelled(&mut self) -> bool {
@@ -902,7 +1322,8 @@ pub async fn handle_chat_ws(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, chat_id))
+    let sockets = state.drain().sockets().clone();
+    ws.on_upgrade(move |socket| sockets.track_future(handle_socket(socket, state, chat_id)))
 }
 
 /// Guard that cleans up connection resources when dropped
@@ -1534,8 +1955,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     // flight so a reload or a dropped socket rejoins the reply mid-sentence.
     let mut titles = crate::workers::titles::subscribe();
     let mut actions = crate::db::actions::subscribe();
-    let stream = ChatStream::of(chat_id);
+    let stream = ChatStream::on(&state, chat_id);
     let (resume, mut events) = stream.join().await;
+    relay::listen(&stream).await;
 
     let init_msg = ServerMessage::Init {
         chat_id,
@@ -1546,7 +1968,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     }
     let _ws_active = crate::metrics::WsActiveGuard::acquire();
     let sender = Arc::new(Mutex::new(sender));
-    if !forward(&sender, resume).await {
+    let mut floor = None;
+    let relayed = match relay::replay(&state, &stream).await {
+        Some((frames, replayed)) => {
+            floor = Some(replayed);
+            frames
+        }
+        None => Vec::new(),
+    };
+    if !forward(&sender, resume).await || !forward_relayed(&sender, relayed).await {
         return;
     }
 
@@ -1580,32 +2010,46 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                 }
             }
             frame = events.recv() => {
-                match frame {
+                let missed = match frame {
+                    Ok(Frame::Gap) => 0,
                     Ok(frame) => {
-                        if !send_server(&sender, frame).await {
+                        if !deliver(&sender, frame, floor).await {
                             break;
                         }
+                        continue;
                     }
-                    // Too far behind to apply the frames it missed, so take
-                    // the turn from the top instead of rendering a gap.
-                    Err(broadcast::error::RecvError::Lagged(frames)) => {
-                        tracing::warn!(%chat_id, frames, "Chat connection fell behind, replaying");
-                        let (mut resume, receiver) = stream.join().await;
-                        events = receiver;
-                        // The queue changes it missed may have emptied it, which
-                        // a join alone says nothing about.
-                        if !resume.iter().any(|frame| matches!(frame, ServerMessage::Queue { .. })) {
-                            resume.push(ServerMessage::Queue {
-                                messages: Vec::new(),
-                                held: false,
-                                started: None,
-                            });
-                        }
-                        if !forward(&sender, resume).await {
-                            break;
-                        }
-                    }
+                    Err(broadcast::error::RecvError::Lagged(frames)) => frames,
                     Err(broadcast::error::RecvError::Closed) => break,
+                };
+                // Too far behind to apply the frames it missed, so take
+                // the turn from the top instead of rendering a gap.
+                tracing::warn!(%chat_id, missed, "Chat connection fell behind, replaying");
+                let (mut resume, receiver) = stream.join().await;
+                events = receiver;
+                let relayed = match relay::replay(&state, &stream).await {
+                    Some((frames, replayed)) => {
+                        floor = Some(replayed);
+                        frames
+                    }
+                    None => Vec::new(),
+                };
+                // The queue changes it missed may have emptied it, which
+                // a join alone says nothing about. A replay from another
+                // replica ends with its queue when it has one.
+                if !resume.iter().any(|frame| matches!(frame, ServerMessage::Queue { .. })) {
+                    let emptied = ServerMessage::Queue {
+                        messages: Vec::new(),
+                        held: false,
+                        started: None,
+                    };
+                    if relayed.is_empty() {
+                        resume.push(emptied);
+                    } else {
+                        resume.insert(0, emptied);
+                    }
+                }
+                if !forward(&sender, resume).await || !forward_relayed(&sender, relayed).await {
+                    break;
                 }
             }
             update = titles.recv() => {
@@ -1657,44 +2101,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                     continue;
                                 }
 
-                                let message = Queued { id, content, metadata, author: user_id };
-                                let started = queue::with(chat_id, |queue| {
-                                    queue
-                                        .submit(message, generating(chat_id))
-                                        .map(|started| begin(chat_id, workspace_id, started))
-                                });
-                                match started {
-                                    // A message that starts at once never showed in the
-                                    // queue, so there is no change for anyone to hear.
-                                    Some(started) => {
-                                        let told = started.0.id != id;
-                                        drive(state.clone(), stream.clone(), chat_id, workspace_id, started, told);
-                                    }
-                                    None => announce(&stream, None).await,
+                                let command = Command::Send { id, content, metadata };
+                                if !dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await {
+                                    return;
                                 }
                             }
                             Ok(ClientMessage::Cancel) => {
-                                queue::with(chat_id, |queue| {
-                                    queue.stop(generating(chat_id));
-                                    cancel_turns(chat_id);
-                                });
+                                if !dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, Command::Cancel).await {
+                                    return;
+                                }
                             }
                             Ok(ClientMessage::Interrupt { id }) => {
-                                let started = queue::with(chat_id, |queue| {
-                                    match queue.interrupt(id, generating(chat_id)) {
-                                        Interrupted::Cancel => {
-                                            cancel_turns(chat_id);
-                                            None
-                                        }
-                                        Interrupted::Start(started) => Some(begin(chat_id, workspace_id, started)),
-                                        Interrupted::Missing => None,
-                                    }
-                                });
-                                match started {
-                                    Some(started) => {
-                                        drive(state.clone(), stream.clone(), chat_id, workspace_id, started, true);
-                                    }
-                                    None => announce(&stream, None).await,
+                                let command = Command::Interrupt { id };
+                                if !dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await {
+                                    return;
                                 }
                             }
                             Ok(ClientMessage::EditQueued { id, content }) => {
@@ -1705,18 +2125,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                     let _ = send_server(&sender, error_msg).await;
                                     continue;
                                 }
-                                queue::with(chat_id, |queue| {
-                                    if content.trim().is_empty() {
-                                        queue.remove(id)
-                                    } else {
-                                        queue.edit(id, content, user_id)
-                                    }
-                                });
-                                announce(&stream, None).await;
+                                let command = Command::EditQueued { id, content };
+                                if !dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await {
+                                    return;
+                                }
                             }
                             Ok(ClientMessage::RemoveQueued { id }) => {
-                                queue::with(chat_id, |queue| queue.remove(id));
-                                announce(&stream, None).await;
+                                let command = Command::RemoveQueued { id };
+                                if !dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await {
+                                    return;
+                                }
                             }
                             Ok(ClientMessage::ApproveTool {
                                 tool_call_id,
@@ -1729,17 +2147,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                     revoke(&sender).await;
                                     return;
                                 }
-                                let decided = crate::agent::ApprovalPolicy::decide_chat(
-                                    chat_id,
-                                    &tool_call_id,
-                                    approved,
-                                );
-                                if !decided {
-                                    let _ = send_server(
-                                        &sender,
-                                        ServerMessage::ToolApprovalClosed { tool_call_id },
-                                    )
-                                    .await;
+                                let command = Command::ApproveTool { tool_call_id, approved };
+                                if !dispatch(&state, &stream, &sender, workspace_id, user_id, session_id, command).await {
+                                    return;
                                 }
                             }
                             Ok(ClientMessage::Auth { .. }) => {
@@ -1809,6 +2219,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                 if sender.lock().await.send(Message::Ping(Bytes::new())).await.is_err() {
                     return;
                 }
+            }
+
+            () = state.drain().closing() => {
+                while let Ok(frame) = events.try_recv() {
+                    if !deliver(&sender, frame, floor).await {
+                        return;
+                    }
+                }
+                let _ = sender.lock().await.send(super::restarting()).await;
+                return;
             }
         }
     }
@@ -2777,7 +3197,8 @@ async fn handle_audio_generation(
 /// refused the chat's lease saved nothing either. Unless it is owed, it says so
 /// as a denial, since nothing else will run it. An owed turn says nothing in the
 /// chat: it stays owed and another runner takes it, so telling whoever watches to
-/// reload would be wrong.
+/// reload would be wrong. Nor is an owed turn told the chat is busy when another
+/// turn holds its lease: it is [`Sent::Deferred`], and runs once that turn is over.
 async fn handle_send_message(
     state: &AppState,
     stream: &Arc<ChatStream>,
@@ -2789,6 +3210,7 @@ async fn handle_send_message(
     mut request: Generation,
     audience: Audience,
 ) -> Sent {
+    let mut reservation = Reservation::claim(chat_id);
     let generation = CHAT_GENERATIONS
         .entry(chat_id)
         .or_insert_with(|| Arc::new(Semaphore::new(1)))
@@ -2822,12 +3244,18 @@ async fn handle_send_message(
         AUTH_RECHECK_INTERVAL,
         request.cancellation(),
     );
-    let mut session = match Session::acquire(state, chat_id, workspace_id, request.message_id).await
-    {
+    let acquired = match reservation.take() {
+        Some(mut reserved) => {
+            reserved.turn = request.message_id;
+            Ok(reserved)
+        }
+        None => Session::acquire(state, chat_id, workspace_id, request.message_id).await,
+    };
+    let mut session = match acquired {
         Ok(session) => session,
         Err(db::context::Error::Refused(shortfall)) => {
             let refusal = crate::services::fleet::refusal::of(shortfall);
-            if audience.announces_refusal() {
+            if !audience.retried() {
                 publish(
                     stream,
                     ServerMessage::Denied {
@@ -2840,6 +3268,10 @@ async fn handle_send_message(
                 tracing::info!(%chat_id, code = refusal.code(), "Fleet policy refused this runner an owed turn, so it stays owed for another runner");
             }
             return Sent::Refused;
+        }
+        Err(db::context::Error::Busy) if audience.retried() => {
+            tracing::info!(%chat_id, "Another turn holds this chat's lease, so an owed turn stays owed until it frees");
+            return Sent::Deferred;
         }
         Err(error) => {
             publish(
@@ -3074,8 +3506,14 @@ pub(crate) async fn run_turn(
 /// [`run_turn`] with its answer's id chosen by the caller, so the caller can
 /// stop this turn and no other through [`cancel_turn`] while it runs. Says
 /// what became of the message, [`Sent::Refused`] when fleet policy refused this
-/// runner the chat, so the caller of an owed turn can leave it owed rather than
-/// count it run.
+/// runner the chat, [`Sent::Stopped`] when this replica's shutdown stopped the
+/// turn and [`Sent::Deferred`] when another replica serves the chat or, for an
+/// owed turn, another turn holds its lease, so the caller of an owed turn can
+/// leave it owed rather than count it run.
+///
+/// The turn is registered before the chat's control topic is served, so an
+/// answering task left over from an earlier turn sees this replica own the
+/// chat and keeps answering rather than leaving in its grace period.
 pub(crate) async fn run_turn_as(
     state: &AppState,
     message_id: Uuid,
@@ -3086,8 +3524,16 @@ pub(crate) async fn run_turn_as(
     metadata: Option<serde_json::Value>,
     audience: Audience,
 ) -> Sent {
-    let stream = ChatStream::of(chat_id);
-    let generation = Generation::registered(chat_id, message_id, user_id, workspace_id);
+    let stream = ChatStream::on(state, chat_id);
+    let (generation, served) =
+        Generation::serving(chat_id, message_id, user_id, workspace_id, || {
+            relay::serve(state, &stream, workspace_id)
+        })
+        .await;
+    if !served {
+        return Sent::Deferred;
+    }
+    let drained = Arc::clone(&generation.drained);
     let sent = handle_send_message(
         state,
         &stream,
@@ -3109,6 +3555,9 @@ pub(crate) async fn run_turn_as(
         Some(Some(started)) => drive(state.clone(), stream, chat_id, workspace_id, started, true),
         Some(None) => announce(&stream, None).await,
         None => {}
+    }
+    if sent != Sent::Refused && drained.load(Ordering::SeqCst) {
+        return Sent::Stopped;
     }
     sent
 }
@@ -3870,7 +4319,7 @@ async fn handle_chat_generation(
         chat_id,
         assistant_message_id,
         Arc::new(SubagentFrames {
-            stream: ChatStream::of(chat_id),
+            stream: ChatStream::on(state, chat_id),
         }),
     );
     let observer: Arc<dyn Observer> = Arc::new(observers(
@@ -6920,7 +7369,7 @@ cat 'DIR/reply.jsonl'
                 let (_, mut frames) = stream.join().await;
                 let watched = tokio::spawn(async move {
                     loop {
-                        match frames.recv().await {
+                        match frames.recv().await.map(Frame::published) {
                             Ok(ServerMessage::Subagent { subagent, .. })
                                 if subagent.external_id == SURVEY =>
                             {
@@ -7017,7 +7466,7 @@ cat 'DIR/reply.jsonl'
                 let mut replayed = Vec::new();
                 tokio::time::timeout(Duration::from_secs(30), async {
                     loop {
-                        match frames.recv().await.expect("the chat's frames") {
+                        match frames.recv().await.expect("the chat's frames").published() {
                             ServerMessage::MessageStart { message_id, .. } => {
                                 started = Some(message_id);
                             }
@@ -7315,7 +7764,7 @@ cat 'DIR/reply.jsonl'
         assert_eq!(index, 1);
         assert!(!truncated);
         assert!(matches!(
-            events.recv().await,
+            events.recv().await.map(Frame::published),
             Ok(ServerMessage::Chunk { content, index: 0 }) if content == "hello"
         ));
 
@@ -7659,7 +8108,7 @@ cat 'DIR/reply.jsonl'
             "{replay:?}"
         );
         assert!(matches!(
-            second.recv().await,
+            second.recv().await.map(Frame::published),
             Ok(ServerMessage::Chunk { .. })
         ));
         assert!(
@@ -7667,11 +8116,11 @@ cat 'DIR/reply.jsonl'
             "the joining connection gets what it missed once, not twice"
         );
         assert!(matches!(
-            first.recv().await,
+            first.recv().await.map(Frame::published),
             Ok(ServerMessage::MessageStart { resumed: false, .. })
         ));
         for expected in ["Half ", "a reply"] {
-            match first.recv().await {
+            match first.recv().await.map(Frame::published) {
                 Ok(ServerMessage::Chunk { content, .. }) => assert_eq!(content, expected),
                 other => panic!("expected a chunk, got {other:?}"),
             }
@@ -7734,7 +8183,11 @@ cat 'DIR/reply.jsonl'
 
         frames.announce(changed.clone(), vec![step]).await;
 
-        let frame = connection.recv().await.expect("the subagent frame");
+        let frame = connection
+            .recv()
+            .await
+            .expect("the subagent frame")
+            .published();
         assert_eq!(
             serde_json::to_value(&frame).expect("a frame"),
             serde_json::json!({
@@ -7759,10 +8212,14 @@ cat 'DIR/reply.jsonl'
         let (_, mut connection) = stream.join().await;
         let removed = vec![Uuid::new_v4(), Uuid::new_v4()];
 
-        announce_removed_subagents(chat_id, Vec::new()).await;
-        announce_removed_subagents(chat_id, removed.clone()).await;
+        announce_removed_subagents(&AppState::for_tests(), chat_id, Vec::new()).await;
+        announce_removed_subagents(&AppState::for_tests(), chat_id, removed.clone()).await;
 
-        let frame = connection.recv().await.expect("the removal frame");
+        let frame = connection
+            .recv()
+            .await
+            .expect("the removal frame")
+            .published();
         assert_eq!(
             serde_json::to_value(&frame).expect("a frame"),
             serde_json::json!({
@@ -7956,7 +8413,8 @@ cat 'DIR/reply.jsonl'
 
         queue::with(chat_id, |queue| queue.remove(second.id));
         announce(&stream, None).await;
-        let Ok(ServerMessage::Queue { messages, .. }) = events.recv().await else {
+        let Ok(ServerMessage::Queue { messages, .. }) = events.recv().await.map(Frame::published)
+        else {
             panic!("every connection hears the queue change");
         };
         assert!(messages.is_empty());
@@ -8179,14 +8637,14 @@ cat 'DIR/reply.jsonl'
         assert!(generation.is_cancelled());
         generation.cancelled(&stream).await;
         assert!(matches!(
-            events.recv().await,
+            events.recv().await.map(Frame::published),
             Ok(ServerMessage::Cancelled { message_id: None })
         ));
 
         generation.started = true;
         generation.cancelled(&stream).await;
         assert!(matches!(
-            events.recv().await,
+            events.recv().await.map(Frame::published),
             Ok(ServerMessage::Cancelled { message_id: Some(id) }) if id == generation.message_id
         ));
         drop(generation);
@@ -8211,6 +8669,58 @@ cat 'DIR/reply.jsonl'
             "a turn in another organization's workspace was cancelled"
         );
         assert!(!theirs.is_cancelled(), "a colleague's turn was cancelled");
+    }
+
+    #[test]
+    fn a_turn_registered_to_start_owns_its_chat_before_it_takes_the_permit() {
+        let chat = Uuid::new_v4();
+        assert!(!owns(chat));
+
+        let turn = Generation::registered(chat, Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+
+        assert!(
+            owns(chat),
+            "an answering task in its grace would leave a registered turn with nobody answering"
+        );
+        drop(turn);
+        assert!(!owns(chat));
+    }
+
+    #[tokio::test]
+    async fn an_automation_turn_owns_its_chat_by_the_time_its_chat_is_served() {
+        let chat = Uuid::new_v4();
+        let owned = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&owned);
+
+        let (turn, ()) = Generation::serving(
+            chat,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            || async move { seen.store(owns(chat), Ordering::SeqCst) },
+        )
+        .await;
+
+        assert!(
+            owned.load(Ordering::SeqCst),
+            "an answering task in its grace would see no turn here and leave while it is served"
+        );
+        drop(turn);
+        assert!(!owns(chat));
+    }
+
+    #[test]
+    fn draining_a_chat_stops_its_turns_as_drained_and_leaves_others_running() {
+        let (chat, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut drained = Generation::new(chat, Uuid::new_v4(), Uuid::new_v4());
+        let mut running = Generation::new(other, Uuid::new_v4(), Uuid::new_v4());
+
+        drain_turns(chat);
+
+        assert!(drained.is_cancelled());
+        assert!(drained.drained.load(Ordering::SeqCst));
+        assert!(!running.is_cancelled());
+        assert!(!running.drained.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -8247,7 +8757,7 @@ cat 'DIR/reply.jsonl'
         let listener = tokio::spawn(async move {
             let mut heard = Vec::new();
             loop {
-                match events.recv().await {
+                match events.recv().await.map(Frame::published) {
                     Ok(ServerMessage::Status { message }) => {
                         heard.push((tokio::time::Instant::now(), message));
                     }
@@ -8319,7 +8829,7 @@ cat 'DIR/reply.jsonl'
         let listener = tokio::spawn(async move {
             let mut heard = Vec::new();
             loop {
-                match events.recv().await {
+                match events.recv().await.map(Frame::published) {
                     Ok(ServerMessage::Status { message }) => {
                         heard.push((tokio::time::Instant::now(), message));
                     }
