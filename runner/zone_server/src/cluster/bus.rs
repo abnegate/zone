@@ -247,6 +247,10 @@ mod tests {
     const WAIT: Duration = Duration::from_secs(2);
     const SILENCE: Duration = Duration::from_millis(200);
     const MARKER: &str = "a-secret-the-wire-must-not-show";
+    /// Longer than Valkey takes to accept a pub/sub connection, or the loopback
+    /// takes to hand a packet over, so the bus's tasks run before it exists.
+    const ASSEMBLY: Duration = Duration::from_secs(1);
+    const SUBSCRIBED: Duration = Duration::from_secs(10);
 
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     struct Title {
@@ -715,5 +719,47 @@ mod tests {
         assert!(!bus.connected());
         assert!(reading.written());
         assert_eq!(reading.value(), 0.0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bus_valkey_answers_before_it_is_assembled_still_subscribes() {
+        let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let instance = Uuid::new_v4();
+        let (client, manager) = Valkey::client(&url, instance).expect("REDIS_URL is a Valkey URL");
+        let status = Arc::new(Status::new(None));
+        let subscriber = Arc::clone(&status);
+
+        let bus = Bus::assemble(&master(), instance, status, |shared, stop| {
+            let transport =
+                Transport::Valkey(Valkey::start(client, manager, shared, subscriber, stop));
+            std::thread::sleep(ASSEMBLY);
+            transport
+        });
+
+        let mut connection = bus.connection();
+        let subscribed =
+            tokio::time::timeout(SUBSCRIBED, connection.wait_for(|connected| *connected)).await;
+        assert!(
+            subscribed.is_ok(),
+            "the pub/sub connection subscribes once the bus it serves exists"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_packet_reaching_a_bus_still_being_assembled_leaves_it_listening() {
+        let hub = Loopback::new();
+        let peer = Bus::attach(&hub, &master());
+
+        let bus = Bus::build(&master(), None, |shared, stop| {
+            hub.attach(shared, stop);
+            peer.publish(Topic::Titles, &title());
+            std::thread::sleep(ASSEMBLY);
+            Transport::Loopback(hub.clone())
+        });
+        let mut titles = bus.subscribe(Topic::Titles).await;
+        let sent = title();
+        peer.publish(Topic::Titles, &sent);
+
+        assert_eq!(next(&mut titles).await.payload::<Title>().unwrap(), sent);
     }
 }

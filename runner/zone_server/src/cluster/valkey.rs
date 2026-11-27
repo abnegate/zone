@@ -26,6 +26,7 @@ const HEARTBEAT: Duration = Duration::from_secs(10);
 const FIRST_RETRY: Duration = Duration::from_millis(200);
 const LAST_RETRY: Duration = Duration::from_secs(5);
 const PUBLISH_RETRIES: usize = 1;
+const ASSEMBLING: Duration = Duration::from_millis(10);
 pub const LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Valkey pub/sub as the bus's transport: one multiplexed connection that
@@ -145,7 +146,13 @@ async fn subscribe(
                     Ended::Lost(reason) => reason,
                 }
             }
-            Ok(None) => break,
+            Ok(None) if stop.is_cancelled() => break,
+            Ok(None) => {
+                if !wait(ASSEMBLING, &mut commands, &stop).await {
+                    break;
+                }
+                continue;
+            }
             Err(reason) => reason,
         };
         if disconnected.ready() {
@@ -162,6 +169,9 @@ async fn subscribe(
     status.set(false);
 }
 
+/// The subscribed connection, or None while `shared` does not upgrade: the
+/// bus starts this task while `Arc::new_cyclic` is still building it, so None
+/// means the bus is gone only once `stop` is cancelled.
 async fn connect(
     client: &Client,
     shared: &Weak<Shared>,

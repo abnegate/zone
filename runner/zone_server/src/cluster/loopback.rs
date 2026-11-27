@@ -63,7 +63,11 @@ async fn listen(
         match packet {
             Ok(packet) => {
                 let Some(shared) = shared.upgrade() else {
-                    return;
+                    // A bus still inside `Arc::new_cyclic` does not upgrade yet either.
+                    if stop.is_cancelled() {
+                        return;
+                    }
+                    continue;
                 };
                 shared.receive(&packet.channel, packet.bytes);
             }

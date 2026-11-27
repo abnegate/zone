@@ -12,6 +12,45 @@ fn sources(directory: &Path) -> Vec<String> {
     names
 }
 
+const NEXTEST: &str = include_str!("../../../.config/nextest.toml");
+const USE: &str = "use ";
+const REPLICAS: &str = "common::replica";
+const GROUP_START: &str = "test(/^(";
+const GROUP_END: &str = ")::/)";
+
+/// The integration files the nextest `replicas` group caps the concurrency of.
+fn grouped() -> Vec<&'static str> {
+    let start = NEXTEST
+        .find(GROUP_START)
+        .expect("the replicas override filters on test names")
+        + GROUP_START.len();
+    let end = start
+        + NEXTEST[start..]
+            .find(GROUP_END)
+            .expect("the replicas filter closes its group");
+    NEXTEST[start..end].split('|').collect()
+}
+
+#[test]
+fn every_file_starting_replicas_runs_in_the_capped_nextest_group() {
+    let integration = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/integration");
+    let grouped = grouped();
+    let uncapped: Vec<String> = sources(&integration)
+        .into_iter()
+        .filter(|name| {
+            fs::read_to_string(integration.join(format!("{name}.rs")))
+                .unwrap()
+                .lines()
+                .any(|line| line.starts_with(USE) && line.contains(REPLICAS))
+        })
+        .filter(|name| !grouped.contains(&name.as_str()))
+        .collect();
+    assert!(
+        uncapped.is_empty(),
+        "each process-per-test replica test holds several 20-connection pools; add these to the replicas group in runner/.config/nextest.toml: {uncapped:?}"
+    );
+}
+
 #[test]
 fn no_test_file_sits_outside_the_integration_target() {
     let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
