@@ -4,53 +4,60 @@
 
 use uuid::Uuid;
 
-use crate::db::context_gatherings;
+use crate::db::DbResult;
+use crate::db::context_gatherings::{self, FAILED};
 use crate::state::AppState;
 use crate::workers::gathering;
 
-const FAILED: &str = "failed";
 const SEMAPHORE_CLOSED: &str = "The indexing semaphore closed before the index started";
 
-/// Index a source in the background, once this replica has an indexing permit free.
-///
-/// Called when a source is created or updated. `is_update` re-indexes what is already there.
-pub fn spawn_index_source(
-    state: AppState,
+/// Index a source in the background unless an index of it is already under way on any replica.
+/// The index is claimed before this replica waits for a permit, so it holds the source while it
+/// waits. `is_update` re-indexes what is already there. Returns `None` when one was under way.
+pub async fn claim(
+    state: &AppState,
     source_id: Uuid,
     workspace_id: Uuid,
     user_id: Uuid,
     is_update: bool,
-) {
-    tokio::spawn(async move {
-        let Ok(_permit) = state.index_semaphore().acquire().await else {
-            tracing::error!(%source_id, "Failed to acquire the indexing semaphore");
-            return;
-        };
-        let gathering_id = match context_gatherings::create_gathering(
-            state.db(),
-            user_id,
+) -> DbResult<Option<Uuid>> {
+    let claimed =
+        context_gatherings::claim_index(state.db(), source_id, workspace_id, user_id).await?;
+    if let Some(gathering_id) = claimed {
+        spawn(
+            state.clone(),
+            gathering_id,
+            source_id,
             workspace_id,
-            &[source_id],
-        )
-        .await
-        {
-            Ok(id) => id,
-            Err(error) => {
-                tracing::error!(%source_id, %error, "Failed to create a gathering for the source");
-                return;
-            }
-        };
-        index(&state, gathering_id, workspace_id, source_id, is_update).await;
-    });
+            is_update,
+        );
+    }
+    Ok(claimed)
 }
 
-/// Re-index a source whose gathering a resync pass already claimed with
-/// [`context_gatherings::claim_index`], once this replica has an indexing permit free.
-pub fn spawn_claimed_index(
+/// Re-index a source whose config or credentials changed, superseding an index of it that is
+/// still queued. Returns `None` when the source is gone.
+pub async fn queue(
+    state: &AppState,
+    source_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<Uuid>> {
+    let queued =
+        context_gatherings::queue_index(state.db(), source_id, workspace_id, user_id).await?;
+    if let Some(gathering_id) = queued {
+        spawn(state.clone(), gathering_id, source_id, workspace_id, true);
+    }
+    Ok(queued)
+}
+
+/// Run a queued index once this replica has an indexing permit free.
+fn spawn(
     state: AppState,
     gathering_id: Uuid,
     source_id: Uuid,
     workspace_id: Uuid,
+    is_update: bool,
 ) {
     tokio::spawn(async move {
         let Ok(_permit) = state.index_semaphore().acquire().await else {
@@ -63,11 +70,11 @@ pub fn spawn_claimed_index(
             )
             .await
             {
-                tracing::error!(%source_id, %error, "Failed to fail the claimed gathering");
+                tracing::error!(%source_id, %error, "Failed to fail the queued gathering");
             }
             return;
         };
-        index(&state, gathering_id, workspace_id, source_id, true).await;
+        index(&state, gathering_id, workspace_id, source_id, is_update).await;
     });
 }
 
@@ -96,12 +103,11 @@ async fn index(
 }
 
 /// Check if a source needs re-indexing based on config changes
-pub fn config_changed(old_config: &serde_json::Value, new_config: &serde_json::Value) -> bool {
-    // Deep compare configs
-    old_config != new_config
+pub fn config_changed(previous: &serde_json::Value, current: &serde_json::Value) -> bool {
+    previous != current
 }
 
 /// Check if a source needs re-indexing based on credential changes
-pub fn credentials_changed(old_creds: Option<&str>, new_creds: Option<&str>) -> bool {
-    old_creds != new_creds
+pub fn credentials_changed(previous: Option<&str>, current: Option<&str>) -> bool {
+    previous != current
 }

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use chrono::NaiveDateTime;
 
-use super::{ORPHANED, PENDING, RUNNING};
+use super::{ABANDONED, ORPHANED, PENDING, RUNNING};
 
 /// A source's newest gathering, which is what decides whether the source is being indexed.
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -21,9 +21,9 @@ impl Latest {
         self.status == RUNNING && self.younger(ORPHANED)
     }
 
-    /// Whether the gathering still holds its source: running, or queued within `abandoned`.
-    pub fn under_way(&self, abandoned: Duration) -> bool {
-        self.running() || (self.status == PENDING && self.younger(abandoned))
+    /// Whether the gathering still holds its source: running, or queued within [`ABANDONED`].
+    pub fn under_way(&self) -> bool {
+        self.running() || (self.status == PENDING && self.younger(ABANDONED))
     }
 
     fn younger(&self, limit: Duration) -> bool {

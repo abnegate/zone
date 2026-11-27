@@ -43,6 +43,7 @@ use crate::error::ServerError;
 use crate::services::github_app;
 use crate::services::github_app::Failure;
 use crate::state::AppState;
+use crate::workers::indexing;
 
 /// Maximum name length
 const MAX_NAME_LENGTH: usize = 256;
@@ -721,14 +722,10 @@ pub async fn create(
         }
     })?;
 
-    if source.is_active.unwrap_or(true) {
-        crate::workers::indexing::spawn_index_source(
-            state.clone(),
-            source.id,
-            workspace_id,
-            user_id,
-            false, // is_update = false (initial index)
-        );
+    if source.is_active.unwrap_or(true)
+        && let Err(error) = indexing::claim(&state, source.id, workspace_id, user_id, false).await
+    {
+        tracing::error!(source_id = %source.id, error = %error, "Failed to queue the new source's first index, which the next resync pass will queue instead");
     }
 
     let response = SourceResponse::from_row(&state, source).await?;
@@ -837,19 +834,16 @@ pub async fn update(
         }
     })?;
 
-    let config_changed = request.config.is_some()
-        && crate::workers::indexing::config_changed(&previous.config, &current.config);
+    let config_changed =
+        request.config.is_some() && indexing::config_changed(&previous.config, &current.config);
     let credentials_changed = current.credentials_encrypted != previous.credentials_encrypted
         || current.github_installation_id != previous.github_installation_id;
 
-    if (config_changed || credentials_changed) && current.is_active.unwrap_or(true) {
-        crate::workers::indexing::spawn_index_source(
-            state.clone(),
-            id,
-            workspace_id,
-            user_id,
-            true, // is_update = true (re-index)
-        );
+    if (config_changed || credentials_changed)
+        && current.is_active.unwrap_or(true)
+        && let Err(error) = indexing::queue(&state, id, workspace_id, user_id).await
+    {
+        tracing::error!(source_id = %id, error = %error, "Failed to queue the changed source's re-index");
     }
 
     let response = SourceResponse::from_row(&state, current).await?;
@@ -1092,9 +1086,8 @@ pub async fn reindex(
         Err(e) => return e.into_response(),
     };
 
-    // The index status is keyed by source alone, so it must not be read for a
-    // source this workspace does not own -- a conflict would answer for another
-    // tenant's source before the check below refuses it.
+    // A claim is keyed by source alone, so it must not be made for a source this
+    // workspace does not own -- a conflict would answer for another tenant's source.
     match sources::get_source(state.db(), source_id, workspace_id).await {
         Ok(Some(_)) => {}
         Ok(None) => {
@@ -1114,33 +1107,29 @@ pub async fn reindex(
         }
     }
 
-    let index_status = sources::get_source_index_status(state.db(), source_id).await;
-    if let Ok(status) = &index_status
-        && matches!(status.status, sources::IndexStatus::Indexing)
-    {
-        return (
+    match indexing::claim(&state, source_id, workspace_id, user_id, true).await {
+        Ok(Some(_)) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "message": "Re-indexing started",
+                "source_id": source_id
+            })),
+        )
+            .into_response(),
+        Ok(None) => (
             StatusCode::CONFLICT,
             Json(ErrorResponse::new("Source is already being indexed")),
         )
-            .into_response();
+            .into_response(),
+        Err(error) => {
+            tracing::error!(source_id = %source_id, workspace_id = %workspace_id, error = %error, "Database error queueing a reindex");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response()
+        }
     }
-
-    crate::workers::indexing::spawn_index_source(
-        state.clone(),
-        source_id,
-        workspace_id,
-        user_id,
-        true, // force re-index
-    );
-
-    (
-        StatusCode::ACCEPTED,
-        Json(serde_json::json!({
-            "message": "Re-indexing started",
-            "source_id": source_id
-        })),
-    )
-        .into_response()
 }
 
 /// Everything known about a kind besides whether an adapter for it is registered.

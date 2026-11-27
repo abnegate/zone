@@ -83,7 +83,7 @@ impl GatheringCallback for DatabaseCallback {
 ///
 /// This function runs the complete gathering pipeline:
 /// 1. Acquires semaphore permit to limit concurrent gatherings
-/// 2. Updates gathering status to "running"
+/// 2. Starts the gathering, and drops it if it is no longer pending
 /// 3. Fetches sources from database (with workspace_id authorization)
 /// 4. Executes ContextService.gather() with DatabaseCallback (with timeout)
 /// 5. Updates status to "completed" or "failed"
@@ -135,14 +135,21 @@ pub async fn execute_gathering(
         index_mode
     );
 
-    // Update status to running
-    if let Err(e) = context_gatherings::update_status(state.db(), gathering_id, "running").await {
-        tracing::error!(
-            "CRITICAL: Failed to update gathering {} status to running: {}",
-            gathering_id,
-            e
-        );
-        // Continue anyway - the gathering can still run even if status update fails
+    match context_gatherings::start(state.db(), gathering_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            obs.set_status("superseded");
+            tracing::info!(
+                %gathering_id,
+                "Dropping a gathering that is no longer pending, which a newer index superseded"
+            );
+            return;
+        }
+        Err(error) => {
+            obs.set_status("error");
+            tracing::error!(%gathering_id, %error, "Failed to start the gathering");
+            return;
+        }
     }
 
     // Get context service
