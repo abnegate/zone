@@ -13,8 +13,8 @@ pub enum Audience {
     /// Started for a person who isn't on the socket yet, such as an auto project's planner
     /// answering its brief. Nothing else will run it, so a refusal is told to the chat.
     Watched,
-    /// Owed by a schedule, such as a reminder's firing. A refusal leaves it owed and another
-    /// runner takes it, so the chat is told nothing.
+    /// Owed by a schedule, such as a reminder's firing. A refusal, or another turn holding the
+    /// chat, leaves it owed for a later attempt, so the chat is told nothing.
     Owed,
 }
 
@@ -23,8 +23,10 @@ impl Audience {
         self == Self::Interactive
     }
 
-    pub(super) fn announces_refusal(self) -> bool {
-        self != Self::Owed
+    /// Whether the turn is offered again when it cannot run now, so the chat is told nothing of
+    /// a refusal or of another turn holding it.
+    pub(super) fn retried(self) -> bool {
+        self == Self::Owed
     }
 }
 

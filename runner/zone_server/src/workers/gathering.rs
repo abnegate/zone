@@ -19,9 +19,6 @@ use crate::state::AppState;
 // Max concurrent gatherings to prevent resource exhaustion
 const MAX_CONCURRENT_GATHERINGS: usize = 10;
 
-// Timeout for gathering operations (1 hour)
-const GATHERING_TIMEOUT_SECS: u64 = 3600;
-
 const TOKEN: &str = "token";
 
 // Global semaphore to limit concurrent gatherings
@@ -228,13 +225,8 @@ pub async fn execute_gathering(
         FetchConfig::for_context_gathering(force_refresh)
     };
 
-    // Execute gathering with timeout
     let gathering_future = context_service.gather(&sources, fetch_config, &callback);
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(GATHERING_TIMEOUT_SECS),
-        gathering_future,
-    )
-    .await;
+    let result = tokio::time::timeout(context_gatherings::TIMEOUT, gathering_future).await;
 
     match result {
         Ok(Ok(gathering_result)) => {
@@ -330,20 +322,17 @@ pub async fn execute_gathering(
         }
         Err(_) => {
             obs.set_status("timeout");
-            // Gathering timed out
+            let timeout = context_gatherings::TIMEOUT.as_secs();
             tracing::error!(
                 "Gathering {} timed out after {} seconds",
                 gathering_id,
-                GATHERING_TIMEOUT_SECS
+                timeout
             );
             if let Err(e) = context_gatherings::update_gathering_status(
                 state.db(),
                 gathering_id,
                 "failed",
-                Some(&format!(
-                    "Gathering timed out after {} seconds",
-                    GATHERING_TIMEOUT_SECS
-                )),
+                Some(&format!("Gathering timed out after {timeout} seconds")),
             )
             .await
             {

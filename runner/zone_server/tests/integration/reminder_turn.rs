@@ -11,9 +11,11 @@
 //! through.
 use crate::common;
 
-use crate::common::context::{Harness, answer, calls, successful, tool};
+use crate::common::context::{Harness, Socket, answer, calls, send, successful, tool};
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::time::Duration;
+use tokio_tungstenite::tungstenite::Message as SocketMessage;
 use uuid::Uuid;
 use zone_server::db::fleet::claimant::Claimant;
 use zone_server::db::reminders::Sweep;
@@ -849,4 +851,233 @@ async fn a_watch_turn_that_outlived_its_lease_leaves_its_firing_owed() {
         0,
         "the attempt that kept its reading finished the firing"
     );
+}
+
+/// The workspace member the harness registered and made owner, whom a firing runs as.
+async fn owner(harness: &Harness) -> Uuid {
+    sqlx::query_scalar(
+        "SELECT user_id FROM workspace_members WHERE workspace_id = $1 AND role = 'owner' \
+         AND is_active LIMIT 1",
+    )
+    .bind(harness.workspace)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("the harness workspace has an owner")
+}
+
+/// A one-shot reminder on the harness's chat whose firing is written down as an owed turn.
+async fn owed_firing(harness: &Harness, prompt: &str) -> Uuid {
+    let created = zone_server::db::reminders::create(
+        &harness.pool,
+        harness.workspace,
+        owner(harness).await,
+        harness.chat,
+        zone_server::db::reminders::Reminder {
+            content: "Dependency check".into(),
+            due_at: (chrono::Utc::now() + chrono::Duration::hours(1)).fixed_offset(),
+            rrule: None,
+            prompt: Some(prompt.into()),
+            timing_mode: None,
+            time_zone: None,
+        },
+    )
+    .await
+    .expect("a prompt-bearing reminder is storable");
+    let reminder: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+    make_due(harness, reminder).await;
+    zone_server::db::reminders::deliver_next(&harness.pool, Sweep::Workspace(harness.workspace))
+        .await
+        .expect("the due firing is written down as an owed turn");
+    reminder
+}
+
+/// The attempts the firing's owed turn has been charged.
+async fn attempts(harness: &Harness, reminder: Uuid) -> i32 {
+    sqlx::query_scalar("SELECT attempts FROM reminder_turns WHERE reminder_id = $1")
+        .bind(reminder)
+        .fetch_one(&harness.pool)
+        .await
+        .expect("the firing is still owed")
+}
+
+/// Every frame the socket receives within `window`.
+async fn during(socket: &mut Socket, window: Duration) -> Vec<Value> {
+    let deadline = tokio::time::Instant::now() + window;
+    let mut frames = Vec::new();
+    while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, socket.next()).await {
+        if let SocketMessage::Text(text) = message {
+            frames.push(serde_json::from_str(&text).expect("a frame is JSON"));
+        }
+    }
+    frames
+}
+
+fn failures(frames: &[Value]) -> Vec<&Value> {
+    frames
+        .iter()
+        .filter(|frame| frame["type"] == "error" || frame["type"] == "denied")
+        .collect()
+}
+
+fn answered(stored: &[(String, String, Value)], content: &str) -> usize {
+    stored
+        .iter()
+        .filter(|(role, answer, _)| role == "assistant" && answer == content)
+        .count()
+}
+
+/// A firing claimed while another turn holds its chat's lease -- a draining replica's turn
+/// running on after its serving key went, or a send that won the lease first -- is given back
+/// still owed with its attempt returned, and the chat is not told it is busy. Once the lease
+/// frees, the next attempt runs it, once.
+#[tokio::test]
+async fn a_firing_whose_chat_another_turn_holds_stays_owed_until_the_lease_frees() {
+    const PROMPT: &str = "Report any dependency PR that has been red for a week.";
+    const DELIVERED: &str = "Two dependency PRs have been red since Tuesday.";
+    const SETTLED_WITHIN: Duration = Duration::from_secs(20);
+    const QUIET: Duration = Duration::from_millis(500);
+    let harness = Harness::new(Some(32_768), false, vec![answer(DELIVERED)]).await;
+    let sweep = Sweep::Workspace(harness.workspace);
+    let lease = Lease {
+        duration: Duration::from_secs(60),
+        renewal: Duration::from_secs(1),
+    };
+    let reminder = owed_firing(&harness, PROMPT).await;
+    let owed_attempts = attempts(&harness, reminder).await;
+    let claim = || async {
+        zone_server::db::reminders::claim_turn(
+            &harness.pool,
+            sweep,
+            lease.duration,
+            Claimant::UNENFORCED,
+        )
+        .await
+        .unwrap()
+        .expect("the owed firing is offered")
+    };
+    let store = harness.store();
+    let held = store
+        .acquire(Uuid::new_v4(), Duration::from_secs(300))
+        .await
+        .expect("another turn takes the chat's lease");
+    let mut socket = harness.connect().await;
+    let state = common::create_test_state(harness.config.clone(), harness.pool.clone());
+
+    let first = claim().await;
+    tokio::time::timeout(
+        SETTLED_WITHIN,
+        run(&state, first.clone(), lease, Claimant::UNENFORCED),
+    )
+    .await
+    .expect("a firing whose chat is held returns rather than waits");
+    let still_owed = owed(&harness, reminder).await;
+    let given_back = attempts(&harness, reminder).await;
+    let told = during(&mut socket, QUIET).await;
+    let while_held = messages(&harness).await;
+
+    store
+        .release(&held)
+        .await
+        .expect("the other turn releases the chat");
+    let retaken = claim().await;
+    tokio::time::timeout(
+        SETTLED_WITHIN,
+        run(&state, retaken.clone(), lease, Claimant::UNENFORCED),
+    )
+    .await
+    .expect("the next attempt runs to its own end");
+    let stored = messages(&harness).await;
+
+    assert_eq!(still_owed, 1, "a firing whose chat is held stays owed");
+    assert_eq!(
+        given_back, owed_attempts,
+        "the claim is given back without charging the firing an attempt"
+    );
+    assert!(
+        failures(&told).is_empty(),
+        "the chat is not told an owed turn found it busy: {told:?}"
+    );
+    assert!(
+        while_held.is_empty(),
+        "nothing reached the chat while another turn held it: {while_held:?}"
+    );
+    assert_eq!(retaken.id, first.id, "the same firing is offered again");
+    assert_eq!(
+        retaken.attempts, first.attempts,
+        "the next attempt is charged as the one given back"
+    );
+    assert_eq!(
+        answered(&stored, DELIVERED),
+        1,
+        "the firing ran once the lease freed: {stored:?}"
+    );
+    assert_eq!(
+        owed(&harness, reminder).await,
+        0,
+        "the run finished the firing"
+    );
+}
+
+/// On one replica a firing that comes due while the person's own turn is answering waits for
+/// that turn or is given back for the next attempt, never told the chat is busy and dropped:
+/// both answers land, once each.
+#[tokio::test]
+async fn a_firing_during_the_persons_own_turn_runs_once_that_turn_is_over() {
+    const PROMPT: &str = "Report any dependency PR that has been red for a week.";
+    const TYPED: &str = "What changed since yesterday?";
+    const ANSWER: &str = "Nothing has changed since yesterday.";
+    const DELIVERED: &str = "Two dependency PRs have been red since Tuesday.";
+    const SETTLED_WITHIN: Duration = Duration::from_secs(20);
+    const ATTEMPTS: usize = 20;
+    let harness = Harness::new(
+        Some(32_768),
+        false,
+        vec![
+            answer(ANSWER).set_delay(Duration::from_secs(2)),
+            answer(DELIVERED),
+        ],
+    )
+    .await;
+    let sweep = Sweep::Workspace(harness.workspace);
+    let lease = Lease {
+        duration: Duration::from_secs(60),
+        renewal: Duration::from_secs(1),
+    };
+    let reminder = owed_firing(&harness, PROMPT).await;
+    let state = common::create_test_state(harness.config.clone(), harness.pool.clone());
+    let mut socket = harness.connect().await;
+
+    send(&mut socket, json!({"type": "send", "content": TYPED})).await;
+    until_requests(&harness, 1).await;
+    for _ in 0..ATTEMPTS {
+        let Some(turn) = zone_server::db::reminders::claim_turn(
+            &harness.pool,
+            sweep,
+            lease.duration,
+            Claimant::UNENFORCED,
+        )
+        .await
+        .unwrap() else {
+            break;
+        };
+        tokio::time::timeout(
+            SETTLED_WITHIN,
+            run(&state, turn, lease, Claimant::UNENFORCED),
+        )
+        .await
+        .expect("the firing's attempt ends");
+        if owed(&harness, reminder).await == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let frames = during(&mut socket, Duration::from_millis(500)).await;
+    let stored = until_stored(&harness, reminder, 4).await;
+
+    assert!(
+        failures(&frames).is_empty(),
+        "neither turn was told the chat is busy: {frames:?}"
+    );
+    assert_eq!(answered(&stored, ANSWER), 1, "{stored:?}");
+    assert_eq!(answered(&stored, DELIVERED), 1, "{stored:?}");
 }

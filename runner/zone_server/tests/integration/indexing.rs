@@ -8,6 +8,7 @@ use serde_json::json;
 use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
+use zone_server::db::context_gatherings::{ORPHANED, RUNNING};
 
 async fn gathering_count(pool: &PgPool, source_id: Uuid) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM context_gatherings WHERE $1 = ANY(source_ids)")
@@ -82,9 +83,38 @@ async fn setup_user_and_workspace(client: &TestClient) -> (String, String, Strin
     (token, org_id, workspace_id)
 }
 
-// =============================================================================
-// Auto-indexing Tests
-// =============================================================================
+/// A text source in `workspace_id`, created through the API.
+async fn text_source(client: &TestClient, token: &str, workspace_id: &str) -> Uuid {
+    let response = client
+        .post_json_auth(
+            &format!("/api/workspaces/{workspace_id}/sources"),
+            &json!({
+                "name": format!("Stranded {}", Uuid::new_v4()),
+                "source_type": "text",
+                "config": {"content": "Content"}
+            }),
+            token,
+        )
+        .await;
+    response.assert_status(StatusCode::CREATED);
+    Uuid::parse_str(response.json_value()["source"]["id"].as_str().unwrap()).unwrap()
+}
+
+/// Stages a gathering of `source` that began running `age` ago as its newest, ahead of the
+/// one creating the source started.
+async fn running_since(pool: &PgPool, source: Uuid, age: Duration) {
+    sqlx::query(
+        "INSERT INTO context_gatherings (source_ids, status, started_at, created_at) \
+         VALUES (ARRAY[$1]::uuid[], $2, LOCALTIMESTAMP - make_interval(secs => $3), \
+         LOCALTIMESTAMP + INTERVAL '1 hour')",
+    )
+    .bind(source)
+    .bind(RUNNING)
+    .bind(age.as_secs_f64())
+    .execute(pool)
+    .await
+    .unwrap();
+}
 
 #[tokio::test]
 async fn test_create_source_includes_index_status() {
@@ -335,6 +365,41 @@ async fn test_manual_reindex_endpoint() {
     );
 }
 
+/// A manual reindex is refused while the source's index can still finish, and admitted once
+/// the replica running it stopped mid-index and left it `running` past its timeout.
+#[tokio::test]
+async fn a_manual_reindex_is_refused_only_while_an_index_can_still_finish() {
+    let client = TestClient::with_db().await;
+    let (token, _org_id, workspace_id) = setup_user_and_workspace(&client).await;
+    let pool = create_test_pool().await;
+    let running = text_source(&client, &token, &workspace_id).await;
+    running_since(&pool, running, Duration::from_secs(60)).await;
+    let orphaned = text_source(&client, &token, &workspace_id).await;
+    running_since(&pool, orphaned, ORPHANED + Duration::from_secs(60)).await;
+    let reindex = |source: Uuid| {
+        let client = &client;
+        let path = format!("/api/workspaces/{workspace_id}/sources/{source}/reindex");
+        let token = &token;
+        async move { client.post_json_auth(&path, &json!({}), token).await }
+    };
+
+    let held = reindex(running).await;
+    let stranded = reindex(orphaned).await;
+
+    assert_eq!(
+        held.status,
+        StatusCode::CONFLICT,
+        "a running index refuses another: {}",
+        held.text()
+    );
+    assert_eq!(
+        stranded.status,
+        StatusCode::ACCEPTED,
+        "an index orphaned by a stopped replica holds nothing back: {}",
+        stranded.text()
+    );
+}
+
 #[tokio::test]
 async fn test_manual_reindex_not_found() {
     let client = TestClient::with_db().await;
@@ -453,10 +518,6 @@ async fn test_list_sources_includes_index_status() {
         );
     }
 }
-
-// =============================================================================
-// Unit Tests for Helper Functions
-// =============================================================================
 
 #[test]
 fn test_config_changed_helper() {

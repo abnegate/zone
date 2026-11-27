@@ -46,7 +46,7 @@ const CLAIMED: Duration = Duration::from_secs(30);
 const REMINDERS: &str = "reminders";
 const REMINDER: &str = "Remind me about the release";
 /// Logged when a replica gives a claimed firing back because another one holds its chat.
-const DEFERRED: &str = "Another replica holds the reminder's chat";
+const DEFERRED: &str = "Another turn holds the reminder's chat";
 const INVALID: &str = "Invalid message format";
 
 /// One test's database, LiteLLM stand-in and the environment its replicas share.

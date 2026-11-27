@@ -9,8 +9,9 @@ pub enum Sent {
     /// This replica began shutting down and stopped the turn, whatever it had saved. An owed turn
     /// is still owed, for a replica that stays up.
     Stopped,
-    /// Another replica runs the chat's turn or holds messages queued for one, so this turn never
-    /// started here, where it would have run beside them. An owed turn is still owed.
+    /// Another replica runs the chat's turn or holds messages queued for one, or another turn
+    /// holds the chat's lease, so this turn never started here, where it would have run beside
+    /// them. An owed turn is still owed.
     Deferred,
 }
 

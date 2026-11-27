@@ -6,7 +6,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 use tokio::sync::OwnedSemaphorePermit;
 use uuid::Uuid;
-use zone_server::db::context_gatherings;
+use zone_server::db::context_gatherings::{self, ORPHANED, PENDING, RUNNING};
 use zone_server::db::migrations;
 use zone_server::state::AppState;
 use zone_server::workers::source_resync::{self, ABANDONED};
@@ -16,6 +16,8 @@ use crate::common::{self, Database};
 const PREFIX: &str = "source_resync";
 const SETTLE: Duration = Duration::from_secs(1);
 const CLAIMANTS: usize = 8;
+/// How far past being orphaned a stranded gathering is.
+const LATE: Duration = Duration::from_secs(60);
 
 async fn source(pool: &PgPool, workspace: Uuid) -> Uuid {
     sqlx::query_scalar(
@@ -126,11 +128,13 @@ async fn a_source_is_queued_again_once_its_index_ended_or_was_abandoned() {
         context_gatherings::claim_index(&database.pool, source, workspace, user, ABANDONED)
     };
     let running = source(&database.pool, workspace).await;
-    gathering(&database.pool, running, "running", ABANDONED * 2).await;
+    gathering(&database.pool, running, RUNNING, ORPHANED / 2).await;
+    let orphaned = source(&database.pool, workspace).await;
+    gathering(&database.pool, orphaned, RUNNING, ORPHANED + LATE).await;
     let pending = source(&database.pool, workspace).await;
-    gathering(&database.pool, pending, "pending", ABANDONED / 2).await;
+    gathering(&database.pool, pending, PENDING, ABANDONED / 2).await;
     let abandoned = source(&database.pool, workspace).await;
-    gathering(&database.pool, abandoned, "pending", ABANDONED * 2).await;
+    gathering(&database.pool, abandoned, PENDING, ABANDONED * 2).await;
     let finished = source(&database.pool, workspace).await;
     gathering(
         &database.pool,
@@ -142,6 +146,7 @@ async fn a_source_is_queued_again_once_its_index_ended_or_was_abandoned() {
 
     let outcomes = [
         claim(running).await.unwrap().is_some(),
+        claim(orphaned).await.unwrap().is_some(),
         claim(pending).await.unwrap().is_some(),
         claim(abandoned).await.unwrap().is_some(),
         claim(finished).await.unwrap().is_some(),
@@ -151,8 +156,67 @@ async fn a_source_is_queued_again_once_its_index_ended_or_was_abandoned() {
 
     assert_eq!(
         outcomes,
-        [false, false, true, true, false],
-        "running and recently queued indexes hold the source, an abandoned or finished one \
-         does not, and a missing source is never queued"
+        [false, true, false, true, true, false],
+        "running and recently queued indexes hold the source, one left running past its \
+         timeout by a replica that stopped, an abandoned or a finished one does not, and a \
+         missing source is never queued"
+    );
+}
+
+/// A gathering is timed from when it began running, so one that waited long for a permit is
+/// not taken to be orphaned the moment it starts.
+#[tokio::test]
+async fn a_gathering_that_waited_long_to_run_still_holds_its_source() {
+    let database = Database::new(PREFIX).await;
+    migrations::run(&database.pool).await.unwrap();
+    let (_, workspace, user) = common::setup_workspace_member(&database.pool).await;
+    let source = source(&database.pool, workspace).await;
+    gathering(&database.pool, source, PENDING, ORPHANED + LATE).await;
+    let queued: Uuid =
+        sqlx::query_scalar("SELECT id FROM context_gatherings WHERE $1 = ANY(source_ids)")
+            .bind(source)
+            .fetch_one(&database.pool)
+            .await
+            .expect("the queued gathering");
+
+    context_gatherings::update_status(&database.pool, queued, RUNNING)
+        .await
+        .expect("the gathering begins running");
+    let claimed =
+        context_gatherings::claim_index(&database.pool, source, workspace, user, ABANDONED)
+            .await
+            .expect("the claim runs");
+    database.cleanup().await;
+
+    assert_eq!(
+        claimed, None,
+        "a gathering that has only just begun running holds its source"
+    );
+}
+
+/// A resync pass skips a source whose index is running, but not one whose replica stopped
+/// mid-index, which every rolling restart does to whatever it was indexing.
+#[tokio::test]
+async fn a_resync_pass_queues_a_source_left_running_by_a_stopped_replica() {
+    let database = Database::new(PREFIX).await;
+    migrations::run(&database.pool).await.unwrap();
+    let (_, workspace, _) = common::setup_workspace_member(&database.pool).await;
+    let running = source(&database.pool, workspace).await;
+    gathering(&database.pool, running, RUNNING, ORPHANED / 2).await;
+    let orphaned = source(&database.pool, workspace).await;
+    gathering(&database.pool, orphaned, RUNNING, ORPHANED + LATE).await;
+    let (state, _permits) = busy(&database).await;
+
+    source_resync::poll_sources(&state).await.unwrap();
+    let outcomes = [
+        gatherings(&database.pool, running).await,
+        gatherings(&database.pool, orphaned).await,
+    ];
+    database.cleanup().await;
+
+    assert_eq!(
+        outcomes,
+        [1, 2],
+        "a running index holds its source and an orphaned one is queued again"
     );
 }
