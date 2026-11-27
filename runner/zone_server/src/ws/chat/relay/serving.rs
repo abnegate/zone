@@ -1,16 +1,20 @@
 use std::time::Duration;
 
 use once_cell::sync::Lazy;
+use redis::Script;
 use redis::aio::ConnectionManager;
-use redis::{Script, SetExpiry, SetOptions};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::cluster::{Bus, Namespace};
+use crate::cluster::{Bus, Malformed, Namespace};
+
+use super::claim::Claim;
 
 const PREFIX: &str = "zone";
 const CHAT: &str = "chat";
 const SERVING: &str = "serving";
+const HOLDING: &str = "1";
+const WAITING: &str = "0";
 
 /// How long Valkey may take to read or write a chat's serving key.
 const TIMEOUT: Duration = Duration::from_millis(500);
@@ -18,6 +22,25 @@ const TIMEOUT: Duration = Duration::from_millis(500);
 static ERASE: Lazy<Script> = Lazy::new(|| {
     Script::new(
         "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+    )
+});
+
+/// Writes ARGV[1] for ARGV[4] milliseconds unless another replica's answerer
+/// keeps the key: one that holds the chat, or one only waiting out its grace
+/// when the writer is too (ARGV[3]). Returns nothing once written, and the
+/// key that stays otherwise.
+static CLAIM: Lazy<Script> = Lazy::new(|| {
+    Script::new(
+        "local current = redis.call('GET', KEYS[1]) \
+         if current then \
+           local decoded, serving = pcall(cjson.decode, current) \
+           if decoded and type(serving) == 'table' and serving.instance ~= ARGV[2] \
+             and (serving.holding == true or ARGV[3] == '0') then \
+             return current \
+           end \
+         end \
+         redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[4]) \
+         return false",
     )
 });
 
@@ -58,37 +81,47 @@ impl Serving {
             }
         };
         let serving: Self = serde_json::from_str(&payload)
+            .map_err(Malformed::from)
             .inspect_err(|error| tracing::warn!(%chat, %error, "Dropped an unreadable serving key"))
             .ok()?;
         (serving.instance != bus.instance()).then_some(serving)
     }
 
-    /// Writes this as `chat`'s serving key for `lifetime`, and returns what
-    /// was written, which [`Self::erase`] takes to remove only this write.
-    pub async fn write(&self, bus: &Bus, chat: Uuid, lifetime: Duration) -> Option<String> {
-        let mut connection = connection(bus)?;
-        let payload = serde_json::to_string(self)
+    /// Makes this `chat`'s serving key for `lifetime`, unless another
+    /// replica's answerer keeps it. A replica holding the chat keeps it from
+    /// everyone else; one only waiting out its grace gives it up to a replica
+    /// that holds the chat, never to another one waiting.
+    pub async fn claim(&self, bus: &Bus, chat: Uuid, lifetime: Duration) -> Claim {
+        let Some(mut connection) = connection(bus) else {
+            return Claim::Unknown;
+        };
+        let Some(payload) = serde_json::to_string(self)
             .inspect_err(
                 |error| tracing::error!(%chat, %error, "Could not serialize a serving key"),
             )
-            .ok()?;
+            .ok()
+        else {
+            return Claim::Unknown;
+        };
         let milliseconds = u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX);
-        let options = SetOptions::default().with_expiration(SetExpiry::PX(milliseconds));
-        let mut command = redis::cmd("SET");
-        command
-            .arg(Self::key(bus.namespace(), chat))
+        let key = Self::key(bus.namespace(), chat);
+        let mut invocation = CLAIM.key(&key);
+        invocation
             .arg(&payload)
-            .arg(options);
-        let written = command.query_async::<()>(&mut connection);
-        match tokio::time::timeout(TIMEOUT, written).await {
-            Ok(Ok(())) => Some(payload),
+            .arg(self.instance.to_string())
+            .arg(if self.holding { HOLDING } else { WAITING })
+            .arg(milliseconds);
+        let claimed = invocation.invoke_async::<Option<String>>(&mut connection);
+        match tokio::time::timeout(TIMEOUT, claimed).await {
+            Ok(Ok(None)) => Claim::Taken(payload),
+            Ok(Ok(Some(_))) => Claim::Held,
             Ok(Err(error)) => {
                 tracing::warn!(%chat, %error, "Could not say this replica serves the chat");
-                None
+                Claim::Unknown
             }
             Err(_) => {
                 tracing::warn!(%chat, "Valkey did not take in time that this replica serves the chat");
-                None
+                Claim::Unknown
             }
         }
     }
@@ -118,33 +151,4 @@ fn connection(bus: &Bus) -> Option<ConnectionManager> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::secret;
-
-    const PASSPHRASE: &str = "a-serving-passphrase-of-at-least-32-bytes";
-
-    #[test]
-    fn the_serving_key_sits_beside_the_chat_topics_in_the_namespace() {
-        let namespace = Namespace::derive(&secret::derive(PASSPHRASE).unwrap());
-        let chat = Uuid::new_v4();
-
-        assert_eq!(
-            Serving::key(&namespace, chat),
-            format!("zone:{namespace}:chat:{chat}:serving")
-        );
-    }
-
-    #[test]
-    fn a_serving_key_reads_back_as_written() {
-        let serving = Serving {
-            instance: Uuid::new_v4(),
-            answerer: Uuid::new_v4(),
-            holding: true,
-        };
-
-        let payload = serde_json::to_string(&serving).unwrap();
-
-        assert_eq!(serde_json::from_str::<Serving>(&payload).unwrap(), serving);
-    }
-}
+mod tests;

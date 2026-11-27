@@ -25,6 +25,13 @@ const PAUSE: Duration = Duration::from_millis(10);
 const ANSWERED: &str = "message_end";
 const DENIED: &str = "denied";
 const FAILED: &str = "error";
+/// How long a replica waits for the one serving a chat to answer a forwarded command
+/// (`ANSWER_TIMEOUT`), and how many times it asks (`ATTEMPTS`).
+const ANSWER: Duration = Duration::from_secs(2);
+const ATTEMPTS: u32 = 2;
+/// Logged by a replica in its grace period that fleet policy refuses a forwarded send.
+const STAYED_SILENT: &str =
+    "Fleet policy refused this runner a forwarded message, so the replica that asked runs it";
 
 struct Deployment {
     database: Database,
@@ -241,11 +248,22 @@ async fn under_fleet_policy_a_send_a_revoked_replica_hears_in_its_grace_runs_els
     asker.until(ANSWERED, TURN).await;
     deployment.revoke(first.name()).await;
 
+    let asked = Instant::now();
     asker.say(Uuid::new_v4(), "Second question").await;
     let frames = ended(&mut asker).await;
+    let waited = asked.elapsed();
     let messages = account.messages(&second, chat).await;
+    let heard = first.log().matches(STAYED_SILENT).count();
     deployment.retire(vec![first, second]).await;
 
+    assert_eq!(
+        heard, ATTEMPTS as usize,
+        "the revoked replica heard every try and was refused the chat each time"
+    );
+    assert!(
+        waited >= ANSWER * ATTEMPTS,
+        "the send ran after {waited:?}, before every try had gone unanswered"
+    );
     assert!(
         !frames.iter().any(|frame| frame.kind() == DENIED),
         "the revoked replica's refusal reached the socket: {:?}",

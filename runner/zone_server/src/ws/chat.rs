@@ -948,19 +948,20 @@ impl Generation {
     /// Registers the turn, then lets `serve` serve its chat's control topic. Registered first,
     /// an answering task left over from an earlier turn, which `serve` leaves in charge, sees
     /// this replica own the chat and keeps answering rather than leaving in its grace period.
+    /// Gives back what `serve` said alongside the turn; dropping the turn unregisters it.
     async fn serving<Serve>(
         chat_id: Uuid,
         message_id: Uuid,
         author: Uuid,
         workspace_id: Uuid,
         serve: impl FnOnce() -> Serve,
-    ) -> Self
+    ) -> (Self, Serve::Output)
     where
-        Serve: Future<Output = ()>,
+        Serve: Future,
     {
         let generation = Self::registered(chat_id, message_id, author, workspace_id);
-        serve().await;
-        generation
+        let served = serve().await;
+        (generation, served)
     }
 
     fn is_cancelled(&mut self) -> bool {
@@ -3464,9 +3465,9 @@ pub(crate) async fn run_turn(
 /// [`run_turn`] with its answer's id chosen by the caller, so the caller can
 /// stop this turn and no other through [`cancel_turn`] while it runs. Says
 /// what became of the message, [`Sent::Refused`] when fleet policy refused this
-/// runner the chat and [`Sent::Stopped`] when this replica's shutdown stopped
-/// the turn, so the caller of an owed turn can leave it owed rather than count
-/// it run.
+/// runner the chat, [`Sent::Stopped`] when this replica's shutdown stopped the
+/// turn and [`Sent::Deferred`] when another replica holds the chat, so the
+/// caller of an owed turn can leave it owed rather than count it run.
 ///
 /// The turn is registered before the chat's control topic is served, so an
 /// answering task left over from an earlier turn sees this replica own the
@@ -3482,10 +3483,14 @@ pub(crate) async fn run_turn_as(
     audience: Audience,
 ) -> Sent {
     let stream = ChatStream::on(state, chat_id);
-    let generation = Generation::serving(chat_id, message_id, user_id, workspace_id, || {
-        relay::serve(state, &stream, workspace_id)
-    })
-    .await;
+    let (generation, served) =
+        Generation::serving(chat_id, message_id, user_id, workspace_id, || {
+            relay::serve(state, &stream, workspace_id)
+        })
+        .await;
+    if !served {
+        return Sent::Deferred;
+    }
     let drained = Arc::clone(&generation.drained);
     let sent = handle_send_message(
         state,
@@ -8645,7 +8650,7 @@ cat 'DIR/reply.jsonl'
         let owned = Arc::new(AtomicBool::new(false));
         let seen = Arc::clone(&owned);
 
-        let turn = Generation::serving(
+        let (turn, ()) = Generation::serving(
             chat,
             Uuid::new_v4(),
             Uuid::new_v4(),
