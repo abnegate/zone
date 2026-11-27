@@ -869,3 +869,57 @@ async fn the_serving_key_outlives_a_request_the_owner_takes_longer_than_its_life
     );
     deployment.retire(vec![first, second]).await;
 }
+
+#[tokio::test]
+async fn a_send_whose_acknowledgement_arrives_late_is_asked_again_answered_duplicate_and_runs_once()
+{
+    let deployment = Deployment::new().await;
+    let cutoff = Cutoff::start(valkey().await).await;
+    let first = deployment.replica().await;
+    let second = Replica::start(&deployment.environment.clone().with_redis(cutoff.url())).await;
+    let account = Account::register(&first).await;
+    let chat = account.chat(&first, false).await;
+    let reply = Reply::counted(80, PAUSE);
+    let next = Reply::new(["Second answer"], Duration::ZERO);
+    deployment.litellm.queue(reply.clone());
+    deployment.litellm.queue(next.clone());
+    let mut owner = ChatSocket::joined(&first, chat, &account.token, JOIN).await;
+    let mut mirror = ChatSocket::joined(&second, chat, &account.token, JOIN).await;
+    owner.say(Uuid::new_v4(), "First question").await;
+    chunked(&mut mirror, 2).await;
+
+    let stall = deployment.stall().await;
+    mirror.say(Uuid::new_v4(), "Second question").await;
+    tokio::time::sleep(ANSWER / 4).await;
+    cutoff.hold();
+    tokio::time::sleep(ANSWER / 4).await;
+    stall.rollback().await.expect("the stall ends");
+    tokio::time::sleep(ANSWER + ANSWER / 4).await;
+    cutoff.release();
+
+    let mut frames = ended_with(&mut mirror, &next.text()).await;
+    frames.extend(mirror.during(QUIET).await);
+
+    let busy: Vec<&Value> = errors(&frames)
+        .into_iter()
+        .filter(|error| error["message"] == BUSY)
+        .collect();
+    assert!(
+        busy.is_empty(),
+        "a send the owner applied was reported busy: {:?}",
+        kinds(&frames)
+    );
+    assert_eq!(
+        saved_count(&frames, "Second question"),
+        1,
+        "the send asked twice ran once: {:?}",
+        kinds(&frames)
+    );
+    let messages = account.messages(&first, chat).await;
+    assert_eq!(
+        stored_count(&messages, "Second question"),
+        1,
+        "{messages:?}"
+    );
+    deployment.retire(vec![first, second]).await;
+}
