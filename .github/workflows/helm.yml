@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     paths:
+      - 'docs/HA.md'
       - 'helm/**'
       - 'k8s/values-tilt-*.yaml'
       - 'Makefile'
@@ -13,6 +14,7 @@ on:
       - '.github/workflows/helm.yml'
   pull_request:
     paths:
+      - 'docs/HA.md'
       - 'helm/**'
       - 'k8s/values-tilt-*.yaml'
       - 'Makefile'
