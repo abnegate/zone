@@ -13,7 +13,7 @@ use zone_context::adapters::{AdapterRegistry, TextAdapter};
 use zone_context::context::ContextService;
 use zone_context::embeddings::providers::MockEmbeddingService;
 use zone_context::stream::{GatheringCallback, GatheringEvent};
-use zone_server::db::{context_gatherings, gathering_events, sources};
+use zone_server::db::{context_gatherings, gathering_events, migrations, sources};
 use zone_server::state::AppState;
 use zone_server::workers::gathering;
 
@@ -440,4 +440,61 @@ async fn test_database_callback_handles_all_event_types() {
     assert!(event_types.contains(&"source_progress".to_string()));
     assert!(event_types.contains(&"source_completed".to_string()));
     assert!(event_types.contains(&"completed".to_string()));
+}
+
+/// A gathering the database refused to start is failed rather than left pending, where as a
+/// queued index it would hold its source against every reindex for as long as its process lives.
+#[tokio::test]
+async fn a_gathering_the_database_refuses_to_start_is_failed() {
+    let database = common::Database::new("gathering_worker").await;
+    migrations::run(&database.pool).await.unwrap();
+    let (_, workspace_id, user_id) = common::setup_workspace_member(&database.pool).await;
+    let source_id = create_test_source(&database.pool, workspace_id, "Refused", "text").await;
+    let state = common::create_test_state(common::test_config(), database.pool.clone());
+    let gathering_id = context_gatherings::claim_index(
+        &database.pool,
+        source_id,
+        workspace_id,
+        user_id,
+        state.instance(),
+    )
+    .await
+    .unwrap()
+    .expect("the source is queued");
+    for statement in [
+        "CREATE FUNCTION refuse_start() RETURNS trigger LANGUAGE plpgsql AS \
+         $$ BEGIN RAISE EXCEPTION 'the database refuses to start the gathering'; END $$",
+        "CREATE TRIGGER refuse_start BEFORE UPDATE ON context_gatherings FOR EACH ROW \
+         WHEN (NEW.status = 'running') EXECUTE FUNCTION refuse_start()",
+    ] {
+        sqlx::query(statement)
+            .execute(&database.pool)
+            .await
+            .expect("the refusing trigger is installed");
+    }
+
+    gathering::execute_gathering(
+        &state,
+        gathering_id,
+        workspace_id,
+        vec![source_id],
+        true,
+        true,
+    )
+    .await;
+    let gathering = context_gatherings::get_gathering(&database.pool, gathering_id)
+        .await
+        .unwrap()
+        .expect("the gathering");
+    database.cleanup().await;
+
+    assert_eq!(gathering.status, context_gatherings::FAILED);
+    assert!(
+        gathering
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("refuses to start")),
+        "the failure says why: {:?}",
+        gathering.error_message
+    );
 }

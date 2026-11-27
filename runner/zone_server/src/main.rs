@@ -41,6 +41,7 @@ use zone_server::services::mail::AccountMail;
 use zone_server::state::AppState;
 use zone_server::state::default_adapter_registry;
 use zone_server::workers::housekeeping::{Leadership, Timing};
+use zone_server::workers::indexing;
 use zone_server::ws::chat;
 
 #[tokio::main]
@@ -282,6 +283,7 @@ async fn main() {
     // not be combined with credentials at all.
     let background = state.background().clone();
     let draining = state.drain().clone();
+    let stopping = state.clone();
     let app = routes::create_router(state);
 
     // Start server
@@ -294,7 +296,10 @@ async fn main() {
     let listener = TcpListener::bind(addr).await.expect("Failed to bind");
 
     let result = serve(listener, app, &draining, config.shutdown).await;
-    drain(&background, BACKGROUND_DRAIN).await;
+    tokio::join!(
+        drain(&background, BACKGROUND_DRAIN),
+        indexing::release(&stopping, INDEXES_RELEASE),
+    );
     recovery.abort();
     let _ = recovery.await;
     training.abort();
@@ -408,6 +413,8 @@ const UNKNOWN_ARGUMENTS: &str = "Unknown server arguments";
 const SEALING_CONNECTIONS: u32 = 2;
 const FAILURE: i32 = 1;
 const BACKGROUND_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
+/// Runs alongside [`BACKGROUND_DRAIN`] and within it, so the stop steps' fixed time is unchanged.
+const INDEXES_RELEASE: std::time::Duration = std::time::Duration::from_secs(2);
 const TURNS_STOP: std::time::Duration = std::time::Duration::from_secs(10);
 const SOCKETS_CLOSE: std::time::Duration = std::time::Duration::from_secs(2);
 const SUCCESS: i32 = 0;
