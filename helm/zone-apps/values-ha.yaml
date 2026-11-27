@@ -75,10 +75,13 @@ server:
       timeoutSeconds: 3
       failureThreshold: 2
 
+  # The delay outlasts readiness failing (periodSeconds 5 x failureThreshold 2)
+  # plus the HAProxy ingress controller's 5-second sync, and the termination
+  # grace covers delay + grace + the server's 17 fixed seconds of stopping.
   terminationGracePeriodSeconds: 75
 
   env:
-    ZONE_SHUTDOWN_DELAY_SECONDS: "10"
+    ZONE_SHUTDOWN_DELAY_SECONDS: "15"
     ZONE_SHUTDOWN_GRACE_SECONDS: "30"
 
   agentState:

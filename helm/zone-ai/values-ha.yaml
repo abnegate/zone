@@ -9,11 +9,23 @@
 #
 # Zone issues LiteLLM keys with no budget, rpm or tpm limits, so replicas share
 # nothing but the database and need no LiteLLM Redis. A killed replica loses
-# the spend logs it had not flushed yet. Ollama is outside the supported
-# topology and keeps a single replica.
+# the spend logs it had not flushed yet.
+#
+# Ollama is outside the supported topology and keeps a single replica, so
+# LiteLLM starts without waiting for it: a replica rescheduled while Ollama is
+# down, or in a release with ollama.enabled false, still comes up. Every entry
+# in litellm.models, nomic-embed-text included, and the "*" wildcard route to
+# the bundled Ollama. Add the chat models Zone uses on hosted or external
+# endpoints to LiteLLM's database instead, through its admin UI or
+# /model/new; both replicas read them from there. Point zone-apps' embeddings
+# away from Ollama too: commonEnv.EMBEDDING_ENGINE local runs the model in
+# each server pod, and openai_compatible sends it through LiteLLM to an
+# embedding model on an external endpoint. See docs/HA.md.
 
 litellm:
   replicas: 2
+
+  waitForOllama: false
 
   # The master and each of the 4 workers is a Python process of about 1 GiB.
   resources:

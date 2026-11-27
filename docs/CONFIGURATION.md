@@ -2655,11 +2655,11 @@ On SIGTERM the server:
 5. closes every WebSocket (chat, task run, context and model pull) with code 1012, Service Restart.
 6. finishes its background writes, including giving stopped reminder firings back, then exits.
 
-Both settings are read at startup. A blank value counts as unset, and a value that is not a whole number of seconds stops the server at startup. Leave both at 0 for a single server, which then stops at once, as it always did, apart from steps 4 to 6. Steps 4 to 6 take at most 17 seconds: up to 10 to stop replies, 2 to close sockets and 5 for background writes. On Kubernetes, keep `terminationGracePeriodSeconds` at least delay + grace + 17; the HA profile (`helm/zone-apps/values-ha.yaml`) uses delay 10, grace 30 and a termination grace of 75.
+Both settings are read at startup. A blank value counts as unset, and a value that is not a whole number of seconds stops the server at startup. Leave both at 0 for a single server, which then stops at once, as it always did, apart from steps 4 to 6. Steps 4 to 6 take at most 17 seconds: up to 10 to stop replies, 2 to close sockets and 5 for background writes. On Kubernetes, keep `terminationGracePeriodSeconds` at least delay + grace + 17; the HA profile (`helm/zone-apps/values-ha.yaml`) uses delay 15, grace 30 and a termination grace of 75.
 
 ### `ZONE_SHUTDOWN_DELAY_SECONDS`
 - **Default**: `0`
-- **Description**: Seconds the server keeps serving after SIGTERM, with readiness failing, before it stops listening. Set it to at least the readiness probe's `periodSeconds × failureThreshold`, plus the time your ingress takes to drop an endpoint.
+- **Description**: Seconds the server keeps serving after SIGTERM, with readiness failing, before it stops listening. Set it to at least the readiness probe's `periodSeconds × failureThreshold`, plus the time your ingress takes to drop an endpoint. The HA profile's 15 is its readiness window of 5 × 2 plus the HAProxy Kubernetes Ingress controller's default 5-second sync.
 
 ### `ZONE_SHUTDOWN_GRACE_SECONDS`
 - **Default**: `0`

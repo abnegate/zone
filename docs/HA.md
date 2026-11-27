@@ -23,7 +23,7 @@ flowchart TD
 |---|---|---|
 | zone-server and console | `helm/zone-apps/values-ha.yaml` | Server autoscaling 3-10, console 2-6, PDBs, probes, shutdown timings, the shared volume, cookie affinity |
 | Postgres | `helm/zone-infra/values-ha.yaml` | CloudNativePG with 3 instances, synchronous replication, required anti-affinity, `max_connections: "400"`, optional Barman Cloud backups. No Valkey. |
-| LiteLLM | `helm/zone-ai/values-ha.yaml` | 2 replicas, a PDB, preferred anti-affinity. Ollama stays at one replica, outside the topology. |
+| LiteLLM | `helm/zone-ai/values-ha.yaml` | 2 replicas, a PDB, preferred anti-affinity, no wait for Ollama. Ollama stays at one replica, outside the topology. |
 
 Replicas coordinate through three things:
 
@@ -170,7 +170,7 @@ While Valkey is down, or does not answer within 500 milliseconds, each replica c
 | Failure | What happens | What is lost |
 |---|---|---|
 | **A server pod is lost** (SIGKILL, OOM, a crash) | Its sockets drop and their clients reconnect to another replica. Chat turns it ran are cut. Clients on other replicas watching those turns get "The server running this reply stopped; any queued messages were dropped. Send again." once the chat's 30-second lease lapses and their 5-second watchdog sees it, and the chat then takes a new message on any replica. Task runs it ran fail once their heartbeat is 60 seconds old, and can be retried. If it held the leadership lock, the lock frees when its Postgres session ends, or after 30 seconds of silence (`idle_session_timeout`) if the connection hangs, and a new leader waits 30 seconds before its first cluster sweep. | The cut turns' unsaved output. Messages queued behind them, which lived in its memory. Agent CLI sign-ins in flight on it (see [Ingress and sign-ins](#ingress-and-sign-ins)): start them again. |
-| **A server pod stops gracefully** (rollout, drain, scale-in) | Readiness turns 503 at once, and chat sockets on it start no new reply: a message that would start one is refused with an error and the socket closes with 1012 so the client reconnects elsewhere. It also gives up the leadership lock at once, so another replica takes the cluster sweeps after its 30-second wait, and claims no more reminder firings, auto-project drives or audit deliveries. It keeps serving for `ZONE_SHUTDOWN_DELAY_SECONDS` (10) while the Service drops it, then stops listening and gives HTTP requests in flight up to `ZONE_SHUTDOWN_GRACE_SECONDS` (30). Turns still running are then stopped the way Stop does: the reply so far is saved and the chat's lease released at once, so another replica can take the next message without waiting 30 seconds. A reminder's turn stopped this way gives its firing back, still owed and with no attempt counted, and another replica runs it again from the start on its next 10-second tick. A reminder whose chat's lease is held by another turn (on any replica, including a draining one whose serving key is gone) is given back still owed, with no attempt counted, and runs on a later sweep once the lease frees. The chat is never told it was busy. Every socket closes with 1012. It finishes background writes, then exits. Turns are not waited for during the grace, because a coding agent reaches Zone's tools at `/mcp` through the same listener. From SIGTERM to exit takes at most delay + grace + 17 seconds: up to 10 to stop turns, 2 to close sockets and 5 for background writes. The profile's `terminationGracePeriodSeconds` of 75 covers its 10 + 30 + 17 = 57, and `scripts/test-helm-ha.sh` checks that it does. | Messages queued behind its running turns, held from the moment it began draining. Task runs it ran, as for a lost pod. Sign-ins in flight on it. A reminder firing it stopped can show twice in its chat: the prompt with the reply cut short, then the prompt again with the full reply from the replica that ran it again. |
+| **A server pod stops gracefully** (rollout, drain, scale-in) | Readiness turns 503 at once, and chat sockets on it start no new reply: a message that would start one is refused with an error and the socket closes with 1012 so the client reconnects elsewhere. It also gives up the leadership lock at once, so another replica takes the cluster sweeps after its 30-second wait, and claims no more reminder firings, auto-project drives or audit deliveries. It keeps serving for `ZONE_SHUTDOWN_DELAY_SECONDS` (15) while readiness fails and the ingress drops it, then stops listening and gives HTTP requests in flight up to `ZONE_SHUTDOWN_GRACE_SECONDS` (30). Turns still running are then stopped the way Stop does: the reply so far is saved and the chat's lease released at once, so another replica can take the next message without waiting 30 seconds. A reminder's turn stopped this way gives its firing back, still owed and with no attempt counted, and another replica runs it again from the start on its next 10-second tick. A reminder whose chat's lease is held by another turn (on any replica, including a draining one whose serving key is gone) is given back still owed, with no attempt counted, and runs on a later sweep once the lease frees. The chat is never told it was busy. Every socket closes with 1012. It finishes background writes, then exits. Turns are not waited for during the grace, because a coding agent reaches Zone's tools at `/mcp` through the same listener. From SIGTERM to exit takes at most delay + grace + 17 seconds: up to 10 to stop turns, 2 to close sockets and 5 for background writes. The profile's `terminationGracePeriodSeconds` of 75 covers its 15 + 30 + 17 = 62, and `scripts/test-helm-ha.sh` checks that it does. | Messages queued behind its running turns, held from the moment it began draining. Task runs it ran, as for a lost pod. Sign-ins in flight on it. A reminder firing it stopped can show twice in its chat: the prompt with the reply cut short, then the prompt again with the full reply from the replica that ran it again. |
 | **A node is lost** | Every Zone pod on it is lost, as above. Kubernetes marks the node unreachable and stops sending it traffic; replacement pods are scheduled elsewhere once its pods are evicted. A Postgres instance on it is lost: if it was the primary, CloudNativePG promotes the synchronous standby. Writes continue on the 2 remaining instances, but the third cannot come back until a third node is schedulable, so a second failure would pause writes. | As for lost server pods. No committed Postgres data. |
 | **The Postgres primary fails over** | 10 to 30 seconds of write errors while CloudNativePG promotes a standby and moves the `zone-postgres-rw` Service. Replicas stay Ready throughout, by design: readiness checks only whether a replica is draining, never Postgres or Valkey, or a failover would mark every replica unready at once and empty the Service. The leadership lock does not survive onto the new primary; the old leader's pings fail and it demotes, and the new leader waits 30 seconds before its first cluster sweep. | Nothing committed: with `synchronous: {method: any, number: 1, dataDurability: required}` every commit is on a standby before it returns. Requests that failed during the failover need retrying. |
 | **Valkey is down** | Replicas stop hearing each other. Clients on a replica that is not running a turn stop receiving its live frames; they see the reply once it is saved and they reload. Commands sent on such a replica are not forwarded: a Send there is refused as busy while the turn runs, and Stop, approvals and queue edits there do not reach it. Answers to a task run's question posted on a replica other than the one it waits on return 404, at once while the bus is disconnected, or after the 2-second answer timeout. Titles and action cards reach only the replica that made them. The context-search, single sign-on and SCIM limits fall back to each replica's own count ([Shared limits](#shared-limits)). `zone_cluster_bus_connected` reads 0, and every replica logs an error that the cluster bus is not connected. Each replica reconnects and resubscribes on its own once Valkey is back. | Nothing persisted. Live frames and commands sent while it was down. |
@@ -200,6 +200,7 @@ The profile backs Postgres up through the [CloudNativePG Barman Cloud plugin](ht
      name: zone-backups
      namespace: zone
    spec:
+     retentionPolicy: "30d"
      configuration:
        destinationPath: s3://<bucket>/zone/
        s3Credentials:
@@ -213,7 +214,7 @@ The profile backs Postgres up through the [CloudNativePG Barman Cloud plugin](ht
          compression: gzip
    ```
 
-3. Set `postgres.backup.objectStore` to its name. The `zone-postgres` Cluster then archives WAL through the plugin, and a `ScheduledBackup` named `zone-postgres` takes a base backup on `postgres.backup.schedule` (`"0 0 0 * * *"`, daily at midnight; the schedule has a leading seconds field) from a standby (`postgres.backup.target: prefer-standby`). Retention is set on the ObjectStore.
+3. Set `postgres.backup.objectStore` to its name. The `zone-postgres` Cluster then archives WAL through the plugin, and a `ScheduledBackup` named `zone-postgres` takes a base backup on `postgres.backup.schedule` (`"0 0 0 * * *"`, daily at midnight; the schedule has a leading seconds field) from a standby (`postgres.backup.target: prefer-standby`). The ObjectStore's `spec.retentionPolicy` sets how long base backups, and the WAL they need, are kept: a whole number of days, weeks or months (`30d`, `4w`, `6m`). The plugin deletes what falls outside it, so keep it longer than the furthest point in time you would restore to.
 
 ### The shared volume
 
@@ -244,7 +245,7 @@ Keep these outside the cluster. Without them a restored database is unreadable o
 
    Leave zone-apps otherwise untouched until step 5.
 3. Restore Postgres. The chart recovers the Cluster from the old backups when `postgres.recovery` is set, and bootstraps it with `initdb` otherwise:
-   - Create a new ObjectStore for the restored cluster to archive into. The old archive belongs to the cluster it came from, and archiving into it again is refused, so the chart refuses a `postgres.recovery.objectStore` equal to `postgres.backup.objectStore`.
+   - Create a new ObjectStore for the restored cluster to archive into, as in [Postgres](#postgres) above but under a new name and with a `destinationPath` no other ObjectStore uses, such as `s3://<bucket>/zone-restored-1/`. The old archive belongs to the cluster it came from, and archiving into it again is refused, so the chart refuses a `postgres.recovery.objectStore` equal to `postgres.backup.objectStore`. The chart compares only the names: it cannot see where an ObjectStore points. The restored Cluster is named `zone-postgres` again and archives under that server name, inside its ObjectStore's `destinationPath`, so a new name over the old path archives into the old archive after all. The plugin checks that the archive is empty before it archives (`barman-cloud-check-wal-archive`) and finds the old WAL there, so WAL archiving fails, unarchived WAL piles up on the instances' volumes, and the restored cluster has no point-in-time recovery of its own. The ObjectStore's own `serverName` cannot tell them apart either: the plugin requires it to be left empty.
    - Delete the `zone-postgres` Cluster, which deletes its volumes with it, then upgrade with your values and the profile in the order you installed them, so the new Cluster keeps your storage size and class, secrets, resources and image:
 
      ```bash
@@ -271,14 +272,83 @@ Keep these outside the cluster. Without them a restored database is unreadable o
      ```
 
      Keep `postgres.recovery` set on every later upgrade of this release, and keep the old ObjectStore while it does. The Cluster then stays exactly as it was recovered, rather than having its bootstrap rewritten to `initdb` while it runs. For the next restore, the store this one archives into is the old ObjectStore, and archiving moves on to another new one.
-4. Restore the shared volume from the snapshot nearest before the Postgres recovery point, into a claim named `<fullname>-shared-state`. The database decides which sign-ins exist: a home whose sign-in the database does not hold is never used, and a sign-in whose home is missing signs in again.
+4. Restore the shared volume from the snapshot nearest before the Postgres recovery point, into the claim the servers mount, `<fullname>-shared-state` (`zone-apps-shared-state` for a release named `zone-apps`). The database decides which sign-ins exist: a home whose sign-in the database does not hold is never used, and a sign-in whose home is missing signs in again.
+
+   The claim is still there, because the chart keeps it (`helm.sh/resource-policy: keep`), and a claim's data source can only be set when it is created. So copy the snapshot's files into it rather than restoring a claim in its place. If the claim itself was lost, create it again from the chart first, as in step 2 of [Moving from a single-node install](#moving-from-a-single-node-install).
+   - Put the snapshot on a claim of its own. For a CSI `VolumeSnapshot`, create one from it, at least the snapshot's `status.restoreSize`, on the class that took it:
+
+     ```yaml
+     apiVersion: v1
+     kind: PersistentVolumeClaim
+     metadata:
+       name: zone-state-snapshot
+       namespace: zone
+     spec:
+       accessModes:
+         - ReadWriteMany
+       storageClassName: <ReadWriteMany class>
+       resources:
+         requests:
+           storage: <restore size>
+       dataSource:
+         apiGroup: snapshot.storage.k8s.io
+         kind: VolumeSnapshot
+         name: <snapshot>
+     ```
+
+     For a provider backup, restore it to a new volume with the provider's tools and bind a claim named `zone-state-snapshot` to it.
+   - Replace the claim's contents with the snapshot's, with a pod that mounts both as the server's user. It empties each of the four directories first, so nothing written after the snapshot is left beside it:
+
+     ```yaml
+     apiVersion: v1
+     kind: Pod
+     metadata:
+       name: zone-state-restore
+       namespace: zone
+     spec:
+       restartPolicy: Never
+       securityContext:
+         runAsUser: 1000
+         runAsGroup: 3000
+         fsGroup: 2000
+       containers:
+         - name: restore
+           image: alpine:3.20
+           command:
+             - sh
+             - -euc
+             - |
+               for directory in agent-state clones workspace artifacts; do
+                 mkdir -p "/claim/$directory"
+                 find "/claim/$directory" -mindepth 1 -delete
+                 if [ -d "/snapshot/$directory" ]; then
+                   cp -a "/snapshot/$directory/." "/claim/$directory/"
+                 fi
+               done
+           volumeMounts:
+             - name: snapshot
+               mountPath: /snapshot
+               readOnly: true
+             - name: claim
+               mountPath: /claim
+       volumes:
+         - name: snapshot
+           persistentVolumeClaim:
+             claimName: zone-state-snapshot
+         - name: claim
+           persistentVolumeClaim:
+             claimName: zone-apps-shared-state
+     ```
+
+     `kubectl apply` it, wait for it to complete, check its log, then `kubectl delete pod zone-state-restore` and `kubectl delete pvc zone-state-snapshot`.
 5. Start the servers again with `kubectl scale deployment/zone-apps-server --namespace zone --replicas=3`, the profile's HPA minimum; the HPA takes over from there. They run any migrations at startup, and the startup probe covers them.
 
 ## Rolling upgrades
 
 - **Migrations run at server startup**, not as a job (`migration.enabled` is refused). Every replica that starts tries to migrate, under a Postgres advisory lock held on one dedicated connection, so one applies them and the others wait, find nothing to do and carry on. `zone-server --migrate-only` uses the same lock if you would rather migrate before rolling.
 - **The startup probe covers them.** `/health` with a period of 10 and a failure threshold of 60 gives a starting pod 10 minutes before liveness or readiness are checked at all, so a long migration is not killed half way.
-- **Shutdown fits the grace period.** A stopping server takes up to `ZONE_SHUTDOWN_DELAY_SECONDS` + `ZONE_SHUTDOWN_GRACE_SECONDS` + 17 seconds from SIGTERM to exit: the 17 are fixed stop steps, 10 to stop turns, 2 to close sockets and 5 for background writes. The sum must stay under `server.terminationGracePeriodSeconds` (75 in the profile, against 10 + 30 + 17 = 57), or the kubelet kills the pod with SIGKILL before it has saved its turns' replies and released their leases. Raise the grace period with either setting.
+- **Shutdown fits the grace period.** A stopping server takes up to `ZONE_SHUTDOWN_DELAY_SECONDS` + `ZONE_SHUTDOWN_GRACE_SECONDS` + 17 seconds from SIGTERM to exit: the 17 are fixed stop steps, 10 to stop turns, 2 to close sockets and 5 for background writes. The sum must stay under `server.terminationGracePeriodSeconds` (75 in the profile, against 15 + 30 + 17 = 62), or the kubelet kills the pod with SIGKILL before it has saved its turns' replies and released their leases. Raise the grace period with either setting.
+- **The delay outlasts the drop.** `ZONE_SHUTDOWN_DELAY_SECONDS` must cover the readiness probe failing, `periodSeconds` × `failureThreshold` (5 × 2 = 10 in the profile), plus the time the ingress takes to drop the endpoint: the HAProxy Kubernetes Ingress controller syncs every 5 seconds by default (`--sync-period`). The profile's 15 covers both, and `scripts/test-helm-ha.sh` checks that it does. A delay that ends sooner stops the listener while the ingress still sends requests to it, and they fail. Raise it with a slower readiness probe or a longer sync period, and the grace period with it.
 - **One pod at a time.** The server rolls with `maxSurge: 1` and `maxUnavailable: 0`: a new pod has to become Ready before an old one is told to stop, and the old one drains as [described above](#what-survives-a-failure). The PDBs allow one disruption at a time. See [Scheduling](#scheduling) for the room a rollout needs.
 - **Every new pod is a new runner.** Each pod registers in the runner fleet under its own name, so a rollout registers new names and leaves the old ones offline. See [Runner fleet](#runner-fleet).
 - **Old and new code run side by side** for the length of a rollout, against the new schema. Schema changes are therefore expand and contract across releases: a release adds what the new code needs without breaking the old code, and only a later release removes what the old code used. Never skip a release that does an expand step on the way to the one that contracts it.
@@ -418,6 +488,15 @@ Zone issues LiteLLM keys with no budgets and no rpm or tpm limits. The LiteLLM r
 
 The profile runs 2 replicas with preferred anti-affinity and a PDB allowing one disruption. A replica that is killed loses the spend logs it had not flushed yet, up to one flush interval. On worker counts, see [Sizing](#postgres-connections).
 
+### Models without Ollama
+
+Ollama is outside the topology, so the profile sets `litellm.waitForOllama: false` and a LiteLLM pod starts whether Ollama answers or not. Otherwise every LiteLLM pod rescheduled while Ollama's one replica is down would wait for it, which undoes the second replica and the PDB. With `ollama.enabled: false` the chart renders no wait at all.
+
+Every entry in `litellm.models`, and the `*` wildcard after them, routes to the bundled Ollama at `http://ollama:11434`, so they answer only while it runs. In HA, point models elsewhere:
+
+- **Chat models**: add the models Zone uses, on hosted or external endpoints, to LiteLLM's database through its admin UI or its `/model/new` API; the chart sets `store_model_in_db: true`. Both replicas read them from the database.
+- **Embeddings**: the chart's `nomic-embed-text` entry is on Ollama, and zone-apps' default `commonEnv.EMBEDDING_ENGINE: ollama` calls Ollama directly. Set `commonEnv.EMBEDDING_ENGINE` in your zone-apps values to `local`, which runs the model in each server pod, or to `openai_compatible`, which sends [`OLLAMA_MODEL_EMBED`](CONFIGURATION.md#ollama_model_embed) through LiteLLM to an embedding model you added on an external endpoint. `local` cannot run the default `qwen3-embedding:0.6b`, so set `OLLAMA_MODEL_EMBED` to `nomic-embed-text` with it; each server pod downloads its weights, about 520MB, when it starts. Vectors from one model do not compare with another's, so a new model means re-embedding what is indexed ([`EMBEDDING_ENGINE`](CONFIGURATION.md#embedding_engine)).
+
 ## Ingress and sign-ins
 
 The profile sets `haproxy.org/cookie-persistence: zone-server` on the server Service, so the HAProxy Kubernetes Ingress controller pins each browser to one server replica with a cookie named `zone-server`. Chats do not need it; they work across replicas through the bus. Two things do:
@@ -441,7 +520,7 @@ Supported: the three `values-ha.yaml` profiles over your own values, on a cluste
 
 Not supported in the HA topology:
 
-- **Ollama.** It runs one replica and is outside the topology; use LiteLLM against hosted or external model endpoints.
+- **Ollama.** It runs one replica and is outside the topology, and LiteLLM does not wait for it; use LiteLLM against hosted or external model endpoints, and embeddings that do not need Ollama ([Models without Ollama](#models-without-ollama)).
 - **ComfyUI**: media generation and training. Training-job recovery is local to one process.
 - **The model-pull websocket.** A pull's progress reaches only sockets on the replica running it.
 - **`ZONE_AGENT_CALLBACK`.** Its loopback sign-in reaches one pod through `kubectl port-forward`; leave it unset and paste Claude's code.
@@ -499,7 +578,7 @@ cargo test -p zone_server --test integration -- \
   shared_sso_throttle sso_throttle_forwarded cluster_bus
 ```
 
-`scripts/test-helm-ha.sh`, run by `.github/workflows/helm.yml`, checks the profiles' renders: the properties on this page, that the guards refuse what they should, that the profiles layered after an operator's values file keep that file's inputs, that every `helm template` and `helm upgrade` command on this page layers your values before the profile and keeps them in its render, and that the default renders keep their single-node settings (one LiteLLM replica, no startup probe, no ReadWriteMany claim, no release in the spread selectors). It does not compare renders against an earlier version of the charts.
+`scripts/test-helm-ha.sh`, run by `.github/workflows/helm.yml`, checks the profiles' renders: the properties on this page, that the guards refuse what they should, that the profiles layered after an operator's values file keep that file's inputs, that every `helm template` and `helm upgrade` command on this page layers your values before the profile and keeps them in its render, that the ObjectStore on this page sets a retention the plugin accepts, and that the default renders keep their single-node settings (one LiteLLM replica that waits for Ollama, no startup probe, no ReadWriteMany claim, no release in the spread selectors). It does not compare renders against an earlier version of the charts.
 
 ### Smoke test on kind
 

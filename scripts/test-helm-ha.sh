@@ -11,6 +11,7 @@ trusted_proxies=10.244.0.0/16
 loopback='127.0.0.1/32,::1/128'
 failures=0
 shutdown_tail=17
+ingress_sync_seconds=5
 
 jwt_secret=0123456789abcdef0123456789abcdef
 encryption_key=fedcba9876543210fedcba9876543210
@@ -131,8 +132,19 @@ expect_shutdown_budget() {
     delay=$(query "$rendered" "$apps_container | .env[] | select(.name == \"ZONE_SHUTDOWN_DELAY_SECONDS\") | .value")
     grace=$(query "$rendered" "$apps_container | .env[] | select(.name == \"ZONE_SHUTDOWN_GRACE_SECONDS\") | .value")
     budget=$((delay + grace + shutdown_tail))
-    if [ "$termination" -lt "$budget" ]; then
-        fail 'a terminating server has time for its whole shutdown' " terminationGracePeriodSeconds $termination is under delay $delay + grace $grace + $shutdown_tail = $budget"
+    if [ "$termination" -le "$budget" ]; then
+        fail 'a terminating server has time for its whole shutdown' " terminationGracePeriodSeconds $termination is not over delay $delay + grace $grace + $shutdown_tail = $budget"
+    fi
+}
+
+expect_shutdown_delay_outlasts_readiness() {
+    rendered=$1
+    delay=$(query "$rendered" "$apps_container | .env[] | select(.name == \"ZONE_SHUTDOWN_DELAY_SECONDS\") | .value")
+    period=$(query "$rendered" "$apps_container | .readinessProbe.periodSeconds")
+    threshold=$(query "$rendered" "$apps_container | .readinessProbe.failureThreshold")
+    window=$((period * threshold + ingress_sync_seconds))
+    if [ "$delay" -lt "$window" ]; then
+        fail 'a draining server keeps serving until readiness has failed and the ingress has dropped it' " ZONE_SHUTDOWN_DELAY_SECONDS $delay is under periodSeconds $period x failureThreshold $threshold + $ingress_sync_seconds = $window"
     fi
 }
 
@@ -182,11 +194,12 @@ check_apps_ha() {
         "$apps_container | .startupProbe | .httpGet.path + \" \" + (.periodSeconds | tostring) + \" \" + (.failureThreshold | tostring)"
     expect 'a terminating server has 75 seconds to drain' 75 "$rendered" \
         "$apps_server | .spec.template.spec.terminationGracePeriodSeconds"
-    expect 'the server keeps serving 10 seconds after SIGTERM' 10 "$rendered" \
+    expect 'the server keeps serving 15 seconds after SIGTERM' 15 "$rendered" \
         "$apps_container | .env[] | select(.name == \"ZONE_SHUTDOWN_DELAY_SECONDS\") | .value"
     expect 'the server gives HTTP 30 seconds to finish' 30 "$rendered" \
         "$apps_container | .env[] | select(.name == \"ZONE_SHUTDOWN_GRACE_SECONDS\") | .value"
     expect_shutdown_budget "$rendered"
+    expect_shutdown_delay_outlasts_readiness "$rendered"
 
     expect 'the shared claim is ReadWriteMany on the given storage class' "ReadWriteMany $storage_class" "$rendered" \
         'select(.kind == "PersistentVolumeClaim" and .metadata.name == "zone-apps-shared-state") | .spec.accessModes[0] + " " + .spec.storageClassName'
@@ -217,6 +230,27 @@ check_apps_ha() {
     expect 'the server trusts the given proxies' "$trusted_proxies" "$rendered" \
         "$apps_container | .env[] | select(.name == \"ZONE_TRUSTED_PROXIES\") | .value"
     expect 'each server pod registers as a runner named after itself, once' metadata.name "$rendered" "$apps_runner_names"
+}
+
+expect_shutdown_check_catches() {
+    setting=$1
+    check=$2
+    shift 2
+    rendered_or_fail "the zone-apps HA profile renders with $setting" render_apps_ha_vouched "$@" || return 0
+    before=$failures
+    "$check" "$rendered" 2>/dev/null
+    caught=$((failures - before))
+    failures=$before
+    if [ "$caught" -eq 0 ]; then
+        fail "the shutdown checks catch $setting"
+    fi
+}
+
+check_apps_ha_shutdown_checks() {
+    expect_shutdown_check_catches 'a termination grace that only equals delay + grace + 17' expect_shutdown_budget \
+        --set server.terminationGracePeriodSeconds=62
+    expect_shutdown_check_catches 'a delay that ends when readiness has failed, before the ingress syncs' \
+        expect_shutdown_delay_outlasts_readiness --set-string server.env.ZONE_SHUTDOWN_DELAY_SECONDS=10
 }
 
 check_apps_ha_trusted_proxies() {
@@ -437,6 +471,7 @@ expect_recovery() {
 ai_litellm='select(.kind == "Deployment" and .metadata.name == "litellm")'
 ai_ollama='select(.kind == "Deployment" and .metadata.name == "ollama")'
 ai_pdb='select(.kind == "PodDisruptionBudget" and .metadata.name == "litellm")'
+ai_litellm_init="$ai_litellm | [.spec.template.spec.initContainers[]?.name] | join(\",\")"
 ai_litellm_workers="$ai_litellm | .spec.template.spec.containers[0].args as \$arguments | \$arguments | to_entries | .[] | select(.value == \"--num_workers\") | \$arguments[.key + 1]"
 litellm_process_mebibytes=1024
 
@@ -650,6 +685,17 @@ check_ai_default() {
     expect 'the default LiteLLM runs one replica' 1 "$rendered" "$ai_litellm | .spec.replicas"
     expect 'the default LiteLLM sets no affinity' null "$rendered" "$ai_litellm | .spec.template.spec.affinity"
     expect 'the default render has no LiteLLM PDB' 0 "$rendered" "[$ai_pdb] | length"
+    expect 'the default LiteLLM waits for the bundled Ollama' wait-for-ollama "$rendered" "$ai_litellm_init"
+}
+
+check_ai_without_ollama() {
+    rendered_or_fail 'the zone-ai defaults render without Ollama' render zone-ai --set ollama.enabled=false || return 0
+    expect 'LiteLLM without Ollama waits for nothing' '' "$rendered" "$ai_litellm_init"
+    expect 'the zone-ai defaults without Ollama render no Ollama' 0 "$rendered" "[$ai_ollama] | length"
+
+    rendered_or_fail 'the zone-ai HA profile renders without Ollama even when asked to wait for it' \
+        render_ha zone-ai --set ollama.enabled=false --set litellm.waitForOllama=true || return 0
+    expect 'LiteLLM never waits for an Ollama the release does not run' '' "$rendered" "$ai_litellm_init"
 }
 
 check_ai_ha() {
@@ -665,6 +711,7 @@ check_ai_ha() {
         "$ai_pdb | .spec.selector.matchLabels[\"app.kubernetes.io/name\"]"
     expect 'a drain may evict a LiteLLM pod that is not Ready' AlwaysAllow "$rendered" \
         "$ai_pdb | .spec.unhealthyPodEvictionPolicy"
+    expect 'LiteLLM in the HA profile starts without waiting for Ollama' '' "$rendered" "$ai_litellm_init"
 
     litellm_workers=$(query "$rendered" "$ai_litellm_workers")
     litellm_memory=$(mebibytes "$(query "$rendered" "$ai_litellm | .spec.template.spec.containers[0].resources.limits.memory")")
@@ -821,6 +868,35 @@ check_documented_command() {
     expect_documented_values "$command" "$chart" "$rendered"
 }
 
+documented_yaml() {
+    awk '
+        /^[[:space:]]*```/ {
+            if (fenced) {
+                print "---"
+            }
+            fenced = !fenced && $0 ~ /```yaml[[:space:]]*$/
+            indent = index($0, "`") - 1
+            next
+        }
+        fenced {
+            print substr($0, indent + 1)
+        }
+    ' "$1"
+}
+
+check_documented_object_store() {
+    retentions=$(documented_yaml "$guide" | yq eval-all 'select(.kind == "ObjectStore") | .spec.retentionPolicy // "none"' -)
+    if [ -z "$retentions" ]; then
+        fail 'docs/HA.md shows the ObjectStore to create'
+        return
+    fi
+    for retention in $retentions; do
+        if ! printf '%s\n' "$retention" | grep -Eq '^[1-9][0-9]*[dwm]$'; then
+            fail 'every documented ObjectStore sets spec.retentionPolicy in days, weeks or months, as the plugin CRD requires' " got $retention"
+        fi
+    done
+}
+
 check_documented_commands() {
     write_documented_values
     commands=$scratch/documented-commands
@@ -887,6 +963,7 @@ if [ $# -eq 0 ]; then
         check_apps_ha_release \
         check_apps_ha_selector_override \
         check_apps_ha_secret \
+        check_apps_ha_shutdown_checks \
         check_apps_ha_trusted_proxies \
         check_apps_ha_runner_name \
         check_apps_ha_refusals \
@@ -904,7 +981,9 @@ if [ $# -eq 0 ]; then
         check_infra_recovery_refusals \
         check_ai_default \
         check_ai_ha \
+        check_ai_without_ollama \
         check_documented_commands \
+        check_documented_object_store \
         check_a_misdocumented_restore_fails_the_run \
         check_a_refused_render_fails_the_run
 fi
