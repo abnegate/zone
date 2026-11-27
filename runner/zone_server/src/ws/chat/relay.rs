@@ -18,6 +18,7 @@
 //! deferred rather than run beside it.
 
 mod acknowledgement;
+mod answered;
 mod beacon;
 mod claim;
 mod command;
@@ -51,7 +52,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::cluster::{Envelope, Subscription, Topic};
+use crate::cluster::{Bus, Envelope, Subscription, Topic};
 use crate::services::chat::session::Session;
 use crate::state::AppState;
 
@@ -65,6 +66,7 @@ pub(super) use route::Route;
 pub(super) use watch::Watch;
 
 use acknowledgement::Acknowledgement;
+use answered::Answered;
 use beacon::Beacon;
 use header::Header;
 use holding::Holding;
@@ -105,9 +107,9 @@ pub(super) const BUSY: &str =
 
 const ACCESS_DENIED: &str = "Access denied";
 
-/// This replica's answering task for each chat, by the claim it keeps on the
-/// chat's serving key.
-static SERVING: Lazy<DashMap<Uuid, Arc<Mutex<Beacon>>>> = Lazy::new(DashMap::new);
+/// Each answering task's claim on its chat's serving key, by the bus instance
+/// it answers as and the chat.
+static SERVING: Lazy<DashMap<Answered, Arc<Mutex<Beacon>>>> = Lazy::new(DashMap::new);
 
 /// Whether another replica can hear this one.
 pub(super) fn reaches_peers(state: &AppState) -> bool {
@@ -389,7 +391,11 @@ fn expired(deadline: DateTime<Utc>) -> bool {
 pub(super) async fn serve(state: &AppState, stream: &Arc<ChatStream>, workspace: Uuid) -> bool {
     let chat = stream.chat_id;
     let holding = super::owns(chat);
-    let beacon = match SERVING.entry(chat) {
+    let answered = Answered {
+        instance: state.bus().instance(),
+        chat,
+    };
+    let beacon = match SERVING.entry(answered) {
         Entry::Occupied(occupied) => {
             let beacon = Arc::clone(occupied.get());
             drop(occupied);
@@ -413,11 +419,14 @@ pub(super) async fn serve(state: &AppState, stream: &Arc<ChatStream>, workspace:
     answers
 }
 
-/// Takes down every serving key this replica wrote, so the chats it answered
-/// pass to another replica as it stops rather than once the keys lapse.
-pub(super) async fn withdraw() {
+/// Takes down every serving key this replica wrote over `bus`, so the chats
+/// it answered pass to another replica as it stops rather than once the keys
+/// lapse.
+pub(super) async fn withdraw(bus: &Bus) {
+    let instance = bus.instance();
     let beacons: Vec<Arc<Mutex<Beacon>>> = SERVING
         .iter()
+        .filter(|serving| serving.key().instance == instance)
         .map(|serving| Arc::clone(serving.value()))
         .collect();
     for beacon in beacons {
@@ -433,6 +442,10 @@ async fn answering(
     beacon: Arc<Mutex<Beacon>>,
 ) {
     let chat = stream.chat_id;
+    let key = Answered {
+        instance: state.bus().instance(),
+        chat,
+    };
     let displaced = Arc::new(Notify::new());
     let stop = CancellationToken::new();
     let shining = tokio::spawn(shine(
@@ -457,7 +470,7 @@ async fn answering(
             },
             () = displaced.notified() => {
                 if SERVING
-                    .remove_if(&chat, |_, serving| mine(serving) && !super::owns(chat))
+                    .remove_if(&key, |_, serving| mine(serving) && !super::owns(chat))
                     .is_some()
                 {
                     break;
@@ -471,7 +484,7 @@ async fn answering(
                 let since = *idle_since.get_or_insert_with(Instant::now);
                 if since.elapsed() >= GRACE
                     && SERVING
-                        .remove_if(&chat, |_, serving| mine(serving) && !super::owns(chat))
+                        .remove_if(&key, |_, serving| mine(serving) && !super::owns(chat))
                         .is_some()
                 {
                     break;
@@ -479,7 +492,7 @@ async fn answering(
             }
         }
     }
-    SERVING.remove_if(&chat, |_, serving| mine(serving));
+    SERVING.remove_if(&key, |_, serving| mine(serving));
     stop.cancel();
     let _ = shining.await;
     beacon.lock().await.hide().await;
@@ -670,7 +683,6 @@ mod tests {
     use metrics::Gauge;
 
     use super::*;
-    use crate::cluster::Bus;
     use crate::secret;
     use crate::state::{test_config, unreachable_pool};
 
@@ -770,7 +782,7 @@ mod tests {
         let served = Serving::elsewhere(&other, chat).await;
 
         state.drain().begin();
-        withdraw().await;
+        withdraw(state.bus()).await;
 
         assert_eq!(
             served.map(|serving| serving.instance),

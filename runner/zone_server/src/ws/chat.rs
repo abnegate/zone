@@ -51,6 +51,7 @@ use crate::agent::{
     ToolCallRecord,
 };
 use crate::auth::validate_access_token;
+use crate::cluster::Bus;
 use crate::db::{
     self, chat_attached_sources, chat_sources, chats, knowledge, sessions, workspace_members,
 };
@@ -818,10 +819,11 @@ pub async fn settled() {
     }
 }
 
-/// Gives up this replica's claim on every chat it answers, so a send on
-/// another replica is never told such a chat is busy once this one is gone.
-pub async fn withdraw() {
-    relay::withdraw().await;
+/// Gives up this replica's claim on every chat it answers over `bus`, so a
+/// send on another replica is never told such a chat is busy once this one is
+/// gone.
+pub async fn withdraw(bus: &Bus) {
+    relay::withdraw(bus).await;
 }
 
 /// Cancels every turn `user_id` started in any of `workspaces`, waiting or
@@ -849,7 +851,8 @@ fn begin(chat_id: Uuid, workspace_id: Uuid, started: Started) -> (Queued, Genera
 
 /// Run a message and then whatever was queued behind it, with nobody needing
 /// to stay connected. When another replica holds the chat, nothing runs here
-/// beside it: the message and the queue behind it are refused as busy.
+/// beside it: the turn is refused as busy and the queue held. `told` says the
+/// message was queued before it started, so the user has seen it accepted.
 fn drive(
     state: AppState,
     stream: Arc<ChatStream>,
@@ -885,7 +888,7 @@ fn drive(
     tokio::spawn(async move {
         if !relay::serve(&serving, &announcer, workspace_id).await {
             drop(running);
-            refuse(&announcer, started.is_some());
+            refuse(&announcer, started).await;
             return;
         }
         if started.is_some() {
@@ -908,22 +911,26 @@ fn drive(
     });
 }
 
-/// Gives up the turn about to start here, and the queue behind it, because
-/// another replica holds the chat, and tells this replica's sockets the chat
-/// is busy. Told only here: the queue the others show is the holder's. A
-/// message the sockets saw queued here is shown gone.
-fn refuse(stream: &ChatStream, shown: bool) {
-    queue::with(stream.chat_id, Queue::clear);
+/// Gives up the turn about to start here, because another replica holds the
+/// chat, and tells this replica's sockets the chat is busy and what is left
+/// queued here. A message the user saw accepted into the queue, `kept`, goes
+/// back in it, held with the rest until this replica can serve the chat or the
+/// user acts on it; only a send that started at once is dropped. Told only
+/// here, under the lock a joining socket reads the queue under: the queue the
+/// others show is the holder's.
+async fn refuse(stream: &ChatStream, kept: Option<Queued>) {
+    queue::with(stream.chat_id, |queue| queue.refuse(kept));
+    let live = stream.live.lock().await;
+    let (messages, held) = queue::snapshot(stream.chat_id).unwrap_or_default();
     stream.local(ServerMessage::Error {
         message: relay::BUSY.to_string(),
     });
-    if shown {
-        stream.local(ServerMessage::Queue {
-            messages: Vec::new(),
-            held: false,
-            started: None,
-        });
-    }
+    stream.local(ServerMessage::Queue {
+        messages,
+        held,
+        started: None,
+    });
+    drop(live);
 }
 
 /// Send frames the caller already holds to one connection.
