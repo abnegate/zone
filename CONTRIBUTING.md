@@ -162,6 +162,18 @@ Run basic automated tests:
 make test
 ```
 
+### Console end-to-end tests
+
+```bash
+make test-e2e-setup   # once per machine: the packages and browser builds
+make test-e2e
+```
+
+The setup step is the only part that reaches the network, because the suite
+mocks every API call and serves the console from vite. `manager/frontend/e2e/CONTEXT.md`
+covers running one spec against one engine, the platforms the browsers are
+known to launch on, and what to do when `bun install` reports failed packages.
+
 ### Verifying a feature in the console
 
 The Playwright suite under `manager/frontend/e2e` mocks every API call and signs

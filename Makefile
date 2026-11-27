@@ -832,7 +832,11 @@ test-console-coverage: ## Run console tests with coverage report
 	@echo "$(BLUE)Running console tests with coverage...$(NC)"
 	cd manager/frontend && bun run test:coverage
 
-test-e2e: ## Run Playwright end-to-end tests
+test-e2e-setup: ## Install the packages and browsers the E2E suite needs (ARGS=chromium for one)
+	@echo "$(BLUE)Installing what the E2E suite needs...$(NC)"
+	./scripts/e2e-setup.sh $(ARGS)
+
+test-e2e: ## Run Playwright end-to-end tests (run test-e2e-setup first)
 	@echo "$(BLUE)Running E2E tests...$(NC)"
 	cd manager/frontend && bun run test:e2e
 
@@ -986,5 +990,5 @@ dev-check: ## Run format check + lint + test on all projects (with TUI)
 
 help: ## Display this help message
 	@awk 'BEGIN {FS = ":.*##"; printf "$(BLUE)Zone AI Stack - Makefile Commands$(NC)\n\n"} \
-		/^[a-zA-Z_-]+:.*?##/ { printf "  $(GREEN)%-25s$(NC) %s\n", $$1, $$2 } \
+		/^[a-zA-Z0-9_-]+:.*?##/ { printf "  $(GREEN)%-25s$(NC) %s\n", $$1, $$2 } \
 		/^##@/ { printf "\n$(YELLOW)%s$(NC)\n", substr($$0, 5) } ' $(MAKEFILE_LIST)

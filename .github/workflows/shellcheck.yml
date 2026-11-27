@@ -57,3 +57,8 @@ jobs:
         run: |
           sh scripts/test-smoke-test.sh
           bash scripts/test-smoke-test.sh
+
+      - name: Verify the E2E setup against a faked bun and Playwright, under dash and bash
+        run: |
+          sh scripts/test-e2e-setup.sh
+          bash scripts/test-e2e-setup.sh
