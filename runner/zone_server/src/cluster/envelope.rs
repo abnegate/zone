@@ -3,6 +3,7 @@ use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use super::kind::Kind;
+use super::malformed::Malformed;
 use super::rejection::Rejection;
 use super::sealer::{NONCE_BYTES, Sealer, TAG_BYTES};
 use super::topic::Topic;
@@ -70,12 +71,12 @@ impl Envelope {
         self.correlation
     }
 
-    pub fn header<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
-        serde_json::from_slice(&self.header)
+    pub fn header<T: DeserializeOwned>(&self) -> Result<T, Malformed> {
+        Ok(serde_json::from_slice(&self.header)?)
     }
 
-    pub fn payload<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
-        serde_json::from_slice(&self.payload)
+    pub fn payload<T: DeserializeOwned>(&self) -> Result<T, Malformed> {
+        Ok(serde_json::from_slice(&self.payload)?)
     }
 
     /// The payload exactly as it was published.
