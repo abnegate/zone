@@ -24,6 +24,7 @@ spec:
         podAntiAffinity:
           {{- toYaml . | nindent 10 }}
       {{- end }}
+      {{- if and .Values.ollama.enabled .Values.litellm.waitForOllama }}
       initContainers:
         - name: wait-for-ollama
           image: "{{ .Values.litellm.waitImage.repository }}:{{ .Values.litellm.waitImage.tag }}"
@@ -43,6 +44,7 @@ spec:
             capabilities:
               drop:
                 - ALL
+      {{- end }}
       securityContext:
         runAsNonRoot: {{ .Values.litellm.securityContext.runAsNonRoot }}
         runAsUser: {{ .Values.litellm.securityContext.runAsUser }}
