@@ -243,28 +243,34 @@ Keep these outside the cluster. Without them a restored database is unreadable o
    ```
 
    Leave zone-apps otherwise untouched until step 5.
-3. Restore Postgres. The chart's Cluster bootstraps with `initdb` only, so restore by hand:
-   - Create a new ObjectStore for the restored cluster to archive into. The old archive belongs to the cluster it came from, and archiving into it again is refused.
-   - Delete the `zone-postgres` Cluster. CloudNativePG deletes its volumes with it.
-   - Render the chart's Cluster with your values and the profile in the order you installed them, so it keeps your storage size and class, secrets, resources and image: `helm template zone-infra helm/zone-infra --namespace zone -f <your values> -f helm/zone-infra/values-ha.yaml --set postgres.backup.objectStore=<new ObjectStore> --show-only templates/postgres-cluster.yaml`. Replace `bootstrap.initdb` with a recovery from the old archive, and add Helm's ownership metadata so the next `helm upgrade` adopts it: the label `app.kubernetes.io/managed-by: Helm` and the annotations `meta.helm.sh/release-name: zone-infra` and `meta.helm.sh/release-namespace: zone`.
+3. Restore Postgres. The chart recovers the Cluster from the old backups when `postgres.recovery` is set, and bootstraps it with `initdb` otherwise:
+   - Create a new ObjectStore for the restored cluster to archive into. The old archive belongs to the cluster it came from, and archiving into it again is refused, so the chart refuses a `postgres.recovery.objectStore` equal to `postgres.backup.objectStore`.
+   - Delete the `zone-postgres` Cluster, which deletes its volumes with it, then upgrade with your values and the profile in the order you installed them, so the new Cluster keeps your storage size and class, secrets, resources and image:
 
-     ```yaml
-     bootstrap:
-       recovery:
-         source: origin
-         recoveryTarget:
-           targetTime: "2026-11-20 09:30:00+00"
-     externalClusters:
-       - name: origin
-         plugin:
-           name: barman-cloud.cloudnative-pg.io
-           parameters:
-             barmanObjectName: <old ObjectStore>
-             serverName: zone-postgres
+     ```bash
+     kubectl delete cluster/zone-postgres --namespace zone --wait
+     helm upgrade zone-infra helm/zone-infra --namespace zone -f <your values> -f helm/zone-infra/values-ha.yaml \
+       --set postgres.recovery.objectStore=<old ObjectStore> \
+       --set postgres.recovery.serverName=zone-postgres \
+       --set postgres.recovery.targetTime=<target time> \
+       --set postgres.backup.objectStore=<new ObjectStore>
+     kubectl wait cluster/zone-postgres --namespace zone --for=condition=Ready --timeout=60m
      ```
 
-     Leave out `recoveryTarget` to replay to the end of the archive.
-   - Apply it and wait for the Cluster to report healthy, then upgrade with the new ObjectStore: `helm upgrade zone-infra helm/zone-infra --namespace zone -f <your values> -f helm/zone-infra/values-ha.yaml --set postgres.backup.objectStore=<new ObjectStore>`.
+     `postgres.recovery.serverName` is the cluster that took the backups: `zone-postgres` for one this chart created. `<target time>` is an RFC 3339 timestamp with its zone, such as `2026-11-20T09:30:00Z`; leave out the `targetTime` line to replay to the end of the archive. The Cluster recovers into the chart's database, owner and credentials secret, as `initdb` would have created them.
+   - Make the restore permanent in your values file before the next upgrade, because a later `helm upgrade` without these settings drops them:
+
+     ```yaml
+     postgres:
+       backup:
+         objectStore: <new ObjectStore>
+       recovery:
+         objectStore: <old ObjectStore>
+         serverName: zone-postgres
+         targetTime: <target time>
+     ```
+
+     Keep `postgres.recovery` set on every later upgrade of this release, and keep the old ObjectStore while it does. The Cluster then stays exactly as it was recovered, rather than having its bootstrap rewritten to `initdb` while it runs. For the next restore, the store this one archives into is the old ObjectStore, and archiving moves on to another new one.
 4. Restore the shared volume from the snapshot nearest before the Postgres recovery point, into a claim named `<fullname>-shared-state`. The database decides which sign-ins exist: a home whose sign-in the database does not hold is never used, and a sign-in whose home is missing signs in again.
 5. Start the servers again with `kubectl scale deployment/zone-apps-server --namespace zone --replicas=3`, the profile's HPA minimum; the HPA takes over from there. They run any migrations at startup, and the startup probe covers them.
 

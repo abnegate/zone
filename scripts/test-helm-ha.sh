@@ -805,6 +805,8 @@ check_documented_command() {
         -e "s|<your values>|'$operator'|g" \
         -e "s|<ObjectStore name>|$documented_object_store|g" \
         -e "s|<new ObjectStore>|$documented_object_store|g" \
+        -e "s|<old ObjectStore>|$recovery_store|g" \
+        -e "s|<target time>|$recovery_time|g" \
         -e "s|<ReadWriteMany class>|$storage_class|g" \
         -e "s|<ingress controller pod CIDR>|$trusted_proxies|g" \
         -e "s| helm/zone-| '$charts'/zone-|g")
@@ -831,23 +833,40 @@ check_documented_commands() {
     if [ "$count" -lt 5 ]; then
         fail 'docs/HA.md documents its helm commands' " found $count"
     fi
+    if ! grep -q '^helm upgrade zone-infra .* --set postgres\.recovery\.objectStore=' "$commands"; then
+        fail 'docs/HA.md restores Postgres with a helm upgrade that sets postgres.recovery.objectStore'
+    fi
 }
 
-check_a_misdocumented_restore_fails_the_run() {
+expect_misdocumented_restore_fails() {
+    message=$1
+    reason=$2
+    shift 2
     guide=$scratch/HA.md
-    sed '/--show-only templates\/postgres-cluster.yaml/s/-f <your values> //' "$root/docs/HA.md" >"$guide"
+    sed "$@" "$root/docs/HA.md" >"$guide"
     if cmp -s "$guide" "$root/docs/HA.md"; then
-        fail 'docs/HA.md renders the restored Cluster with your values'
+        fail "$message: the edit changed nothing in docs/HA.md"
         return
     fi
     if output=$(ZONE_HA_GUIDE=$guide sh "$0" check_documented_commands 2>&1); then
-        fail 'a restore render without your values fails the run'
+        fail "$message passes the run"
         return
     fi
     case "$output" in
-        *"your values' Postgres storage survives"*) ;;
-        *) fail 'a restore render without your values fails on the storage it drops' " $output" ;;
+        *"$reason"*) ;;
+        *) fail "$message fails without \"$reason\"" " $output" ;;
     esac
+}
+
+check_a_misdocumented_restore_fails_the_run() {
+    expect_misdocumented_restore_fails 'a restore without your values' "your values' Postgres storage survives" \
+        -e '/^[[:space:]]*helm upgrade zone-infra .*\\$/{' -e 'N' -e '/postgres\.recovery\.objectStore=/s/-f <your values> //' -e '}'
+    expect_misdocumented_restore_fails 'a restore that bootstraps with initdb' \
+        'restores Postgres with a helm upgrade that sets postgres.recovery.objectStore' \
+        -e 's/postgres\.recovery\.objectStore=<old ObjectStore>/postgres.backup.schedule=@daily/'
+    expect_misdocumented_restore_fails 'a restore from the object store it archives into' \
+        'a recovered cluster archives into a new ObjectStore' \
+        -e 's/postgres\.recovery\.objectStore=<old ObjectStore>/postgres.recovery.objectStore=<new ObjectStore>/'
 }
 
 check_a_refused_render_fails_the_run() {
