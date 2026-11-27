@@ -8,9 +8,18 @@
 //! control topic, which only the replica holding the chat answers. The
 //! replica answering a chat says so under the chat's serving key, so the
 //! others find it even while it holds a queue and no lease.
+//!
+//! One replica answers a chat at a time: the one its serving key names. An
+//! answering task claims the key before it listens, and again as it takes
+//! each request, so a request is never applied by a replica the key has
+//! moved away from. A replica holding the chat keeps the key from every
+//! other; one only waiting out its grace gives it up to one that holds the
+//! chat. A turn that would start on a replica while another holds the chat is
+//! deferred rather than run beside it.
 
 mod acknowledgement;
 mod beacon;
+mod claim;
 mod command;
 mod floor;
 mod header;
@@ -36,6 +45,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use once_cell::sync::Lazy;
+use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -94,8 +105,9 @@ pub(super) const BUSY: &str =
 
 const ACCESS_DENIED: &str = "Access denied";
 
-/// The replica answering each chat's control topic, by the id of its answering task.
-static SERVING: Lazy<DashMap<Uuid, Uuid>> = Lazy::new(DashMap::new);
+/// This replica's answering task for each chat, by the claim it keeps on the
+/// chat's serving key.
+static SERVING: Lazy<DashMap<Uuid, Arc<Mutex<Beacon>>>> = Lazy::new(DashMap::new);
 
 /// Whether another replica can hear this one.
 pub(super) fn reaches_peers(state: &AppState) -> bool {
@@ -368,23 +380,33 @@ fn expired(deadline: DateTime<Utc>) -> bool {
 /// Answers the chat's control topic while this replica runs or queues a turn
 /// for it, and for a grace period after. Returns once the subscription is
 /// live, so a turn started next cannot be asked about before it can answer.
-pub(super) async fn serve(state: &AppState, stream: &Arc<ChatStream>, workspace: Uuid) {
+/// Says whether this replica answers the chat: false when another replica
+/// holds it, so a turn about to start here should not.
+pub(super) async fn serve(state: &AppState, stream: &Arc<ChatStream>, workspace: Uuid) -> bool {
     let chat = stream.chat_id;
-    let id = Uuid::new_v4();
-    match SERVING.entry(chat) {
-        Entry::Occupied(_) => return,
-        Entry::Vacant(vacant) => {
-            vacant.insert(id);
+    let holding = super::owns(chat);
+    let beacon = match SERVING.entry(chat) {
+        Entry::Occupied(occupied) => {
+            let beacon = Arc::clone(occupied.get());
+            drop(occupied);
+            return beacon.lock().await.claim(holding).await;
         }
-    }
+        Entry::Vacant(vacant) => {
+            let beacon = Arc::new(Mutex::new(Beacon::new(state.bus().clone(), chat)));
+            vacant.insert(Arc::clone(&beacon));
+            beacon
+        }
+    };
+    let answers = beacon.lock().await.claim(holding).await;
     let subscription = state.bus().subscribe(Topic::ChatControl(chat)).await;
     tokio::spawn(answering(
         state.clone(),
         Arc::clone(stream),
         workspace,
         subscription,
-        id,
+        beacon,
     ));
+    answers
 }
 
 async fn answering(
@@ -392,37 +414,48 @@ async fn answering(
     stream: Arc<ChatStream>,
     workspace: Uuid,
     mut subscription: Subscription,
-    id: Uuid,
+    beacon: Arc<Mutex<Beacon>>,
 ) {
     let chat = stream.chat_id;
+    let displaced = Arc::new(Notify::new());
+    let stop = CancellationToken::new();
+    let shining = tokio::spawn(shine(
+        state.clone(),
+        chat,
+        Arc::clone(&beacon),
+        Arc::clone(&displaced),
+        stop.clone(),
+    ));
+    let mine = |serving: &Arc<Mutex<Beacon>>| Arc::ptr_eq(serving, &beacon);
     let mut seen = Seen::new(SEEN_CAPACITY);
-    let mut beacon = Beacon::new(state.bus().clone(), chat, id);
     let mut idle_since: Option<Instant> = None;
     let mut check = tokio::time::interval(IDLE_CHECK);
     loop {
         tokio::select! {
             received = subscription.recv() => match received {
-                Ok(envelope) => answer(&state, &stream, workspace, &mut seen, &envelope).await,
+                Ok(envelope) => answer(&state, &stream, workspace, &beacon, &mut seen, &envelope).await,
                 Err(RecvError::Lagged(missed)) => {
                     tracing::warn!(%chat, missed, "Missed commands forwarded by other replicas");
                 }
                 Err(RecvError::Closed) => break,
             },
-            _ = check.tick() => {
-                let holding = super::owns(chat);
-                if state.drain().is_draining() {
-                    beacon.hide().await;
-                } else {
-                    beacon.show(holding).await;
+            () = displaced.notified() => {
+                if SERVING
+                    .remove_if(&chat, |_, serving| mine(serving) && !super::owns(chat))
+                    .is_some()
+                {
+                    break;
                 }
-                if holding {
+            }
+            _ = check.tick() => {
+                if super::owns(chat) {
                     idle_since = None;
                     continue;
                 }
                 let since = *idle_since.get_or_insert_with(Instant::now);
                 if since.elapsed() >= GRACE
                     && SERVING
-                        .remove_if(&chat, |_, serving| *serving == id && !super::owns(chat))
+                        .remove_if(&chat, |_, serving| mine(serving) && !super::owns(chat))
                         .is_some()
                 {
                     break;
@@ -430,12 +463,45 @@ async fn answering(
             }
         }
     }
-    SERVING.remove_if(&chat, |_, serving| *serving == id);
-    beacon.hide().await;
+    SERVING.remove_if(&chat, |_, serving| mine(serving));
+    stop.cancel();
+    let _ = shining.await;
+    beacon.lock().await.hide().await;
 }
 
-/// Applies one forwarded request, answering only as the replica holding the
-/// chat or the one that already took the Send. A replica in its grace period
+/// Keeps an answering task's claim on its chat fresh, apart from the task, so
+/// a request it takes long to apply never lets the claim lapse. Tells the task
+/// when another replica's answerer has the chat and this replica holds
+/// nothing, so it has nothing left to answer for.
+async fn shine(
+    state: AppState,
+    chat: Uuid,
+    beacon: Arc<Mutex<Beacon>>,
+    displaced: Arc<Notify>,
+    stop: CancellationToken,
+) {
+    let mut check = tokio::time::interval(IDLE_CHECK);
+    loop {
+        tokio::select! {
+            () = stop.cancelled() => return,
+            _ = check.tick() => {
+                let holding = super::owns(chat);
+                let mut beacon = beacon.lock().await;
+                if state.drain().is_draining() {
+                    beacon.hide().await;
+                } else if !beacon.show(holding).await && !holding {
+                    displaced.notify_one();
+                }
+            }
+        }
+    }
+}
+
+/// Applies one forwarded request, answering only as the replica the chat's
+/// serving key names. That replica replays what it has to a joining socket,
+/// an ended turn's nothing included, so the socket never waits out a replay
+/// a stale key asked for. It applies a command only as the replica holding
+/// the chat or the one that already took the Send. A replica in its grace period
 /// holds nothing, so it takes a forwarded Send only by taking the chat's lease
 /// first, and stays silent when another replica has it or fleet policy refuses
 /// this runner the chat. Nothing is applied past the request's deadline.
@@ -443,6 +509,7 @@ async fn answer(
     state: &AppState,
     stream: &Arc<ChatStream>,
     workspace: Uuid,
+    beacon: &Mutex<Beacon>,
     seen: &mut Seen,
     envelope: &Envelope,
 ) {
@@ -454,12 +521,17 @@ async fn answer(
             return;
         }
     };
+    let draining = state.drain().is_draining();
+    if !draining && !beacon.lock().await.claim(super::owns(chat)).await {
+        return;
+    }
     let (user, session, deadline, command) = match request {
         Request::Replay => {
-            if super::owns(chat) {
-                let (frames, sequence) = stream.snapshot().await;
-                acknowledge(state, envelope, Outcome::Applied, sequence, &frames);
+            if draining && !super::owns(chat) {
+                return;
             }
+            let (frames, sequence) = stream.snapshot().await;
+            acknowledge(state, envelope, Outcome::Applied, sequence, &frames);
             return;
         }
         Request::Control {
@@ -477,9 +549,7 @@ async fn answer(
         acknowledge(state, envelope, Outcome::Duplicate, stream.sequence(), &[]);
         return;
     }
-    if state.drain().is_draining()
-        && matches!(command, Command::Send { .. } | Command::Interrupt { .. })
-    {
+    if draining && matches!(command, Command::Send { .. } | Command::Interrupt { .. }) {
         return;
     }
     let holder = super::owns(chat);
@@ -496,7 +566,15 @@ async fn answer(
     if reserved {
         match Session::acquire(state, chat, workspace, Uuid::new_v4()).await {
             Ok(session) => Reservation::hold(chat, session),
-            Err(crate::db::context::Error::Busy | crate::db::context::Error::Refused(_)) => return,
+            Err(crate::db::context::Error::Busy) => return,
+            Err(crate::db::context::Error::Refused(shortfall)) => {
+                tracing::info!(
+                    %chat,
+                    ?shortfall,
+                    "Fleet policy refused this runner a forwarded message, so the replica that asked runs it"
+                );
+                return;
+            }
             Err(error) => {
                 tracing::warn!(%chat, %error, "Could not take the chat for a forwarded message");
                 return;

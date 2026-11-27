@@ -3446,9 +3446,9 @@ pub(crate) async fn run_turn(
 /// [`run_turn`] with its answer's id chosen by the caller, so the caller can
 /// stop this turn and no other through [`cancel_turn`] while it runs. Says
 /// what became of the message, [`Sent::Refused`] when fleet policy refused this
-/// runner the chat and [`Sent::Stopped`] when this replica's shutdown stopped
-/// the turn, so the caller of an owed turn can leave it owed rather than count
-/// it run.
+/// runner the chat, [`Sent::Stopped`] when this replica's shutdown stopped the
+/// turn and [`Sent::Deferred`] when another replica holds the chat, so the
+/// caller of an owed turn can leave it owed rather than count it run.
 ///
 /// The turn is registered before the chat's control topic is served, so an
 /// answering task left over from an earlier turn sees this replica own the
@@ -3466,7 +3466,9 @@ pub(crate) async fn run_turn_as(
     let stream = ChatStream::on(state, chat_id);
     let generation = Generation::registered(chat_id, message_id, user_id, workspace_id);
     let drained = Arc::clone(&generation.drained);
-    relay::serve(state, &stream, workspace_id).await;
+    if !relay::serve(state, &stream, workspace_id).await {
+        return Sent::Deferred;
+    }
     let sent = handle_send_message(
         state,
         &stream,

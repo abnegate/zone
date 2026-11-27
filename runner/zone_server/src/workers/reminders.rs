@@ -39,6 +39,9 @@ const REFUSED: &str = "Fleet policy refused this runner the reminder's chat";
 /// Logged when a claimed firing is given back because this replica is shutting down.
 const DRAINING: &str = "This replica is shutting down";
 
+/// Logged when a claimed firing is given back because another replica holds its chat.
+const DEFERRED: &str = "Another replica holds the reminder's chat";
+
 /// Stops a turn's renewals when the turn is over, however it ended -- a turn
 /// that panicked must not leave its claim renewed for ever, or its firing is
 /// never offered again.
@@ -194,9 +197,9 @@ fn watching(prompt: &str, baseline: Option<&str>) -> String {
 
 /// Runs one claimed firing's turn in its chat, keeping the claim as `claimant`
 /// for as long as the turn runs, and marks it done. A turn fleet policy refuses
-/// the chat, and one this replica's shutdown stops or keeps from starting,
-/// gives the claim back without counting the attempt, and the firing stays
-/// owed for a replica that stays up.
+/// the chat, one this replica's shutdown stops or keeps from starting, and one
+/// deferred because another replica holds the chat, gives the claim back
+/// without counting the attempt, and the firing stays owed for the next sweep.
 pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease, claimant: Claimant) {
     // A watch is the same turn with the last firing's answer composed in. Read
     // here rather than at claim time so two firings that queued up behind a
@@ -264,6 +267,10 @@ pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease, claimant: Cl
         }
         Sent::Stopped => {
             give_back(state, &turn, DRAINING).await;
+            return;
+        }
+        Sent::Deferred => {
+            give_back(state, &turn, DEFERRED).await;
             return;
         }
         Sent::Saved | Sent::Unsaved => {}

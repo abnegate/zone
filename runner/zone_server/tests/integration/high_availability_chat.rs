@@ -11,10 +11,13 @@ use serde_json::{Value, json};
 use sqlx::ConnectOptions;
 use tokio::time::Instant;
 use uuid::Uuid;
+use zone_server::db::{licenses, migrations};
+use zone_server::services::fleet::identity::LABELS;
 
 use crate::common::Database;
 use crate::common::chat_socket::{ChatSocket, Received};
 use crate::common::replica::{Account, Environment, Replica};
+use crate::common::sso::active;
 use crate::common::stub_litellm::{Reply, StubLitellm};
 
 use cutoff::Cutoff;
@@ -34,6 +37,17 @@ const INIT: Duration = Duration::from_secs(2);
 /// How long a replica waits for the one running a chat to answer a forwarded command
 /// (`ANSWER_TIMEOUT`).
 const ANSWER: Duration = Duration::from_secs(2);
+/// How long a chat's serving key outlives its last write (`LIFETIME`).
+const SERVING_LIFETIME: Duration = Duration::from_secs(6);
+/// How long a reminder's firing may wait for a replica to claim it: the dispatch ticks every ten
+/// seconds.
+const CLAIMED: Duration = Duration::from_secs(30);
+/// The runner label that places a workspace's reminder turns.
+const REMINDERS: &str = "reminders";
+const REMINDER: &str = "Remind me about the release";
+/// Logged when a replica gives a claimed firing back because another one holds its chat.
+const DEFERRED: &str = "Another replica holds the reminder's chat";
+const INVALID: &str = "Invalid message format";
 
 /// One test's database, LiteLLM stand-in and the environment its replicas share.
 struct Deployment {
@@ -55,8 +69,83 @@ impl Deployment {
         }
     }
 
+    /// A deployment under fleet policy, so a workspace's reminder turns go only to the replicas
+    /// carrying the labels it requires. A replica trusts only the production keyring, which can't
+    /// verify the test's key, and a stored key that doesn't verify keeps fleet policy enforced.
+    async fn enforced() -> Self {
+        let deployment = Self::new().await;
+        migrations::run(&deployment.database.pool)
+            .await
+            .expect("the schema is applied");
+        licenses::replace(&deployment.database.pool, &active())
+            .await
+            .expect("the license is stored");
+        deployment
+    }
+
     async fn replica(&self) -> Replica {
         Replica::start(&self.environment).await
+    }
+
+    /// A replica whose runner carries `labels`.
+    async fn labelled(&self, labels: &str) -> Replica {
+        Replica::start(&self.environment.clone().with_variable(LABELS, labels)).await
+    }
+
+    /// Places `workspace`'s unattended work, its reminder turns among it, only on runners
+    /// carrying `label`.
+    async fn require(&self, workspace: Uuid, label: &str) {
+        sqlx::query("INSERT INTO workspace_runner_labels (workspace_id, labels) VALUES ($1, $2)")
+            .bind(workspace)
+            .bind(vec![label.to_string()])
+            .execute(&self.database.pool)
+            .await
+            .expect("the workspace requires the label");
+    }
+
+    /// A reminder in `chat` whose firing owes a turn asking `prompt` now, as the dispatch writes
+    /// it down when the reminder comes due.
+    async fn owe(&self, account: &Account, chat: Uuid, prompt: &str) {
+        let user: Uuid =
+            sqlx::query_scalar("SELECT user_id FROM workspace_members WHERE workspace_id = $1")
+                .bind(account.workspace)
+                .fetch_one(&self.database.pool)
+                .await
+                .expect("the workspace has its member");
+        let reminder: Uuid = sqlx::query_scalar(
+            "INSERT INTO reminders (workspace_id, chat_id, created_by, content, due_at, prompt) \
+             VALUES ($1, $2, $3, $4, now() + interval '1 day', $4) RETURNING id",
+        )
+        .bind(account.workspace)
+        .bind(chat)
+        .bind(user)
+        .bind(prompt)
+        .fetch_one(&self.database.pool)
+        .await
+        .expect("the reminder is stored");
+        sqlx::query(
+            "INSERT INTO reminder_turns (reminder_id, workspace_id, chat_id, created_by, prompt) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(reminder)
+        .bind(account.workspace)
+        .bind(chat)
+        .bind(user)
+        .bind(prompt)
+        .execute(&self.database.pool)
+        .await
+        .expect("the firing's turn is owed");
+    }
+
+    /// Holds the access check every replica makes before applying a forwarded command, until the
+    /// transaction ends.
+    async fn stall(&self) -> sqlx::Transaction<'static, sqlx::Postgres> {
+        let mut stall = self.database.pool.begin().await.expect("a transaction");
+        sqlx::query("LOCK TABLE workspace_members IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *stall)
+            .await
+            .expect("the access check is stalled");
+        stall
     }
 
     /// Stops every replica, waits for their sessions to leave the database,
@@ -190,6 +279,50 @@ async fn ran(socket: &mut ChatSocket, contents: &[&str]) -> Vec<Received> {
     }
     received.extend(socket.until("message_end", TURN).await);
     received
+}
+
+/// Sends a question, queues two messages behind its turn and stops it, so the socket's replica
+/// holds the two with no turn running and no lease. Returns their ids.
+async fn hold_queue(owner: &mut ChatSocket) -> Vec<String> {
+    owner.say(Uuid::new_v4(), "Opening question").await;
+    chunked(owner, 2).await;
+    let held = [Uuid::new_v4(), Uuid::new_v4()];
+    owner.say(held[0], "Held one").await;
+    owner.say(held[1], "Held two").await;
+    queue_where(owner, |queue| queued_ids(queue).len() == 2).await;
+    owner.send(json!({"type": "cancel"})).await;
+    queue_where(owner, |queue| queue["held"] == true).await;
+    held.iter().map(Uuid::to_string).collect()
+}
+
+fn saved_count(frames: &[Received], content: &str) -> usize {
+    frames
+        .iter()
+        .filter(|frame| frame.kind() == "message_saved" && frame.frame["content"] == content)
+        .count()
+}
+
+fn stored_count(messages: &[Value], content: &str) -> usize {
+    messages
+        .iter()
+        .filter(|message| message["content"] == content)
+        .count()
+}
+
+/// Whether Valkey holds `chat`'s serving key, under whichever namespace the replicas use.
+async fn serving(chat: Uuid) -> bool {
+    let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+    let client = redis::Client::open(url).expect("REDIS_URL is a Valkey URL");
+    let mut connection = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("Valkey answers");
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg(format!("zone:*:chat:{chat}:serving"))
+        .query_async(&mut connection)
+        .await
+        .expect("the keys can be listed");
+    !keys.is_empty()
 }
 
 async fn valkey() -> SocketAddr {
@@ -486,7 +619,7 @@ async fn a_send_as_a_turn_ends_still_runs_and_answers_reach_only_the_socket_that
 }
 
 #[tokio::test]
-async fn a_socket_joining_an_idle_chat_on_another_replica_gets_init_at_once() {
+async fn a_socket_joining_an_idle_chat_on_another_replica_is_served_without_waiting_on_a_replay() {
     let deployment = Deployment::new().await;
     let first = deployment.replica().await;
     let second = deployment.replica().await;
@@ -497,14 +630,28 @@ async fn a_socket_joining_an_idle_chat_on_another_replica_gets_init_at_once() {
     owner.until("message_end", TURN).await;
 
     let mut joining = ChatSocket::connect(&second, chat, &account.token).await;
-    let asked = Instant::now();
+    joining.send(json!({"type": "unknown"})).await;
     let init = joining
         .next(INIT)
         .await
         .unwrap_or_else(|| panic!("init arrives within {INIT:?}"));
+    let initialised = Instant::now();
+    let answered = joining
+        .next(ANSWER)
+        .await
+        .unwrap_or_else(|| panic!("the socket is served within {ANSWER:?} of init"));
 
     assert_eq!(init.kind(), "init");
-    assert!(asked.elapsed() <= INIT);
+    assert_eq!(answered.kind(), "error", "{}", answered.text);
+    assert_eq!(
+        answered.frame["message"], INVALID,
+        "the first frame after init answers what the socket sent, with no replay before it"
+    );
+    assert!(
+        initialised.elapsed() < ANSWER,
+        "the socket waited {:?} after init, as long as a replay nobody answers",
+        initialised.elapsed()
+    );
     assert!(
         joining.during(QUIET).await.is_empty(),
         "an idle chat has nothing to replay"
@@ -587,15 +734,7 @@ async fn a_queue_held_on_one_replica_shows_on_another_and_runs_from_a_send_there
         .litellm
         .fall_back_to(Reply::new(["Later answer"], Duration::ZERO));
     let mut owner = ChatSocket::joined(&first, chat, &account.token, JOIN).await;
-    owner.say(Uuid::new_v4(), "Opening question").await;
-    chunked(&mut owner, 2).await;
-    let held = [Uuid::new_v4(), Uuid::new_v4()];
-    owner.say(held[0], "Held one").await;
-    owner.say(held[1], "Held two").await;
-    queue_where(&mut owner, |queue| queued_ids(queue).len() == 2).await;
-    owner.send(json!({"type": "cancel"})).await;
-    queue_where(&mut owner, |queue| queue["held"] == true).await;
-    let expected: Vec<String> = held.iter().map(Uuid::to_string).collect();
+    let expected = hold_queue(&mut owner).await;
 
     let mut joining = ChatSocket::joined(&second, chat, &account.token, JOIN).await;
     let shown = joining.until("queue", JOIN).await;
@@ -620,5 +759,113 @@ async fn a_queue_held_on_one_replica_shows_on_another_and_runs_from_a_send_there
             "{content} ran once: {messages:?}"
         );
     }
+    deployment.retire(vec![first, second]).await;
+}
+
+#[tokio::test]
+async fn a_reminder_on_another_replica_waits_for_a_held_queue_and_one_replica_answers_the_chat() {
+    let deployment = Deployment::enforced().await;
+    let first = deployment.replica().await;
+    let second = deployment.labelled(REMINDERS).await;
+    let third = deployment.replica().await;
+    let account = Account::register(&first).await;
+    deployment.require(account.workspace, REMINDERS).await;
+    let chat = account.chat(&first, false).await;
+    deployment.litellm.queue(Reply::counted(200, PAUSE));
+    deployment.litellm.queue(Reply::counted(40, PAUSE));
+    deployment
+        .litellm
+        .fall_back_to(Reply::new(["Later answer"], Duration::ZERO));
+    let mut owner = ChatSocket::joined(&first, chat, &account.token, JOIN).await;
+    let expected = hold_queue(&mut owner).await;
+    let mut distant = ChatSocket::joined(&third, chat, &account.token, JOIN).await;
+    let shown = distant.until("queue", JOIN).await;
+    assert_eq!(
+        queued_ids(&shown.last().expect("the held queue").frame),
+        expected
+    );
+
+    deployment.owe(&account, chat, REMINDER).await;
+    let mut frames = Vec::new();
+    let claimed = Instant::now() + CLAIMED;
+    while !second.log().contains(DEFERRED) && saved_count(&frames, REMINDER) == 0 {
+        assert!(
+            Instant::now() < claimed,
+            "the labelled replica never took the reminder's firing"
+        );
+        frames.extend(distant.during(PAUSE * 5).await);
+    }
+    distant.say(Uuid::new_v4(), "Fresh question").await;
+    let contents = ["Held one", "Held two", "Fresh question"];
+    frames.extend(ran(&mut distant, &contents).await);
+    frames.extend(distant.during(QUIET).await);
+
+    assert!(
+        errors(&frames).is_empty(),
+        "one replica answered the send, so no turn was refused the chat: {:?}",
+        errors(&frames)
+    );
+    assert_eq!(
+        saved_count(&frames, "Fresh question"),
+        1,
+        "the send streamed once: {:?}",
+        kinds(&frames)
+    );
+    let messages = account.messages(&first, chat).await;
+    for content in contents {
+        assert_eq!(
+            stored_count(&messages, content),
+            1,
+            "{content} ran once: {messages:?}"
+        );
+    }
+    let deadline = Instant::now() + CLAIMED;
+    let mut messages = messages;
+    while stored_count(&messages, REMINDER) == 0 && Instant::now() < deadline {
+        tokio::time::sleep(PAUSE * 5).await;
+        messages = account.messages(&first, chat).await;
+    }
+    assert_eq!(
+        stored_count(&messages, REMINDER),
+        1,
+        "the deferred firing ran once the queue was done: {messages:?}"
+    );
+    deployment.retire(vec![first, second, third]).await;
+}
+
+#[tokio::test]
+async fn the_serving_key_outlives_a_request_the_owner_takes_longer_than_its_lifetime_to_apply() {
+    let deployment = Deployment::new().await;
+    let first = deployment.replica().await;
+    let second = deployment.replica().await;
+    let account = Account::register(&first).await;
+    let chat = account.chat(&first, false).await;
+    deployment.litellm.queue(Reply::counted(200, PAUSE));
+    let mut owner = ChatSocket::joined(&first, chat, &account.token, JOIN).await;
+    hold_queue(&mut owner).await;
+    let mut asker = ChatSocket::joined(&second, chat, &account.token, JOIN).await;
+    asker.until("queue", JOIN).await;
+    assert!(
+        serving(chat).await,
+        "the replica holding the queue serves the chat"
+    );
+
+    let stall = deployment.stall().await;
+    asker.send(json!({"type": "cancel"})).await;
+    let stalled = Instant::now();
+    let mut lapsed = None;
+    while stalled.elapsed() < SERVING_LIFETIME + ANSWER {
+        tokio::time::sleep(PAUSE * 5).await;
+        if !serving(chat).await {
+            lapsed = Some(stalled.elapsed());
+            break;
+        }
+    }
+    stall.rollback().await.expect("the stall ends");
+
+    assert_eq!(
+        lapsed, None,
+        "the serving key lapsed while the owner applied a forwarded command"
+    );
     deployment.retire(vec![first, second]).await;
 }
