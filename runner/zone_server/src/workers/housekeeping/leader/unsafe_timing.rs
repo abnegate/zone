@@ -4,6 +4,6 @@ use super::timing::Timing;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
     "the housekeeping leader timing lets two leaders overlap: it needs ping < freshness, \
-     ping < idle and freshness < wait, but is {0:?}"
+     ping < idle and freshness + timeout < wait, but is {0:?}"
 )]
 pub struct UnsafeTiming(pub Timing);

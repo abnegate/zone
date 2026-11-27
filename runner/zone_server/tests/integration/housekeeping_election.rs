@@ -49,7 +49,7 @@ fn timing() -> Timing {
         ping: Duration::from_millis(200),
         timeout: Duration::from_secs(1),
         freshness: Duration::from_secs(1),
-        wait: Duration::from_secs(2),
+        wait: Duration::from_secs(3),
         idle: Duration::from_secs(2),
     }
 }
