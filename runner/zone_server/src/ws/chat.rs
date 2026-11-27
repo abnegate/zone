@@ -945,6 +945,24 @@ impl Generation {
         }
     }
 
+    /// Registers the turn, then lets `serve` serve its chat's control topic. Registered first,
+    /// an answering task left over from an earlier turn, which `serve` leaves in charge, sees
+    /// this replica own the chat and keeps answering rather than leaving in its grace period.
+    async fn serving<Serve>(
+        chat_id: Uuid,
+        message_id: Uuid,
+        author: Uuid,
+        workspace_id: Uuid,
+        serve: impl FnOnce() -> Serve,
+    ) -> Self
+    where
+        Serve: Future<Output = ()>,
+    {
+        let generation = Self::registered(chat_id, message_id, author, workspace_id);
+        serve().await;
+        generation
+    }
+
     fn is_cancelled(&mut self) -> bool {
         !matches!(
             self.cancel.try_recv(),
@@ -3464,9 +3482,11 @@ pub(crate) async fn run_turn_as(
     audience: Audience,
 ) -> Sent {
     let stream = ChatStream::on(state, chat_id);
-    let generation = Generation::registered(chat_id, message_id, user_id, workspace_id);
+    let generation = Generation::serving(chat_id, message_id, user_id, workspace_id, || {
+        relay::serve(state, &stream, workspace_id)
+    })
+    .await;
     let drained = Arc::clone(&generation.drained);
-    relay::serve(state, &stream, workspace_id).await;
     let sent = handle_send_message(
         state,
         &stream,
@@ -8614,6 +8634,29 @@ cat 'DIR/reply.jsonl'
         assert!(
             owns(chat),
             "an answering task in its grace would leave a registered turn with nobody answering"
+        );
+        drop(turn);
+        assert!(!owns(chat));
+    }
+
+    #[tokio::test]
+    async fn an_automation_turn_owns_its_chat_by_the_time_its_chat_is_served() {
+        let chat = Uuid::new_v4();
+        let owned = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&owned);
+
+        let turn = Generation::serving(
+            chat,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            || async move { seen.store(owns(chat), Ordering::SeqCst) },
+        )
+        .await;
+
+        assert!(
+            owned.load(Ordering::SeqCst),
+            "an answering task in its grace would see no turn here and leave while it is served"
         );
         drop(turn);
         assert!(!owns(chat));
