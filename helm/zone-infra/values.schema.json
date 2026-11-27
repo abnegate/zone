@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "postgres": {
+      "type": "object",
+      "properties": {
+        "recovery": {
+          "type": "object",
+          "description": "Bootstrap the Cluster by recovering backups from a Barman Cloud ObjectStore instead of with initdb.",
+          "additionalProperties": false,
+          "properties": {
+            "objectStore": {
+              "type": "string",
+              "description": "The barmancloud.cnpg.io ObjectStore holding the backups to recover; empty bootstraps with initdb."
+            },
+            "serverName": {
+              "type": "string",
+              "description": "The name of the cluster whose backups objectStore holds."
+            },
+            "targetTime": {
+              "type": "string",
+              "description": "An RFC 3339 timestamp with its zone to stop the replay at; empty replays to the end of the archive."
+            }
+          }
+        }
+      }
+    }
+  }
+}

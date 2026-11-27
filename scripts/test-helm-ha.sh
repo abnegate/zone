@@ -410,6 +410,29 @@ infra_cluster='select(.kind == "Cluster" and .metadata.name == "zone-postgres")'
 infra_backup='select(.kind == "ScheduledBackup" and .metadata.name == "zone-postgres")'
 infra_valkey='[select(.metadata.name == "valkey" or .metadata.name == "valkey-pvc") | .kind] | join(",")'
 barman_cloud_plugin=barman-cloud.cloudnative-pg.io
+infra_bootstrap="$infra_cluster | .spec.bootstrap | keys | join(\",\")"
+infra_external="$infra_cluster | [.spec.externalClusters[]? | .name + \" \" + .plugin.name + \" \" + .plugin.parameters.barmanObjectName + \" \" + .plugin.parameters.serverName] | join(\",\")"
+infra_recovery="$infra_cluster | .spec.bootstrap.recovery | .source + \" \" + .database + \" \" + .owner + \" \" + .secret.name"
+infra_archive="$infra_cluster | [.spec.plugins[]? | .name + \" \" + (.isWALArchiver | tostring) + \" \" + .parameters.barmanObjectName] | join(\",\")"
+recovery_store=zone-backups
+recovery_server=zone-postgres
+recovery_time=2026-11-20T09:30:00Z
+restored_store=zone-backups-restored
+
+expect_initdb() {
+    expect "$1 bootstraps with initdb alone" initdb "$2" "$infra_bootstrap"
+    expect "$1 names no external cluster" '' "$2" "$infra_external"
+}
+
+expect_recovery() {
+    expect "$1 bootstraps with recovery alone" recovery "$2" "$infra_bootstrap"
+    expect "$1 recovers the chart's database, owner and secret from the origin external cluster" \
+        'origin litellm zone zone-secrets' "$2" "$infra_recovery"
+    expect "$1 reads the old backups through the Barman Cloud plugin" \
+        "origin $barman_cloud_plugin $recovery_store $recovery_server" "$2" "$infra_external"
+    expect "$1 archives WAL into the new object store" \
+        "$barman_cloud_plugin true $restored_store" "$2" "$infra_archive"
+}
 
 ai_litellm='select(.kind == "Deployment" and .metadata.name == "litellm")'
 ai_ollama='select(.kind == "Deployment" and .metadata.name == "ollama")'
@@ -452,6 +475,7 @@ check_infra_default() {
     expect 'the default cluster loads no plugins' false "$rendered" "$infra_cluster | .spec | has(\"plugins\")"
     expect 'the default render schedules no backup' 0 "$rendered" "[$infra_backup] | length"
     expect 'the default render deploys the in-cluster valkey' PersistentVolumeClaim,Service,Deployment "$rendered" "$infra_valkey"
+    expect_initdb 'the default cluster' "$rendered"
 }
 
 check_infra_ha() {
@@ -464,6 +488,7 @@ check_infra_ha() {
     expect 'the HA cluster loads no plugins without an object store' false "$rendered" "$infra_cluster | .spec | has(\"plugins\")"
     expect 'the HA render schedules no backup without an object store' 0 "$rendered" "[$infra_backup] | length"
     expect 'the HA render deploys no in-cluster valkey' '' "$rendered" "$infra_valkey"
+    expect_initdb 'the HA cluster' "$rendered"
     expect 'the HA render has no Valkey Deployment' 0 "$rendered" \
         '[select(.kind == "Deployment" and .spec.template.metadata.labels["app.kubernetes.io/name"] == "valkey")] | length'
 
@@ -542,6 +567,7 @@ check_infra_ha_backup() {
         render_ha zone-infra --set postgres.backup.objectStore=zone-backups || return 0
     expect 'the cluster archives WAL through the Barman Cloud plugin' "$barman_cloud_plugin true zone-backups" "$rendered" \
         "$infra_cluster | .spec.plugins[] | .name + \" \" + (.isWALArchiver | tostring) + \" \" + .parameters.barmanObjectName"
+    expect_initdb 'a cluster that archives WAL' "$rendered"
     expect 'the scheduled backup targets the cluster through the plugin' "zone-postgres plugin $barman_cloud_plugin" "$rendered" \
         "$infra_backup | .spec | .cluster.name + \" \" + .method + \" \" + .pluginConfiguration.name"
     expect 'the scheduled backup prefers a standby' prefer-standby "$rendered" "$infra_backup | .spec.target"
@@ -563,6 +589,60 @@ check_infra_ha_operator_values() {
 check_infra_ha_refusals() {
     expect_refused 'synchronous replication with too few standbys is refused' 'must be below postgres.instances' \
         render_ha zone-infra --set postgres.instances=1
+}
+
+render_infra_recovery() {
+    render_ha zone-infra \
+        --set "postgres.backup.objectStore=$restored_store" \
+        --set "postgres.recovery.objectStore=$recovery_store" \
+        --set "postgres.recovery.serverName=$recovery_server" \
+        "$@"
+}
+
+check_infra_ha_recovery() {
+    rendered_or_fail 'the zone-infra HA profile renders a recovery to a point in time' \
+        render_infra_recovery --set "postgres.recovery.targetTime=$recovery_time" || return 0
+    expect_recovery 'a point-in-time recovery' "$rendered"
+    expect 'a point-in-time recovery stops at the target time alone' "targetTime=$recovery_time" "$rendered" \
+        "$infra_cluster | .spec.bootstrap.recovery.recoveryTarget | to_entries | map(.key + \"=\" + .value) | join(\",\")"
+    expect 'a recovered cluster still schedules backups into the new object store' "zone-postgres plugin $barman_cloud_plugin" "$rendered" \
+        "$infra_backup | .spec | .cluster.name + \" \" + .method + \" \" + .pluginConfiguration.name"
+
+    rendered_or_fail 'the zone-infra HA profile renders a recovery to the end of the archive' render_infra_recovery || return 0
+    expect_recovery 'a recovery to the end of the archive' "$rendered"
+    expect 'a recovery to the end of the archive sets no recovery target' false "$rendered" \
+        "$infra_cluster | .spec.bootstrap.recovery | has(\"recoveryTarget\")"
+
+    rendered_or_fail 'the zone-infra HA profile renders a recovery that archives nowhere' \
+        render_infra_recovery --set postgres.backup.objectStore= || return 0
+    expect 'a recovery without a new object store bootstraps with recovery alone' recovery "$rendered" "$infra_bootstrap"
+    expect 'a recovery without a new object store archives no WAL' '' "$rendered" "$infra_archive"
+
+    rendered_or_fail 'the zone-infra defaults render a recovery' render zone-infra \
+        --set "postgres.recovery.objectStore=$recovery_store" \
+        --set "postgres.recovery.serverName=$recovery_server" || return 0
+    expect 'a single-instance recovery bootstraps with recovery alone' recovery "$rendered" "$infra_bootstrap"
+}
+
+check_infra_recovery_refusals() {
+    expect_refused 'a recovery from the object store the cluster archives into is refused' \
+        'a recovered cluster archives into a new ObjectStore' \
+        render_infra_recovery --set "postgres.backup.objectStore=$recovery_store"
+    expect_refused 'a recovery without the backed-up server name is refused' \
+        'postgres.recovery.serverName must name the cluster' \
+        render_infra_recovery --set postgres.recovery.serverName=
+    expect_refused 'a recovery target time without an object store is refused' \
+        'need postgres.recovery.objectStore' \
+        render_ha zone-infra --set "postgres.recovery.targetTime=$recovery_time"
+    expect_refused 'a recovery server name without an object store is refused' \
+        'need postgres.recovery.objectStore' \
+        render_ha zone-infra --set "postgres.recovery.serverName=$recovery_server"
+    expect_refused 'a misspelt recovery setting is refused rather than bootstrapping an empty database' \
+        "additional properties 'objectstore' not allowed" \
+        render_ha zone-infra --set "postgres.recovery.objectstore=$recovery_store"
+    expect_refused 'a recovery server name that is not a string is refused' \
+        'got number, want string' \
+        render_infra_recovery --set postgres.recovery.serverName=1
 }
 
 check_ai_default() {
@@ -644,7 +724,7 @@ documented_chart() {
     done
 }
 
-documented_object_store=zone-backups-restored
+documented_object_store=$restored_store
 documented_postgres_size=50Gi
 documented_postgres_class=gp3-documented
 documented_server_memory=3Gi
@@ -679,6 +759,10 @@ expect_documented_values() {
                 expect "your values' Postgres storage survives: $command" \
                     "$documented_postgres_size $documented_postgres_class" "$rendered" \
                     "$infra_cluster | .spec.storage.size + \" \" + .spec.storage.storageClass"
+                case $command in
+                    *" postgres.recovery.objectStore="*) expect_recovery "the documented restore: $command" "$rendered" ;;
+                    *) expect_initdb "the documented command: $command" "$rendered" ;;
+                esac
             fi
             ;;
         zone-apps)
@@ -797,6 +881,8 @@ if [ $# -eq 0 ]; then
         check_infra_ha_backup \
         check_infra_ha_operator_values \
         check_infra_ha_refusals \
+        check_infra_ha_recovery \
+        check_infra_recovery_refusals \
         check_ai_default \
         check_ai_ha \
         check_documented_commands \

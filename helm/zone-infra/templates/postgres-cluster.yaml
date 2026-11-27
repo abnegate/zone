@@ -3,6 +3,16 @@
 {{- if and $postgres.synchronous (ge (int $postgres.synchronous.number) (int $postgres.instances)) }}
 {{- fail (printf "postgres.synchronous.number (%v) must be below postgres.instances (%v): CNPG waits on that many standbys" $postgres.synchronous.number $postgres.instances) }}
 {{- end }}
+{{- $recovery := $postgres.recovery | default dict }}
+{{- if and (not $recovery.objectStore) (or $recovery.serverName $recovery.targetTime) }}
+{{- fail "postgres.recovery.serverName and postgres.recovery.targetTime need postgres.recovery.objectStore, the ObjectStore holding the backups to recover" }}
+{{- end }}
+{{- if and $recovery.objectStore (not $recovery.serverName) }}
+{{- fail "postgres.recovery.serverName must name the cluster whose backups postgres.recovery.objectStore holds: zone-postgres for a cluster this chart created" }}
+{{- end }}
+{{- if and $recovery.objectStore (eq $recovery.objectStore $postgres.backup.objectStore) }}
+{{- fail (printf "postgres.recovery.objectStore and postgres.backup.objectStore are both %q: a recovered cluster archives into a new ObjectStore" $recovery.objectStore) }}
+{{- end }}
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -48,6 +58,18 @@ spec:
   {{- end }}
 
   bootstrap:
+    {{- if $recovery.objectStore }}
+    recovery:
+      source: origin
+      database: {{ $postgres.database }}
+      owner: {{ $postgres.owner }}
+      secret:
+        name: {{ include "zone-infra.secretsName" . }}
+      {{- with $recovery.targetTime }}
+      recoveryTarget:
+        targetTime: {{ . | quote }}
+      {{- end }}
+    {{- else }}
     initdb:
       database: {{ $postgres.database }}
       owner: {{ $postgres.owner }}
@@ -57,6 +79,17 @@ spec:
       postInitTemplateSQL:
         {{- toYaml $postgres.postInitTemplateSQL | nindent 8 }}
       {{- end }}
+    {{- end }}
+
+  {{- if $recovery.objectStore }}
+  externalClusters:
+    - name: origin
+      plugin:
+        name: {{ include "zone-infra.barmanCloudPlugin" . }}
+        parameters:
+          barmanObjectName: {{ $recovery.objectStore | quote }}
+          serverName: {{ $recovery.serverName | quote }}
+  {{- end }}
 
   superuserSecret:
     name: {{ $postgres.superuser.secretName }}
