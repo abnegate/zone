@@ -6,6 +6,8 @@ use tokio::sync::watch;
 use super::command::Command;
 use super::loopback::Loopback;
 use super::packet::Packet;
+#[cfg(test)]
+use super::recording::Recording;
 use super::valkey::Valkey;
 
 /// How envelopes leave this process and reach the others.
@@ -13,6 +15,8 @@ use super::valkey::Valkey;
 pub enum Transport {
     Loopback(Loopback),
     Valkey(Valkey),
+    #[cfg(test)]
+    Recording(Recording),
 }
 
 impl Transport {
@@ -22,13 +26,15 @@ impl Transport {
         match self {
             Self::Loopback(loopback) => loopback.has_peers(),
             Self::Valkey(_) => true,
+            #[cfg(test)]
+            Self::Recording(_) => false,
         }
     }
 
     pub fn valkey(&self) -> Option<&ConnectionManager> {
         match self {
-            Self::Loopback(_) => None,
             Self::Valkey(valkey) => Some(valkey.manager()),
+            _ => None,
         }
     }
 
@@ -36,6 +42,8 @@ impl Transport {
         match self {
             Self::Loopback(loopback) => loopback.send(packet),
             Self::Valkey(valkey) => valkey.send(packet),
+            #[cfg(test)]
+            Self::Recording(_) => {}
         }
     }
 
@@ -45,12 +53,17 @@ impl Transport {
                 confirmed.send_replace(true);
             }
             Self::Valkey(valkey) => valkey.command(Command::Subscribe { channel, confirmed }),
+            #[cfg(test)]
+            Self::Recording(recording) => recording.subscribe(channel, confirmed),
         }
     }
 
     pub fn unsubscribe(&self, channel: Arc<str>) {
-        if let Self::Valkey(valkey) = self {
-            valkey.command(Command::Unsubscribe { channel });
+        match self {
+            Self::Loopback(_) => {}
+            Self::Valkey(valkey) => valkey.command(Command::Unsubscribe { channel }),
+            #[cfg(test)]
+            Self::Recording(recording) => recording.unsubscribe(channel),
         }
     }
 }

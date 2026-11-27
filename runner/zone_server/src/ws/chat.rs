@@ -818,6 +818,12 @@ pub async fn settled() {
     }
 }
 
+/// Gives up this replica's claim on every chat it answers, so a send on
+/// another replica is never told such a chat is busy once this one is gone.
+pub async fn withdraw() {
+    relay::withdraw().await;
+}
+
 /// Cancels every turn `user_id` started in any of `workspaces`, waiting or
 /// running, and returns how many. A cancelled turn ends as a person's Stop
 /// ends it, dropping its agent's MCP lease on the way out.
@@ -842,7 +848,8 @@ fn begin(chat_id: Uuid, workspace_id: Uuid, started: Started) -> (Queued, Genera
 }
 
 /// Run a message and then whatever was queued behind it, with nobody needing
-/// to stay connected.
+/// to stay connected. When another replica holds the chat, nothing runs here
+/// beside it: the message and the queue behind it are refused as busy.
 fn drive(
     state: AppState,
     stream: Arc<ChatStream>,
@@ -876,7 +883,11 @@ fn drive(
     let running = turn(first);
     let teller = announcer.clone();
     tokio::spawn(async move {
-        relay::serve(&serving, &announcer, workspace_id).await;
+        if !relay::serve(&serving, &announcer, workspace_id).await {
+            drop(running);
+            refuse(&announcer, started.is_some());
+            return;
+        }
         if started.is_some() {
             announce(&announcer, started).await;
         }
@@ -895,6 +906,24 @@ fn drive(
             announce(&announcer, None).await;
         }
     });
+}
+
+/// Gives up the turn about to start here, and the queue behind it, because
+/// another replica holds the chat, and tells this replica's sockets the chat
+/// is busy. Told only here: the queue the others show is the holder's. A
+/// message the sockets saw queued here is shown gone.
+fn refuse(stream: &ChatStream, shown: bool) {
+    queue::with(stream.chat_id, Queue::clear);
+    stream.local(ServerMessage::Error {
+        message: relay::BUSY.to_string(),
+    });
+    if shown {
+        stream.local(ServerMessage::Queue {
+            messages: Vec::new(),
+            held: false,
+            started: None,
+        });
+    }
 }
 
 /// Send frames the caller already holds to one connection.

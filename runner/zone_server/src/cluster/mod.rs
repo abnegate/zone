@@ -14,6 +14,8 @@ mod namespace;
 mod pacer;
 mod packet;
 mod pending;
+#[cfg(test)]
+mod recording;
 mod rejection;
 mod sealer;
 mod seen;

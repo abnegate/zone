@@ -372,27 +372,51 @@ pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
             // Then whatever the claims left owing, which is also where a turn
             // abandoned by a restart is picked back up.
             let claimant = fleet::claimant(&state).await;
-            while !state.drain().is_draining() {
-                match reminders::claim_turn(state.db(), sweep, lease.duration, claimant).await {
-                    Ok(None) => break,
-                    Ok(Some(turn)) => {
-                        // Spawned rather than awaited: a generation takes as
-                        // long as a model takes, and the dispatch tick is what
-                        // every other due reminder is waiting on. The chat's
-                        // own semaphore already serialises this turn against
-                        // anything the person is typing there.
-                        let state = state.clone();
-                        let background = state.background().clone();
-                        background.spawn(async move { run(&state, turn, lease, claimant).await });
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "Reminder turn claim failed; retrying next interval");
-                        break;
-                    }
-                }
-            }
+            claim_owed(&state, sweep, lease, claimant, |turn| {
+                // Spawned rather than awaited: a generation takes as long as a
+                // model takes, and the dispatch tick is what every other due
+                // reminder is waiting on. The chat's own semaphore already
+                // serialises this turn against anything the person is typing
+                // there.
+                let state = state.clone();
+                let background = state.background().clone();
+                background.spawn(async move { run(&state, turn, lease, claimant).await });
+                std::future::ready(())
+            })
+            .await;
         }
     })
+}
+
+/// Claims each firing still owed a turn and hands it to `launch`, until none
+/// is left or this replica starts draining. Each firing is claimed once a
+/// sweep: one given back because its chat is busy waits for the next.
+async fn claim_owed<Launch, Launched>(
+    state: &AppState,
+    sweep: Sweep,
+    lease: Lease,
+    claimant: Claimant,
+    mut launch: Launch,
+) where
+    Launch: FnMut(PendingTurn) -> Launched,
+    Launched: Future<Output = ()>,
+{
+    let mut claimed = Vec::new();
+    while !state.drain().is_draining() {
+        match reminders::claim_turn_except(state.db(), sweep, lease.duration, claimant, &claimed)
+            .await
+        {
+            Ok(None) => break,
+            Ok(Some(turn)) => {
+                claimed.push(turn.id);
+                launch(turn).await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Reminder turn claim failed; retrying next interval");
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -401,6 +425,7 @@ mod tests {
     use super::LEASE;
     use super::Lease;
     use super::RENEWAL;
+    use super::claim_owed;
     use super::renewing;
     use super::run;
     use super::watching;
@@ -420,6 +445,9 @@ mod tests {
     use std::time::Duration;
     use uuid::Uuid;
     use zone_enterprise::Plan;
+
+    /// How long one sweep of owed firings may take.
+    const SWEEP: Duration = Duration::from_secs(10);
 
     fn counting(
         outcome: fn(u32) -> DbResult<bool>,
@@ -686,6 +714,82 @@ mod tests {
             "the firing is owed again, unclaimed and with no attempt counted"
         );
         assert_eq!(messages, 0, "nothing reached the chat");
+    }
+
+    /// A firing given back because another turn holds its chat is not claimed
+    /// again in the sweep that gave it back, however quickly it was given
+    /// back, and the next sweep offers it again once the chat is free, still
+    /// owed and with no attempt spent.
+    #[tokio::test]
+    async fn a_deferred_turn_is_claimed_once_a_sweep_and_offered_again_once_its_chat_frees() {
+        let server = Server::new(Some(Plan::Enterprise)).await;
+        let pool = server.database.pool.clone();
+        let (workspace, user, chat) = member_chat(&pool).await;
+        let turn = owed_turn(&pool, workspace, user, chat).await;
+        sqlx::query(
+            "INSERT INTO chat_leases (chat_id, owner, fence, expires_at) \
+             VALUES ($1, gen_random_uuid(), 1, clock_timestamp() + interval '1 hour')",
+        )
+        .bind(chat)
+        .execute(&pool)
+        .await
+        .expect("another turn holds the chat");
+        let claimant = fleet::claimant(&server.state).await;
+        let state = &server.state;
+        let claims = AtomicU32::new(0);
+
+        let swept = tokio::time::timeout(
+            SWEEP,
+            claim_owed(state, Sweep::All, Lease::default(), claimant, |claimed| {
+                claims.fetch_add(1, Ordering::SeqCst);
+                run(state, claimed, Lease::default(), claimant)
+            }),
+        )
+        .await;
+        let deferred = claims.load(Ordering::SeqCst);
+        let owed: Option<(i32, bool)> = sqlx::query_as(
+            "SELECT attempts, claimed_at IS NOT NULL FROM reminder_turns WHERE id = $1",
+        )
+        .bind(turn)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM chat_leases WHERE chat_id = $1")
+            .bind(chat)
+            .execute(&pool)
+            .await
+            .expect("the other turn is over");
+        let offered = Arc::new(std::sync::Mutex::new(Vec::new()));
+        tokio::time::timeout(
+            SWEEP,
+            claim_owed(state, Sweep::All, Lease::default(), claimant, |claimed| {
+                offered.lock().unwrap().push(claimed.id);
+                std::future::ready(())
+            }),
+        )
+        .await
+        .expect("the next sweep ends");
+        let offered = offered.lock().unwrap().clone();
+        server.remove().await;
+
+        assert!(
+            swept.is_ok(),
+            "the sweep kept claiming the firing it had just given back"
+        );
+        assert_eq!(
+            deferred, 1,
+            "the deferred firing was claimed once that sweep"
+        );
+        assert_eq!(
+            owed,
+            Some((0, false)),
+            "the deferred firing is owed again with no attempt counted"
+        );
+        assert_eq!(
+            offered,
+            [turn],
+            "the next sweep offers the firing again once its chat is free"
+        );
     }
 
     /// A one-shot reminder in `chat` and the turn its firing owes.

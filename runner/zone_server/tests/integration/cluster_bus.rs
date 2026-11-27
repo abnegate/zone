@@ -23,6 +23,10 @@ const POLL: Duration = Duration::from_millis(100);
 const CONNECTED: f64 = 1.0;
 const DISCONNECTED: f64 = 0.0;
 const MARKER: &str = "a-secret-the-wire-must-not-show";
+/// How many tasks on one replica join and leave a topic at once, and how many
+/// times each does.
+const CHURNERS: usize = 8;
+const CHURNS: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct Title {
@@ -198,6 +202,37 @@ async fn envelopes_from_one_publisher_arrive_in_order() {
             envelope.bytes().as_ref(),
             format!(r#"{{"type":"chunk","sequence":{sequence}}}"#).as_bytes()
         );
+    }
+}
+
+/// Subscribers on one replica that join and leave a topic all at once, each
+/// staying after its last join, still hear a peer publish to it: no leave
+/// reaches Valkey after a join that came later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_topic_joined_and_left_concurrently_still_hears_its_peer() {
+    let (first, second) = pair().await;
+    let topic = Topic::ChatControl(Uuid::new_v4());
+    let churning: Vec<_> = (0..CHURNERS)
+        .map(|_| {
+            let bus = second.clone();
+            tokio::spawn(async move {
+                for _ in 0..CHURNS {
+                    drop(bus.subscribe(topic).await);
+                }
+                bus.subscribe(topic).await
+            })
+        })
+        .collect();
+    let mut kept = Vec::new();
+    for churner in churning {
+        kept.push(churner.await.expect("the churn ends"));
+    }
+
+    let sent = title();
+    first.publish(topic, &sent);
+
+    for subscription in &mut kept {
+        assert_eq!(next(subscription).await.payload::<Title>().unwrap(), sent);
     }
 }
 
