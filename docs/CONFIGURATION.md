@@ -2648,7 +2648,7 @@ The server serves two probes. `GET /health` answers 200 `{"status":"healthy",...
 
 On SIGTERM the server:
 
-1. marks itself draining, so readiness fails and chat sockets start no new reply. A message that would start one is refused with an error, and the socket is closed with code 1012 so the console reconnects, to another replica once this one has left the load balancer. Messages already queued behind a running reply stay queued and are dropped when the process exits. It gives up housekeeping leadership, so another replica takes the cluster sweeps, and claims no more reminder firings.
+1. marks itself draining, so readiness fails and chat sockets start no new reply. A message that would start one is refused with an error, and the socket is closed with code 1012 so the console reconnects, to another replica once this one has left the load balancer. Messages already queued behind a running reply stay queued and are dropped when the process exits. It gives up housekeeping leadership, so another replica takes the cluster sweeps, and claims no more reminder firings, auto-project drives or audit deliveries.
 2. keeps serving for `ZONE_SHUTDOWN_DELAY_SECONDS`, while load balancers notice the failed readiness. Chat replies already running carry on.
 3. stops listening, and gives HTTP requests in flight up to `ZONE_SHUTDOWN_GRACE_SECONDS` to finish.
 4. stops every chat reply still running, the way Stop does: the reply so far is saved, and the chat is released at once for another replica instead of after its 30-second lease. Replies are not waited for past the listener, because a coding agent reaches Zone's tools through it. A reminder's reply stopped this way leaves its firing owed, and another replica runs it again.
