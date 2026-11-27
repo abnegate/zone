@@ -200,6 +200,7 @@ The profile backs Postgres up through the [CloudNativePG Barman Cloud plugin](ht
      name: zone-backups
      namespace: zone
    spec:
+     retentionPolicy: "30d"
      configuration:
        destinationPath: s3://<bucket>/zone/
        s3Credentials:
@@ -213,7 +214,7 @@ The profile backs Postgres up through the [CloudNativePG Barman Cloud plugin](ht
          compression: gzip
    ```
 
-3. Set `postgres.backup.objectStore` to its name. The `zone-postgres` Cluster then archives WAL through the plugin, and a `ScheduledBackup` named `zone-postgres` takes a base backup on `postgres.backup.schedule` (`"0 0 0 * * *"`, daily at midnight; the schedule has a leading seconds field) from a standby (`postgres.backup.target: prefer-standby`). Retention is set on the ObjectStore.
+3. Set `postgres.backup.objectStore` to its name. The `zone-postgres` Cluster then archives WAL through the plugin, and a `ScheduledBackup` named `zone-postgres` takes a base backup on `postgres.backup.schedule` (`"0 0 0 * * *"`, daily at midnight; the schedule has a leading seconds field) from a standby (`postgres.backup.target: prefer-standby`). The ObjectStore's `spec.retentionPolicy` sets how long base backups, and the WAL they need, are kept: a whole number of days, weeks or months (`30d`, `4w`, `6m`). The plugin deletes what falls outside it, so keep it longer than the furthest point in time you would restore to.
 
 ### The shared volume
 
@@ -244,7 +245,7 @@ Keep these outside the cluster. Without them a restored database is unreadable o
 
    Leave zone-apps otherwise untouched until step 5.
 3. Restore Postgres. The chart recovers the Cluster from the old backups when `postgres.recovery` is set, and bootstraps it with `initdb` otherwise:
-   - Create a new ObjectStore for the restored cluster to archive into. The old archive belongs to the cluster it came from, and archiving into it again is refused, so the chart refuses a `postgres.recovery.objectStore` equal to `postgres.backup.objectStore`.
+   - Create a new ObjectStore for the restored cluster to archive into, as in [Postgres](#postgres) above but under a new name and with a `destinationPath` no other ObjectStore uses, such as `s3://<bucket>/zone-restored-1/`. The old archive belongs to the cluster it came from, and archiving into it again is refused, so the chart refuses a `postgres.recovery.objectStore` equal to `postgres.backup.objectStore`. The chart compares only the names: it cannot see where an ObjectStore points. The restored Cluster is named `zone-postgres` again and archives under that server name, inside its ObjectStore's `destinationPath`, so a new name over the old path archives into the old archive after all. The plugin checks that the archive is empty before it archives (`barman-cloud-check-wal-archive`) and finds the old WAL there, so WAL archiving fails, unarchived WAL piles up on the instances' volumes, and the restored cluster has no point-in-time recovery of its own. The ObjectStore's own `serverName` cannot tell them apart either: the plugin requires it to be left empty.
    - Delete the `zone-postgres` Cluster, which deletes its volumes with it, then upgrade with your values and the profile in the order you installed them, so the new Cluster keeps your storage size and class, secrets, resources and image:
 
      ```bash
@@ -271,7 +272,75 @@ Keep these outside the cluster. Without them a restored database is unreadable o
      ```
 
      Keep `postgres.recovery` set on every later upgrade of this release, and keep the old ObjectStore while it does. The Cluster then stays exactly as it was recovered, rather than having its bootstrap rewritten to `initdb` while it runs. For the next restore, the store this one archives into is the old ObjectStore, and archiving moves on to another new one.
-4. Restore the shared volume from the snapshot nearest before the Postgres recovery point, into a claim named `<fullname>-shared-state`. The database decides which sign-ins exist: a home whose sign-in the database does not hold is never used, and a sign-in whose home is missing signs in again.
+4. Restore the shared volume from the snapshot nearest before the Postgres recovery point, into the claim the servers mount, `<fullname>-shared-state` (`zone-apps-shared-state` for a release named `zone-apps`). The database decides which sign-ins exist: a home whose sign-in the database does not hold is never used, and a sign-in whose home is missing signs in again.
+
+   The claim is still there, because the chart keeps it (`helm.sh/resource-policy: keep`), and a claim's data source can only be set when it is created. So copy the snapshot's files into it rather than restoring a claim in its place. If the claim itself was lost, create it again from the chart first, as in step 2 of [Moving from a single-node install](#moving-from-a-single-node-install).
+   - Put the snapshot on a claim of its own. For a CSI `VolumeSnapshot`, create one from it, at least the snapshot's `status.restoreSize`, on the class that took it:
+
+     ```yaml
+     apiVersion: v1
+     kind: PersistentVolumeClaim
+     metadata:
+       name: zone-state-snapshot
+       namespace: zone
+     spec:
+       accessModes:
+         - ReadWriteMany
+       storageClassName: <ReadWriteMany class>
+       resources:
+         requests:
+           storage: <restore size>
+       dataSource:
+         apiGroup: snapshot.storage.k8s.io
+         kind: VolumeSnapshot
+         name: <snapshot>
+     ```
+
+     For a provider backup, restore it to a new volume with the provider's tools and bind a claim named `zone-state-snapshot` to it.
+   - Replace the claim's contents with the snapshot's, with a pod that mounts both as the server's user. It empties each of the four directories first, so nothing written after the snapshot is left beside it:
+
+     ```yaml
+     apiVersion: v1
+     kind: Pod
+     metadata:
+       name: zone-state-restore
+       namespace: zone
+     spec:
+       restartPolicy: Never
+       securityContext:
+         runAsUser: 1000
+         runAsGroup: 3000
+         fsGroup: 2000
+       containers:
+         - name: restore
+           image: alpine:3.20
+           command:
+             - sh
+             - -euc
+             - |
+               for directory in agent-state clones workspace artifacts; do
+                 mkdir -p "/claim/$directory"
+                 find "/claim/$directory" -mindepth 1 -delete
+                 if [ -d "/snapshot/$directory" ]; then
+                   cp -a "/snapshot/$directory/." "/claim/$directory/"
+                 fi
+               done
+           volumeMounts:
+             - name: snapshot
+               mountPath: /snapshot
+               readOnly: true
+             - name: claim
+               mountPath: /claim
+       volumes:
+         - name: snapshot
+           persistentVolumeClaim:
+             claimName: zone-state-snapshot
+         - name: claim
+           persistentVolumeClaim:
+             claimName: zone-apps-shared-state
+     ```
+
+     `kubectl apply` it, wait for it to complete, check its log, then `kubectl delete pod zone-state-restore` and `kubectl delete pvc zone-state-snapshot`.
 5. Start the servers again with `kubectl scale deployment/zone-apps-server --namespace zone --replicas=3`, the profile's HPA minimum; the HPA takes over from there. They run any migrations at startup, and the startup probe covers them.
 
 ## Rolling upgrades
@@ -509,7 +578,7 @@ cargo test -p zone_server --test integration -- \
   shared_sso_throttle sso_throttle_forwarded cluster_bus
 ```
 
-`scripts/test-helm-ha.sh`, run by `.github/workflows/helm.yml`, checks the profiles' renders: the properties on this page, that the guards refuse what they should, that the profiles layered after an operator's values file keep that file's inputs, that every `helm template` and `helm upgrade` command on this page layers your values before the profile and keeps them in its render, and that the default renders keep their single-node settings (one LiteLLM replica that waits for Ollama, no startup probe, no ReadWriteMany claim, no release in the spread selectors). It does not compare renders against an earlier version of the charts.
+`scripts/test-helm-ha.sh`, run by `.github/workflows/helm.yml`, checks the profiles' renders: the properties on this page, that the guards refuse what they should, that the profiles layered after an operator's values file keep that file's inputs, that every `helm template` and `helm upgrade` command on this page layers your values before the profile and keeps them in its render, that the ObjectStore on this page sets a retention the plugin accepts, and that the default renders keep their single-node settings (one LiteLLM replica that waits for Ollama, no startup probe, no ReadWriteMany claim, no release in the spread selectors). It does not compare renders against an earlier version of the charts.
 
 ### Smoke test on kind
 

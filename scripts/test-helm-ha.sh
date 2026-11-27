@@ -868,6 +868,35 @@ check_documented_command() {
     expect_documented_values "$command" "$chart" "$rendered"
 }
 
+documented_yaml() {
+    awk '
+        /^[[:space:]]*```/ {
+            if (fenced) {
+                print "---"
+            }
+            fenced = !fenced && $0 ~ /```yaml[[:space:]]*$/
+            indent = index($0, "`") - 1
+            next
+        }
+        fenced {
+            print substr($0, indent + 1)
+        }
+    ' "$1"
+}
+
+check_documented_object_store() {
+    retentions=$(documented_yaml "$guide" | yq eval-all 'select(.kind == "ObjectStore") | .spec.retentionPolicy // "none"' -)
+    if [ -z "$retentions" ]; then
+        fail 'docs/HA.md shows the ObjectStore to create'
+        return
+    fi
+    for retention in $retentions; do
+        if ! printf '%s\n' "$retention" | grep -Eq '^[1-9][0-9]*[dwm]$'; then
+            fail 'every documented ObjectStore sets spec.retentionPolicy in days, weeks or months, as the plugin CRD requires' " got $retention"
+        fi
+    done
+}
+
 check_documented_commands() {
     write_documented_values
     commands=$scratch/documented-commands
@@ -954,6 +983,7 @@ if [ $# -eq 0 ]; then
         check_ai_ha \
         check_ai_without_ollama \
         check_documented_commands \
+        check_documented_object_store \
         check_a_misdocumented_restore_fails_the_run \
         check_a_refused_render_fails_the_run
 fi
