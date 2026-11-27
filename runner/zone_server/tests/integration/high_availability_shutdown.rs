@@ -463,14 +463,14 @@ async fn a_terminated_replica_gives_its_reminder_firing_back_and_takes_no_new_on
         (1, 0),
         "the firing whose turn the shutdown stopped is owed again, and unclaimed"
     );
-    let (late_owed, late_claimed) = owed(&deployment.database, late).await;
-    assert_eq!(
-        late_claimed, 0,
-        "the draining replica claimed a firing that fell due after SIGTERM"
-    );
     assert!(
-        pending(&deployment.database, late).await || late_owed == 1,
-        "the firing that fell due after SIGTERM is still owed"
+        pending(&deployment.database, late).await,
+        "the draining replica took up a reminder that fell due after SIGTERM"
+    );
+    assert_eq!(
+        owed(&deployment.database, late).await,
+        (0, 0),
+        "a reminder the draining replica never took up has no firing to claim or give back"
     );
 
     let second = deployment.replica().await;
