@@ -11,11 +11,13 @@ use uuid::Uuid;
 use zone_server::db::context_gatherings::{ORPHANED, RUNNING};
 
 async fn gathering_count(pool: &PgPool, source_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT COUNT(*) FROM context_gatherings WHERE $1 = ANY(source_ids)")
-        .bind(source_id)
-        .fetch_one(pool)
-        .await
-        .unwrap()
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM context_gatherings WHERE source_ids @> ARRAY[$1]::uuid[]",
+    )
+    .bind(source_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 async fn wait_for_gatherings(pool: &PgPool, source_id: Uuid, min: i64) -> i64 {
