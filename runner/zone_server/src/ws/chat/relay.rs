@@ -682,6 +682,7 @@ fn acknowledge(
 mod tests {
     use metrics::Gauge;
 
+    use super::super::queue::{self, Finished, Queue, Queued};
     use super::*;
     use crate::secret;
     use crate::state::{test_config, unreachable_pool};
@@ -716,6 +717,232 @@ mod tests {
                 Err(RecvError::Closed) => panic!("the chat's frames closed"),
             }
         }
+    }
+
+    /// Says, as `holder`, that another replica holds `chat`, as one that took
+    /// its serving key while this replica could not reach Valkey would. Gives
+    /// back what it wrote, to take down again.
+    async fn hold(holder: &Bus, chat: Uuid) -> String {
+        let held = Serving {
+            instance: holder.instance(),
+            answerer: Uuid::new_v4(),
+            holding: true,
+        };
+        match held.claim(holder, chat, HELD).await {
+            claim::Claim::Taken(payload) => payload,
+            other => panic!("the other replica takes the chat's serving key, got {other:?}"),
+        }
+    }
+
+    fn queued(content: &str) -> Queued {
+        Queued {
+            id: Uuid::new_v4(),
+            content: content.to_string(),
+            metadata: None,
+            author: Uuid::new_v4(),
+        }
+    }
+
+    fn ids(messages: &[Queued]) -> Vec<Uuid> {
+        messages.iter().map(|message| message.id).collect()
+    }
+
+    /// The queue this replica's sockets are shown once they are told the
+    /// chat is busy: its messages and whether it is held.
+    async fn refused(events: &mut tokio::sync::broadcast::Receiver<Frame>) -> (Vec<Uuid>, bool) {
+        let mut busy = false;
+        loop {
+            match events.recv().await {
+                Ok(Frame::Message(message)) => match &*message {
+                    ServerMessage::Error { message } if message == BUSY => busy = true,
+                    ServerMessage::Queue { messages, held, .. } if busy => {
+                        return (ids(messages), *held);
+                    }
+                    _ => {}
+                },
+                Ok(_) | Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => panic!("the chat's frames closed"),
+            }
+        }
+    }
+
+    /// The message the next queue frame here says left the queue to start.
+    async fn started(events: &mut tokio::sync::broadcast::Receiver<Frame>) -> Uuid {
+        loop {
+            match events.recv().await {
+                Ok(Frame::Message(message)) => {
+                    if let ServerMessage::Queue {
+                        started: Some(started),
+                        ..
+                    } = &*message
+                    {
+                        return started.id;
+                    }
+                }
+                Ok(_) | Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => panic!("the chat's frames closed"),
+            }
+        }
+    }
+
+    /// The queue a socket joining this replica is shown.
+    async fn joined(stream: &ChatStream) -> Option<(Vec<Uuid>, bool)> {
+        let (frames, _) = stream.snapshot().await;
+        frames.into_iter().find_map(|frame| match frame {
+            ServerMessage::Queue { messages, held, .. } => Some((ids(&messages), held)),
+            _ => None,
+        })
+    }
+
+    fn queue_of(chat: Uuid) -> Option<(Vec<Uuid>, bool)> {
+        queue::snapshot(chat).map(|(messages, held)| (ids(&messages), held))
+    }
+
+    /// A queue held here whose chat another replica took, as one does once
+    /// this replica has been cut off from Valkey longer than a serving key
+    /// lives, loses nothing when an Interrupt is refused busy: every held
+    /// message stays queued, shown to the sockets here, and runs once the
+    /// other replica lets the chat go.
+    #[tokio::test]
+    async fn an_interrupt_refused_while_another_replica_took_the_chat_keeps_every_held_message() {
+        let passphrase = format!("relay-interrupt-{}", Uuid::new_v4().simple());
+        let (here, holder) = (replica(&passphrase).await, replica(&passphrase).await);
+        let chat = Uuid::new_v4();
+        let (first, second) = (queued("first"), queued("second"));
+        queue::with(chat, |queue| {
+            queue.submit(first.clone(), true);
+            queue.submit(second.clone(), true);
+            queue.hold();
+        });
+        let taken = hold(&holder, chat).await;
+        let state = AppState::new(test_config(), unreachable_pool(), None).with_bus(here);
+        let stream = ChatStream::on(&state, chat);
+        let mut events = stream.events.subscribe();
+        let workspace = Uuid::new_v4();
+        let interrupt = |id: Uuid| {
+            super::super::control(
+                &state,
+                &stream,
+                workspace,
+                Uuid::new_v4(),
+                Command::Interrupt { id },
+            )
+        };
+
+        let handled = interrupt(second.id).await;
+        let shown = tokio::time::timeout(WAIT, refused(&mut events))
+            .await
+            .expect("the interrupt is refused busy with the queue left here");
+
+        assert!(handled.started, "the interrupt started the message here");
+        let kept = (vec![second.id, first.id], true);
+        assert_eq!(shown, kept, "the sockets here are shown every held message");
+        assert_eq!(
+            queue_of(chat),
+            Some(kept.clone()),
+            "the queue keeps every held message, the interrupted one first"
+        );
+        assert_eq!(joined(&stream).await, Some(kept));
+        assert!(super::super::owns(chat), "the held queue stays here");
+
+        Serving::erase(&holder, chat, &taken).await;
+        interrupt(first.id).await;
+        let ran = tokio::time::timeout(WAIT, async {
+            [started(&mut events).await, started(&mut events).await]
+        })
+        .await
+        .expect("the held messages run once the chat is free");
+        assert_eq!(ran, [first.id, second.id]);
+    }
+
+    /// A queue waiting here behind another turn, released as that turn ends
+    /// while another replica took the chat, is held rather than dropped, and
+    /// the sockets here are shown it.
+    #[tokio::test]
+    async fn a_queue_released_while_another_replica_took_the_chat_is_held_with_every_message() {
+        let passphrase = format!("relay-release-{}", Uuid::new_v4().simple());
+        let (here, holder) = (replica(&passphrase).await, replica(&passphrase).await);
+        let chat = Uuid::new_v4();
+        let (first, second) = (queued("first"), queued("second"));
+        queue::with(chat, |queue| {
+            queue.submit(first.clone(), true);
+            queue.submit(second.clone(), true);
+        });
+        hold(&holder, chat).await;
+        let state = AppState::new(test_config(), unreachable_pool(), None).with_bus(here);
+        let stream = ChatStream::on(&state, chat);
+        let mut events = stream.events.subscribe();
+        let workspace = Uuid::new_v4();
+        let Finished::Next(next) = queue::with(chat, Queue::release) else {
+            panic!("the queue starts its front once the other turn ends");
+        };
+
+        super::super::drive(
+            state.clone(),
+            Arc::clone(&stream),
+            chat,
+            workspace,
+            super::super::begin(chat, workspace, next),
+            true,
+        );
+        let shown = tokio::time::timeout(WAIT, refused(&mut events))
+            .await
+            .expect("the released queue is refused busy");
+
+        let kept = (vec![first.id, second.id], true);
+        assert_eq!(shown, kept);
+        assert_eq!(queue_of(chat), Some(kept.clone()));
+        assert_eq!(joined(&stream).await, Some(kept));
+    }
+
+    /// Messages queued here behind a send that started at once, while it
+    /// waited to hear whether this replica serves the chat, stay queued and
+    /// shown when that send is refused busy. Only the send that never showed
+    /// in the queue is dropped.
+    #[tokio::test]
+    async fn messages_queued_behind_a_send_refused_busy_stay_queued_and_shown() {
+        let passphrase = format!("relay-behind-{}", Uuid::new_v4().simple());
+        let (here, holder) = (replica(&passphrase).await, replica(&passphrase).await);
+        let chat = Uuid::new_v4();
+        hold(&holder, chat).await;
+        let state = AppState::new(test_config(), unreachable_pool(), None).with_bus(here);
+        let stream = ChatStream::on(&state, chat);
+        let mut events = stream.events.subscribe();
+        let workspace = Uuid::new_v4();
+        let key = Answered {
+            instance: state.bus().instance(),
+            chat,
+        };
+        let beacon = Arc::new(Mutex::new(Beacon::new(state.bus().clone(), chat)));
+        SERVING.insert(key, Arc::clone(&beacon));
+        let claiming = beacon.lock().await;
+        let send = |message: Queued| {
+            super::super::control(
+                &state,
+                &stream,
+                workspace,
+                message.author,
+                Command::Send {
+                    id: message.id,
+                    content: message.content,
+                    metadata: None,
+                },
+            )
+        };
+        let (sent, first, second) = (queued("sent"), queued("first"), queued("second"));
+
+        assert!(send(sent).await.started, "the first send starts at once");
+        assert!(!send(first.clone()).await.started);
+        assert!(!send(second.clone()).await.started);
+        drop(claiming);
+        let shown = tokio::time::timeout(WAIT, refused(&mut events))
+            .await
+            .expect("the send is refused busy");
+        SERVING.remove(&key);
+
+        let kept = (vec![first.id, second.id], true);
+        assert_eq!(shown, kept, "the sockets are shown what is still queued");
+        assert_eq!(queue_of(chat), Some(kept));
     }
 
     /// A Send this replica took to run itself, because no other replica
@@ -789,6 +1016,44 @@ mod tests {
             Some(state.bus().instance())
         );
         assert_eq!(Serving::elsewhere(&other, chat).await, None);
+    }
+
+    /// A replica stopping leaves alone the claims every other replica keeps,
+    /// one sharing its process included, and never waits on them.
+    #[tokio::test]
+    async fn a_replica_stopping_leaves_the_claims_of_every_other_replica() {
+        let passphrase = format!("relay-neighbour-{}", Uuid::new_v4().simple());
+        let (here, there, other) = (
+            replica(&passphrase).await,
+            replica(&passphrase).await,
+            replica(&passphrase).await,
+        );
+        let state = AppState::new(test_config(), unreachable_pool(), None).with_bus(here);
+        let neighbour = AppState::new(test_config(), unreachable_pool(), None).with_bus(there);
+        let chat = Uuid::new_v4();
+        let stream = ChatStream::on(&neighbour, chat);
+        assert!(serve(&neighbour, &stream, Uuid::new_v4()).await);
+        let beacon = SERVING
+            .get(&Answered {
+                instance: neighbour.bus().instance(),
+                chat,
+            })
+            .map(|serving| Arc::clone(serving.value()))
+            .expect("the neighbour answers its chat");
+        let untouched = beacon.lock().await;
+
+        state.drain().begin();
+        tokio::time::timeout(WAIT, withdraw(state.bus()))
+            .await
+            .expect("withdrawing never waits on another replica's claim");
+        let served = Serving::elsewhere(&other, chat).await;
+        drop(untouched);
+
+        assert_eq!(
+            served.map(|serving| serving.instance),
+            Some(neighbour.bus().instance()),
+            "the neighbour still answers its chat"
+        );
     }
 
     #[test]
