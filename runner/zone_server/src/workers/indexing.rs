@@ -6,39 +6,26 @@ use uuid::Uuid;
 
 use crate::db::context_gatherings;
 use crate::state::AppState;
+use crate::workers::gathering;
 
-/// Spawn background indexing task for a source
+const FAILED: &str = "failed";
+const SEMAPHORE_CLOSED: &str = "The indexing semaphore closed before the index started";
+
+/// Index a source in the background, once this replica has an indexing permit free.
 ///
-/// This is called when a source is created or updated.
-/// It queues the source for background indexing.
+/// Called when a source is created or updated. `is_update` re-indexes what is already there.
 pub fn spawn_index_source(
     state: AppState,
     source_id: Uuid,
     workspace_id: Uuid,
     user_id: Uuid,
-    is_update: bool, // true = re-index, false = initial index
+    is_update: bool,
 ) {
     tokio::spawn(async move {
-        // Acquire semaphore permit from AppState
-        let semaphore = state.index_semaphore().clone();
-        let _permit = match semaphore.acquire().await {
-            Ok(p) => p,
-            Err(_) => {
-                tracing::error!(
-                    "Failed to acquire indexing semaphore for source {}",
-                    source_id
-                );
-                return;
-            }
+        let Ok(_permit) = state.index_semaphore().acquire().await else {
+            tracing::error!(%source_id, "Failed to acquire the indexing semaphore");
+            return;
         };
-
-        tracing::info!(
-            "Starting background {} for source {}",
-            if is_update { "re-index" } else { "index" },
-            source_id
-        );
-
-        // Create gathering record
         let gathering_id = match context_gatherings::create_gathering(
             state.db(),
             user_id,
@@ -48,32 +35,64 @@ pub fn spawn_index_source(
         .await
         {
             Ok(id) => id,
-            Err(e) => {
-                tracing::error!("Failed to create gathering for source {}: {}", source_id, e);
+            Err(error) => {
+                tracing::error!(%source_id, %error, "Failed to create a gathering for the source");
                 return;
             }
         };
-
-        // Execute gathering (reuse existing worker)
-        use crate::workers::gathering;
-
-        gathering::execute_gathering(
-            &state,
-            gathering_id,
-            workspace_id,
-            vec![source_id],
-            is_update, // force_refresh = true for updates
-            true,      // index the full source, not a chat token budget
-        )
-        .await;
-
-        // Note: execute_gathering returns () so we can't check result directly
-        // The gathering worker updates the gathering status in the database
-        tracing::info!(
-            "Background indexing task completed for source {}",
-            source_id
-        );
+        index(&state, gathering_id, workspace_id, source_id, is_update).await;
     });
+}
+
+/// Re-index a source whose gathering a resync pass already claimed with
+/// [`context_gatherings::claim_index`], once this replica has an indexing permit free.
+pub fn spawn_claimed_index(
+    state: AppState,
+    gathering_id: Uuid,
+    source_id: Uuid,
+    workspace_id: Uuid,
+) {
+    tokio::spawn(async move {
+        let Ok(_permit) = state.index_semaphore().acquire().await else {
+            tracing::error!(%source_id, "Failed to acquire the indexing semaphore");
+            if let Err(error) = context_gatherings::update_gathering_status(
+                state.db(),
+                gathering_id,
+                FAILED,
+                Some(SEMAPHORE_CLOSED),
+            )
+            .await
+            {
+                tracing::error!(%source_id, %error, "Failed to fail the claimed gathering");
+            }
+            return;
+        };
+        index(&state, gathering_id, workspace_id, source_id, true).await;
+    });
+}
+
+async fn index(
+    state: &AppState,
+    gathering_id: Uuid,
+    workspace_id: Uuid,
+    source_id: Uuid,
+    is_update: bool,
+) {
+    tracing::info!(
+        %source_id,
+        "Starting background {} of the source",
+        if is_update { "re-index" } else { "index" }
+    );
+    gathering::execute_gathering(
+        state,
+        gathering_id,
+        workspace_id,
+        vec![source_id],
+        is_update,
+        true,
+    )
+    .await;
+    tracing::info!(%source_id, "Background indexing of the source finished");
 }
 
 /// Check if a source needs re-indexing based on config changes

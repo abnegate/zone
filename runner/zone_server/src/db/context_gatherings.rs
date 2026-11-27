@@ -2,6 +2,8 @@
 //!
 //! Provides persistence for context gathering operations
 
+use std::time::Duration;
+
 use chrono::NaiveDateTime;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -43,6 +45,59 @@ pub async fn create_gathering(
     .await?;
 
     Ok(id)
+}
+
+/// Queue an index of `source_id` as a gathering of its own, unless one is already under way:
+/// its latest gathering is running, or pending and younger than `abandoned`. Returns the new
+/// gathering, or `None` when another pass got there first.
+///
+/// Two callers claiming one source at once queue it once: the source's row is locked before
+/// its gatherings are read, so the second reads the first's gathering once it is committed.
+pub async fn claim_index(
+    pool: &PgPool,
+    source_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    abandoned: Duration,
+) -> DbResult<Option<Uuid>> {
+    let mut transaction = pool.begin().await?;
+    let source: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM sources WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(source_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    if source.is_none() {
+        return Ok(None);
+    }
+    let claimed = sqlx::query_scalar(
+        r#"
+        INSERT INTO context_gatherings
+            (user_id, workspace_id, source_ids, status, started_at, created_at)
+        SELECT $2, $3, ARRAY[$1]::uuid[], 'pending', LOCALTIMESTAMP, statement_timestamp()
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM (
+                SELECT status, started_at
+                FROM context_gatherings
+                WHERE $1 = ANY(source_ids)
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+            ) latest
+            WHERE latest.status = 'running'
+               OR (latest.status = 'pending'
+                   AND latest.started_at > LOCALTIMESTAMP - make_interval(secs => $4))
+        )
+        RETURNING id
+        "#,
+    )
+    .bind(source_id)
+    .bind(user_id)
+    .bind(workspace_id)
+    .bind(abandoned.as_secs_f64())
+    .fetch_optional(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(claimed)
 }
 
 /// Get a gathering by ID

@@ -163,6 +163,7 @@ mod shared_limiter;
 mod shared_scim_rate_limit;
 mod shared_sso_throttle;
 mod skills_store;
+mod source_resync;
 mod spend_enforcement;
 mod spend_routes;
 mod spend_store;
