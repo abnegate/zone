@@ -163,6 +163,8 @@ impl Shared {
     }
 
     /// Removes a subscriber, unsubscribing the transport after the last.
+    /// The transport is told while the entry is still held, so a join waiting
+    /// on it subscribes after the unsubscribe, and Valkey hears them in that order.
     pub fn leave(&self, channel: &Arc<str>) {
         let Entry::Occupied(mut occupied) = self.channels.entry(Arc::clone(channel)) else {
             return;
@@ -172,10 +174,10 @@ impl Shared {
         if subscribed.subscribers > 0 {
             return;
         }
-        occupied.remove();
         if *channel != self.home {
             self.transport.unsubscribe(Arc::clone(channel));
         }
+        occupied.remove();
     }
 
     /// Every channel the pub/sub connection must listen on.
@@ -190,3 +192,6 @@ impl Shared {
         channels
     }
 }
+
+#[cfg(test)]
+mod tests;
