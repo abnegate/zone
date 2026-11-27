@@ -48,6 +48,9 @@ const REMINDER: &str = "Remind me about the release";
 /// Logged when a replica gives a claimed firing back because another one holds its chat.
 const DEFERRED: &str = "Another turn holds the reminder's chat";
 const INVALID: &str = "Invalid message format";
+/// Told to a socket whose command the replica answering the chat refused, because the socket's
+/// user may no longer write there.
+const DENIED: &str = "Access denied";
 
 /// One test's database, LiteLLM stand-in and the environment its replicas share.
 struct Deployment {
@@ -106,12 +109,7 @@ impl Deployment {
     /// A reminder in `chat` whose firing owes a turn asking `prompt` now, as the dispatch writes
     /// it down when the reminder comes due.
     async fn owe(&self, account: &Account, chat: Uuid, prompt: &str) {
-        let user: Uuid =
-            sqlx::query_scalar("SELECT user_id FROM workspace_members WHERE workspace_id = $1")
-                .bind(account.workspace)
-                .fetch_one(&self.database.pool)
-                .await
-                .expect("the workspace has its member");
+        let user = self.user(account).await;
         let reminder: Uuid = sqlx::query_scalar(
             "INSERT INTO reminders (workspace_id, chat_id, created_by, content, due_at, prompt) \
              VALUES ($1, $2, $3, $4, now() + interval '1 day', $4) RETURNING id",
@@ -146,6 +144,48 @@ impl Deployment {
             .await
             .expect("the access check is stalled");
         stall
+    }
+
+    /// The user who registered `account`.
+    async fn user(&self, account: &Account) -> Uuid {
+        sqlx::query_scalar("SELECT user_id FROM workspace_members WHERE workspace_id = $1")
+            .bind(account.workspace)
+            .fetch_one(&self.database.pool)
+            .await
+            .expect("the workspace has its member")
+    }
+
+    /// Makes `member`'s user a member who may write in `workspace` and its organization.
+    async fn admit(&self, member: &Account, workspace: Uuid) {
+        let user = self.user(member).await;
+        sqlx::query(
+            "INSERT INTO organization_members (organization_id, user_id, role) \
+             SELECT organization_id, $2, 'member' FROM workspaces WHERE id = $1",
+        )
+        .bind(workspace)
+        .bind(user)
+        .execute(&self.database.pool)
+        .await
+        .expect("the member joins the organization");
+        sqlx::query(
+            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+        )
+        .bind(workspace)
+        .bind(user)
+        .execute(&self.database.pool)
+        .await
+        .expect("the member joins the workspace");
+    }
+
+    /// Takes `member`'s user out of `workspace`, so every replica's next access check denies it.
+    async fn expel(&self, member: &Account, workspace: Uuid) {
+        let user = self.user(member).await;
+        sqlx::query("DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2")
+            .bind(workspace)
+            .bind(user)
+            .execute(&self.database.pool)
+            .await
+            .expect("the member leaves the workspace");
     }
 
     /// Stops every replica, waits for their sessions to leave the database,
@@ -979,5 +1019,45 @@ async fn a_send_on_another_replica_while_a_slow_replica_holds_a_queue_is_busy_an
             "{content} ran: {messages:?}"
         );
     }
+    deployment.retire(vec![first, second]).await;
+}
+
+#[tokio::test]
+async fn a_command_the_answering_replica_refuses_reaches_the_asker_refused_and_nothing_runs() {
+    let deployment = Deployment::new().await;
+    let first = deployment.replica().await;
+    let second = deployment.replica().await;
+    let account = Account::register(&first).await;
+    let member = Account::register(&first).await;
+    deployment.admit(&member, account.workspace).await;
+    let chat = account.chat(&first, false).await;
+    let reply = Reply::counted(40, PAUSE);
+    deployment.litellm.queue(reply.clone());
+    let mut owner = ChatSocket::joined(&first, chat, &account.token, JOIN).await;
+    let mut asker = ChatSocket::joined(&second, chat, &member.token, JOIN).await;
+    owner.say(Uuid::new_v4(), "First question").await;
+    chunked(&mut asker, 2).await;
+
+    deployment.expel(&member, account.workspace).await;
+    asker.send(json!({"type": "cancel"})).await;
+    let refused = asker.until("error", TURN).await;
+    let ended = owner.until("message_end", TURN).await;
+
+    assert_eq!(
+        refused.last().expect("the refusal").frame["message"],
+        DENIED,
+        "{:?}",
+        texts(&refused)
+    );
+    assert!(
+        !kinds(&ended).contains(&"cancelled"),
+        "the refused cancel stopped the turn: {:?}",
+        kinds(&ended)
+    );
+    assert_eq!(
+        ended.last().expect("the reply").frame["content"],
+        reply.text(),
+        "the turn ran to its end"
+    );
     deployment.retire(vec![first, second]).await;
 }
