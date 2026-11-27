@@ -363,6 +363,14 @@ EOF
         "$apps_container | .env[] | select(.name == \"ZONE_TRUSTED_PROXIES\") | .value"
 }
 
+check_apps_ha_shared_claim() {
+    rendered_or_fail 'the shared claim renders on its own, as docs/HA.md creates it before a move' \
+        render_apps_ha_vouched --show-only templates/server/pvc.yaml || return 0
+    expect 'the shared claim renders alone, under the name and owner docs/HA.md gives' \
+        'PersistentVolumeClaim zone-apps-shared-state Helm' "$rendered" \
+        '.kind + " " + .metadata.name + " " + .metadata.labels["app.kubernetes.io/managed-by"]'
+}
+
 check_apps_default() {
     rendered_or_fail 'the zone-apps defaults render' render zone-apps || return 0
     expect 'the default server has no startup probe' null "$rendered" "$apps_container | .startupProbe"
@@ -572,6 +580,7 @@ if [ $# -eq 0 ]; then
         check_apps_ha_refusals \
         check_apps_ha_network_policy \
         check_apps_ha_operator_values \
+        check_apps_ha_shared_claim \
         check_infra_default \
         check_infra_ha \
         check_infra_ha_parameters \
