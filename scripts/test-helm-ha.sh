@@ -270,6 +270,10 @@ check_apps_ha_secret() {
         render_apps_ha_created --set-string secrets.redisUrl=redis://cache.valkey.example.com:6379
     expect_renders 'a redis:// URL on an IP address renders' \
         render_apps_ha_created --set-string 'secrets.redisUrl=redis://10.0.0.5:6379'
+    for url in redis://valkey.corp:6379 redis://valkey.example.com:6379 rediss://valkey.svc.example.com:6380; do
+        expect_renders "a secrets.redisUrl on an external host named valkey ($url) renders" \
+            render_apps_ha_created --set-string "secrets.redisUrl=$url"
+    done
 }
 
 check_apps_ha_refusals() {
@@ -286,14 +290,28 @@ check_apps_ha_refusals() {
         redis://valkey.zone.svc.cluster.local:6379 \
         rediss://:secret@valkey.zone.svc.cluster.local.:6380 \
         redis://10-244-1-5.valkey.zone.svc.cluster.local:6379 \
-        redis://valkey-0.valkey.zone.svc:6379; do
+        redis://valkey-0.valkey.zone.svc:6379 \
+        redis://valkey.other.svc:6379 \
+        redis://valkey.other.svc.cluster.local:6379; do
         expect_refused "secrets.redisUrl naming the in-cluster valkey ($url) is refused" 'in-cluster valkey service' \
             render_apps_ha_created --set-string "secrets.redisUrl=$url"
     done
+    expect_refused 'secrets.redisUrl naming the valkey service of the release namespace is refused' 'in-cluster valkey service (valkey.other)' \
+        render_apps_ha_created --namespace other --set-string secrets.redisUrl=redis://valkey.other:6379
     expect_refused 'the schema refuses a secrets.redisUrl scheme other than redis or rediss' "/secrets/redisUrl" \
         render_apps_ha_created --set-string secrets.redisUrl=http://redis.example.com:6379
     expect_refused 'the template refuses a secrets.redisUrl scheme other than redis or rediss' 'must start with redis:// or rediss://' \
         render_apps_ha_created --skip-schema-validation --set-string secrets.redisUrl=http://redis.example.com:6379
+    expect_refused 'HA with ReadWriteOnce agent state is refused' 'needs agent state shared by every replica' \
+        render_apps_ha_vouched --set server.agentState.persistence.accessMode=ReadWriteOnce
+    expect_refused 'HA without agent state persistence is refused' 'needs agent state shared by every replica' \
+        render_apps_ha_vouched --set server.agentState.persistence.enabled=false
+    for reason in \
+        'devices: enforce a NetworkPolicy of your own that admits only the ingress controller to the server and set highAvailability.externalNetworkPolicy=true' \
+        'cuts the server off from single sign-on identity providers, SMTP, git hosts and model providers'; do
+        expect_refused "HA trusting a pod network without a network policy is refused: $reason" "$reason" \
+            render_apps_ha_vouched --set highAvailability.externalNetworkPolicy=false
+    done
     expect_refused 'a ReadWriteMany claim with no storage class is refused' 'storageClass must name a ReadWriteMany storage class' \
         render_ha zone-apps --set highAvailability.externalValkey=true --set "server.trustedProxies=$trusted_proxies" \
             --set highAvailability.externalNetworkPolicy=true
