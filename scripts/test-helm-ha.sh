@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 charts=${ZONE_HELM_CHARTS:-$root/helm}
+guide=${ZONE_HA_GUIDE:-$root/docs/HA.md}
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 storage_class=test-rwx
@@ -466,23 +467,67 @@ check_infra_ha() {
     expect 'the HA render has no Valkey Deployment' 0 "$rendered" \
         '[select(.kind == "Deployment" and .spec.template.metadata.labels["app.kubernetes.io/name"] == "valkey")] | length'
 
-    max_connections=$(query "$rendered" "$infra_cluster | .spec.postgresql.parameters.max_connections")
+    infra=$rendered
     rendered_or_fail 'the zone-apps HA profile renders for sizing' render_apps_ha_vouched || return 0
     apps=$rendered
     rendered_or_fail 'the zone-ai HA profile renders for sizing' render_ha zone-ai || return 0
-    ai=$rendered
-    server_replicas=$(query "$apps" 'select(.kind == "HorizontalPodAutoscaler" and .metadata.name == "zone-apps-server") | .spec.maxReplicas')
-    litellm_replicas=$(query "$ai" "$ai_litellm | .spec.replicas")
-    litellm_workers=$(query "$ai" "$ai_litellm_workers")
+    expect_connection_budget 'max_connections covers every server and LiteLLM pool at the HPA maximum plus a surge pod' \
+        "$infra" "$apps" "$rendered"
+}
+
+expect_connection_budget() {
+    message=$1
+    max_connections=$(query "$2" "$infra_cluster | .spec.postgresql.parameters.max_connections")
+    server_replicas=$(query "$3" 'select(.kind == "HorizontalPodAutoscaler" and .metadata.name == "zone-apps-server") | .spec.maxReplicas')
+    litellm_replicas=$(query "$4" "$ai_litellm | .spec.replicas")
+    litellm_workers=$(query "$4" "$ai_litellm_workers")
     case "$server_replicas$litellm_replicas$litellm_workers" in
         *[!0-9]* | '')
-            fail 'the connection sizing inputs are numbers' " server $server_replicas, litellm $litellm_replicas x $litellm_workers"
+            fail "$message" " sizing inputs are not numbers: server $server_replicas, litellm $litellm_replicas x $litellm_workers"
             return
             ;;
     esac
     needed=$(((server_replicas + 1) * (20 + 1) + (litellm_replicas + 1) * litellm_workers * 10))
-    expect_at_most 'max_connections covers every server and LiteLLM pool at the HPA maximum plus a surge pod' \
-        "$max_connections" "$needed"
+    expect_at_most "$message" "$max_connections" "$needed"
+}
+
+check_infra_ha_sizing() {
+    rendered_or_fail 'the zone-apps HA profile renders for sizing' render_apps_ha_vouched || return 0
+    apps=$rendered
+    connections=$scratch/zone-infra-sizing.yaml
+    printf '%s\n' 'postgres:' '  parameters:' '    max_connections: "500"' >"$connections"
+    workers=$scratch/zone-ai-sizing.yaml
+    printf '%s\n' 'litellm:' '  workers: 6' >"$workers"
+
+    rendered_or_fail 'the zone-infra HA profile renders over a values file that sets max_connections' \
+        render zone-infra -f "$connections" -f "$charts/zone-infra/values-ha.yaml" || return 0
+    expect 'the profile overrides a max_connections set in your values file, as docs/HA.md warns' 400 "$rendered" \
+        "$infra_cluster | .spec.postgresql.parameters.max_connections"
+    infra=$rendered
+    rendered_or_fail 'the zone-ai HA profile renders over a values file that sets litellm.workers' \
+        render zone-ai -f "$workers" -f "$charts/zone-ai/values-ha.yaml" || return 0
+    before=$failures
+    expect_connection_budget 'over budget' "$infra" "$apps" "$rendered" 2>/dev/null
+    caught=$((failures - before))
+    failures=$before
+    if [ "$caught" -eq 0 ]; then
+        fail 'the budget check catches 6 LiteLLM workers in your values file against the 400 the profile keeps'
+    fi
+
+    rendered_or_fail 'the zone-infra HA profile renders with max_connections in a values file after it' \
+        render_ha zone-infra -f "$connections" || return 0
+    expect 'a max_connections in a values file after the profile wins' 500 "$rendered" \
+        "$infra_cluster | .spec.postgresql.parameters.max_connections"
+
+    rendered_or_fail 'the zone-infra HA profile renders with max_connections set after it' \
+        render_ha zone-infra --set postgres.parameters.max_connections=500 || return 0
+    infra=$rendered
+    rendered_or_fail 'the zone-apps HA profile renders with maxReplicas set after it' \
+        render_apps_ha_vouched --set server.autoscaling.maxReplicas=14 || return 0
+    apps=$rendered
+    rendered_or_fail 'the zone-ai HA profile renders for sizing' render_ha zone-ai || return 0
+    expect_connection_budget 'the max_connections docs/HA.md gives for 14 server replicas covers their pools' \
+        "$infra" "$apps" "$rendered"
 }
 
 check_infra_ha_parameters() {
@@ -557,6 +602,170 @@ check_ai_ha() {
     fi
 }
 
+documented_commands() {
+    awk '
+        /^[[:space:]]*```/ {
+            fenced = !fenced
+            command = ""
+            next
+        }
+        fenced {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            if (command == "" && line !~ /^helm (template|upgrade) /) {
+                next
+            }
+            continuing = sub(/[[:space:]]*\\$/, "", line)
+            command = command (command == "" ? "" : " ") line
+            if (!continuing) {
+                print command
+                command = ""
+            }
+            next
+        }
+        {
+            line = $0
+            while (match(line, /`helm (template|upgrade) [^`]*`/)) {
+                print substr(line, RSTART + 1, RLENGTH - 2)
+                line = substr(line, RSTART + RLENGTH)
+            }
+        }
+    ' "$1"
+}
+
+documented_chart() {
+    for chart in zone-apps zone-ai zone-infra; do
+        case "$1 " in
+            *" helm/$chart "*)
+                printf '%s' "$chart"
+                return
+                ;;
+        esac
+    done
+}
+
+documented_object_store=zone-backups-restored
+documented_postgres_size=50Gi
+documented_postgres_class=gp3-documented
+documented_server_memory=3Gi
+documented_litellm_workers=5
+
+write_documented_values() {
+    cat >"$scratch/documented-zone-infra.yaml" <<EOF
+postgres:
+  storage:
+    size: $documented_postgres_size
+    storageClass: $documented_postgres_class
+EOF
+    cat >"$scratch/documented-zone-apps.yaml" <<EOF
+server:
+  resources:
+    limits:
+      memory: $documented_server_memory
+EOF
+    cat >"$scratch/documented-zone-ai.yaml" <<EOF
+litellm:
+  workers: $documented_litellm_workers
+EOF
+}
+
+expect_documented_values() {
+    command=$1
+    chart=$2
+    rendered=$3
+    case $chart in
+        zone-infra)
+            if [ "$(query "$rendered" "[$infra_cluster] | length")" != 0 ]; then
+                expect "your values' Postgres storage survives: $command" \
+                    "$documented_postgres_size $documented_postgres_class" "$rendered" \
+                    "$infra_cluster | .spec.storage.size + \" \" + .spec.storage.storageClass"
+            fi
+            ;;
+        zone-apps)
+            if [ "$(query "$rendered" "[$apps_server] | length")" != 0 ]; then
+                expect "your values' server memory limit survives: $command" \
+                    "$documented_server_memory" "$rendered" "$apps_container | .resources.limits.memory"
+            fi
+            ;;
+        zone-ai)
+            if [ "$(query "$rendered" "[$ai_litellm] | length")" != 0 ]; then
+                expect "your values' LiteLLM workers survive: $command" \
+                    "$documented_litellm_workers" "$rendered" "$ai_litellm_workers"
+            fi
+            ;;
+    esac
+}
+
+check_documented_command() {
+    command=${1%% | *}
+    chart=$(documented_chart "$command")
+    if [ -z "$chart" ]; then
+        fail 'every helm command in docs/HA.md names its chart' " $command"
+        return
+    fi
+    case $command in
+        *"-f <your values> "*"-f helm/$chart/values-ha.yaml"*) ;;
+        *) fail 'every helm command in docs/HA.md layers your values, then the profile' " $command" ;;
+    esac
+    case $command in
+        *...*) return ;;
+        *[\$\`\;\&\(\)]*)
+            fail 'every helm command in docs/HA.md is plain words' " $command"
+            return
+            ;;
+    esac
+    operator="$scratch/documented-$chart.yaml"
+    words=$(printf '%s\n' "$command" | sed \
+        -e 's/^helm upgrade --install /helm template /' \
+        -e 's/^helm upgrade /helm template /' \
+        -e "s|<your values>|'$operator'|g" \
+        -e "s|<ObjectStore name>|$documented_object_store|g" \
+        -e "s|<new ObjectStore>|$documented_object_store|g" \
+        -e "s|<ReadWriteMany class>|$storage_class|g" \
+        -e "s|<ingress controller pod CIDR>|$trusted_proxies|g" \
+        -e "s| helm/zone-| '$charts'/zone-|g")
+    case $words in
+        *'<'*)
+            fail 'every placeholder in a docs/HA.md helm command has a test value' " $command"
+            return
+            ;;
+    esac
+    eval "set -- $words"
+    rendered_or_fail "the documented command renders: $command" "$@" || return 0
+    expect_documented_values "$command" "$chart" "$rendered"
+}
+
+check_documented_commands() {
+    write_documented_values
+    commands=$scratch/documented-commands
+    documented_commands "$guide" >"$commands"
+    count=0
+    while IFS= read -r line; do
+        count=$((count + 1))
+        check_documented_command "$line"
+    done <"$commands"
+    if [ "$count" -lt 5 ]; then
+        fail 'docs/HA.md documents its helm commands' " found $count"
+    fi
+}
+
+check_a_misdocumented_restore_fails_the_run() {
+    guide=$scratch/HA.md
+    sed '/--show-only templates\/postgres-cluster.yaml/s/-f <your values> //' "$root/docs/HA.md" >"$guide"
+    if cmp -s "$guide" "$root/docs/HA.md"; then
+        fail 'docs/HA.md renders the restored Cluster with your values'
+        return
+    fi
+    if output=$(ZONE_HA_GUIDE=$guide sh "$0" check_documented_commands 2>&1); then
+        fail 'a restore render without your values fails the run'
+        return
+    fi
+    case "$output" in
+        *"your values' Postgres storage survives"*) ;;
+        *) fail 'a restore render without your values fails on the storage it drops' " $output" ;;
+    esac
+}
+
 check_a_refused_render_fails_the_run() {
     broken=$scratch/broken
     cp -R "$charts" "$broken"
@@ -584,11 +793,14 @@ if [ $# -eq 0 ]; then
         check_infra_default \
         check_infra_ha \
         check_infra_ha_parameters \
+        check_infra_ha_sizing \
         check_infra_ha_backup \
         check_infra_ha_operator_values \
         check_infra_ha_refusals \
         check_ai_default \
         check_ai_ha \
+        check_documented_commands \
+        check_a_misdocumented_restore_fails_the_run \
         check_a_refused_render_fails_the_run
 fi
 for check in "$@"; do
