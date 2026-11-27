@@ -134,8 +134,7 @@ impl Envelope {
             _ => return Err(Rejection::Truncated),
         };
         let issued_at = reader.get_u64();
-        let mut nonce = [0u8; NONCE_BYTES];
-        reader.copy_to_slice(&mut nonce);
+        let nonce = <[u8; NONCE_BYTES]>::try_from(reader).expect("the framing ends with the nonce");
         Ok(Unverified::new(
             topic,
             kind,
@@ -245,11 +244,14 @@ mod tests {
     fn the_same_envelope_seals_differently_each_time() {
         let sealer = sealer();
         let original = envelope(Kind::Message);
+        let first = original.encode(CHANNEL, &sealer, ISSUED_AT);
+        let second = original.encode(CHANNEL, &sealer, ISSUED_AT);
+        let nonce = FRAMING_BYTES - NONCE_BYTES..FRAMING_BYTES;
 
-        assert_ne!(
-            original.encode(CHANNEL, &sealer, ISSUED_AT),
-            original.encode(CHANNEL, &sealer, ISSUED_AT)
-        );
+        assert_ne!(first[nonce.clone()], second[nonce]);
+        assert_ne!(first[FRAMING_BYTES..], second[FRAMING_BYTES..]);
+        assert_eq!(opened(first, CHANNEL, &sealer).unwrap(), original);
+        assert_eq!(opened(second, CHANNEL, &sealer).unwrap(), original);
     }
 
     #[test]
