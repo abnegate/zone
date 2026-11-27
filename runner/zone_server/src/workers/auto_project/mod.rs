@@ -128,6 +128,11 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
             tokio::select! {
                 _ = interval.tick() => {}
                 _ = WAKE.notified() => {}
+                () = state.drain().draining() => {}
+            }
+            if state.drain().is_draining() {
+                tracing::info!("Auto project driver stopped; this replica is shutting down");
+                return;
             }
             tick(&state, &services, &config, &driving).await;
         }
@@ -135,13 +140,19 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
 }
 
 /// Claim what is due and drive each project on a task of its own, so one
-/// slow review does not hold every other project's tick.
+/// slow review does not hold every other project's tick. A replica that is
+/// shutting down claims nothing, and its drives stop at their next step and
+/// give their claims back, so a replica that stays up takes the projects over
+/// on its next tick instead of after the lease.
 pub async fn tick(
     state: &AppState,
     services: &Arc<Services>,
     config: &Arc<AutoProjectConfig>,
     driving: &Arc<DashMap<Uuid, ()>>,
 ) {
+    if state.drain().is_draining() {
+        return;
+    }
     let running: Vec<Uuid> = driving.iter().map(|entry| *entry.key()).collect();
     let claimant = fleet::claimant(state).await;
     let due = match auto_projects::claim_due(
@@ -168,14 +179,22 @@ pub async fn tick(
         let services = Arc::clone(services);
         let config = Arc::clone(config);
         let driving = Arc::clone(driving);
-        tokio::spawn(async move {
+        let background = state.background().clone();
+        background.spawn(async move {
             let drive = |lease: lease::Lease| {
                 let (state, services, config) = (&state, &services, &config);
                 async move { driver::drive_project(state, services, config, project_id, &lease).await }
             };
-            if let Err(error) =
-                lease::holding(state.db().clone(), claim, claimant, CLAIM_RENEWAL, drive).await
-            {
+            let held = lease::holding(
+                state.db().clone(),
+                claim,
+                claimant,
+                CLAIM_RENEWAL,
+                state.drain().clone(),
+                drive,
+            )
+            .await;
+            if let Err(error) = held {
                 tracing::warn!(%project_id, %error, "Auto project drive failed; retrying next tick");
             }
             match auto_projects::release(state.db(), claim).await {

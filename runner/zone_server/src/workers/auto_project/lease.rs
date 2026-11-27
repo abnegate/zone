@@ -8,7 +8,9 @@
 //! A renewal that finds the claim taken over says so through the drive's
 //! [`Lease`], and the drive stops at its next boundary between steps. Every
 //! write it makes until then is fenced on the claim, so nothing it does after
-//! losing the claim reaches the database.
+//! losing the claim reaches the database. A replica that starts shutting down
+//! stops its drives the same way, so each gives its claim back before the
+//! replica exits rather than holding it for the lease.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -21,6 +23,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::db::auto_projects::{self, Claim};
 use crate::db::fleet::claimant::Claimant;
+use crate::drain::Drain;
 
 /// What a drive knows of its hold on the project.
 #[derive(Debug, Clone)]
@@ -51,8 +54,9 @@ impl Lease {
         self.claim
     }
 
-    /// Whether another instance has taken the project over since the drive
-    /// began, so the drive must stop at its next boundary.
+    /// Whether the drive must stop at its next boundary: another instance has
+    /// taken the project over since the drive began, or this replica is
+    /// shutting down.
     pub fn lost(&self) -> bool {
         self.lost.load(Ordering::SeqCst)
     }
@@ -74,16 +78,19 @@ impl Drop for Renewal {
 }
 
 /// Runs the drive `start` makes of its lease to completion while renewing
-/// `claim` as `claimant` every `renewal`.
+/// `claim` as `claimant` every `renewal`, and stops it once `drain` begins.
 ///
 /// The renewals run as a task of their own rather than racing the drive, so a
 /// renewal that fails or finds the claim lost never cancels a drive part way
-/// through a merge: it marks the lease lost, and the drive stops itself.
+/// through a merge: it marks the lease lost, and the drive stops itself. A
+/// drain marks it lost the same way, and the renewals go on until the drive
+/// has stopped, so the claim is still this drive's to give back.
 pub async fn holding<Start, Drive>(
     pool: PgPool,
     claim: Claim,
     claimant: Claimant,
     renewal: Duration,
+    drain: Drain,
     start: Start,
 ) -> Drive::Output
 where
@@ -92,7 +99,15 @@ where
 {
     let lease = Lease::held(claim);
     let _renewal = Renewal(
-        tokio::spawn(heartbeat(pool, lease.clone(), claim, claimant, renewal)).abort_handle(),
+        tokio::spawn(heartbeat(
+            pool,
+            lease.clone(),
+            claim,
+            claimant,
+            renewal,
+            drain,
+        ))
+        .abort_handle(),
     );
     start(lease).await
 }
@@ -103,11 +118,24 @@ async fn heartbeat(
     claim: Claim,
     claimant: Claimant,
     renewal: Duration,
+    drain: Drain,
 ) {
     let mut interval = tokio::time::interval_at(Instant::now() + renewal, renewal);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut stopping = false;
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = interval.tick() => {}
+            () = drain.draining(), if !stopping => {
+                tracing::info!(
+                    project_id = %claim.project_id,
+                    "This replica is shutting down; stopping its auto project drive at its next step"
+                );
+                lease.lose();
+                stopping = true;
+                continue;
+            }
+        }
         match auto_projects::renew(&pool, claim, claimant).await {
             Ok(true) => {}
             Ok(false) => {
