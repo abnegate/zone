@@ -86,7 +86,6 @@ export function siteValues(site: Site): Record<string, string> {
     contactFormURL: site.contactFormURL,
     repository: site.repository,
     releasesURL: `${site.repository}/releases`,
-    latestDownloadURL: latestDownloadURL(site.repository),
     domain: site.domain,
   };
 }
