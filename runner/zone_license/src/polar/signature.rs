@@ -17,12 +17,12 @@ const CONTENT_SEPARATOR: &[u8] = b".";
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub fn verify(
+pub fn verify<'a>(
     secret: &WebhookSecret,
     headers: &Headers,
-    body: &[u8],
+    body: &'a [u8],
     now: DateTime<Utc>,
-) -> Result<(), SignatureError> {
+) -> Result<&'a [u8], SignatureError> {
     let id = headers.id()?;
     let timestamp = headers.timestamp()?;
     let header = headers.signature()?;
@@ -35,7 +35,7 @@ pub fn verify(
         tags.contains(&expected)
     });
     if matches {
-        Ok(())
+        Ok(body)
     } else {
         Err(SignatureError::Mismatch)
     }

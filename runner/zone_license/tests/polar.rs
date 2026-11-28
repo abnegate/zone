@@ -119,7 +119,7 @@ fn accepts_a_legacy_secret() {
     let secret = WebhookSecret::new(LEGACY_SECRET);
     assert_eq!(
         verify(&secret, &headers(LEGACY_SIGNATURE), CREATE, now()),
-        Ok(())
+        Ok(CREATE)
     );
 }
 
@@ -128,7 +128,7 @@ fn accepts_a_standard_secret() {
     let secret = WebhookSecret::new(STANDARD_SECRET);
     assert_eq!(
         verify(&secret, &headers(STANDARD_SIGNATURE), CREATE, now()),
-        Ok(())
+        Ok(CREATE)
     );
 }
 
@@ -158,9 +158,15 @@ fn standard_secret_decodes_to_the_raw_key() {
 fn accepts_any_matching_entry_among_several() {
     let secret = WebhookSecret::new(LEGACY_SECRET);
     let header = format!("{OTHER_SIGNATURE} {LEGACY_SIGNATURE}");
-    assert_eq!(verify(&secret, &headers(&header), CREATE, now()), Ok(()));
+    assert_eq!(
+        verify(&secret, &headers(&header), CREATE, now()),
+        Ok(CREATE)
+    );
     let header = format!("{LEGACY_SIGNATURE} {OTHER_SIGNATURE}");
-    assert_eq!(verify(&secret, &headers(&header), CREATE, now()), Ok(()));
+    assert_eq!(
+        verify(&secret, &headers(&header), CREATE, now()),
+        Ok(CREATE)
+    );
 }
 
 #[test]
@@ -244,7 +250,7 @@ fn accepts_the_300_second_boundary() {
                 CREATE,
                 now() + Duration::seconds(offset)
             ),
-            Ok(()),
+            Ok(CREATE),
             "offset {offset}"
         );
     }
@@ -317,7 +323,7 @@ fn reads_headers_through_a_lookup() {
         _ => None,
     });
     let secret = WebhookSecret::new(LEGACY_SECRET);
-    assert_eq!(verify(&secret, &headers, CREATE, now()), Ok(()));
+    assert_eq!(verify(&secret, &headers, CREATE, now()), Ok(CREATE));
 }
 
 #[test]

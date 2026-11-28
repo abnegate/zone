@@ -23,7 +23,7 @@ fn now() -> DateTime<Utc> {
 fn signature_round_trips() {
     let secret = WebhookSecret::new("whsec_unit");
     let headers = headers(signature(KEY, ID, TIMESTAMP, BODY));
-    assert_eq!(verify(&secret, &headers, BODY, now()), Ok(()));
+    assert_eq!(verify(&secret, &headers, BODY, now()), Ok(BODY));
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn skips_entries_that_are_not_base64() {
     let secret = WebhookSecret::new("whsec_unit");
     let valid = signature(KEY, ID, TIMESTAMP, BODY);
     let header = format!("v1,not*base64 {valid}");
-    assert_eq!(verify(&secret, &headers(header), BODY, now()), Ok(()));
+    assert_eq!(verify(&secret, &headers(header), BODY, now()), Ok(BODY));
 }
 
 #[test]

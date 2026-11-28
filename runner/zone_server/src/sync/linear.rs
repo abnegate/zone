@@ -136,26 +136,6 @@ impl LinearSyncProvider {
             .map_err(|e| SyncError::InvalidConfig(format!("Invalid Linear config: {}", e)))
     }
 
-    /// Verify HMAC-SHA256 signature for Linear webhooks
-    fn verify_signature(secret: &str, body: &[u8], signature: &str) -> bool {
-        use hmac::{Hmac, KeyInit, Mac};
-        use subtle::ConstantTimeEq;
-        type HmacSha256 = Hmac<Sha256>;
-
-        // Linear sends raw hex signature
-        let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-
-        mac.update(body);
-        let result = mac.finalize();
-        let computed_sig = hex::encode(result.into_bytes());
-
-        // Constant-time comparison to prevent timing attacks
-        computed_sig.as_bytes().ct_eq(signature.as_bytes()).into()
-    }
-
     /// Map Zone task status to Linear state
     fn map_task_status_to_linear_state(status: &str) -> &str {
         match status {
@@ -394,11 +374,8 @@ impl SyncProvider for LinearSyncProvider {
                 SyncError::WebhookVerificationFailed(format!("Missing {SIGNATURE_HEADER} header"))
             })?;
 
-        if !Self::verify_signature(secret, body, signature) {
-            return Err(SyncError::WebhookVerificationFailed(
-                "Invalid signature".to_string(),
-            ));
-        }
+        let body = authenticated(secret, body, signature)
+            .ok_or_else(|| SyncError::WebhookVerificationFailed("Invalid signature".to_string()))?;
 
         let payload: LinearWebhookPayload = serde_json::from_slice(body).map_err(|e| {
             SyncError::InvalidWebhookPayload(format!("Failed to parse JSON: {}", e))
@@ -463,6 +440,17 @@ impl SyncProvider for LinearSyncProvider {
     }
 }
 
+/// The body, once its HMAC-SHA256 hex signature proves Linear sent it.
+fn authenticated<'a>(secret: &str, body: &'a [u8], signature: &str) -> Option<&'a [u8]> {
+    use hmac::{Hmac, KeyInit, Mac};
+    use subtle::ConstantTimeEq;
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(body);
+    let computed = hex::encode(mac.finalize().into_bytes());
+    bool::from(computed.as_bytes().ct_eq(signature.as_bytes())).then_some(body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_signature_valid() {
+    fn a_correctly_signed_body_is_authenticated() {
         let secret = generate_token();
         let body = b"test payload";
 
@@ -490,24 +478,20 @@ mod tests {
         let result = mac.finalize();
         let sig = hex::encode(result.into_bytes());
 
-        assert!(LinearSyncProvider::verify_signature(&secret, body, &sig));
+        assert_eq!(authenticated(&secret, body, &sig), Some(&body[..]));
     }
 
     #[test]
-    fn test_verify_signature_invalid() {
+    fn a_malformed_signature_authenticates_nothing() {
         let secret = generate_token();
         let body = b"test payload";
         let invalid_sig = "invalid";
 
-        assert!(!LinearSyncProvider::verify_signature(
-            &secret,
-            body,
-            invalid_sig
-        ));
+        assert_eq!(authenticated(&secret, body, invalid_sig), None);
     }
 
     #[test]
-    fn test_verify_signature_wrong_secret() {
+    fn a_body_signed_with_another_secret_authenticates_nothing() {
         let secret = generate_token();
         let body = b"test payload";
 
@@ -520,7 +504,7 @@ mod tests {
         let result = mac.finalize();
         let sig = hex::encode(result.into_bytes());
 
-        assert!(!LinearSyncProvider::verify_signature(&secret, body, &sig));
+        assert_eq!(authenticated(&secret, body, &sig), None);
     }
 
     static SECRET: LazyLock<String> = LazyLock::new(generate_token);

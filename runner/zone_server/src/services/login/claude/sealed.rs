@@ -124,8 +124,11 @@ mod tests {
 
         let sealed = tokens.seal(&key).expect("seal");
 
-        for secret in [ACCESS, REFRESH] {
-            assert!(!sealed.contains(secret), "the sealed form shows {secret}");
+        for (kind, token) in [("access", ACCESS), ("refresh", REFRESH)] {
+            assert!(
+                !sealed.contains(token),
+                "the sealed form shows the {kind} token"
+            );
         }
         assert_eq!(Tokens::open(&key, &sealed).expect("open"), tokens);
         assert!(matches!(

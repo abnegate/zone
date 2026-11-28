@@ -59,8 +59,10 @@ fn message(location: Location<'_>, expires: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::crypto::generate_token;
+    use std::sync::LazyLock;
 
-    const SECRET: &str = "test-secret-key-must-be-at-least-32-chars-long";
+    static SECRET: LazyLock<String> = LazyLock::new(generate_token);
 
     fn location(filename: &str) -> Location<'_> {
         Location {
@@ -73,9 +75,9 @@ mod tests {
 
     #[test]
     fn a_fresh_signature_verifies() {
-        let signature = sign(SECRET, location("clip.webm"), 2_000);
+        let signature = sign(&SECRET, location("clip.webm"), 2_000);
         assert!(verify(
-            SECRET,
+            &SECRET,
             location("clip.webm"),
             2_000,
             &signature,
@@ -85,16 +87,16 @@ mod tests {
 
     #[test]
     fn a_signature_stops_working_once_it_expires() {
-        let signature = sign(SECRET, location("clip.webm"), 2_000);
+        let signature = sign(&SECRET, location("clip.webm"), 2_000);
         assert!(verify(
-            SECRET,
+            &SECRET,
             location("clip.webm"),
             2_000,
             &signature,
             2_000
         ));
         assert!(!verify(
-            SECRET,
+            &SECRET,
             location("clip.webm"),
             2_000,
             &signature,
@@ -104,9 +106,9 @@ mod tests {
 
     #[test]
     fn a_signature_only_covers_the_artifact_it_was_minted_for() {
-        let signature = sign(SECRET, location("clip.webm"), 2_000);
+        let signature = sign(&SECRET, location("clip.webm"), 2_000);
         assert!(
-            !verify(SECRET, location("other.webm"), 2_000, &signature, 1_000),
+            !verify(&SECRET, location("other.webm"), 2_000, &signature, 1_000),
             "a signature must not travel to another filename"
         );
 
@@ -115,31 +117,31 @@ mod tests {
             ..location("clip.webm")
         };
         assert!(
-            !verify(SECRET, elsewhere, 2_000, &signature, 1_000),
+            !verify(&SECRET, elsewhere, 2_000, &signature, 1_000),
             "a signature must not travel to another workspace"
         );
     }
 
     #[test]
     fn a_tampered_signature_or_deadline_is_rejected() {
-        let signature = sign(SECRET, location("clip.webm"), 2_000);
+        let signature = sign(&SECRET, location("clip.webm"), 2_000);
         assert!(!verify(
-            SECRET,
+            &SECRET,
             location("clip.webm"),
             9_999,
             &signature,
             1_000
         ));
-        assert!(!verify(SECRET, location("clip.webm"), 2_000, "", 1_000));
+        assert!(!verify(&SECRET, location("clip.webm"), 2_000, "", 1_000));
         assert!(!verify(
-            SECRET,
+            &SECRET,
             location("clip.webm"),
             2_000,
             &"0".repeat(64),
             1_000
         ));
         assert!(!verify(
-            "another-secret-key-that-is-also-long-enough",
+            &generate_token(),
             location("clip.webm"),
             2_000,
             &signature,
@@ -149,8 +151,8 @@ mod tests {
 
     #[test]
     fn a_signed_url_carries_the_deadline_and_signature() {
-        let url = signed_url(SECRET, location("clip.webm"), 2_000);
-        let expected = sign(SECRET, location("clip.webm"), 2_000);
+        let url = signed_url(&SECRET, location("clip.webm"), 2_000);
+        let expected = sign(&SECRET, location("clip.webm"), 2_000);
         assert_eq!(
             url,
             format!(

@@ -55,6 +55,7 @@ impl fmt::Debug for Credentials {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::crypto::generate_token;
 
     fn header(credentials: &str) -> HeaderValue {
         HeaderValue::from_str(&format!("{BASIC_SCHEME}{}", STANDARD.encode(credentials)))
@@ -89,8 +90,9 @@ mod tests {
 
     #[test]
     fn credentials_never_print_their_password() {
-        let credentials = Credentials::new("zone", "hunter2");
+        let password = generate_token();
+        let credentials = Credentials::new("zone", &password);
 
-        assert!(!format!("{credentials:?}").contains("hunter2"));
+        assert!(!format!("{credentials:?}").contains(&password));
     }
 }

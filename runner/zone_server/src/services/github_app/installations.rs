@@ -176,25 +176,25 @@ mod tests {
         let db = pool().await;
         let organization = seed_organization(&db).await;
         let app = seed_app(&db, organization, "acme").await;
-        let mut unknown_account = installation_of(&app, installation_id());
-        unknown_account.account.kind = pull_request::AccountType::Unknown;
+        let mut unknown_type = installation_of(&app, installation_id());
+        unknown_type.account.kind = pull_request::AccountType::Unknown;
         let mut unknown_selection = installation_of(&app, installation_id());
         unknown_selection.repository_selection = pull_request::RepositorySelection::Unknown;
 
-        let account = record(&db, &app, &unknown_account, None)
+        let type_refusal = record(&db, &app, &unknown_type, None)
             .await
             .expect_err("an unknown account type must not be filed");
-        let selection = record(&db, &app, &unknown_selection, None)
+        let selection_refusal = record(&db, &app, &unknown_selection, None)
             .await
             .expect_err("an unknown selection must not be filed");
 
         assert!(
-            matches!(account, Unrecorded::UnknownAccountType),
-            "{account:?}"
+            matches!(type_refusal, Unrecorded::UnknownAccountType),
+            "{type_refusal:?}"
         );
         assert!(
-            matches!(selection, Unrecorded::UnknownRepositorySelection),
-            "{selection:?}"
+            matches!(selection_refusal, Unrecorded::UnknownRepositorySelection),
+            "{selection_refusal:?}"
         );
         assert_eq!(rows(&db, organization).await, 0);
     }

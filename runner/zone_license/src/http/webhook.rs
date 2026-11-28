@@ -24,14 +24,17 @@ pub async fn receive(
     body: Bytes,
 ) -> Response {
     let signed = Headers::read(|name| headers.get(name).and_then(|value| value.to_str().ok()));
-    if let Err(error) = polar::verify(&context.secret, &signed, &body, Utc::now()) {
-        let outcome = Outcome::Unsigned;
-        tracing::info!(%outcome, %error, "Refused a webhook delivery");
-        return outcome.status().into_response();
-    }
+    let body = match polar::verify(&context.secret, &signed, &body, Utc::now()) {
+        Ok(body) => body,
+        Err(error) => {
+            let outcome = Outcome::Unsigned;
+            tracing::info!(%outcome, %error, "Refused a webhook delivery");
+            return outcome.status().into_response();
+        }
+    };
     let webhook = signed.id.as_deref().unwrap_or_default();
 
-    let event = match Event::parse(&body) {
+    let event = match Event::parse(body) {
         Ok(event) => event,
         Err(error) => {
             let outcome = Outcome::Malformed;
