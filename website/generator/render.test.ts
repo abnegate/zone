@@ -1,9 +1,18 @@
 import { describe, expect, test } from 'bun:test';
 import { site } from '../config.ts';
 import { baseURLFrom, fragmentName, renderSite } from './build.ts';
+import { cliBuilds, desktopDownloads } from './downloads.ts';
 import type { Page } from './Page.ts';
 import { pages } from './pages.ts';
-import { directoryOf, escapeHTML, fill, formatMoney, rootFor, siteValues } from './render.ts';
+import {
+  cliCommands,
+  directoryOf,
+  escapeHTML,
+  fill,
+  formatMoney,
+  rootFor,
+  siteValues,
+} from './render.ts';
 
 function pageAt(output: string, linksFromBasePath = false): Page {
   return {
@@ -216,5 +225,46 @@ describe('site', () => {
 
   test('roots the not found page at the base path', () => {
     expect(rendered.get('404.html')).toContain('href="/zone/static/style.css"');
+  });
+});
+
+describe('downloads', () => {
+  const rendered = renderSite(baseURLFrom('https://bitecodehq.github.io/zone'));
+  const download = rendered.get('download/index.html') ?? '';
+  const latest = `${site.repository}/releases/latest/download/`;
+
+  test('links every desktop build to the latest release', () => {
+    for (const group of desktopDownloads) {
+      for (const { asset } of group.downloads) {
+        expect(download).toContain(`href="${escapeHTML(latest + asset)}"`);
+      }
+    }
+  });
+
+  test('never pins a desktop or CLI download to a version', () => {
+    for (const href of download.match(/href="[^"]*\/releases\/[^"]*"/g) ?? []) {
+      expect(href).not.toMatch(/\/releases\/(tag|download)\//);
+      expect(href).not.toMatch(/\d+\.\d+\.\d+/);
+    }
+  });
+
+  test('downloads, checks and installs each CLI build from the latest release', () => {
+    for (const build of cliBuilds) {
+      expect(cliCommands(build, latest)).toEqual(
+        expect.arrayContaining([
+          `base=${latest.slice(0, -1)}`,
+          `curl -fsSLO $base/${build.asset}`,
+          `curl -fsSLO $base/SHA256SUMS`,
+          `${build.checksumCommand} --check --ignore-missing SHA256SUMS`,
+          `sudo install -m 755 ${build.asset} /usr/local/bin/zone`,
+        ])
+      );
+      expect(download).toContain(`id="cli-${build.id}"`);
+    }
+  });
+
+  test('is linked from the navigation and the footer', () => {
+    expect(rendered.get('index.html')).toContain('<a href="./download/">Download</a>');
+    expect(download).toContain('<a href="../download/" aria-current="page">Download</a>');
   });
 });

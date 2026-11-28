@@ -42,6 +42,34 @@ jobs:
             runner/Cargo.lock
             runner/zone_desktop/tauri.conf.json
 
+  hold-latest:
+    name: Keep latest on a release with downloads
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Point latest back at the previous release until this one has its assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+          RELEASE_ID: ${{ github.event.release.id }}
+        run: |
+          if [[ $TAG == *-* ]]; then
+            gh api -X PATCH "repos/${REPO}/releases/${RELEASE_ID}" -F prerelease=true >/dev/null
+          fi
+          previous=$(.github/scripts/highest-release.sh "$REPO" "$TAG")
+          if [[ -z $previous ]]; then
+            echo "No earlier release to keep as latest"
+            exit 0
+          fi
+          previous_id=$(gh api "repos/${REPO}/releases/tags/${previous}" --jq .id)
+          gh api -X PATCH "repos/${REPO}/releases/${previous_id}" -f make_latest=true >/dev/null
+          echo "Latest stays on ${previous} until ${TAG} has its assets"
+
   commit-release-version:
     name: Commit release version
     needs: prepare-release
@@ -193,6 +221,7 @@ jobs:
               "$rust_dir/zone" \
               manager/frontend/build \
               dist
+            cp "$rust_dir/bundle/macos/Zone.app/Contents/MacOS/zone" "dist/zone-${{ matrix.target }}"
           else
             strip "$rust_dir/zone-desktop" || true
             name="zone-${{ matrix.target }}"
@@ -205,6 +234,11 @@ jobs:
             cp "$rust_dir/zone-desktop" "dist/zone-desktop-${{ matrix.target }}"
             rm -rf "dist/$name"
           fi
+      - name: Check the macOS CLI
+        if: matrix.kind == 'macos'
+        run: |
+          test "$(lipo -archs "dist/zone-${{ matrix.target }}")" = "${{ matrix.app_arch }}"
+          codesign --verify --strict "dist/zone-${{ matrix.target }}"
       - name: Smoke
         if: matrix.target != 'x86_64-apple-darwin'
         run: |
@@ -212,6 +246,7 @@ jobs:
             unzip -l "dist/Zone-${{ needs.prepare-release.outputs.version }}-darwin-${{ matrix.app_arch }}.zip" | grep -q 'Zone.app/Contents/MacOS/zone-desktop'
             unzip -l "dist/Zone-${{ needs.prepare-release.outputs.version }}-darwin-${{ matrix.app_arch }}.zip" | grep -q 'Zone.app/Contents/MacOS/zone'
             unzip -l "dist/Zone-${{ needs.prepare-release.outputs.version }}-darwin-${{ matrix.app_arch }}.zip" | grep -q 'Contents/Resources/manager/index.html'
+            ./dist/zone-${{ matrix.target }} --help
           else
             ./dist/zone-${{ matrix.target }} --help
             test -x "./dist/zone-desktop-${{ matrix.target }}"
@@ -274,16 +309,43 @@ jobs:
             dist/zone-desktop-aarch64-unknown-linux-gnu \
             manager/frontend/build \
             dist
+      - name: Latest download names
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          cd dist
+          for arch in arm64 x86_64; do
+            cp "Zone-${VERSION}-darwin-${arch}.zip" "Zone-darwin-${arch}.zip"
+          done
+          for arch in amd64 arm64; do
+            cp "zone_${VERSION}-1_${arch}.deb" "zone_${arch}.deb"
+          done
       - name: Checksums
         run: |
           cd dist
           find . -type f \( -name 'Zone-*.zip' -o -name 'zone-*.tar.gz' -o -name '*.deb' -o -name 'zone-*' \) \
             ! -name 'SHA256SUMS' \
             -exec sha256sum {} + | tee SHA256SUMS
+      - name: Decide whether this release becomes latest
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          highest=$(.github/scripts/highest-release.sh "$REPO" "$TAG")
+          if [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
+            [[ -z $highest || $(printf '%s\n' "$highest" "$TAG" | sort -V | tail -n 1) == "$TAG" ]]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: dist/*
+          prerelease: ${{ contains(github.event.release.tag_name, '-') }}
+          make_latest: ${{ steps.latest.outputs.latest }}
 
   publish-homebrew:
     name: Homebrew Cask
@@ -367,7 +429,7 @@ jobs:
           mkdir -p debs
           gh release download "${RELEASE_TAG}" \
             --repo "${REPO}" \
-            --pattern "*.deb" \
+            --pattern "zone_*-1_*.deb" \
             --dir debs
       - name: Import GPG key
         env:

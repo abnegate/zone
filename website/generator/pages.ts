@@ -12,6 +12,16 @@ export const pages: ReadonlyArray<Page> = [
     linksFromBasePath: false,
   },
   {
+    template: 'download.html',
+    output: 'download/index.html',
+    title: 'Download · Zone',
+    description:
+      'Download the Zone desktop app for macOS and Linux, or install the zone CLI. Every link fetches the latest release.',
+    navigationLabel: 'Download',
+    indexed: true,
+    linksFromBasePath: false,
+  },
+  {
     template: 'pricing.html',
     output: 'pricing/index.html',
     title: 'Pricing · Zone',

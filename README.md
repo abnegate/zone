@@ -328,6 +328,8 @@ curl "https://manager.yourdomain.com/api/workspaces/${WORKSPACE_ID}/analytics?pe
 
 The Zone desktop app ships the manager console. On first launch it asks for your Zone server URL. The `zone` CLI is linked on your PATH.
 
+Download the latest desktop app or the standalone `zone` CLI from [zone.bitecode.ltd/download](https://zone.bitecode.ltd/download/). The page links to fixed file names in the latest GitHub release, which `.github/workflows/release.yml` publishes alongside the versioned ones.
+
 **Homebrew** (macOS):
 
 ```bash

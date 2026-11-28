@@ -1,9 +1,10 @@
 # Zone website
 
-The public site: home, pricing, licensing, contact, the post-checkout thank-you page and a 404 page. It is plain HTML and CSS, rendered by a small Bun script that fills shared values into the templates. There is no client-side JavaScript, no cookies and no tracking.
+The public site: home, downloads, pricing, licensing, contact, the post-checkout thank-you page and a 404 page. It is plain HTML and CSS, rendered by a small Bun script that fills shared values into the templates. There is no client-side JavaScript, no cookies and no tracking.
 
 | Path | What |
 | --- | --- |
+| `generator/downloads.ts` | The desktop and CLI builds the download page links, by their file names in the latest GitHub release |
 | `config.ts` | Every value that may change: the Community member limit, each paid plan's monthly and yearly seat price and Polar checkout link, contact address and form endpoint, domain, repository |
 | `templates/` | `layout.html` and one template per page; `{{ name }}` is a value from `config.ts` |
 | `static/` | Stylesheet, favicon and self-hosted fonts (SIL Open Font License) |

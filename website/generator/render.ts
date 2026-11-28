@@ -1,3 +1,6 @@
+import type { CLIBuild } from './CLIBuild.ts';
+import type { DownloadGroup } from './DownloadGroup.ts';
+import { cliBuilds, desktopDownloads } from './downloads.ts';
 import type { Page } from './Page.ts';
 import type { Plan } from './Plan.ts';
 import type { Site } from './Site.ts';
@@ -82,8 +85,60 @@ export function siteValues(site: Site): Record<string, string> {
     contactEmail: site.contactEmail,
     contactFormURL: site.contactFormURL,
     repository: site.repository,
+    releasesURL: `${site.repository}/releases`,
     domain: site.domain,
   };
+}
+
+export function latestDownloadURL(repository: string): string {
+  return `${repository}/releases/latest/download/`;
+}
+
+export function renderDesktopDownloads(
+  groups: ReadonlyArray<DownloadGroup>,
+  latest: string
+): string {
+  return groups
+    .map((group) => {
+      const heading = `download-${group.id}-heading`;
+      const links = group.downloads
+        .map(
+          (download) =>
+            `<li><a class="button button-secondary" href="${escapeHTML(latest + download.asset)}">${escapeHTML(download.label)} <span class="download-format">${escapeHTML(download.format)}</span></a></li>`
+        )
+        .join('');
+      const command =
+        group.command === undefined
+          ? ''
+          : `<pre class="command"><code>${escapeHTML(group.command)}</code></pre>`;
+      return `<article class="card download-card" aria-labelledby="${heading}"><h3 id="${heading}">${escapeHTML(group.platform)}</h3><ul class="download-list">${links}</ul><p class="download-note">${escapeHTML(group.note)}</p>${command}</article>`;
+    })
+    .join('');
+}
+
+export function cliCommands(build: CLIBuild, latest: string): ReadonlyArray<string> {
+  return [
+    `base=${latest.replace(/\/$/, '')}`,
+    `curl -fsSLO $base/${build.asset}`,
+    `curl -fsSLO $base/SHA256SUMS`,
+    `${build.checksumCommand} --check --ignore-missing SHA256SUMS`,
+    ...(build.installDirectoryMayBeMissing ? ['sudo mkdir -p /usr/local/bin'] : []),
+    `sudo install -m 755 ${build.asset} /usr/local/bin/zone`,
+  ];
+}
+
+export function renderCLIInstructions(builds: ReadonlyArray<CLIBuild>, latest: string): string {
+  return builds
+    .map((build) => {
+      const code = cliCommands(build, latest)
+        .map(
+          (command) =>
+            `<span class="prompt" aria-hidden="true">$&nbsp;</span>${escapeHTML(command)}`
+        )
+        .join('\n');
+      return `<div class="terminal" id="cli-${build.id}"><p class="terminal-title">${escapeHTML(build.platform)}</p><pre><code>${code}</code></pre></div>`;
+    })
+    .join('');
 }
 
 export function renderNavigation(page: Page, pages: ReadonlyArray<Page>, root: string): string {
@@ -124,7 +179,11 @@ export function renderPage(
   const canonicalLink = page.indexed
     ? `<link rel="canonical" href="${escapeHTML(new URL(directoryOf(page.output), baseURL).href)}">`
     : '';
-  const content = fill(template, values, filledFragments);
+  const content = fill(template, values, {
+    ...filledFragments,
+    desktopDownloads: renderDesktopDownloads(desktopDownloads, latestDownloadURL(site.repository)),
+    cliInstructions: renderCLIInstructions(cliBuilds, latestDownloadURL(site.repository)),
+  });
   return fill(layout, values, {
     content,
     canonicalLink,
