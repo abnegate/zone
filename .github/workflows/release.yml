@@ -193,6 +193,7 @@ jobs:
               "$rust_dir/zone" \
               manager/frontend/build \
               dist
+            cp "$rust_dir/bundle/macos/Zone.app/Contents/MacOS/zone" "dist/zone-${{ matrix.target }}"
           else
             strip "$rust_dir/zone-desktop" || true
             name="zone-${{ matrix.target }}"
@@ -212,6 +213,7 @@ jobs:
             unzip -l "dist/Zone-${{ needs.prepare-release.outputs.version }}-darwin-${{ matrix.app_arch }}.zip" | grep -q 'Zone.app/Contents/MacOS/zone-desktop'
             unzip -l "dist/Zone-${{ needs.prepare-release.outputs.version }}-darwin-${{ matrix.app_arch }}.zip" | grep -q 'Zone.app/Contents/MacOS/zone'
             unzip -l "dist/Zone-${{ needs.prepare-release.outputs.version }}-darwin-${{ matrix.app_arch }}.zip" | grep -q 'Contents/Resources/manager/index.html'
+            ./dist/zone-${{ matrix.target }} --help
           else
             ./dist/zone-${{ matrix.target }} --help
             test -x "./dist/zone-desktop-${{ matrix.target }}"
@@ -274,6 +276,17 @@ jobs:
             dist/zone-desktop-aarch64-unknown-linux-gnu \
             manager/frontend/build \
             dist
+      - name: Latest download names
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          cd dist
+          for arch in arm64 x86_64; do
+            cp "Zone-${VERSION}-darwin-${arch}.zip" "Zone-darwin-${arch}.zip"
+          done
+          for arch in amd64 arm64; do
+            cp "zone_${VERSION}-1_${arch}.deb" "zone_${arch}.deb"
+          done
       - name: Checksums
         run: |
           cd dist
@@ -367,7 +380,7 @@ jobs:
           mkdir -p debs
           gh release download "${RELEASE_TAG}" \
             --repo "${REPO}" \
-            --pattern "*.deb" \
+            --pattern "zone_*-1_*.deb" \
             --dir debs
       - name: Import GPG key
         env:

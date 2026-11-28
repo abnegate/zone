@@ -1,0 +1,80 @@
+<section class="hero hero-compact">
+  <div class="container hero-inner narrow">
+    <h1>Download Zone</h1>
+    <p class="lead">
+      The desktop app and the <code>zone</code> CLI connect to a Zone server you run. On first
+      launch the app asks for your server&rsquo;s address. Every link below fetches the latest
+      release.
+    </p>
+    <p class="docs-links">
+      <a href="#desktop-heading">Desktop app</a>
+      <a href="#cli-heading">CLI</a>
+      <a href="{{ releasesURL }}">All releases</a>
+    </p>
+  </div>
+</section>
+
+<section class="section section-tight" aria-labelledby="desktop-heading" id="desktop">
+  <div class="container">
+    <h2 id="desktop-heading">Desktop app</h2>
+    <p class="section-lead">
+      The app is the Zone console in its own window, with the <code>zone</code> CLI bundled.
+      Android builds are attached to each <a href="{{ releasesURL }}">release</a>.
+    </p>
+    <div class="cards cards-three">
+      {{ desktopDownloads }}
+    </div>
+  </div>
+</section>
+
+<section class="section section-sunken" aria-labelledby="package-managers-heading">
+  <div class="container split">
+    <div>
+      <h2 id="package-managers-heading">Or use a package manager</h2>
+      <p class="section-lead">
+        Homebrew and APT install the desktop app and the <code>zone</code> CLI, and update both
+        with the rest of your packages.
+      </p>
+    </div>
+    <div class="terminal-stack">
+      <div class="terminal">
+        <p class="terminal-title">macOS, Homebrew</p>
+        <pre><code><span class="prompt" aria-hidden="true">$ </span>brew tap bitecodehq/tap
+<span class="prompt" aria-hidden="true">$ </span>brew install --cask zone</code></pre>
+      </div>
+      <div class="terminal">
+        <p class="terminal-title">Debian and Ubuntu, APT</p>
+        <pre><code><span class="prompt" aria-hidden="true">$ </span>curl -fsSL https://apt.bitecode.ltd/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/bitecode.gpg
+<span class="prompt" aria-hidden="true">$ </span>echo "deb [signed-by=/usr/share/keyrings/bitecode.gpg] https://apt.bitecode.ltd stable main" | sudo tee /etc/apt/sources.list.d/bitecode.list
+<span class="prompt" aria-hidden="true">$ </span>sudo apt update &amp;&amp; sudo apt install zone</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" aria-labelledby="cli-heading" id="cli">
+  <div class="container">
+    <h2 id="cli-heading">The <code>zone</code> CLI on its own</h2>
+    <p class="section-lead">
+      For servers, containers and terminals without the app. Download the binary for your
+      platform, check it against the release&rsquo;s checksums, and put it on your path.
+    </p>
+    <div class="terminal-grid">
+      {{ cliInstructions }}
+    </div>
+    <div class="split cli-next">
+      <div>
+        <h3>Then sign in to your server</h3>
+        <p>
+          <code>zone login</code> asks for your email and password and keeps the session in your
+          system keychain. Run <code>zone --help</code> for every command.
+        </p>
+      </div>
+      <div class="terminal">
+        <p class="terminal-title">Terminal</p>
+        <pre><code><span class="prompt" aria-hidden="true">$ </span>zone login https://zone.example.com
+<span class="prompt" aria-hidden="true">$ </span>zone run "Add input validation to the user form"</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
