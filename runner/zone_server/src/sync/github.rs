@@ -332,11 +332,8 @@ impl SyncProvider for GitHubSyncProvider {
                 ))
             })?;
 
-        if !WebhookSignature::verify(signature, &SecretValue::new(secret), body) {
-            return Err(SyncError::WebhookVerificationFailed(
-                INVALID_SIGNATURE.to_string(),
-            ));
-        }
+        let body = authenticated(secret, body, signature)
+            .ok_or_else(|| SyncError::WebhookVerificationFailed(INVALID_SIGNATURE.to_string()))?;
 
         let event = headers
             .get(EVENT_HEADER)
@@ -395,6 +392,11 @@ impl SyncProvider for GitHubSyncProvider {
             },
         }))
     }
+}
+
+/// The body, once its signature header proves GitHub sent it.
+fn authenticated<'a>(secret: &str, body: &'a [u8], signature: &str) -> Option<&'a [u8]> {
+    WebhookSignature::verify(signature, &SecretValue::new(secret), body).then_some(body)
 }
 
 #[cfg(test)]
@@ -572,6 +574,24 @@ mod tests {
 
     fn signature(secret: &str, body: &[u8]) -> String {
         format!("{PREFIX}{}", digest(secret, body))
+    }
+
+    #[test]
+    fn only_a_body_signed_with_the_secret_is_authenticated() {
+        let body = br#"{"zen":"Keep it logically awesome."}"#;
+
+        assert_eq!(
+            authenticated(&SECRET, body, &signature(&SECRET, body)),
+            Some(&body[..])
+        );
+        assert_eq!(
+            authenticated(&SECRET, body, &signature(&generate_token(), body)),
+            None
+        );
+        assert_eq!(
+            authenticated(&SECRET, b"{}", &signature(&SECRET, body)),
+            None
+        );
     }
 
     fn headers_signed(signature: &str, event: Option<&str>) -> HeaderMap {

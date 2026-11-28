@@ -63,14 +63,14 @@ fn own_address(config: &Config) -> String {
 }
 
 pub async fn serve(headers: HeaderMap, body: Bytes) -> HttpResponse {
-    let Some(turn) = bearer(&headers).and_then(Turn::find) else {
+    let Some((turn, body)) = admitted(&headers, &body) else {
         return unauthorized();
     };
     if !turn.tools().permitted().await {
         return unauthorized();
     }
 
-    let request: Request = match serde_json::from_slice(&body) {
+    let request: Request = match serde_json::from_slice(body) {
         Ok(request) => request,
         Err(error) => {
             return (
@@ -218,6 +218,13 @@ async fn call(turn: &Turn, params: Option<Value>) -> Result<Value, ErrorData> {
 
     serde_json::to_value(turn.run(name, &arguments).await)
         .map_err(|error| ErrorData::internal_error(error.to_string(), None))
+}
+
+/// The turn the bearer names, with the body it sent: a body no turn vouches for is never read.
+fn admitted<'a>(headers: &HeaderMap, body: &'a [u8]) -> Option<(Arc<Turn>, &'a [u8])> {
+    bearer(headers)
+        .and_then(Turn::find)
+        .map(|turn| (turn, body))
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -556,6 +563,15 @@ mod tests {
 
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(body, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn a_body_without_the_turns_bearer_is_refused_before_it_is_read() {
+        for offered in [None, Some("not-a-token")] {
+            let (status, answer) = post(offered, json!("not a request")).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{offered:?}");
+            assert_eq!(answer["error"]["code"], -32600, "{answer}");
+        }
     }
 
     #[tokio::test]
